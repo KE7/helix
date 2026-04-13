@@ -1,0 +1,10 @@
+{
+  "id": "q04_github_ratelimit_status",
+  "question": "What HTTP status code does the GitHub REST API return when a client exceeds the secondary rate limit? Answer with just the numeric status code.",
+  "ground_truth": "429",
+  "ground_truth_source": null,
+  "ground_truth_static_fallback": "429",
+  "match_mode": "exact",
+  "category": "api_behavior",
+  "difficulty": "medium"
+}

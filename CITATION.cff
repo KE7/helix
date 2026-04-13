@@ -1,0 +1,64 @@
+cff-version: 1.2.0
+title: HELIX
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Karim
+    family-names: Elmaaroufi
+    website: 'https://github.com/KE7'
+  - name: OMAR
+    website: 'http://omar.tech/'
+version: "0.1.0"
+date-released: "2026-04-10"
+repository-code: 'https://github.com/KE7/helix'
+license: MIT
+abstract: >-
+  HELIX is an evolutionary code optimization framework that
+  applies LLM-driven mutation operators at GEPA parity to
+  automatically improve algorithm implementations.
+references:
+  - type: software
+    title: >-
+      GEPA: Reflective Prompt Evolution Can Outperform
+      Reinforcement Learning
+    authors:
+      - given-names: Lakshya A
+        family-names: Agrawal
+      - given-names: Shangyin
+        family-names: Tan
+      - given-names: Dilara
+        family-names: Soylu
+      - given-names: Noah
+        family-names: Ziems
+      - given-names: Rishi
+        family-names: Khare
+      - given-names: Krista
+        family-names: Opsahl-Ong
+      - given-names: Arnav
+        family-names: Singhvi
+      - given-names: Herumb
+        family-names: Shandilya
+      - given-names: Michael J
+        family-names: Ryan
+      - given-names: Meng
+        family-names: Jiang
+      - given-names: Christopher
+        family-names: Potts
+      - given-names: Koushik
+        family-names: Sen
+      - given-names: Alexandros G.
+        family-names: Dimakis
+      - given-names: Ion
+        family-names: Stoica
+      - given-names: Dan
+        family-names: Klein
+      - given-names: Matei
+        family-names: Zaharia
+      - given-names: Omar
+        family-names: Khattab
+    identifiers:
+      - type: url
+        value: 'https://arxiv.org/abs/2507.19457'
+    license: MIT

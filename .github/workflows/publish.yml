@@ -1,0 +1,35 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi  # Requires environment protection rules configured in repo settings
+    permissions:
+      id-token: write  # Required for OIDC Trusted Publisher authentication
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: pip install build
+
+      - name: Build distribution packages
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses Trusted Publisher (OIDC) — no API token needed.
+        # Configure at: https://pypi.org/manage/project/helix-evo/settings/publishing/
+        # Add a pending publisher: owner=KE7, repo=helix, workflow=publish.yml, env=pypi

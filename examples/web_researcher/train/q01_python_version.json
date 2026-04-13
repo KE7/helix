@@ -1,0 +1,11 @@
+{
+  "id": "q01_python_version",
+  "question": "What is the current latest stable release version of CPython (Python 3)? Answer with just the version number, e.g. 3.12.4",
+  "ground_truth": "FETCH:pypi:python-version",
+  "ground_truth_source": "https://endoflife.date/api/python.json",
+  "ground_truth_source_jq": ".[0].latest",
+  "ground_truth_static_fallback": "3.13.2",
+  "match_mode": "version_prefix",
+  "category": "version",
+  "difficulty": "medium"
+}

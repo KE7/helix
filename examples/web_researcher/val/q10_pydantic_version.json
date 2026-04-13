@@ -1,0 +1,11 @@
+{
+  "id": "q10_pydantic_version",
+  "question": "What is the latest stable version of the 'pydantic' Python package available on PyPI? Answer with just the version number.",
+  "ground_truth": "FETCH:pypi:pydantic",
+  "ground_truth_source": "https://pypi.org/pypi/pydantic/json",
+  "ground_truth_source_jq": ".info.version",
+  "ground_truth_static_fallback": "2.10.6",
+  "match_mode": "version_prefix",
+  "category": "version",
+  "difficulty": "easy"
+}
