@@ -10,9 +10,9 @@
 
 <br>
 
-**Evolutionary optimization for full codebases using Claude Code as the mutation engine and git worktrees as the population pool.**
+**Evolutionary optimization for full codebases using agentic coding tools as the mutation engine and git worktrees as the population pool.**
 
-HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage.
+HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage. Currently supports Claude Code, with support for OpenCode, Codex CLI, and Cursor CLI coming in the next release.
 
 <br>
 
