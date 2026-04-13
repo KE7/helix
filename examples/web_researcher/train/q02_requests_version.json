@@ -1,0 +1,11 @@
+{
+  "id": "q02_requests_version",
+  "question": "What is the latest stable version of the 'requests' Python package available on PyPI? Answer with just the version number.",
+  "ground_truth": "FETCH:pypi:requests",
+  "ground_truth_source": "https://pypi.org/pypi/requests/json",
+  "ground_truth_source_jq": ".info.version",
+  "ground_truth_static_fallback": "2.32.3",
+  "match_mode": "version_prefix",
+  "category": "version",
+  "difficulty": "easy"
+}

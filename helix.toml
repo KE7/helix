@@ -1,0 +1,18 @@
+# helix.toml — HELIX evolutionary configuration
+# Run `helix evolve` to start optimising.
+
+# TODO: describe what you want the code to do better
+objective = "TODO: describe the optimisation objective"
+
+[evaluator]
+# TODO: command to evaluate a candidate (run from worktree root)
+command = "python evaluate.py"
+# score_parser = "pytest"   # or "exitcode"
+
+[evolution]
+max_generations = 20
+merge_enabled = true
+# merge_interval removed — not a recognised EvolutionConfig field.
+
+[claude]
+model = "claude-sonnet-4-5"

@@ -1,0 +1,10 @@
+{
+  "id": "q08_github_ratelimit_count",
+  "question": "What is the primary rate limit for unauthenticated requests to the GitHub REST API, in requests per hour? Answer with just the number.",
+  "ground_truth": "60",
+  "ground_truth_source": null,
+  "ground_truth_static_fallback": "60",
+  "match_mode": "exact",
+  "category": "api_behavior",
+  "difficulty": "easy"
+}

@@ -1,0 +1,43 @@
+[project]
+objective = """Maximize accuracy answering software engineering questions requiring up-to-date knowledge. \
+The agent should use web browsing (requests, httpx, or urllib) to fetch live data from official docs, PyPI, \
+GitHub API, or package changelogs rather than relying on potentially stale LLM training data. \
+Questions cover current library versions, API behaviors, and language feature changes."""
+
+[evaluator]
+command = "uv run python evaluate.py"
+score_parser = "json_accuracy"
+
+[evolution]
+max_generations = 2
+merge_enabled = true
+num_parallel_proposals = 8
+
+[claude]
+model = "haiku"
+effort = "low"
+max_turns = 20
+background = """The agent code is at: examples/web_researcher/agent.py
+The evaluator code is at: examples/web_researcher/evaluate.py
+The val questions are in: examples/web_researcher/val/*.json
+
+The agent's solve() function is what's being evaluated. It currently returns stale answers
+for version questions because it uses hardcoded training data instead of live web lookups.
+
+HOW TO FIX: Modify examples/web_researcher/agent.py to fetch live package versions
+from PyPI using urllib.request (already in stdlib, no extra install needed):
+
+  import urllib.request, json
+  def _fetch_pypi_version(package):
+      url = f"https://pypi.org/pypi/{package}/json"
+      with urllib.request.urlopen(url, timeout=10) as resp:
+          data = json.loads(resp.read().decode())
+      return data["info"]["version"]
+
+Replace the stale _TRAINING_KNOWLEDGE version entries with live PyPI calls.
+The packages to fetch are: anthropic, httpx, pydantic (and optionally requests, numpy).
+Keep the stable non-version answers (github rate limits, urllib2, asyncio) unchanged.
+
+VERIFY your changes work by running from the worktree root:
+  cd examples/web_researcher && uv run python agent.py
+"""

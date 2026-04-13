@@ -1,0 +1,23 @@
+examples/circle_packing/.git/
+examples/circle_packing/.helix/
+examples/web_researcher/.git/
+examples/web_researcher/.helix/
+tests/integration/circle_packing_playground/
+
+# Virtual environments
+.venv/
+venv/
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/

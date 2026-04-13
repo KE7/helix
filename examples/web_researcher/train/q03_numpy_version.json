@@ -1,0 +1,11 @@
+{
+  "id": "q03_numpy_version",
+  "question": "What is the latest stable version of 'numpy' available on PyPI? Answer with just the version number.",
+  "ground_truth": "FETCH:pypi:numpy",
+  "ground_truth_source": "https://pypi.org/pypi/numpy/json",
+  "ground_truth_source_jq": ".info.version",
+  "ground_truth_static_fallback": "2.2.2",
+  "match_mode": "version_prefix",
+  "category": "version",
+  "difficulty": "easy"
+}

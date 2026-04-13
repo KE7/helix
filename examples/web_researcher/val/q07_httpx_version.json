@@ -1,0 +1,11 @@
+{
+  "id": "q07_httpx_version",
+  "question": "What is the latest stable version of the 'httpx' Python package on PyPI? Answer with just the version number.",
+  "ground_truth": "FETCH:pypi:httpx",
+  "ground_truth_source": "https://pypi.org/pypi/httpx/json",
+  "ground_truth_source_jq": ".info.version",
+  "ground_truth_static_fallback": "0.28.1",
+  "match_mode": "version_prefix",
+  "category": "version",
+  "difficulty": "easy"
+}

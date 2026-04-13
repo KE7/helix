@@ -1,0 +1,10 @@
+{
+  "id": "q05_urllib2_replacement",
+  "question": "In Python 3, the urllib2 module from Python 2 was split into two modules. What is the primary replacement module for making HTTP requests (the one with urlopen)? Answer with just the module name.",
+  "ground_truth": "urllib.request",
+  "ground_truth_source": null,
+  "ground_truth_static_fallback": "urllib.request",
+  "match_mode": "exact",
+  "category": "language_change",
+  "difficulty": "easy"
+}
