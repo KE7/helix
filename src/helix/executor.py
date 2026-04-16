@@ -89,14 +89,21 @@ def _validate_and_split_command(cmd: str) -> list[str]:
 
 
 def _scrub_environment(
-    split: str,
+    split: str | None = None,
     instance_ids: list[str] | None = None,
     passthrough_env: list[str] | None = None,
 ) -> dict[str, str]:
     """Create a scrubbed environment with only allowed variables.
 
+    This is the single source of truth for env-scrubbing across HELIX.
+    Both the evaluator subprocess (via :func:`run_evaluator`) and the
+    Claude Code subprocess (via :func:`~helix.mutator.invoke_claude_code`)
+    call this function.
+
     Args:
-        split: Dataset split name to pass as HELIX_SPLIT.
+        split: Dataset split name to pass as HELIX_SPLIT.  When *None*
+            (the default), HELIX_SPLIT is not added — useful for
+            non-evaluator subprocesses like Claude Code.
         instance_ids: Optional list of example IDs to evaluate on. Passed
             to the evaluator as HELIX_INSTANCE_IDS (comma-separated).
             Evaluators that honor it restrict to these; others ignore it
@@ -105,7 +112,7 @@ def _scrub_environment(
             from the parent process (e.g. CUDA_VISIBLE_DEVICES, HF_HOME).
 
     Returns:
-        Dict containing only PATH, HOME, HELIX_SPLIT, HELIX_* variables,
+        Dict containing only PATH, HOME, HELIX_* variables,
         and any explicitly listed passthrough_env keys.
     """
     scrubbed: dict[str, str] = {}
@@ -116,8 +123,9 @@ def _scrub_environment(
     if "HOME" in os.environ:
         scrubbed["HOME"] = os.environ["HOME"]
 
-    # Add HELIX_SPLIT
-    scrubbed["HELIX_SPLIT"] = split
+    # Add HELIX_SPLIT when running evaluators.
+    if split is not None:
+        scrubbed["HELIX_SPLIT"] = split
 
     # Add HELIX_INSTANCE_IDS when a minibatch subset is requested.
     if instance_ids is not None:
