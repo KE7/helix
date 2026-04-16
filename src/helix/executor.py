@@ -89,7 +89,9 @@ def _validate_and_split_command(cmd: str) -> list[str]:
 
 
 def _scrub_environment(
-    split: str, instance_ids: list[str] | None = None
+    split: str,
+    instance_ids: list[str] | None = None,
+    passthrough_env: list[str] | None = None,
 ) -> dict[str, str]:
     """Create a scrubbed environment with only allowed variables.
 
@@ -99,9 +101,12 @@ def _scrub_environment(
             to the evaluator as HELIX_INSTANCE_IDS (comma-separated).
             Evaluators that honor it restrict to these; others ignore it
             and HELIX post-filters the returned instance_scores.
+        passthrough_env: Optional list of extra env var names to preserve
+            from the parent process (e.g. CUDA_VISIBLE_DEVICES, HF_HOME).
 
     Returns:
-        Dict containing only PATH, HOME, HELIX_SPLIT, and HELIX_* variables.
+        Dict containing only PATH, HOME, HELIX_SPLIT, HELIX_* variables,
+        and any explicitly listed passthrough_env keys.
     """
     scrubbed: dict[str, str] = {}
 
@@ -126,6 +131,11 @@ def _scrub_environment(
             and key != "HELIX_INSTANCE_IDS"
         ):
             scrubbed[key] = value
+
+    # Include user-specified passthrough variables
+    for key in passthrough_env or []:
+        if key in os.environ:
+            scrubbed[key] = os.environ[key]
 
     return scrubbed
 
@@ -213,7 +223,7 @@ def run_evaluator(
     evaluator = config.evaluator
 
     # Run main evaluation command
-    env = _scrub_environment(split, instance_ids=instance_ids)
+    env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)
     cmd_tokens = _validate_and_split_command(evaluator.command)
     result = subprocess.run(
         cmd_tokens,
