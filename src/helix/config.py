@@ -304,6 +304,14 @@ class HelixConfig(BaseModel):
     objective: str
     seed: str = "."
     rng_seed: int = 0  # GEPA parity: deterministic RNG for selection
+    passthrough_env: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Environment variable names to pass through the env scrub into "
+            "evaluator and Claude Code subprocesses (e.g. "
+            '["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]).'
+        ),
+    )
     evaluator: EvaluatorConfig
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     seedless: SeedlessConfig = Field(default_factory=SeedlessConfig)

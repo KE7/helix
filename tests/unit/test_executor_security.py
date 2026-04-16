@@ -211,6 +211,44 @@ class TestEnvironmentScrubbing:
         allowed_keys = {"PATH", "HOME", "HELIX_SPLIT", "HELIX_VAR"}
         assert set(env.keys()) == allowed_keys
 
+    def test_passthrough_env_preserves_listed_vars(self, monkeypatch):
+        """passthrough_env includes specified variables in the scrubbed env."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+        monkeypatch.setenv("HF_HOME", "/data/hf")
+        monkeypatch.setenv("SECRET_KEY", "should_not_appear")
+
+        env = _scrub_environment("val", passthrough_env=["CUDA_VISIBLE_DEVICES", "HF_HOME"])
+        assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+        assert env["HF_HOME"] == "/data/hf"
+        assert "SECRET_KEY" not in env
+
+    def test_passthrough_env_missing_var_is_ignored(self, monkeypatch):
+        """passthrough_env silently skips vars not present in os.environ."""
+        monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
+        env = _scrub_environment("val", passthrough_env=["NONEXISTENT_VAR"])
+        assert "NONEXISTENT_VAR" not in env
+
+    def test_passthrough_env_empty_list_no_change(self):
+        """Empty passthrough_env behaves identically to the default."""
+        env_default = _scrub_environment("val")
+        env_empty = _scrub_environment("val", passthrough_env=[])
+        assert env_default == env_empty
+
+    def test_scrub_without_split_omits_helix_split(self, monkeypatch):
+        """When split is None (CC subprocess path), HELIX_SPLIT is not set."""
+        monkeypatch.delenv("HELIX_SPLIT", raising=False)
+        env = _scrub_environment(passthrough_env=["PATH"])
+        assert "HELIX_SPLIT" not in env
+        # PATH and HOME should still be present
+        assert "PATH" in env
+
+    def test_scrub_without_split_preserves_passthrough(self, monkeypatch):
+        """CC subprocess path (split=None) still honours passthrough_env."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+        env = _scrub_environment(passthrough_env=["CUDA_VISIBLE_DEVICES"])
+        assert env["CUDA_VISIBLE_DEVICES"] == "2"
+        assert "HELIX_SPLIT" not in env
+
 
 # ---------------------------------------------------------------------------
 # Tests: Integration - run_evaluator with security
