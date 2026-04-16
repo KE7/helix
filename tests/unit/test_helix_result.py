@@ -104,6 +104,37 @@ class TestHelixResultParsing:
         assert result.side_info is None
 
     @patch("helix.executor.subprocess.run")
+    def test_helix_result_multiple_lines_takes_first(self, mock_run):
+        """When multiple HELIX_RESULT= lines exist, only the first is used."""
+        side_info_1 = {"source": "first"}
+        side_info_2 = {"source": "second"}
+        line1 = f"HELIX_RESULT={json.dumps([0.9, side_info_1])}"
+        line2 = f"HELIX_RESULT={json.dumps([0.1, side_info_2])}"
+        stdout = f"preamble\n{line1}\nmiddle\n{line2}\nend\n"
+        mock_run.return_value = _mock_subprocess_result(stdout, returncode=0)
+
+        config = make_config()
+        candidate = make_candidate()
+        result = run_evaluator(candidate, config, split="val")
+
+        assert result.scores["success"] == 0.9
+        assert result.side_info == side_info_1
+
+    @patch("helix.executor.subprocess.run")
+    def test_helix_result_non_dict_side_info_ignored(self, mock_run):
+        """When payload[1] is not a dict, score is used but side_info stays None."""
+        helix_line = f"HELIX_RESULT={json.dumps([0.75, 'just a string'])}"
+        stdout = f"output\n{helix_line}\n"
+        mock_run.return_value = _mock_subprocess_result(stdout, returncode=0)
+
+        config = make_config()
+        candidate = make_candidate()
+        result = run_evaluator(candidate, config, split="val")
+
+        assert result.scores["success"] == 0.75
+        assert result.side_info is None
+
+    @patch("helix.executor.subprocess.run")
     def test_helix_result_stdout_still_in_asi(self, mock_run):
         """Non-HELIX_RESULT stdout lines should still flow into ASI."""
         side_info = {"metric": 42}
