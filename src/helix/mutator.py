@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
 
+import os
+
 from helix.population import Candidate, EvalResult
 from helix.config import ClaudeConfig, HelixConfig
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
@@ -188,7 +190,7 @@ def generate_seed(
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
-    invoke_claude_code(worktree_path, prompt, config.claude)
+    invoke_claude_code(worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
 
 
 def build_mutation_prompt(
@@ -303,6 +305,7 @@ def invoke_claude_code(
     worktree_path: str,
     prompt: str,
     config: ClaudeConfig,
+    passthrough_env: list[str] | None = None,
 ) -> dict[str, Any]:
     """Invoke Claude Code CLI in *worktree_path* and return the parsed JSON output.
 
@@ -314,6 +317,9 @@ def invoke_claude_code(
         The prompt to pass via ``-p``.
     config:
         Claude configuration (model, effort, allowed_tools).
+    passthrough_env:
+        Optional list of extra env var names to preserve from the parent
+        process through the env scrub (e.g. CUDA_VISIBLE_DEVICES).
 
     Returns
     -------
@@ -348,11 +354,26 @@ def invoke_claude_code(
 
     cmd_str = " ".join(args)
 
+    # Build a scrubbed env for the Claude Code subprocess, preserving only
+    # PATH, HOME, HELIX_*, and any user-specified passthrough vars.
+    cc_env: dict[str, str] = {}
+    if "PATH" in os.environ:
+        cc_env["PATH"] = os.environ["PATH"]
+    if "HOME" in os.environ:
+        cc_env["HOME"] = os.environ["HOME"]
+    for k, v in os.environ.items():
+        if k.startswith("HELIX_"):
+            cc_env[k] = v
+    for k in passthrough_env or []:
+        if k in os.environ:
+            cc_env[k] = os.environ[k]
+
     result = subprocess.run(
         args,
         cwd=worktree_path,
         capture_output=True,
         text=True,
+        env=cc_env,
     )
 
     if result.returncode != 0:
@@ -501,7 +522,7 @@ def mutate(
     )
 
     try:
-        invoke_claude_code(child.worktree_path, prompt, config.claude)
+        invoke_claude_code(child.worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
