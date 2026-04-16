@@ -234,6 +234,21 @@ class TestEnvironmentScrubbing:
         env_empty = _scrub_environment("val", passthrough_env=[])
         assert env_default == env_empty
 
+    def test_scrub_without_split_omits_helix_split(self, monkeypatch):
+        """When split is None (CC subprocess path), HELIX_SPLIT is not set."""
+        monkeypatch.delenv("HELIX_SPLIT", raising=False)
+        env = _scrub_environment(passthrough_env=["PATH"])
+        assert "HELIX_SPLIT" not in env
+        # PATH and HOME should still be present
+        assert "PATH" in env
+
+    def test_scrub_without_split_preserves_passthrough(self, monkeypatch):
+        """CC subprocess path (split=None) still honours passthrough_env."""
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+        env = _scrub_environment(passthrough_env=["CUDA_VISIBLE_DEVICES"])
+        assert env["CUDA_VISIBLE_DEVICES"] == "2"
+        assert "HELIX_SPLIT" not in env
+
 
 # ---------------------------------------------------------------------------
 # Tests: Integration - run_evaluator with security

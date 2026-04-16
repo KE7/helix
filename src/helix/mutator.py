@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
-
-import os
-
 from helix.population import Candidate, EvalResult
 from helix.config import ClaudeConfig, HelixConfig
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
+from helix.executor import _scrub_environment
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree
+
+logger = logging.getLogger(__name__)
 
 # Differential-testing hook: when set to a callable, ``invoke_claude_code``
 # bypasses the subprocess invocation and delegates to the override with
@@ -354,19 +354,8 @@ def invoke_claude_code(
 
     cmd_str = " ".join(args)
 
-    # Build a scrubbed env for the Claude Code subprocess, preserving only
-    # PATH, HOME, HELIX_*, and any user-specified passthrough vars.
-    cc_env: dict[str, str] = {}
-    if "PATH" in os.environ:
-        cc_env["PATH"] = os.environ["PATH"]
-    if "HOME" in os.environ:
-        cc_env["HOME"] = os.environ["HOME"]
-    for k, v in os.environ.items():
-        if k.startswith("HELIX_"):
-            cc_env[k] = v
-    for k in passthrough_env or []:
-        if k in os.environ:
-            cc_env[k] = os.environ[k]
+    # Reuse the shared scrub helper (no split/instance_ids for CC sessions).
+    cc_env = _scrub_environment(passthrough_env=passthrough_env)
 
     result = subprocess.run(
         args,
