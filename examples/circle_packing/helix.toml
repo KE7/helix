@@ -1,6 +1,10 @@
 [project]
 objective = "Maximize the sum of radii of 26 non-overlapping circles packed in a unit square. Higher total radius sum = better packing."
 
+# Uncomment to pass specific env vars through the scrub into evaluator
+# and Claude Code subprocesses (e.g. GPU selection, cache dirs):
+# passthrough_env = ["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]
+
 [evaluator]
 command = "python3 evaluate.py"
 score_parser = "json_score"
