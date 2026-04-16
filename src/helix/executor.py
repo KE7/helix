@@ -266,16 +266,17 @@ def run_evaluator(
     # Exactly zero or one HELIX_RESULT= line is expected; multiple is an evaluator bug.
     helix_result_score = None
     side_info = None
-    helix_result_lines = [
-        line for line in stdout.splitlines() if line.startswith("HELIX_RESULT=")
-    ]
-    if len(helix_result_lines) > 1:
-        raise RuntimeError(
-            "Multiple HELIX_RESULT= lines found in evaluator output. "
-            "Expected exactly one."
-        )
-    if helix_result_lines:
-        line = helix_result_lines[0]
+    result_line = None
+    for line in reversed(stdout.splitlines()):
+        if line.startswith("HELIX_RESULT="):
+            if result_line is not None:
+                raise RuntimeError(
+                    "Multiple HELIX_RESULT= lines found in evaluator output. "
+                    "Expected exactly one."
+                )
+            result_line = line
+    if result_line is not None:
+        line = result_line
         try:
             payload = json.loads(line[len("HELIX_RESULT="):])
             if isinstance(payload, list) and len(payload) == 2:
