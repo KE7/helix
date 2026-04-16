@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -279,13 +280,41 @@ def run_evaluator(
     # Collect ASI
     asi = _collect_asi(stdout, stderr, extra_outputs, config)
 
-    # Parse scores
+    # Check for HELIX_RESULT= line (GEPA OA contract: [score, side_info_dict])
+    # Exactly zero or one HELIX_RESULT= line is expected; multiple is an evaluator bug.
+    helix_result_score = None
+    side_info = None
+    result_line = None
+    for line in reversed(stdout.splitlines()):
+        if line.startswith("HELIX_RESULT="):
+            if result_line is not None:
+                raise RuntimeError(
+                    "Multiple HELIX_RESULT= lines found in evaluator output. "
+                    "Expected exactly one."
+                )
+            result_line = line
+    if result_line is not None:
+        line = result_line
+        try:
+            payload = json.loads(line[len("HELIX_RESULT="):])
+            if isinstance(payload, list) and len(payload) == 2:
+                helix_result_score = float(payload[0])
+                if isinstance(payload[1], dict):
+                    side_info = payload[1]
+        except (json.JSONDecodeError, ValueError, TypeError):
+            logger.warning("Failed to parse HELIX_RESULT= line: %s", line)
+
+    # Parse scores (fallback path, always runs for instance_scores)
     parser = get_parser(evaluator.score_parser)
     if evaluator.score_parser == "pytest":
         scores, instance_scores = parser(stdout, stderr)
     else:
         # exitcode, json_accuracy, and other parsers take (returncode, stdout, stderr)
         scores, instance_scores = parser(returncode, stdout, stderr)
+
+    # If HELIX_RESULT= provided a score, override the parser-derived aggregate
+    if helix_result_score is not None:
+        scores["success"] = helix_result_score
 
     # Post-filter instance_scores when a subset was requested: evaluators
     # that ignore HELIX_INSTANCE_IDS will still have returned the whole
@@ -306,6 +335,7 @@ def run_evaluator(
         scores=scores,
         asi=asi,
         instance_scores=instance_scores,
+        side_info=side_info,
     )
     TRACE.emit(
         EventType.EVAL_END,
