@@ -40,6 +40,7 @@ class EvalResult:
     scores: dict[str, float]          # aggregate/summary scores
     asi: dict[str, str]               # arbitrary string info (metadata)
     instance_scores: dict[str, float] # per-instance scores
+    side_info: dict | None = None     # optional diagnostics from HELIX_RESULT (reflection only)
 
     def aggregate_score(self) -> float:
         """Return mean of instance scores, or 0.0 if none."""
@@ -53,12 +54,15 @@ class EvalResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict."""
-        return {
+        d: dict[str, Any] = {
             "candidate_id": self.candidate_id,
             "scores": self.scores,
             "instance_scores": self.instance_scores,
             "asi": self.asi,
         }
+        if self.side_info is not None:
+            d["side_info"] = self.side_info
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalResult:
@@ -68,6 +72,7 @@ class EvalResult:
             scores=data.get("scores", {}),
             instance_scores=data.get("instance_scores", {}),
             asi=data.get("asi", {}),
+            side_info=data.get("side_info"),
         )
 
 

@@ -71,7 +71,7 @@ MUTATION_PROMPT_TEMPLATE = """\
 ### stderr
 {asi_stderr}
 
-{extra_asi_section}## Background / Context
+{extra_asi_section}{diagnostics_section}## Background / Context
 {background}
 
 ## Your Task
@@ -220,6 +220,14 @@ def build_mutation_prompt(
     else:
         extra_asi_section = ""
 
+    # Render side_info diagnostics section (GEPA OA contract)
+    diagnostics_section = ""
+    if eval_result.side_info is not None:
+        diag_lines = "\n".join(
+            f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
+        )
+        diagnostics_section = f"## Diagnostics\n{diag_lines}\n\n"
+
     bg = background or "(no additional background provided)"
 
     return MUTATION_PROMPT_TEMPLATE.format(
@@ -229,6 +237,7 @@ def build_mutation_prompt(
         asi_stdout=asi_stdout,
         asi_stderr=asi_stderr,
         extra_asi_section=extra_asi_section,
+        diagnostics_section=diagnostics_section,
         background=bg,
         turn_budget=_turn_budget_section(max_turns),
     )
