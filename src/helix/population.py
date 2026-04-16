@@ -40,7 +40,7 @@ class EvalResult:
     scores: dict[str, float]          # aggregate/summary scores
     asi: dict[str, str]               # arbitrary string info (metadata)
     instance_scores: dict[str, float] # per-instance scores
-    side_info: dict | None = None     # optional diagnostics from HELIX_RESULT (reflection only)
+    side_info: dict[str, object] | None = None  # optional diagnostics from HELIX_RESULT (reflection only)
 
     def aggregate_score(self) -> float:
         """Return mean of instance scores, or 0.0 if none."""
