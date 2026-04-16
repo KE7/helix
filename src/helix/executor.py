@@ -263,19 +263,27 @@ def run_evaluator(
     asi = _collect_asi(stdout, stderr, extra_outputs, config)
 
     # Check for HELIX_RESULT= line (GEPA OA contract: [score, side_info_dict])
+    # Exactly zero or one HELIX_RESULT= line is expected; multiple is an evaluator bug.
     helix_result_score = None
     side_info = None
-    for line in stdout.splitlines():
-        if line.startswith("HELIX_RESULT="):
-            try:
-                payload = json.loads(line[len("HELIX_RESULT="):])
-                if isinstance(payload, list) and len(payload) == 2:
-                    helix_result_score = float(payload[0])
-                    if isinstance(payload[1], dict):
-                        side_info = payload[1]
-            except (json.JSONDecodeError, ValueError, TypeError):
-                logger.warning("Failed to parse HELIX_RESULT= line: %s", line)
-            break
+    helix_result_lines = [
+        line for line in stdout.splitlines() if line.startswith("HELIX_RESULT=")
+    ]
+    if len(helix_result_lines) > 1:
+        raise RuntimeError(
+            "Multiple HELIX_RESULT= lines found in evaluator output. "
+            "Expected exactly one."
+        )
+    if helix_result_lines:
+        line = helix_result_lines[0]
+        try:
+            payload = json.loads(line[len("HELIX_RESULT="):])
+            if isinstance(payload, list) and len(payload) == 2:
+                helix_result_score = float(payload[0])
+                if isinstance(payload[1], dict):
+                    side_info = payload[1]
+        except (json.JSONDecodeError, ValueError, TypeError):
+            logger.warning("Failed to parse HELIX_RESULT= line: %s", line)
 
     # Parse scores (fallback path, always runs for instance_scores)
     parser = get_parser(evaluator.score_parser)

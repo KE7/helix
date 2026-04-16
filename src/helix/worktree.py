@@ -287,7 +287,7 @@ def _snapshot_dirty_working_tree(repo_root: Path, worktree_path: Path) -> bool:
     )
     if diff_proc.stdout:
         subprocess.run(
-            ["git", "apply", "--allow-empty", "--whitespace=nowarn", "-"],
+            ["git", "apply", "--whitespace=nowarn", "-"],
             cwd=worktree_path,
             check=True,
             input=diff_proc.stdout,

@@ -104,8 +104,8 @@ class TestHelixResultParsing:
         assert result.side_info is None
 
     @patch("helix.executor.subprocess.run")
-    def test_helix_result_multiple_lines_takes_first(self, mock_run):
-        """When multiple HELIX_RESULT= lines exist, only the first is used."""
+    def test_helix_result_multiple_lines_raises(self, mock_run):
+        """When multiple HELIX_RESULT= lines exist, a RuntimeError is raised."""
         side_info_1 = {"source": "first"}
         side_info_2 = {"source": "second"}
         line1 = f"HELIX_RESULT={json.dumps([0.9, side_info_1])}"
@@ -115,10 +115,8 @@ class TestHelixResultParsing:
 
         config = make_config()
         candidate = make_candidate()
-        result = run_evaluator(candidate, config, split="val")
-
-        assert result.scores["success"] == 0.9
-        assert result.side_info == side_info_1
+        with pytest.raises(RuntimeError, match="Multiple HELIX_RESULT= lines found"):
+            run_evaluator(candidate, config, split="val")
 
     @patch("helix.executor.subprocess.run")
     def test_helix_result_non_dict_side_info_ignored(self, mock_run):
