@@ -287,9 +287,13 @@ class EvolutionConfig(BaseModel):
             raise ValueError(
                 f"evolution.val_stage_size must be >= 0 (got {self.val_stage_size})"
             )
-        if not self.group_key_separator:
+        # group_key_separator is only consumed by the stratified sampler;
+        # validate it only on that path so default ('__') configs that use
+        # the epoch_shuffled sampler aren't restricted unnecessarily.
+        if self.batch_sampler == "stratified" and not self.group_key_separator:
             raise ValueError(
                 "evolution.group_key_separator must be a non-empty string "
+                "when evolution.batch_sampler='stratified' "
                 f"(got {self.group_key_separator!r})"
             )
 

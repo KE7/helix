@@ -249,3 +249,110 @@ def test_stratified_unbalanced_group_sizes_still_stratifies() -> None:
         batch = sampler.next_minibatch_ids(loader, _State(i=i))
         groups = {_group_by_prefix(eid) for eid in batch}
         assert len(groups) == 3
+
+
+def test_stratified_num_groups_gt_m_unbalanced_no_crash() -> None:
+    """Regression: num_groups > minibatch_size with uneven group sizes used to
+    crash the trim logic (PR#3 review MUST-FIX).
+
+    Reproducer: 4 groups of sizes (3, 2, 1, 3), m=2 — at least one round has
+    `m <= len(round_slice) < num_groups`, so the previous flat-chunking trim
+    misaligned and produced a `len(shuffled_ids)` that was not a multiple of
+    `m`, tripping the `% m == 0` assert in `next_minibatch_ids`.
+    """
+    ids = [
+        "a__0", "a__1", "a__2",
+        "b__0", "b__1",
+        "c__0",
+        "d__0", "d__1", "d__2",
+    ]
+    # Run across every seed in 0..9 — review reports failure on all of them.
+    for seed in range(10):
+        loader = _Loader(ids)
+        sampler = StratifiedBatchSampler(
+            minibatch_size=2, group_fn=_group_by_prefix, rng=random.Random(seed)
+        )
+        # Drive multiple steps, including across epoch boundaries.
+        for i in range(8):
+            batch = sampler.next_minibatch_ids(loader, _State(i=i))
+            assert len(batch) == 2
+            groups = {_group_by_prefix(eid) for eid in batch}
+            assert len(groups) == 2, (
+                f"seed={seed} i={i} batch={batch} should have 2 distinct groups"
+            )
+        # Schedule must always be a multiple of minibatch_size.
+        assert len(sampler.shuffled_ids) % 2 == 0
+
+
+def test_stratified_num_groups_gt_m_balanced_eventual_coverage() -> None:
+    """Across N epochs with `num_groups > m` balanced groups, every instance
+    must appear at least once in the union of emitted minibatches.
+
+    This guards against within-epoch group starvation regressing further
+    (PR#3 review SHOULD-FIX #2): without per-round group rotation, the same
+    `num_groups % m` groups would be dropped every round of every epoch
+    until the per-epoch shuffle rotated them in by chance.
+    """
+    # 5 groups of size 3 each, m=3 -> num_groups % m == 2 dropped per round.
+    ids = [f"{g}__{i}" for g in ("a", "b", "c", "d", "e") for i in range(3)]
+    loader = _Loader(ids)
+    sampler = StratifiedBatchSampler(
+        minibatch_size=3, group_fn=_group_by_prefix, rng=random.Random(0)
+    )
+    seen: set[str] = set()
+    # 5 epochs of 3 minibatches each — with rotation, this covers every id.
+    for i in range(15):
+        batch = sampler.next_minibatch_ids(loader, _State(i=i))
+        seen.update(batch)
+        assert len({_group_by_prefix(eid) for eid in batch}) == 3
+    assert seen == set(ids), f"missing ids: {set(ids) - seen}"
+
+
+def test_stratified_num_groups_gt_m_per_round_rotation_covers_all_groups() -> None:
+    """Within a single epoch with `num_groups > m`, every group should appear
+    at least once across the emitted schedule (per-round rotation guarantees
+    this when there are enough rounds).
+    """
+    # 4 groups of size 4 each, m=3 -> 1 group dropped per round, 4 rounds
+    # total -> rotation visits all groups within the epoch.
+    ids = [f"{g}__{i}" for g in ("a", "b", "c", "d") for i in range(4)]
+    loader = _Loader(ids)
+    sampler = StratifiedBatchSampler(
+        minibatch_size=3, group_fn=_group_by_prefix, rng=random.Random(0)
+    )
+    sampler.next_minibatch_ids(loader, _State(i=0))
+    schedule_groups = {_group_by_prefix(eid) for eid in sampler.shuffled_ids}
+    assert schedule_groups == {"a", "b", "c", "d"}, (
+        "every group should appear at least once in the schedule "
+        f"(got {schedule_groups})"
+    )
+
+
+def test_stratified_fallback_short_circuits_after_engagement() -> None:
+    """Once the fallback is engaged and the trainset hasn't changed, calls
+    should bypass `_update_shuffled` entirely (PR#3 review SHOULD-FIX #3).
+    """
+    ids = ["a__0", "a__1", "a__2", "b__0", "b__1", "b__2"]
+    loader = _Loader(ids)
+    sampler = StratifiedBatchSampler(
+        minibatch_size=3, group_fn=_group_by_prefix, rng=random.Random(0)
+    )
+    # Engage the fallback.
+    sampler.next_minibatch_ids(loader, _State(i=0))
+    assert sampler._fallback is not None
+
+    # Patch _update_shuffled so any further call would explode — proves we
+    # short-circuit straight to the fallback when trainset_size is stable.
+    call_count = {"n": 0}
+    original = sampler._update_shuffled
+
+    def _tripwire(*args: Any, **kwargs: Any) -> None:
+        call_count["n"] += 1
+        original(*args, **kwargs)
+
+    sampler._update_shuffled = _tripwire  # type: ignore[method-assign]
+    for i in range(1, 6):
+        sampler.next_minibatch_ids(loader, _State(i=i))
+    assert call_count["n"] == 0, (
+        "fallback path should short-circuit and never re-bucket all_ids()"
+    )
