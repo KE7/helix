@@ -115,9 +115,9 @@ class EpochShuffledBatchSampler(Generic[DataId]):
 class StratifiedBatchSampler(Generic[DataId]):
     """Task-stratified minibatch sampler.
 
-    Each minibatch of size ``K`` is constructed by choosing ``K`` distinct
-    groups (per ``group_fn``) and then picking one unused instance from each
-    of those groups.  This guarantees task diversity within every minibatch,
+    Each epoch is pre-shuffled such that every minibatch of size ``K`` is a
+    slice of ``K`` instances drawn from ``K`` distinct groups (per
+    ``group_fn``).  This guarantees task diversity within every minibatch,
     which helps reflection-style evolutionary search reason about
     generalisation instead of overfitting to whichever task happens to
     dominate a random batch.
@@ -130,14 +130,19 @@ class StratifiedBatchSampler(Generic[DataId]):
       any contiguous window of ``minibatch_size`` indices begins at a
       multiple of ``minibatch_size`` and touches ``minibatch_size`` distinct
       groups — as long as at least ``minibatch_size`` groups exist.
+    - Per-round rotation: when ``num_groups > minibatch_size``, each round
+      drops the trailing ``num_groups % minibatch_size`` groups (padding
+      would re-introduce a group collision).  We rotate ``group_keys`` by
+      ``r`` positions on round ``r`` so the dropped slot rotates across all
+      groups within a single epoch — preventing within-epoch group
+      starvation.
     - Epoch bumps reshuffle via the shared ``rng``, mirroring
       :class:`EpochShuffledBatchSampler`'s determinism guarantees.
-    - Padding: when the combined interleaved schedule is not a multiple of
-      ``minibatch_size``, we drop the trailing partial round rather than
-      pad with duplicates, because padding would re-introduce a group
-      collision within the final minibatch.  Because all full rounds are
-      emitted first, this only ever discards a tail of size
-      ``< minibatch_size`` per epoch.
+    - Padding: when a round is partial (some buckets exhausted), we trim to
+      the largest multiple of ``minibatch_size`` that still fits in the
+      round, dropping any trailing remainder rather than padding with
+      duplicates (padding would re-introduce a group collision within the
+      final minibatch).
     - Fallback: when ``len(groups) < minibatch_size``, a stratified minibatch
       is impossible, so the sampler transparently delegates to an internal
       :class:`EpochShuffledBatchSampler` for GEPA parity semantics.
@@ -145,9 +150,14 @@ class StratifiedBatchSampler(Generic[DataId]):
     Invariants:
       S1. Every returned minibatch of size ``m`` contains exactly ``m``
           distinct group keys (when ``num_groups >= m``).
-      S2. Across a full epoch, each instance is yielded at most once
-          (instances beyond ``floor(min_group_size * num_groups / m) * m``
-          may be dropped in the final partial round).
+      S2. Within an epoch each instance is yielded at most once.  In each
+          round of the round-robin interleave, only the first
+          ``whole_rounds_per_round = (num_groups // m) * m`` entries are
+          kept (rounded down to a multiple of ``m`` for partial rounds).
+          When ``num_groups % m != 0``, the trailing ``num_groups % m``
+          group slots in any given round are dropped — but the per-round
+          rotation of ``group_keys`` ensures the dropped slot rotates
+          across all groups, so no group is starved within an epoch.
       S3. Determinism given ``rng`` seed, matching
           :class:`EpochShuffledBatchSampler` semantics.
     """
@@ -199,34 +209,34 @@ class StratifiedBatchSampler(Generic[DataId]):
             self.rng.shuffle(buckets[key])
         self.rng.shuffle(group_keys)
 
-        # Interleave round-robin: round r picks buckets[k][r] for each key k,
-        # as long as index r is valid for that bucket.  A "full round" touches
-        # every group exactly once — that's our stratification guarantee.
+        # Interleave round-robin and trim per-round.  Round r picks
+        # buckets[k][r] for each key k where r is a valid index for that
+        # bucket.  A "full round" touches every group exactly once — that's
+        # our stratification guarantee.  Within a round, the first
+        # ``whole_rounds_per_round = (num_groups // m) * m`` entries form
+        # complete stratified minibatches; any trailing ``num_groups % m``
+        # entries are dropped because padding them would require
+        # duplicating a group.  When a round is partial (some buckets
+        # exhausted), we further clip to a multiple of ``m`` so the slice
+        # formula in ``next_minibatch_ids`` never overruns a boundary.
+        #
+        # Per-round rotation: rotating ``group_keys`` by ``r`` positions
+        # before slicing rotates which group lands in the trimmed slot
+        # across rounds, so no group is starved within an epoch when
+        # ``num_groups > m`` and ``num_groups % m != 0``.
         max_rounds = max(len(buckets[k]) for k in group_keys)
-        schedule: list[DataId] = []
-        for r in range(max_rounds):
-            round_slice: list[DataId] = []
-            for key in group_keys:
-                if r < len(buckets[key]):
-                    round_slice.append(buckets[key][r])
-            # Only emit the round if it fills at least one full minibatch of
-            # distinct groups; otherwise stratification would break.
-            if len(round_slice) >= self.minibatch_size:
-                schedule.extend(round_slice)
-
-        # Trim to a whole-number-of-minibatches length so the slice formula
-        # in ``next_minibatch_ids`` never overruns a boundary.  Each full
-        # round has length ``num_groups``; within a round, the first
-        # ``(num_groups // m) * m`` entries form complete stratified
-        # minibatches — any trailing ``num_groups % m`` entries are dropped
-        # because padding them would require duplicating a group.
         m = self.minibatch_size
         whole_rounds_per_round = (num_groups // m) * m
         trimmed: list[DataId] = []
-        # Split ``schedule`` back into rounds of size ``num_groups``.
-        for start in range(0, len(schedule), num_groups):
-            round_ids = schedule[start : start + num_groups]
-            trimmed.extend(round_ids[:whole_rounds_per_round])
+        for r in range(max_rounds):
+            offset = r % num_groups
+            rotated_keys = group_keys[offset:] + group_keys[:offset]
+            round_slice = [buckets[k][r] for k in rotated_keys if r < len(buckets[k])]
+            # Take at most whole_rounds_per_round entries, then clip to a
+            # multiple of m in case this round is partial.
+            keep = min(len(round_slice), whole_rounds_per_round)
+            keep -= keep % m
+            trimmed.extend(round_slice[:keep])
 
         self.shuffled_ids = trimmed
 
@@ -236,6 +246,13 @@ class StratifiedBatchSampler(Generic[DataId]):
         trainset_size = len(loader)
         if trainset_size == 0:
             raise ValueError("Cannot sample a minibatch from an empty loader.")
+
+        # Fast path: once the fallback is engaged and the trainset hasn't
+        # changed, delegate directly without re-bucketing all_ids() on every
+        # call.  ``self.epoch`` is left untouched in this branch — the inner
+        # fallback maintains its own epoch state.
+        if self._fallback is not None and trainset_size == self.last_trainset_size:
+            return self._fallback.next_minibatch_ids(loader, state)
 
         base_idx = state.i * self.minibatch_size
         curr_epoch = (

@@ -806,8 +806,8 @@ def run_evolution(
             # 'cube_stack__s3' -> 'cube_stack' with separator='__'.
             sep = config.evolution.group_key_separator
 
-            def _group_fn(example_id: str, _sep: str = sep) -> str:
-                return example_id.split(_sep, 1)[0]
+            def _group_fn(example_id: str) -> str:
+                return example_id.split(sep, 1)[0]
 
             batch_sampler = StratifiedBatchSampler[str](
                 minibatch_size=config.evolution.minibatch_size,
