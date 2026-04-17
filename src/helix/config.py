@@ -260,11 +260,41 @@ class EvolutionConfig(BaseModel):
             "when unset or 0."
         ),
     )
+    batch_sampler: Literal["epoch_shuffled", "stratified"] = Field(
+        default="epoch_shuffled",
+        description=(
+            "Minibatch sampling strategy. "
+            "'epoch_shuffled' (default): GEPA-parity EpochShuffledBatchSampler. "
+            "'stratified': StratifiedBatchSampler guarantees each minibatch of "
+            "size K touches K distinct groups, where the group key is derived "
+            "from each instance id via 'evolution.group_key_separator'. Falls "
+            "back to epoch_shuffled behaviour when fewer groups than "
+            "minibatch_size are available."
+        ),
+    )
+    group_key_separator: str = Field(
+        default="__",
+        description=(
+            "Separator used to derive a group key from each instance id for "
+            "the stratified batch sampler: the id is split on this separator "
+            "and the first part is taken as the group key (e.g. "
+            "'cube_stack__s3' -> 'cube_stack' when separator='__')."
+        ),
+    )
 
     def model_post_init(self, __context: object) -> None:
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(
                 f"evolution.val_stage_size must be >= 0 (got {self.val_stage_size})"
+            )
+        # group_key_separator is only consumed by the stratified sampler;
+        # validate it only on that path so default ('__') configs that use
+        # the epoch_shuffled sampler aren't restricted unnecessarily.
+        if self.batch_sampler == "stratified" and not self.group_key_separator:
+            raise ValueError(
+                "evolution.group_key_separator must be a non-empty string "
+                "when evolution.batch_sampler='stratified' "
+                f"(got {self.group_key_separator!r})"
             )
 
 
