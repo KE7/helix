@@ -29,7 +29,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from helix.batch_sampler import EpochShuffledBatchSampler
+from helix.batch_sampler import BatchSampler, EpochShuffledBatchSampler, StratifiedBatchSampler
 from helix.config import HelixConfig, load_dataset_examples
 from helix.eval_cache import EvaluationCache as MinibatchEvalCache
 from helix.eval_policy import (
@@ -798,12 +798,27 @@ def run_evolution(
     # result is that minibatches diverge from GEPA starting with the very
     # first iteration on identical seeds.  Detected by the GEPA
     # differential testing harness (tests/unit/test_gepa_diff_harness.py).
-    batch_sampler: EpochShuffledBatchSampler[str] | None = None
+    batch_sampler: BatchSampler[str] | None = None
     if use_minibatch_gate:
-        batch_sampler = EpochShuffledBatchSampler[str](
-            minibatch_size=config.evolution.minibatch_size,
-            rng=rng,
-        )
+        if config.evolution.batch_sampler == "stratified":
+            # Derive group key from instance id by splitting on the
+            # configured separator and taking the first part.  E.g.
+            # 'cube_stack__s3' -> 'cube_stack' with separator='__'.
+            sep = config.evolution.group_key_separator
+
+            def _group_fn(example_id: str) -> str:
+                return example_id.split(sep, 1)[0]
+
+            batch_sampler = StratifiedBatchSampler[str](
+                minibatch_size=config.evolution.minibatch_size,
+                group_fn=_group_fn,
+                rng=rng,
+            )
+        else:
+            batch_sampler = EpochShuffledBatchSampler[str](
+                minibatch_size=config.evolution.minibatch_size,
+                rng=rng,
+            )
 
     # GEPA-parity per-(candidate_hash, example_id) eval cache.  Kept
     # distinct from the legacy ``eval_cache`` above, which is keyed by
