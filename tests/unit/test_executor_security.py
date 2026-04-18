@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import stat
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -82,25 +84,22 @@ class TestCommandValidation:
         tokens = _validate_and_split_command("bash run_tests.sh")
         assert tokens == ["bash", "run_tests.sh"]
 
-    def test_allowed_relative_path(self):
-        """./script is allowed."""
+    def test_allowed_relative_path(self, tmp_path, monkeypatch):
+        """./script is allowed when it resolves to an existing file."""
+        (tmp_path / "run_evaluation.sh").write_text("#!/bin/sh\n")
+        monkeypatch.chdir(tmp_path)
         tokens = _validate_and_split_command("./run_evaluation.sh")
         assert tokens == ["./run_evaluation.sh"]
 
     def test_allowed_usr_bin_path(self):
-        """/usr/bin/ paths are allowed."""
+        """/usr/bin/python3 is allowed (it exists on the system)."""
+        # /usr/bin/python3 is present on the CI/dev machine; if it ever isn't,
+        # this test should be skipped rather than dropped — it guards the
+        # common case of absolute interpreter paths.
+        if not Path("/usr/bin/python3").is_file():
+            pytest.skip("/usr/bin/python3 not present on this system")
         tokens = _validate_and_split_command("/usr/bin/python3 test.py")
         assert tokens == ["/usr/bin/python3", "test.py"]
-
-    def test_allowed_home_path(self):
-        """/home/ paths are allowed."""
-        tokens = _validate_and_split_command("/home/user/bin/test")
-        assert tokens == ["/home/user/bin/test"]
-
-    def test_allowed_opt_path(self):
-        """/opt/ paths are allowed."""
-        tokens = _validate_and_split_command("/opt/venv/bin/python")
-        assert tokens == ["/opt/venv/bin/python"]
 
     def test_disallowed_command_raises_error(self):
         """Disallowed commands raise EvaluatorError."""
@@ -140,6 +139,60 @@ class TestCommandValidation:
             _validate_and_split_command("python; rm -rf /")
         # shlex.split gives ["python;", "rm", "-rf", "/"]
         # "python;" is not in the allow-list
+
+    # ------------------------------------------------------------------
+    # Absolute/relative path acceptance: match the claim made in the
+    # error message ("... or an absolute/relative path ...") by checking
+    # that the path resolves to an existing file rather than matching a
+    # hard-coded prefix allow-list.
+    # ------------------------------------------------------------------
+
+    def test_absolute_path_on_data_mount_is_accepted(self, tmp_path):
+        """Absolute path outside /usr,/home,/opt is accepted if it exists.
+
+        This is the bug: `/data/k.e/venvs/cap-x/bin/python` was rejected
+        even though it's a legitimate absolute interpreter path.
+        """
+        exe = tmp_path / "python"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        tokens = _validate_and_split_command(f"{exe} eval.py")
+        assert tokens == [str(exe), "eval.py"]
+
+    def test_absolute_path_nonexistent_file_is_rejected(self):
+        """Typos in absolute paths should still fail loudly, not silently pass."""
+        with pytest.raises(EvaluatorError) as exc_info:
+            _validate_and_split_command("/data/does/not/exist/python eval.py")
+        msg = str(exc_info.value)
+        assert "InvalidEvaluatorCommand" in msg
+        assert "not in allow-list" in msg
+        # New error wording should mention the existence requirement.
+        assert "existing file" in msg
+
+    def test_relative_path_dot_slash_accepted(self, tmp_path, monkeypatch):
+        """./foo.py resolves against cwd and is accepted when the file exists."""
+        (tmp_path / "eval.py").write_text("# evaluator\n")
+        monkeypatch.chdir(tmp_path)
+        tokens = _validate_and_split_command("./eval.py")
+        assert tokens == ["./eval.py"]
+
+    def test_bare_name_python_still_allowed(self):
+        """Regression: bare interpreter name stays on the allow-list."""
+        tokens = _validate_and_split_command("python eval.py")
+        assert tokens == ["python", "eval.py"]
+
+    def test_bare_name_rm_still_rejected(self):
+        """Regression: bare-name allow-list still gates non-path tokens."""
+        with pytest.raises(EvaluatorError) as exc_info:
+            _validate_and_split_command("rm -rf /")
+        assert "InvalidEvaluatorCommand" in str(exc_info.value)
+
+    def test_usr_bin_prefix_still_works(self):
+        """Regression: a real /usr/bin/* interpreter continues to be accepted."""
+        if not Path("/usr/bin/python3").is_file():
+            pytest.skip("/usr/bin/python3 not present on this system")
+        tokens = _validate_and_split_command("/usr/bin/python3 -m pytest")
+        assert tokens == ["/usr/bin/python3", "-m", "pytest"]
 
 
 # ---------------------------------------------------------------------------
