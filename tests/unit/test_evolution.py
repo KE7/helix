@@ -7,7 +7,7 @@ Covers:
 - budget_exhausted() helper
 - run_evolution() loop behaviors:
     gating, convergence, budget exhaustion, perfect score break,
-    merge triggering/cap, dev/val split routing, dominated cleanup,
+    merge triggering/cap, train/val split routing, dominated cleanup,
     pareto frontier update
 """
 
@@ -318,7 +318,7 @@ class TestConvergenceDetection:
         gen_count = [0]
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            if split == "dev" or (split is None and candidate.id != "g0-s0"):
+            if split == "train" or (split is None and candidate.id != "g0-s0"):
                 gen_count[0] += 1
             return make_eval_result(candidate.id, {"i1": 0.5})
 
@@ -344,9 +344,9 @@ class TestConvergenceDetection:
 
 class TestPerfectScoreEarlyStopping:
     def test_perfect_score_skips_mutation_continues_loop(self, mocker, tmp_path, all_mocks):
-        """Perfect score on dev eval skips mutation (continue) but loop keeps running.
+        """Perfect score on train eval skips mutation (continue) but loop keeps running.
 
-        HELIX uses `continue` (not `break`) when the parent's dev score is perfect,
+        HELIX uses `continue` (not `break`) when the parent's train score is perfect,
         in line with GEPA §Reflective Mutation step 5: "skip mutation for this parent
         when the minibatch score is already perfect".  Mutation is never invoked.
         """
@@ -703,13 +703,13 @@ class TestMergeBehavior:
 
 
 # ---------------------------------------------------------------------------
-# run_evolution — dev/val split routing
+# run_evolution — train/val split routing
 # ---------------------------------------------------------------------------
 
 
-class TestDevValSplitRouting:
-    def test_dev_split_used_for_gating(self, mocker, tmp_path, all_mocks):
-        """Gating evaluation uses split='dev'."""
+class TestTrainValSplitRouting:
+    def test_train_split_used_for_gating(self, mocker, tmp_path, all_mocks):
+        """Gating evaluation uses split='train'."""
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
         all_mocks["create_seed_worktree"].return_value = seed
@@ -731,7 +731,7 @@ class TestDevValSplitRouting:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         child_splits = [split for cid, split in splits_seen if cid == "g1-s1"]
-        assert "dev" in child_splits, f"Gating should use dev split; saw: {child_splits}"
+        assert "train" in child_splits, f"Gating should use train split; saw: {child_splits}"
 
     def test_val_split_used_for_pareto_update(self, mocker, tmp_path, all_mocks):
         """After gating passes, val split is used for the frontier update."""
@@ -744,8 +744,8 @@ class TestDevValSplitRouting:
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
             splits_seen.append((candidate.id, split))
-            if candidate.id == "g1-s1" and split == "dev":
-                # Gating passes (child improves on dev)
+            if candidate.id == "g1-s1" and split == "train":
+                # Gating passes (child improves on train)
                 return make_eval_result("g1-s1", {"i1": 0.9})
             return make_eval_result(candidate.id, {"i1": 0.5})
 
@@ -792,7 +792,7 @@ class TestDevValSplitRouting:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # Child should be evaluated twice: once for gating (dev), once for val
+        # Child should be evaluated twice: once for gating (train), once for val
         assert child_call_count[0] == 2
 
 
@@ -867,7 +867,7 @@ class TestGenerationsFlagOverridesConfig:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # Loop ran for exactly 2 generations — mutate is called once per gen
-        # (Note: dev evals may be cached by EvaluationCache for the same parent,
+        # (Note: train evals may be cached by EvaluationCache for the same parent,
         # so we count via mutate calls instead.)
         assert all_mocks["mutate"].call_count == 2
 

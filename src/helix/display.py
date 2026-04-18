@@ -24,7 +24,7 @@ class HelixPhase(Enum):
     """
     SEED_GENERATION = "Generating seed candidate"
     SEED_EVAL = "Evaluating seed"
-    DEV_EVALUATION = "Running dev evaluation"
+    TRAIN_EVALUATION = "Running train evaluation"
     VAL_EVALUATION = "Running validation evaluation"
     MUTATION = "Applying mutation"
     MUTATION_GATING = "Gating mutation"

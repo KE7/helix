@@ -320,7 +320,7 @@ class TestMinibatchGateIntegration:
                 child_val_calls.append(list(instance_ids))
             if split == "val" and instance_ids == ["0", "1", "2", "3"] and candidate.id == seed.id:
                 return _make_result(candidate.id, {"0": 0.8, "1": 0.8, "2": 0.8, "3": 0.8})
-            if split == "dev" and instance_ids is not None:
+            if split == "train" and instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
@@ -368,7 +368,7 @@ class TestMinibatchGateIntegration:
                 child_val_calls.append(list(instance_ids))
             if split == "val" and instance_ids == ["0", "1", "2", "3"] and candidate.id == seed.id:
                 return _make_result(candidate.id, {"0": 0.2, "1": 0.2, "2": 0.2, "3": 0.2})
-            if split == "dev" and instance_ids is not None:
+            if split == "train" and instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
@@ -424,7 +424,7 @@ class TestMinibatchGateIntegration:
                 child_val_calls.append(list(instance_ids))
             if split == "val" and instance_ids == ["0", "1", "2", "3"]:
                 return _make_result(candidate.id, {i: 0.8 for i in instance_ids})
-            if split == "dev" and instance_ids is not None:
+            if split == "train" and instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
@@ -609,7 +609,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-A")
-        cand_dict = {"id": cand.id, "split": "dev"}
+        cand_dict = {"id": cand.id, "split": "train"}
         cache.put_batch(
             cand_dict,
             ["0", "1", "2"],
@@ -621,7 +621,7 @@ class TestCachedEvaluateBatch:
         write_batch_mock = mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "dev",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
         )
 
         assert run_eval_mock.call_count == 0, (
@@ -659,7 +659,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "dev",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
         )
 
         assert seen_instance_ids == [["0", "1", "2"]], (
@@ -675,7 +675,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-C")
-        cand_dict = {"id": cand.id, "split": "dev"}
+        cand_dict = {"id": cand.id, "split": "train"}
         # Pre-populate 0 and 2; leave 1 uncached.
         cache.put_batch(
             cand_dict,
@@ -708,7 +708,7 @@ class TestCachedEvaluateBatch:
         )
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "dev",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
         )
 
         # Evaluator called exactly once, with only the missing id.
@@ -753,7 +753,7 @@ class TestCachedEvaluateBatch:
 
         # First call: full miss → evaluator runs once.
         first_result, first_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "dev",
+            cand, ["0", "1"], cache, cfg, "train",
         )
         assert call_count["n"] == 1
         assert first_num_actual == 2
@@ -761,7 +761,7 @@ class TestCachedEvaluateBatch:
 
         # Second call with the same (candidate, ids): full hit → no re-run.
         second_result, second_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "dev",
+            cand, ["0", "1"], cache, cfg, "train",
         )
         assert call_count["n"] == 1, (
             "Evaluator must not be invoked a second time for cached ids"
@@ -770,14 +770,14 @@ class TestCachedEvaluateBatch:
         assert second_result.instance_scores == {"0": 0.77, "1": 0.77}
 
     def test_cache_is_split_aware(self, mocker: Any) -> None:
-        """A cached dev score must not satisfy a val request for the same id."""
+        """A cached train score must not satisfy a val request for the same id."""
         from helix.eval_cache import EvaluationCache as MBCache
         from helix.evolution import _cached_evaluate_batch
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-split")
         cache.put_batch(
-            {"id": cand.id, "split": "dev"},
+            {"id": cand.id, "split": "train"},
             ["0"],
             [None],
             [0.1],
@@ -830,7 +830,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "dev",
+            cand, ["0", "1"], None, self._trivial_config(), "train",
         )
 
         assert seen_instance_ids == [["0", "1"]]

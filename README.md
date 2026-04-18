@@ -56,7 +56,7 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
 | 🎯 | **Convergence detection** | Auto-stop when the frontier stagnates for N generations |
 | 💾 | **State persistence & resume** | Crash-safe — resume from any generation with `helix resume` |
-| 🚦 | **Gated mutations** | Dev-set gating rejects regressions before Pareto evaluation |
+| 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
 | 📋 | **Semantic mutation log** | Full trajectory with root-cause analysis, changes made, and parent lineage |
 
 ---
@@ -93,7 +93,7 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
                            │                               │
                            ▼                               │
                     ┌──────────────┐     ┌──────────┐      │
-                    │  Gate on Dev │────▶│  Reject  │      │
+                    │Gate on Train │────▶│  Reject  │      │
                     │  (regress?)  │ yes └──────────┘      │
                     └──────┬───────┘                       │
                        no  │                               │
@@ -120,7 +120,7 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
 2. **Evaluate** — Run your evaluator command; parse scores per test/instance
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
 4. **Mutate** — Spawn Claude Code in an isolated worktree with full tool access. It reads files, diagnoses failures, makes surgical multi-file edits, and runs commands to verify
-5. **Gate** — Re-evaluate on the dev set. Reject if the mutation caused regressions
+5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
 7. **Merge** — Periodically combine two complementary frontier candidates via Claude Code
 8. **Cleanup** — Remove dominated worktrees; persist state; repeat
@@ -294,9 +294,10 @@ HELIX splits dataset concerns across two TOML sections:
 | **Positional-index handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples integer indices into `range(train_size)`; the evaluator reads `helix_batch.json` from cwd and filters its own dataset. |
 | **Seedless multi-task** | `seedless.enabled = true`, `seedless.train_path` set | Seed generation prompt includes the first 3 training examples for grounding. |
 
-HELIX does not own separate dataset files for train/dev/val; your evaluator remains
-the source of truth. During evolution HELIX sets `HELIX_SPLIT` (`train`, `dev`, or
-`val`) so evaluator-owned datasets can switch behavior by phase.
+HELIX does not own separate dataset files for train/val; your evaluator remains
+the source of truth. During evolution HELIX sets `HELIX_SPLIT` (`train` or `val`)
+so evaluator-owned datasets can switch behavior by phase, mirroring GEPA's
+`trainset` / `valset` duality.
 
 When `evolution.val_stage_size` is set to a positive value and `dataset.val_size` is also set, accepted mutation proposals run a deterministic first-N validation stage before the full validation sweep. Stage-only results are never added to the frontier; HELIX still persists only full-val results for Pareto ranking and resume stability.
 

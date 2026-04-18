@@ -59,7 +59,7 @@ class TestBuildSeedGenerationPrompt:
 
     def test_contains_evaluator_cmd_when_provided(self):
         """evaluator_cmd should appear in the prompt when given."""
-        evaluator_cmd = "python evaluate.py --split dev"
+        evaluator_cmd = "python evaluate.py --split train"
         prompt = build_seed_generation_prompt(
             objective="Generate a solver",
             evaluator_cmd=evaluator_cmd,
