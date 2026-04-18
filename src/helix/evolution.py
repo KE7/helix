@@ -237,6 +237,10 @@ _SKIP_TOKENS = {"run"}
 _SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".ts")
 # Shell wrappers whose command body (after -c/-lc/...) is opaque to path-level
 # validation — e.g. `bash -lc "cd /x && python evaluate.py"`.
+# Note: only the adjacent `{wrapper} {flag}` prefix is exempted. Forms like
+# `bash --login -c "..."` (separate tokens) fall through to the normal
+# script-path checks by design — extend _SHELL_COMMAND_FLAGS if that becomes
+# a real-world need.
 _SHELL_WRAPPERS = {"bash", "sh", "zsh", "fish", "dash"}
 _SHELL_COMMAND_FLAGS = {"-c", "-lc", "-ic", "-ilc", "-lic"}
 _EVALUATOR_MANIFEST_FILENAME = "evaluator_manifest.json"
