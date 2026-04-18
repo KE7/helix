@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig, EvaluatorConfig
@@ -74,16 +75,19 @@ def _validate_and_split_command(cmd: str) -> list[str]:
     if first_token in _ALLOWED_COMMANDS:
         return tokens
 
-    # Allow absolute and relative paths
-    if first_token.startswith(("./", "/usr/bin/", "/home/", "/opt/")):
-        return tokens
+    # Allow absolute/relative paths that resolve to an existing regular file.
+    # Paths must actually exist on disk — typos and bogus prefixes still fail
+    # loudly and fall through to the allow-list error below.
+    if first_token.startswith(("./", "../", "/")):
+        if Path(first_token).is_file():
+            return tokens
 
     # Not allowed
     allowed_list = ", ".join(sorted(_ALLOWED_COMMANDS))
     raise EvaluatorError(
         f'InvalidEvaluatorCommand: "{cmd}" not in allow-list. '
         f"See helix.toml evaluator.command. Allowed: {allowed_list}, "
-        f"or absolute/relative paths.",
+        f"or an absolute/relative path that resolves to an existing file.",
         operation="validate_command",
         command=cmd,
     )
