@@ -127,6 +127,10 @@ def all_mocks(mocker):
         "print_warning": mocker.patch("helix.evolution.print_warning"),
         "render_budget": mocker.patch("helix.evolution.render_budget"),
         "render_generation": mocker.patch("helix.evolution.render_generation"),
+        # Merge eval (M5 subsample path) writes helix_batch.json via
+        # _cached_evaluate_batch.  Stub it out so tests can use non-numeric
+        # or synthetic instance ids without hitting the filesystem.
+        "_write_helix_batch": mocker.patch("helix.evolution._write_helix_batch"),
     }
 
 
@@ -618,6 +622,10 @@ class TestMergeBehavior:
 
         GEPA parity (M2/L3): candidates need complementary instance scores
         so both are non-dominated and merge candidate pool has >= 2 entries.
+
+        Uses numeric instance ids ("1"/"2") because the merge-eval path
+        (M5 subsample) runs through ``_cached_evaluate_batch`` → positional
+        helix_batch.json handoff, which requires int-convertible ids.
         """
         seed = make_candidate("g0-s0")
         merged_cand = make_candidate("g1-m1", generation=1)
@@ -637,13 +645,17 @@ class TestMergeBehavior:
         # Return a valid triplet so merge can attempt to fire
         all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
 
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            # Seed is better on i2, children are better on i1 →
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            # Seed is better on "2", children are better on "1" →
             # neither dominates the other → both non-dominated.
             # Child sum (1.4) > parent sum (1.3) so strict acceptance passes.
             if candidate.id == "g0-s0":
-                return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.8})
-            return make_eval_result(candidate.id, {"i1": 0.9, "i2": 0.5})
+                scores = {"1": 0.5, "2": 0.8}
+            else:
+                scores = {"1": 0.9, "2": 0.5}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
@@ -666,6 +678,8 @@ class TestMergeBehavior:
 
         GEPA parity: merge fires at start of gen 2 (deferred from gen 1).
         GEPA parity (M2/L3): complementary scores so both are non-dominated.
+        GEPA parity (M5): merged eval runs on val subsample of common ids
+        via ``_cached_evaluate_batch``; ids must be int-convertible.
         """
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
@@ -677,16 +691,20 @@ class TestMergeBehavior:
 
         merged_eval_count = [0]
 
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
             if candidate.id == "g2-m1":
                 merged_eval_count[0] += 1
-                # Score must be >= max parent sum to be accepted.
-                # max(seed_sum=1.3, child_sum=1.4) = 1.4; merged sum = 1.5
-                return make_eval_result("g2-m1", {"i1": 0.9, "i2": 0.6})
-            if candidate.id == "g1-s1":
-                # Complementary: child better on i1, seed better on i2
-                return make_eval_result("g1-s1", {"i1": 0.9, "i2": 0.5})
-            return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.8})
+                # Merged subsample sum must be >= max(parent subsample sums).
+                # Parent subsample sums on {"1","2"}: seed=1.3, child=1.4.
+                # Merged subsample sum = 1.5 → accepted.
+                scores = {"1": 0.9, "2": 0.6}
+            elif candidate.id == "g1-s1":
+                scores = {"1": 0.9, "2": 0.5}
+            else:
+                scores = {"1": 0.5, "2": 0.8}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
@@ -700,6 +718,101 @@ class TestMergeBehavior:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert merged_eval_count[0] >= 1
+
+    def test_merge_acceptance_uses_val_subsample_not_full_val(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """Merge acceptance compares subsample sums, not full-val sums.
+
+        GEPA parity (M5, merge.py:332-400): the merged candidate is evaluated
+        only on ``subsample_ids`` (intersection of parent val coverage) and
+        compared against ``max(parent_a_subsample, parent_b_subsample)`` —
+        not ``max(parent_a_full, parent_b_full)``.
+
+        Scenario chosen so that old (full-val) and new (subsample) logic
+        disagree:
+
+            seed  (era) : {"1": 0.3, "2": 0.3, "3": 1.0} full=1.6 sub=0.6
+            child (erb) : {"1": 0.5, "2": 0.5}           full=1.0 sub=1.0
+            merged      : {"1": 0.6, "2": 0.5}           sub=1.1
+
+        Old: required = max(1.6, 1.0) = 1.6 → 1.1 < 1.6 → REJECT.
+        New: required = max(0.6, 1.0) = 1.0 → 1.1 >= 1.0 → ACCEPT.
+
+        Asserting the merge eval runs on ``split="val"`` with
+        ``instance_ids=["1","2"]`` (sorted common ids) — plus acceptance
+        into the frontier — proves the subsample path is active.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        merged_eval_calls: list[tuple[str | None, tuple[str, ...] | None]] = []
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            # Gating uses split="train"; frontier + merge use split="val".
+            # We only care about val-side asymmetry for the subsample test,
+            # so make train sums trivially pass the gate (child >= seed).
+            if split == "train":
+                if candidate.id == "g0-s0":
+                    scores = {"1": 0.3}
+                elif candidate.id == "g1-s1":
+                    scores = {"1": 0.9}
+                else:
+                    scores = {"1": 0.9}
+            else:
+                if candidate.id == "g0-s0":
+                    scores = {"1": 0.3, "2": 0.3, "3": 1.0}
+                elif candidate.id == "g1-s1":
+                    scores = {"1": 0.5, "2": 0.5}
+                elif candidate.id == "g2-m1":
+                    scores = {"1": 0.6, "2": 0.5}
+                    merged_eval_calls.append(
+                        (split, tuple(instance_ids) if instance_ids is not None else None)
+                    )
+                else:
+                    scores = {"1": 0.0}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=0,
+            max_metric_calls=10000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # Merge eval must use the val split restricted to common ids.
+        assert merged_eval_calls, "merged candidate was never evaluated"
+        assert all(split == "val" for split, _ids in merged_eval_calls), (
+            f"merge eval must route through val, saw splits: "
+            f"{[s for s, _ in merged_eval_calls]}"
+        )
+        assert all(ids == ("1", "2") for _split, ids in merged_eval_calls), (
+            f"merge eval must use sorted common val ids ['1','2'], saw: "
+            f"{[i for _, i in merged_eval_calls]}"
+        )
+
+        # Under the old (full-val) comparison the merge would be REJECTED
+        # (1.1 < 1.6); under the new (subsample) comparison it is ACCEPTED
+        # (1.1 >= 1.0).  Acceptance manifests as a frontier entry for the
+        # merged candidate — rejection would call remove_worktree on it.
+        removed_ids = [
+            c.args[0].id for c in all_mocks["remove_worktree"].call_args_list
+        ]
+        assert "g2-m1" not in removed_ids, (
+            f"merge should be accepted under subsample comparison; "
+            f"remove_worktree was called on: {removed_ids}"
+        )
 
 
 # ---------------------------------------------------------------------------
