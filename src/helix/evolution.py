@@ -235,6 +235,10 @@ _NO_SCRIPT_COMMANDS = {"make", "pytest"}
 _INTERPRETERS = {"python", "python3", "uv", "poetry", "node", "bash", "sh"}
 _SKIP_TOKENS = {"run"}
 _SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".ts")
+# Shell wrappers whose command body (after -c/-lc/...) is opaque to path-level
+# validation — e.g. `bash -lc "cd /x && python evaluate.py"`.
+_SHELL_WRAPPERS = {"bash", "sh", "zsh", "fish", "dash"}
+_SHELL_COMMAND_FLAGS = {"-c", "-lc", "-ic", "-ilc", "-lic"}
 _EVALUATOR_MANIFEST_FILENAME = "evaluator_manifest.json"
 
 
@@ -291,6 +295,14 @@ def _collect_protected_evaluator_paths(
         except ValueError:
             continue
         if not tokens or tokens[0] in _NO_SCRIPT_COMMANDS:
+            continue
+        # Shell wrappers like `bash -c "..."` hide the real command inside an
+        # opaque body string; path-level validation cannot reason about it.
+        if (
+            tokens[0] in _SHELL_WRAPPERS
+            and len(tokens) >= 2
+            and tokens[1] in _SHELL_COMMAND_FLAGS
+        ):
             continue
         script_token = _extract_script_token(tokens)
         if script_token is None or not _looks_like_script_file(script_token):
@@ -421,6 +433,15 @@ def _check_evaluator_script_exists(
             "Check the evaluator.command in helix.toml."
         )
         raise SystemExit(1)
+
+    # A shell wrapper like `bash -c "..."` hides the real command inside an
+    # opaque body string; path-level validation cannot reason about it.
+    if (
+        tokens[0] in _SHELL_WRAPPERS
+        and len(tokens) >= 2
+        and tokens[1] in _SHELL_COMMAND_FLAGS
+    ):
+        return
 
     # If the first token is a command that doesn't need a script, allow it
     if tokens[0] in _NO_SCRIPT_COMMANDS:
