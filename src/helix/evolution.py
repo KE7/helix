@@ -642,7 +642,7 @@ def _cached_evaluate_batch(
     ``len(uncached_ids)`` return value.
     """
     # Cache keys must remain stable across re-evals of the same candidate
-    # identity, but dev/val batches must not alias when they share
+    # identity, but train/val batches must not alias when they share
     # positional ids like "0", "1", ... .
     cand_dict: dict[str, str] = {"id": candidate.id, "split": split}
 
@@ -1207,10 +1207,15 @@ def run_evolution(
                                 f"helix: merge {merge_id} ({cid_i}+{cid_j})",
                             )
                             # GEPA parity (M5): merge acceptance uses subsample
-                            # (dev) evaluation, not full val.  Mirrors GEPA
+                            # evaluation, not full val.  Mirrors GEPA
                             # merge.py:332-335,399 and engine.py:675-688.
+                            # NOTE: GEPA subsamples from valset here
+                            # (merge.py:348 `self.valset.fetch(...)`); HELIX
+                            # currently routes this through the train split.
+                            # Tracked as a separate follow-up (not part of
+                            # the split-vocabulary alignment with GEPA).
                             merge_result, _merge_cached = _cached_eval(
-                                merged, config, "dev", eval_cache,
+                                merged, config, "train", eval_cache,
                             )
                             merge_result.candidate_id = merged.id
                             if not _merge_cached:
@@ -1296,7 +1301,7 @@ def run_evolution(
         # proposal_contexts.  When the minibatch gate is active, these
         # carry the per-proposal subsample ids and the parent's fresh
         # minibatch result; otherwise they are all None and the legacy
-        # dev-gating path handles acceptance.
+        # train-gating path handles acceptance.
         proposal_subsamples: list[list[str] | None] = []
         proposal_parent_mb_results: list[EvalResult | None] = []
         _budget_break = False
@@ -1322,7 +1327,7 @@ def run_evolution(
                     EventType.SAMPLE_MINIBATCH,
                     candidate_id=parent.id,
                     example_ids=list(subsample_ids),
-                    split="dev",
+                    split="train",
                 )
                 # GEPA parity: route parent-on-minibatch through the
                 # per-example cache consumer (``cached_evaluate_full`` in
@@ -1336,7 +1341,7 @@ def run_evolution(
                     list(subsample_ids),
                     minibatch_cache,
                     config,
-                    "dev",
+                    "train",
                 )
                 parent_mb_result.candidate_id = parent.id
                 state.budget.evaluations += _n
@@ -1347,22 +1352,22 @@ def run_evolution(
 
             # GEPA parity: the eval_result passed to the mutator is the
             # parent's minibatch eval (reflective_mutation.py:268,341), not
-            # a full-train dev re-eval. HELIX previously ran a redundant
-            # _cached_eval(parent, 'dev') here, which forced evaluator-owned
+            # a full-train re-eval. HELIX previously ran a redundant
+            # _cached_eval(parent, 'train') here, which forced evaluator-owned
             # datasets to rescore the entire training split just to provide
             # prompt context. Legacy (no-minibatch) single-task mode keeps a
-            # dev eval because there is no minibatch to use.
+            # train eval because there is no minibatch to use.
             eval_for_mutate: EvalResult
             if parent_mb_result is not None:
                 eval_for_mutate = parent_mb_result
             else:
-                set_phase(HelixPhase.DEV_EVALUATION)
-                eval_for_mutate, _ = _cached_eval(parent, config, "dev", eval_cache)
+                set_phase(HelixPhase.TRAIN_EVALUATION)
+                eval_for_mutate, _ = _cached_eval(parent, config, "train", eval_cache)
                 eval_for_mutate.candidate_id = parent.id
 
             # Skip-if-perfect (GEPA reflective_mutation.py:308-312): check
             # the eval used for the mutator, which is the minibatch score
-            # in GEPA-parity mode or the single-task dev eval in legacy mode.
+            # in GEPA-parity mode or the single-task train eval in legacy mode.
             if (
                 config.evolution.perfect_score_threshold is not None
                 and eval_for_mutate.aggregate_score()
@@ -1392,7 +1397,7 @@ def run_evolution(
             _parent, _parent_frontier_result, _eval_for_mutate, _new_id = ctx
             # GEPA parity: mutator receives the parent's minibatch eval
             # (see make_reflective_dataset(curr_prog, eval_curr, ...) in
-            # reflective_mutation.py:341), not a full-train dev re-eval.
+            # reflective_mutation.py:341), not a full-train re-eval.
             return mutate(
                 parent=_parent,
                 eval_result=_eval_for_mutate,
@@ -1502,10 +1507,10 @@ def run_evolution(
             #  (a) Minibatch gate (GEPA §5.1): when train_loader exists,
             #      run the child on the SAME subsample as the parent and
             #      accept on strict/relaxed sum improvement over the
-            #      parent's minibatch scores.  No separate dev re-eval.
-            #  (b) Legacy dev-gating: no train_loader — preserve the
+            #      parent's minibatch scores.  No separate train re-eval.
+            #  (b) Legacy train-gating: no train_loader — preserve the
             #      original behaviour (degrades() + strict improvement
-            #      on dev instance scores).
+            #      on train instance scores).
             if use_minibatch_gate and _subsample_ids is not None and _parent_mb is not None:
                 set_phase(HelixPhase.MUTATION_GATING)
                 # GEPA parity: route child-on-minibatch through the
@@ -1518,7 +1523,7 @@ def run_evolution(
                     list(_subsample_ids),
                     minibatch_cache,
                     config,
-                    "dev",
+                    "train",
                 )
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
@@ -1575,11 +1580,11 @@ def run_evolution(
                     )
             else:
                 set_phase(HelixPhase.MUTATION_GATING)
-                gating_result, _gating_cached = _cached_eval(child, config, "dev", eval_cache)
+                gating_result, _gating_cached = _cached_eval(child, config, "train", eval_cache)
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
-                # Legacy single-task mode still gates on dev, but the parent baseline
-                # must come from the same dev eval that was passed into the mutator,
+                # Legacy single-task mode still gates on train, but the parent baseline
+                # must come from the same train eval that was passed into the mutator,
                 # not the parent's stored val frontier result.
                 parent_acceptance_result = _eval_for_mutate
                 if not _gating_cached:
@@ -1610,7 +1615,7 @@ def run_evolution(
                     continue
 
                 # GEPA parity (Fix 3 / W3): Strict improvement acceptance on the
-                # same dev split used for the child gating run.
+                # same train split used for the child gating run.
                 parent_sum = sum(parent_acceptance_result.instance_scores.values())
                 child_sum = sum(gating_result.instance_scores.values())
                 if child_sum <= parent_sum:

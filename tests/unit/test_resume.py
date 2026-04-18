@@ -95,7 +95,7 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         if call_count[0] == 1:
             # First call = seed evaluation — succeed
             return seed_result
-        # Second call (gen 1 dev eval) — crash
+        # Second call (gen 1 train eval) — crash
         raise boom_error
 
     # Make HelixProgress a no-op context manager
