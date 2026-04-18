@@ -8,11 +8,11 @@ Please open a private security advisory on GitHub: https://github.com/KE7/helix/
 
 HELIX executes user-provided evaluators and LLM-generated mutations. The following behaviors are by design and represent trust boundaries users should be aware of:
 
-### 1. Evaluator command allow-list
+### 1. Evaluator command execution
 
-Evaluator commands in `helix.toml` are parsed with `shlex.split()` and executed with `shell=False`, which eliminates shell metacharacter injection. HELIX additionally enforces an allow-list of accepted first tokens (python, python3, pytest, make, bash, sh, node, uv, poetry, cat) OR any executable whose path starts with `./`, `/usr/bin/`, `/home/`, or `/opt/`.
+Evaluator commands in `helix.toml` are parsed with `shlex.split()` and executed with `shell=False`. This eliminates shell metacharacter injection — pipes, redirects, and command substitution in the command string are treated as literal arguments.
 
-**This means:** any executable at a whitelisted path prefix can be invoked. If you trust the contents of your `helix.toml` and your evaluator script, this is safe. Do NOT run HELIX on a `helix.toml` from an untrusted source.
+**This means:** a `helix.toml` author can run any executable they choose (and can trivially run arbitrary code via e.g. `python -c "..."`). HELIX does not gate commands with an allow-list because the `helix.toml` author is already trusted. Do NOT run HELIX on a `helix.toml` from an untrusted source.
 
 ### 2. No evaluator timeout
 
