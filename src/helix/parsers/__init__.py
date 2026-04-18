@@ -26,7 +26,8 @@ def get_parser(name: str) -> Callable[..., Any]:
     """Return the parse function for the given parser name.
 
     Args:
-        name: Parser name, one of "pytest" or "exitcode".
+        name: Parser name, one of "pytest", "exitcode", "json_accuracy",
+            "json_score", or "helix_result".
 
     Returns:
         A callable parse function.

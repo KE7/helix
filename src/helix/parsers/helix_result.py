@@ -69,7 +69,7 @@ def parse(
         )
 
     try:
-        payload: Any = json.loads(result_line[len("HELIX_RESULT="):])
+        payload: Any = json.loads(result_line.removeprefix("HELIX_RESULT="))
     except (json.JSONDecodeError, ValueError, TypeError):
         return (
             {"success": fallback_success},
@@ -114,10 +114,6 @@ def parse(
     raw_instances = side_info.get("scores", {})
     if isinstance(raw_instances, dict):
         for k, v in raw_instances.items():
-            if isinstance(v, bool):
-                # bool is a subclass of int; treat as numeric 0/1.
-                instance_scores[str(k)] = float(v)
-                continue
             if isinstance(v, (int, float)) and math.isfinite(float(v)):
                 instance_scores[str(k)] = float(v)
 
