@@ -77,6 +77,14 @@ class TestCommandValidation:
 
         assert "Empty command" in str(exc_info.value)
 
+    def test_unclosed_quote_raises_evaluator_error(self):
+        """Malformed quoting surfaces as EvaluatorError, not bare ValueError."""
+        with pytest.raises(EvaluatorError) as exc_info:
+            _validate_and_split_command('python "unterminated')
+
+        assert "Failed to parse evaluator command" in str(exc_info.value)
+        assert exc_info.value.command == 'python "unterminated'
+
 
 # ---------------------------------------------------------------------------
 # Tests: Environment scrubbing
@@ -191,8 +199,8 @@ class TestEnvironmentScrubbing:
 # ---------------------------------------------------------------------------
 
 
-class TestRunEvaluatorSecurity:
-    """Test that run_evaluator properly enforces the shell=False boundary."""
+class TestRunEvaluator:
+    """Integration-style tests for run_evaluator: tokenization, env scrub, and the shell=False invariant."""
 
     def test_run_evaluator_uses_scrubbed_env(self, mocker, monkeypatch):
         """run_evaluator passes only scrubbed environment variables."""

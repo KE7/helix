@@ -27,6 +27,8 @@ _EVALUATOR_OVERRIDE = None
 def _validate_and_split_command(cmd: str) -> list[str]:
     """Tokenize a command string for subprocess.run with shell=False.
 
+    On the happy path, returns ``shlex.split(command)``.
+
     The real safety boundary is ``shell=False``: shell metacharacters in the
     command string are treated as literal arguments, so injection via
     ``helix.toml`` is not possible regardless of the first token.  A
@@ -34,7 +36,14 @@ def _validate_and_split_command(cmd: str) -> list[str]:
     can simply write ``python -c "..."``), so we do not gate commands by
     an allow-list.
     """
-    tokens = shlex.split(cmd)
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as e:
+        raise EvaluatorError(
+            f"Failed to parse evaluator command: {e}",
+            operation="validate_command",
+            command=cmd,
+        ) from e
     if not tokens:
         raise EvaluatorError(
             "Empty command string",
