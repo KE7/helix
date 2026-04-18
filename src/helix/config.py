@@ -18,7 +18,9 @@ class EvaluatorConfig(BaseModel):
     results are parsed into scores.
     """
     command: str
-    score_parser: Literal["pytest", "exitcode", "json_accuracy", "json_score"] = "pytest"
+    score_parser: Literal[
+        "pytest", "exitcode", "json_accuracy", "json_score", "helix_result"
+    ] = "pytest"
     include_stdout: bool = True
     include_stderr: bool = True
     extra_commands: list[str] = Field(default_factory=list)
