@@ -1134,6 +1134,7 @@ def run_evolution(
                     # Mirrors GEPA merge.py:199-201.
                     era = frontier._results.get(cid_i)
                     erb = frontier._results.get(cid_j)
+                    common_val_ids: set[str] = set()
                     if era is not None and erb is not None:
                         common_val_ids = (
                             set(era.instance_scores.keys())
@@ -1207,20 +1208,37 @@ def run_evolution(
                                 f"helix: merge {merge_id} ({cid_i}+{cid_j})",
                             )
                             # GEPA parity (M5): merge acceptance uses subsample
-                            # evaluation, not full val.  Mirrors GEPA
-                            # merge.py:332-335,399 and engine.py:675-688.
-                            # NOTE: GEPA subsamples from valset here
-                            # (merge.py:348 `self.valset.fetch(...)`); HELIX
-                            # currently routes this through the train split.
-                            # Tracked as a separate follow-up (not part of
-                            # the split-vocabulary alignment with GEPA).
-                            merge_result, _merge_cached = _cached_eval(
-                                merged, config, "train", eval_cache,
+                            # evaluation on VALSET, not full val, and compares
+                            # merged sum against parent sums restricted to the
+                            # same subsample.  Mirrors GEPA merge.py:332-400
+                            # (subsample_ids drawn from common val coverage;
+                            # `self.valset.fetch(subsample_ids)` at line 348;
+                            # required_score = max(sum(id1_sub), sum(id2_sub))).
+                            if not common_val_ids:
+                                print_warning(
+                                    f"Merge {merge_id}: no common val coverage "
+                                    f"between parents -- rejecting."
+                                )
+                                try:
+                                    remove_worktree(merged)
+                                except Exception as _rm_exc:
+                                    print_warning(
+                                        f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
+                                    )
+                                if merged.id in candidates:
+                                    del candidates[merged.id]
+                                save_state(state, project_root)
+                                if not _hprog.is_active:
+                                    render_budget(state.budget, config.evolution)
+                                _hprog.update(gen, _frontier_best_score())
+                                continue
+
+                            merge_subsample_ids = sorted(common_val_ids)
+                            merge_result, _merge_evals = _cached_evaluate_batch(
+                                merged, merge_subsample_ids, minibatch_cache, config, "val",
                             )
                             merge_result.candidate_id = merged.id
-                            if not _merge_cached:
-                                _n = max(len(merge_result.instance_scores), 1)
-                                state.budget.evaluations += _n
+                            state.budget.evaluations += _merge_evals
                             _save_evaluation(base_dir, merge_result)
 
                             # GEPA parity (Fix 13): mid-generation budget check.
@@ -1229,11 +1247,18 @@ def run_evolution(
                                 save_state(state, project_root)
                                 break
 
-                            # Merged score must be >= max(both parent sums).
-                            # GEPA parity (W2): use float("-inf") fallback when era/erb
-                            # is None/empty, matching GEPA's behaviour (not 0.0).
-                            a_score = era.sum_score() if era else float("-inf")
-                            b_score = erb.sum_score() if erb else float("-inf")
+                            # Merged subsample sum must be >= max of parent
+                            # subsample sums (GEPA merge.py:344-345, 394-395).
+                            # GEPA parity (W2): float("-inf") fallback for
+                            # missing era/erb, matching GEPA's behaviour.
+                            a_score = (
+                                sum(era.instance_scores.get(k, 0.0) for k in merge_subsample_ids)
+                                if era else float("-inf")
+                            )
+                            b_score = (
+                                sum(erb.instance_scores.get(k, 0.0) for k in merge_subsample_ids)
+                                if erb else float("-inf")
+                            )
                             required_score = max(a_score, b_score)
 
                             if merge_result.sum_score() >= required_score:
@@ -1243,13 +1268,14 @@ def run_evolution(
                                 state.frontier = list(frontier._candidates.keys())
                                 state.instance_scores[merged.id] = merge_result.instance_scores
                             else:
-                                # GEPA parity (L4): print sum_score (not
-                                # aggregate_score / mean) since required_score
-                                # is also a sum.
+                                # GEPA parity (L4): sum_score here is the sum
+                                # over the subsample (merge_result.instance_scores
+                                # covers only subsample_ids), so it is directly
+                                # comparable to required_score.
                                 print_warning(
-                                    f"Merge {merge_id} score "
+                                    f"Merge {merge_id} subsample score "
                                     f"{merge_result.sum_score():.4f} < "
-                                    f"max parent {required_score:.4f} -- rejecting."
+                                    f"max parent subsample {required_score:.4f} -- rejecting."
                                 )
                                 try:
                                     remove_worktree(merged)
