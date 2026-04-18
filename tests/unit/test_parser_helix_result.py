@@ -71,6 +71,52 @@ class TestHelixResultWellFormed:
         assert "accuracy" not in scores
         assert scores["success"] == 0.5
 
+    def test_bool_top_level_score_true(self):
+        # bool is a subclass of int; float(True) == 1.0.
+        side_info = {"scores": {"a__m": 1.0}}
+        line = f"HELIX_RESULT={json.dumps([True, side_info])}"
+
+        scores, instance_scores = helix_result_parse(0, line + "\n", "")
+
+        assert scores["success"] == 1.0
+        assert instance_scores == {"a__m": 1.0}
+
+    def test_bool_top_level_score_false(self):
+        side_info = {"scores": {"a__m": 0.0}}
+        line = f"HELIX_RESULT={json.dumps([False, side_info])}"
+
+        scores, instance_scores = helix_result_parse(0, line + "\n", "")
+
+        assert scores["success"] == 0.0
+        assert instance_scores == {"a__m": 0.0}
+
+    def test_int_top_level_score(self):
+        side_info = {"scores": {"a__m": 1.0}}
+        line = f"HELIX_RESULT={json.dumps([1, side_info])}"
+
+        scores, instance_scores = helix_result_parse(0, line + "\n", "")
+
+        assert scores["success"] == 1.0
+        assert instance_scores == {"a__m": 1.0}
+
+    def test_empty_scores_dict_yields_empty_instance_scores(self):
+        side_info = {"scores": {}}
+        line = f"HELIX_RESULT={json.dumps([0.5, side_info])}"
+
+        _scores, instance_scores = helix_result_parse(0, line + "\n", "")
+
+        assert instance_scores == {}
+
+    def test_non_dict_scores_value_yields_empty_instance_scores(self):
+        # side_info["scores"] is a string rather than a dict — must not crash.
+        side_info = {"scores": "not-a-dict"}
+        line = f"HELIX_RESULT={json.dumps([0.5, side_info])}"
+
+        scores, instance_scores = helix_result_parse(0, line + "\n", "")
+
+        assert scores["success"] == 0.5
+        assert instance_scores == {}
+
 
 # ---------------------------------------------------------------------------
 # Fallback paths (missing / malformed / shape errors)
