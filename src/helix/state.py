@@ -68,8 +68,19 @@ class EvolutionState:
     # Total merge invocations across the entire run (GEPA: lifetime cap).
     total_merge_invocations: int = 0
     # GEPA parity (Fix 12): track attempted merge pairs to avoid re-attempting.
-    # Each entry is [cid_i, cid_j] sorted lexicographically.
+    # Each entry is [cid_i, cid_j] sorted lexicographically.  Kept for
+    # backward-compat with existing state files; the within-propose retry
+    # filter in ``lineage.find_merge_triplet`` reads this set to short-
+    # circuit already-seen pairs (merge-pairing audit B2).
     merge_attempted_pairs: list[list[str]] = field(default_factory=list)
+    # GEPA parity (merge-pairing audit C1, /tmp/audit_audit-merge-pairing.md:28-31):
+    # mirrors GEPA ``merges_performed[1]`` at gepa/proposer/merge.py:195-203.
+    # Each entry is [cid_i, cid_j, desc_hash] with cid_i <= cid_j
+    # lexicographically and desc_hash = post-snapshot git SHA of the
+    # merged worktree.  Blocks only the *same* (pair, output) triplet,
+    # so the same pair can retry if a different ancestor/ordering yields
+    # a different merged output.
+    merge_description_triplets: list[list[str]] = field(default_factory=list)
     # GEPA parity (§5.1 minibatch integration): monotonic proposal counter.
     # Starts at -1 and is bumped to 0 before the first minibatch sample.
     # Mirrors GEPA ``state.i`` in core/state.py.
@@ -127,6 +138,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "merge_counter": state.merge_counter,
         "total_merge_invocations": state.total_merge_invocations,
         "merge_attempted_pairs": state.merge_attempted_pairs,
+        "merge_description_triplets": state.merge_description_triplets,
         "i": state.i,
         "num_metric_calls_by_discovery": state.num_metric_calls_by_discovery,
     }
@@ -181,6 +193,7 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         merge_counter=data.get("merge_counter", 0),
         total_merge_invocations=data.get("total_merge_invocations", 0),
         merge_attempted_pairs=data.get("merge_attempted_pairs", []),
+        merge_description_triplets=data.get("merge_description_triplets", []),
         i=data.get("i", -1),
         num_metric_calls_by_discovery=data.get("num_metric_calls_by_discovery", {}),
         schema_version=SCHEMA_VERSION,

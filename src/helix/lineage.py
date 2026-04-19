@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random as _random
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,8 @@ def find_merge_triplet(
     frontier_scores: dict[str, float],
     rng: _random.Random | None = None,
     max_attempts: int = 10,
+    attempted_pairs: set[tuple[str, str]] | None = None,
+    has_val_support_overlap: Callable[[str, str], bool] | None = None,
 ) -> tuple[str, str, str] | None:
     """Find a (candidate_i, candidate_j, common_ancestor) triplet for merge.
 
@@ -122,6 +125,17 @@ def find_merge_triplet(
     GEPA parity (L1): improvement filter is non-strict (``>``) matching
     GEPA merge.py:59 — ancestor score must not exceed either candidate.
 
+    GEPA parity (merge-pairing audit B1/B2/C3, /tmp/audit_audit-merge-pairing.md):
+    - Canonicalize ``(i, j)`` inside the sampling loop so downstream
+      consumers (the merge subprocess, the attempted-pair ledger) always
+      see a lex-sorted tuple.  Mirrors GEPA ``merge.py:94-95``
+      (``if j < i: i, j = j, i``).
+    - Filter already-attempted pairs (``attempted_pairs``) and pairs
+      that fail the val-support overlap floor (``has_val_support_overlap``)
+      *inside* the retry loop, so a blocked sample triggers resampling
+      rather than bailing out of the iteration.  Mirrors GEPA
+      ``merge.py:147-148, 199-201`` (inside ``sample_and_attempt_...``).
+
     Parameters
     ----------
     lineage:
@@ -134,13 +148,24 @@ def find_merge_triplet(
     rng:
         Seeded RNG instance.  Falls back to ``random.Random(0)`` if None.
     max_attempts:
-        Maximum random sampling attempts before giving up.
+        Maximum random sampling attempts before giving up.  Defaults to 10
+        to match GEPA ``merge.py:76,126`` (``max_attempts=10``).
+    attempted_pairs:
+        Optional set of canonical ``(i, j)`` tuples (lex-sorted) that have
+        already been attempted in earlier iterations.  Sampled pairs matching
+        an entry are skipped and resampled within the same call.
+    has_val_support_overlap:
+        Optional callable; when provided, a candidate pair is skipped when
+        ``has_val_support_overlap(i, j)`` returns ``False``.  Mirrors the
+        ``has_val_support_overlap`` parameter in
+        ``sample_and_attempt_merge_programs_by_common_predictors`` at
+        GEPA ``merge.py:125,199-201``.
 
     Returns
     -------
     tuple[str, str, str] | None
-        ``(i, j, common_ancestor)`` on success, or ``None`` if no valid
-        triplet exists.
+        ``(i, j, common_ancestor)`` on success (with ``i <= j`` lex), or
+        ``None`` if no valid triplet exists after ``max_attempts`` tries.
     """
     if len(frontier_ids) < 2:
         return None
@@ -157,6 +182,27 @@ def find_merge_triplet(
         # GEPA parity (M3): random pair sampling (merge.py:87-90)
         i, j = rng.sample(frontier_ids, 2)
         if i == j:
+            continue
+
+        # GEPA parity (merge-pairing audit C3, merge.py:94-95): canonicalize
+        # pair so (i, j) and (j, i) land on the same (i, j) tuple for all
+        # downstream consumers (merge subprocess arg order, attempted-pair
+        # ledger, description-triplet dedup).  HELIX ids are strings, so
+        # lex comparison mirrors GEPA's integer ``j < i`` swap.
+        if j < i:
+            i, j = j, i
+
+        # GEPA parity (merge-pairing audit B2, merge.py:147-148): skip
+        # already-attempted pairs inside the retry loop instead of burning
+        # the whole propose() call.
+        if attempted_pairs is not None and (i, j) in attempted_pairs:
+            continue
+
+        # GEPA parity (merge-pairing audit B1, merge.py:199-201): skip
+        # pairs with insufficient val-support overlap inside the retry
+        # loop.  This lets the next sample win instead of consuming the
+        # whole generation on the first unlucky draw.
+        if has_val_support_overlap is not None and not has_val_support_overlap(i, j):
             continue
 
         anc_i = ancestor_sets[i]

@@ -321,6 +321,7 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "merge_counter",
         "total_merge_invocations",
         "merge_attempted_pairs",
+        "merge_description_triplets",
         "i",
         "num_metric_calls_by_discovery",
     }
