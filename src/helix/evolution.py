@@ -12,7 +12,7 @@ import shlex
 import threading
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -208,16 +208,20 @@ def init_base_dir(base_dir: Path, config: HelixConfig) -> None:
 
 
 def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
-    """Persist an EvalResult to evaluations/<candidate_id>.json."""
+    """Persist an EvalResult to evaluations/<candidate_id>.json.
+
+    Uses ``EvalResult.to_dict()`` so every field — including the newer
+    ``side_info`` / ``per_example_side_info`` / ``objective_scores``
+    optionals — round-trips through the on-disk JSON.  Optional fields
+    are omitted by ``to_dict`` when ``None`` so evaluations from
+    single-task / non-helix_result paths stay byte-identical to their
+    pre-multi-axis shape.
+    """
     eval_dir = base_dir / "evaluations"
     eval_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "candidate_id": result.candidate_id,
-        "scores": result.scores,
-        "instance_scores": result.instance_scores,
-        "asi": result.asi,
-    }
-    (eval_dir / f"{result.candidate_id}.json").write_text(json.dumps(data, indent=2))
+    (eval_dir / f"{result.candidate_id}.json").write_text(
+        json.dumps(result.to_dict(), indent=2)
+    )
 
 
 def _load_evaluation(base_dir: Path, candidate_id: str) -> EvalResult | None:
@@ -703,6 +707,15 @@ def _cached_evaluate_batch(
     # itself (helix.eval_cache.EvaluationCache.evaluate_with_cache_full,
     # which is a line-for-line port of GEPA state.py:94-130).
 
+    # Closure side-channel: the cache stores ``(output, score, objective_scores)``
+    # per id but has no slot for freeform ``side_info``.  Collect fresh
+    # per-example side_info in a closure dict so we can attach it to the
+    # merged ``EvalResult`` below.  Cache-hit ids (not in this dict) get
+    # ``{}`` as their per_example_side_info slot — their prior side_info
+    # was consumed by the reflection prompt at their original eval time
+    # and is not round-tripped through the cache.
+    fresh_side_info_by_id: dict[str, dict[str, Any]] = {}
+
     def _fetcher(ids: list[str]) -> list[str]:
         # HELIX evaluators read batches off disk via helix_batch.json;
         # the "batch" handed to the evaluator callable is just the list
@@ -740,10 +753,35 @@ def _cached_evaluate_batch(
             f"{sorted(missing)}"
         )
         scores = [float(fresh.instance_scores[eid]) for eid in batch]
-        return outputs, scores, None
+        # Thread per-example objective_scores through the cache: GEPA
+        # ``EvaluationBatch.objective_scores`` parity
+        # (``src/gepa/core/adapter.py:26``).  Feeds the multi-axis
+        # Pareto frontier when ``evolution.frontier_type`` is
+        # ``"objective"``, ``"hybrid"``, or ``"cartesian"``.  The
+        # underlying ``EvaluationCache`` already has a slot for this
+        # (``put_batch(..., objective_scores_list=...)``); previously
+        # ``_evaluator`` returned ``None`` here and the multi-axis data
+        # was dropped on the cached path.
+        obj_list: list[dict[str, float]] | None = None
+        if (
+            fresh.objective_scores is not None
+            and len(fresh.objective_scores) == len(batch)
+        ):
+            obj_list = [fresh.objective_scores[i] for i in range(len(batch))]
+        # Capture per-example side_info for the outer merge.  Only
+        # freshly-evaluated ids populate this; cache hits remain ``{}``.
+        if (
+            fresh.per_example_side_info is not None
+            and len(fresh.per_example_side_info) == len(batch)
+        ):
+            for i, eid in enumerate(batch):
+                fresh_side_info_by_id[eid] = fresh.per_example_side_info[i]
+        return outputs, scores, obj_list
 
-    _, scores_by_id, _, num_actual_evals = cache.evaluate_with_cache_full(
-        cand_dict, example_ids, _fetcher, _evaluator,
+    _, scores_by_id, objective_by_id, num_actual_evals = (
+        cache.evaluate_with_cache_full(
+            cand_dict, example_ids, _fetcher, _evaluator,
+        )
     )
 
     # Merge hits + fresh into a single EvalResult.  ``scores_by_id``
@@ -751,21 +789,62 @@ def _cached_evaluate_batch(
     # ``scores`` (aggregate dict) and ``asi`` (metadata) are not carried
     # on cached paths: the minibatch gate and frontier update logic only
     # read ``instance_scores``.
+    #
+    # Per-example ``objective_scores`` and ``per_example_side_info`` ARE
+    # attached when any data was produced (freshly-evaluated) or cached
+    # for any id in this batch — the multi-axis frontier and reflection
+    # paths both depend on them.  Missing entries get ``{}`` placeholders
+    # so the list length always equals ``len(example_ids)`` (positional
+    # alignment is the whole point of the per-example contract).
+    objective_scores_list: list[dict[str, float]] | None = None
+    if objective_by_id is not None:
+        objective_scores_list = [
+            objective_by_id.get(eid, {}) for eid in example_ids
+        ]
+    per_example_side_info_list: list[dict[str, Any]] | None = None
+    if fresh_side_info_by_id:
+        per_example_side_info_list = [
+            fresh_side_info_by_id.get(eid, {}) for eid in example_ids
+        ]
+
     merged = EvalResult(
         candidate_id=candidate.id,
         scores={},
         asi={},
         instance_scores={eid: scores_by_id[eid] for eid in example_ids},
+        per_example_side_info=per_example_side_info_list,
+        objective_scores=objective_scores_list,
     )
     return merged, num_actual_evals
 
 
-def _full_val_example_ids(config: HelixConfig) -> list[str]:
-    """Return deterministic full validation ids for the cardinality-only dataset."""
+def _full_val_example_ids(
+    config: HelixConfig,
+    val_loader: "HelixDataLoader | _RangeDataLoader | None" = None,
+) -> list[str]:
+    """Return deterministic full validation ids.
+
+    Priority (first non-empty wins):
+
+    1. ``dataset.val_size`` — stringified range ids ``"0".."N-1"``
+       (Architecture A cardinality-only path).
+    2. ``val_loader.all_ids()`` — ids from the configured
+       :class:`HelixDataLoader` over ``seedless.val_path`` (or
+       ``seedless.train_path`` when val_path is unset).  File-stem
+       ids for a directory layout, stringified indices otherwise.
+       This is what lets the seed-eval and full-val paths write
+       ``helix_batch.json`` for evaluators (like capx-solver) that
+       use ``helix_result`` and need the positional id handoff — the
+       strict ``helix_result`` parser requires the batch file to be
+       present on every evaluator invocation.
+    3. Empty list — legacy single-task path (no example-id handoff).
+    """
     val_size = config.dataset.val_size
-    if val_size is None or val_size <= 0:
-        return []
-    return [str(i) for i in range(val_size)]
+    if val_size is not None and val_size > 0:
+        return [str(i) for i in range(val_size)]
+    if val_loader is not None and len(val_loader) > 0:
+        return list(val_loader.all_ids())
+    return []
 
 
 def _stage_val_example_ids(config: HelixConfig, full_example_ids: list[str]) -> list[str]:
@@ -827,7 +906,7 @@ def run_evolution(
     # In-memory candidate registry and frontier
     candidates: dict[str, Candidate] = {}
     rng = _random.Random(config.rng_seed)
-    frontier = ParetoFrontier(rng=rng)
+    frontier = ParetoFrontier(rng=rng, frontier_type=config.evolution.frontier_type)
 
     # GEPA parity (Fix 11): evaluation cache — skip re-evaluation of
     # identical (candidate_id, split) pairs.
@@ -934,7 +1013,7 @@ def run_evolution(
     # Full-eval policy (GEPA §4.2) — kept for parity and future policy-based
     # val scheduling refactors.
     _full_eval_policy = FullEvaluationPolicy()
-    full_val_example_ids = _full_val_example_ids(config)
+    full_val_example_ids = _full_val_example_ids(config, val_loader)
     stage_val_example_ids = _stage_val_example_ids(config, full_val_example_ids)
 
     # ------------------------------------------------------------------
@@ -961,10 +1040,22 @@ def run_evolution(
             instance_scores={},
             budget=BudgetState(),
             config_hash=cfg_hash,
+            # Pin the frontier dimensionality to whatever the evolve
+            # run uses so ``helix frontier`` / ``helix best`` display
+            # with the SAME axis later — even if ``helix.toml``'s
+            # ``evolution.frontier_type`` is edited between runs.
+            frontier_type=config.evolution.frontier_type,
         )
         needs_seed = True
     else:
         needs_seed = False
+        # Keep ``state.frontier_type`` pinned to whatever was stored;
+        # it already matches the frontier that was built.  On a legacy
+        # state with no persisted field (defaulted to "instance" by
+        # ``load_state``) a config change to e.g. "hybrid" does NOT
+        # retroactively rebuild the frontier — display stays on
+        # "instance" for legacy runs.  A fresh run picks up the new
+        # type via the branch above.
         if state.config_hash != cfg_hash:
             print_warning(
                 "Config hash differs from the saved state; resuming with the current "

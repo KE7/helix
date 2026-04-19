@@ -185,8 +185,10 @@ class TestMinibatchGateIntegration:
         mutated = _make_candidate("g1-s1")
         all_mocks["mutate"].return_value = mutated
 
-        # instance_ids should be set on parent/child gating calls
-        seen_instance_ids: list[list[str] | None] = []
+        # Filter to minibatch (train-split) calls only — seed-eval and
+        # child full-val are both on "val" split with explicit ids now
+        # (helix_result requires helix_batch.json on every invocation).
+        train_minibatch_calls: list[list[str]] = []
 
         def run_eval(
             candidate: Candidate,
@@ -195,13 +197,14 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            seen_instance_ids.append(instance_ids)
+            if split == "train" and instance_ids is not None:
+                train_minibatch_calls.append(list(instance_ids))
             if instance_ids is not None:
-                # minibatch eval: return small per-id scores
+                # minibatch / explicit-id eval: return small per-id scores
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
-            # full val eval: moderate scores
+            # full val eval (legacy path, single-task mode): moderate scores
             return _make_result(candidate.id, {"v1": 0.5, "v2": 0.5})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -212,14 +215,14 @@ class TestMinibatchGateIntegration:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # Parent minibatch call + child minibatch call both carry instance_ids.
-        minibatch_calls = [x for x in seen_instance_ids if x is not None]
-        assert len(minibatch_calls) >= 2, (
-            f"Expected at least parent+child minibatch eval calls, got {seen_instance_ids}"
+        assert len(train_minibatch_calls) >= 2, (
+            "Expected at least parent+child minibatch eval calls on train split, "
+            f"got {train_minibatch_calls}"
         )
         # Parent and child minibatches should be the SAME subsample.
-        assert minibatch_calls[0] == minibatch_calls[1]
+        assert train_minibatch_calls[0] == train_minibatch_calls[1]
         # minibatch_size=2 → two ids.
-        assert len(minibatch_calls[0]) == 2
+        assert len(train_minibatch_calls[0]) == 2
 
     def test_rejected_proposal_skips_full_val_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]
@@ -273,7 +276,10 @@ class TestMinibatchGateIntegration:
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = _make_candidate("g1-s1")
 
-        child_val_calls: list[list[str] | None] = []
+        # Full-val evals now always carry explicit instance_ids when a
+        # loader is configured (helix_result requires helix_batch.json).
+        # Distinguish child full-val from child minibatch by split="val".
+        child_val_calls: list[list[str]] = []
 
         def run_eval(
             candidate: Candidate,
@@ -282,8 +288,12 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == "g1-s1" and instance_ids is None:
-                child_val_calls.append(instance_ids)
+            if (
+                candidate.id == "g1-s1"
+                and split == "val"
+                and instance_ids is not None
+            ):
+                child_val_calls.append(list(instance_ids))
             if instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
@@ -467,7 +477,15 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == seed.id and instance_ids is not None:
+            # Parent minibatch evals run on split="train"; the seed
+            # full-val eval runs on split="val" with explicit ids too
+            # (helix_result requires helix_batch.json on every
+            # invocation), so gate on split to avoid counting it.
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
                 parent_minibatches.append(list(instance_ids))
             if instance_ids is not None:
                 # Child scores slightly worse so all get rejected -- keeps
@@ -726,6 +744,101 @@ class TestCachedEvaluateBatch:
         # Merged scores cover ALL requested ids: cached 0/2 + fresh 1.
         assert result.instance_scores == {"0": 0.11, "1": 0.22, "2": 0.33}
 
+    def test_partial_cache_hit_per_example_fields_merge(self, mocker: Any) -> None:
+        """Partial-cache-hit merge of ``per_example_side_info`` and
+        ``objective_scores``.  Pins the closure side-channel design
+        from commit H (``_cached_evaluate_batch``):
+
+          * cache-hit positions get ``{}`` for per_example_side_info
+            (the cache has no slot for freeform side_info so the merge
+            can't round-trip it — their prior side_info was consumed
+            by the reflection prompt at their original eval time);
+          * fresh miss positions get the per_example_side_info dict
+            from the fresh EvalResult, zipped by id;
+          * ``objective_scores`` IS round-tripped through the cache
+            (it has a dedicated slot — see
+            ``eval_cache.CachedEvaluation.objective_scores``), so
+            cache-hit positions get back the previously-stored dict
+            and miss positions get the freshly-harvested dict.
+        """
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cand = self._make_cand("cand-pcfm")
+        cand_dict = {"id": cand.id, "split": "train"}
+        # Pre-populate ids "0" and "2" with both score AND
+        # objective_scores (the cache stores these natively).
+        cache.put_batch(
+            cand_dict,
+            ["0", "2"],
+            [None, None],
+            [0.11, 0.33],
+            objective_scores_list=[
+                {"obj_alpha": 0.11, "obj_beta": 0.8},
+                {"obj_alpha": 0.33, "obj_beta": 0.1},
+            ],
+        )
+        # "1" is uncached — the evaluator is invoked with it only, and
+        # must return an ``EvalResult`` that carries per_example_side_info
+        # + objective_scores for the merge path to thread through.
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            # Produce one fresh entry for each requested uncached id.
+            ids = list(instance_ids or [])
+            return EvalResult(
+                candidate_id=candidate.id,
+                scores={},
+                asi={},
+                instance_scores={eid: 0.22 for eid in ids},
+                per_example_side_info=[
+                    {"trajectory": f"fresh_trace_{eid}", "rollout_id": f"fresh__{eid}"}
+                    for eid in ids
+                ],
+                objective_scores=[
+                    {"obj_alpha": 0.22, "obj_beta": 0.5}
+                    for _ in ids
+                ],
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
+        )
+
+        # instance_scores merge: cached 0/2 + fresh 1 (established
+        # earlier by ``test_partial_cache_hit``).
+        assert result.instance_scores == {"0": 0.11, "1": 0.22, "2": 0.33}
+        assert num_actual == 1
+
+        # objective_scores round-trip fully through the cache (dedicated
+        # slot in ``CachedEvaluation``).  Each slot positional to
+        # ``example_ids``:
+        assert result.objective_scores is not None
+        assert result.objective_scores == [
+            {"obj_alpha": 0.11, "obj_beta": 0.8},     # cached id "0"
+            {"obj_alpha": 0.22, "obj_beta": 0.5},     # fresh id "1"
+            {"obj_alpha": 0.33, "obj_beta": 0.1},     # cached id "2"
+        ]
+
+        # per_example_side_info: cache has no slot, so cache-hit
+        # positions get ``{}`` placeholder; the fresh miss position
+        # gets the dict we returned from fake_run.
+        assert result.per_example_side_info is not None
+        assert result.per_example_side_info == [
+            {},                                                               # cached "0" → {}
+            {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},         # fresh "1"
+            {},                                                               # cached "2" → {}
+        ]
+
     def test_cache_populates_after_fresh_eval(self, mocker: Any) -> None:
         """After a fresh eval, a second call with the same ids is a full hit."""
         from helix.eval_cache import EvaluationCache as MBCache
@@ -938,15 +1051,23 @@ class TestParentMinibatchParallelism:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == seed.id and instance_ids is not None:
-                # Parent-minibatch eval site.  Small sleep guarantees the
-                # first eval is still in flight when the second submit
-                # fires, so the ThreadPoolExecutor spawns a second worker
-                # thread (rather than reusing W1 after an instant task).
-                # The per-worktree lock (see ``_worktree_lock``) serialises
-                # the subsequent lock acquisition, but both tasks still
-                # execute on DIFFERENT worker threads — our concurrency
-                # signal.
+            # Parent-minibatch eval site — gated on split="train" to
+            # exclude the seed full-val eval (which now also runs with
+            # explicit ids on split="val" because helix_result needs
+            # helix_batch.json on every invocation).
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
+                # Small sleep guarantees the first eval is still in
+                # flight when the second submit fires, so the
+                # ThreadPoolExecutor spawns a second worker thread
+                # (rather than reusing W1 after an instant task).
+                # The per-worktree lock (see ``_worktree_lock``)
+                # serialises the subsequent lock acquisition, but both
+                # tasks still execute on DIFFERENT worker threads —
+                # our concurrency signal.
                 parent_eval_threads.add(threading.get_ident())
                 parent_minibatches.append(list(instance_ids))
                 time.sleep(0.05)
@@ -1071,7 +1192,16 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == seed.id and instance_ids is not None:
+            # Parent-minibatch eval — gated on split="train" so the seed
+            # full-val eval (now also explicit-ids on "val" because
+            # helix_result needs helix_batch.json) doesn't inflate the
+            # count.  Without this filter the seed eval would be
+            # indistinguishable from a parent minibatch eval.
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
                 parent_eval_attempts.append(True)
                 # Raise on the second parent-eval only (stable because
                 # ``parent_eval_attempts`` is append-ordered).
