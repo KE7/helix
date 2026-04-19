@@ -64,7 +64,6 @@ def make_eval_result(
 def make_config(
     max_generations: int = 5,
     max_metric_calls: int = 1000,
-    convergence_patience: int = 5,
     perfect_score_threshold: float | None = 1.0,
     gating_threshold: float = 0.0,
     merge_enabled: bool = False,
@@ -80,7 +79,6 @@ def make_config(
         evolution=EvolutionConfig(
             max_generations=max_generations,
             max_metric_calls=max_metric_calls,
-            convergence_patience=convergence_patience,
             perfect_score_threshold=perfect_score_threshold,
             gating_threshold=gating_threshold,
             merge_enabled=merge_enabled,
@@ -315,58 +313,6 @@ class TestBudgetExhaustionStopsLoop:
 # ---------------------------------------------------------------------------
 
 
-class TestConvergenceDetection:
-    def test_convergence_patience_stops_loop(self, mocker, tmp_path, all_mocks):
-        """Loop stops after convergence_patience stagnant generations."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        # Mutate returns None every time → no frontier change
-        all_mocks["mutate"].return_value = None
-
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.5})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-
-        config = make_config(
-            max_generations=20,
-            convergence_patience=3,
-            max_metric_calls=10000,
-
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        warning_msgs = " ".join(str(c) for c in all_mocks["print_warning"].call_args_list)
-        assert "Converged" in warning_msgs or "converged" in warning_msgs.lower()
-
-    def test_convergence_count_does_not_exceed_patience(self, mocker, tmp_path, all_mocks):
-        """Loop never runs more than convergence_patience extra generations after stagnation."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = None
-
-        gen_count = [0]
-
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            if split == "train" or (split is None and candidate.id != "g0-s0"):
-                gen_count[0] += 1
-            return make_eval_result(candidate.id, {"i1": 0.5})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-
-        patience = 3
-        config = make_config(
-            max_generations=50,
-            convergence_patience=patience,
-            max_metric_calls=10000,
-
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        # Loop cannot run more than patience+1 generations (off-by-one in check)
-        assert gen_count[0] <= patience + 2  # generous upper bound
-
-
 # ---------------------------------------------------------------------------
 # run_evolution — perfect score early stopping
 # ---------------------------------------------------------------------------
@@ -391,7 +337,6 @@ class TestPerfectScoreEarlyStopping:
         config = make_config(
             max_generations=10,
             perfect_score_threshold=1.0,
-            convergence_patience=3,
             max_metric_calls=10000,
 
         )
@@ -415,7 +360,6 @@ class TestPerfectScoreEarlyStopping:
         config = make_config(
             max_generations=2,
             perfect_score_threshold=1.0,
-            convergence_patience=10,
             max_metric_calls=10000,
 
         )
@@ -448,7 +392,6 @@ class TestGatingInEvolutionLoop:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            convergence_patience=10,
             max_metric_calls=10000,
 
         )
@@ -630,7 +573,6 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=0,  # cap at zero → no merges ever
             merge_val_overlap_floor=1,
-            convergence_patience=10,
             max_metric_calls=10000,
 
         )
@@ -690,7 +632,6 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=1,  # total lifetime cap of 1
             merge_val_overlap_floor=1,
-            convergence_patience=10,
             max_metric_calls=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1572,7 +1513,6 @@ class TestGenerationsFlagOverridesConfig:
 
         config = make_config(
             max_generations=2,
-            convergence_patience=100,  # prevent early convergence stop
             max_metric_calls=10000,
 
         )

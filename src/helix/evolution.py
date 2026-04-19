@@ -1041,8 +1041,11 @@ def run_evolution(
         else:
             seed_result = run_evaluator(seed, config)
             seed_result.candidate_id = seed.id
-            _n = max(len(seed_result.instance_scores), 1)
-            state.budget.evaluations += _n
+            # GEPA parity: charge the actual number of per-instance evals,
+            # never clamp to 1.  When the evaluator returns an empty
+            # ``instance_scores`` dict GEPA charges 0 (engine.py:167 via
+            # ``state.increment_evals(num_actual_evals)``).
+            state.budget.evaluations += len(seed_result.instance_scores)
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
@@ -1085,8 +1088,6 @@ def run_evolution(
     # ------------------------------------------------------------------
     # Generation loop
     # ------------------------------------------------------------------
-    prev_signature = frontier.signature()
-    convergence_count = 0
     start_gen = state.generation + 1
     # GEPA parity: discovery-based merge trigger.  merges_due increments
     # when a new candidate is accepted to the frontier.
@@ -1118,24 +1119,15 @@ def run_evolution(
 
     for gen in range(start_gen, config.evolution.max_generations + 1):
         state.generation = gen
+        # GEPA parity (engine.py:649): bump ``state.i`` unconditionally at
+        # the top of every iteration so the proposal counter — used by the
+        # batch sampler and as a tiebreaker elsewhere — advances regardless
+        # of which path (merge, mutation, early-exit) the iteration takes.
+        state.i += 1
         TRACE.emit(EventType.ITER_START, decision=str(gen))
 
         if budget_exhausted(state, config):
             print_warning("Budget exhausted -- stopping early.")
-            break
-
-        # Convergence check
-        sig = frontier.signature()
-        if sig == prev_signature:
-            convergence_count += 1
-        else:
-            convergence_count = 0
-            prev_signature = sig
-
-        if convergence_count >= config.evolution.convergence_patience:
-            print_warning(
-                f"Converged after {convergence_count} stagnant generations -- stopping."
-            )
             break
 
         # =============================================================
@@ -1455,8 +1447,10 @@ def run_evolution(
                                 )
                                 full_val_result.candidate_id = merged.id
                                 if not _full_val_cached:
-                                    state.budget.evaluations += max(
-                                        len(full_val_result.instance_scores), 1
+                                    # GEPA parity: charge the actual count
+                                    # of per-instance evals (never clamp to 1).
+                                    state.budget.evaluations += len(
+                                        full_val_result.instance_scores
                                     )
                             _save_evaluation(base_dir, full_val_result)
 
@@ -1544,17 +1538,28 @@ def run_evolution(
                 _budget_break = True
                 break
 
+            # GEPA parity (engine.py:405-410): the FIRST proposal reuses
+            # the iteration slot already created at the top of the outer
+            # loop (state.i bumped at evolution.py loop head).  For each
+            # ADDITIONAL parallel proposal, GEPA bumps state.i again so
+            # the per-proposal counter advances independently of the
+            # outer loop.  The bump is unconditional (no minibatch gate).
+            if _p_idx > 0:
+                state.i += 1
+
             parent = frontier.select_parent()
             parent_frontier_result = frontier._results.get(parent.id)
 
             # --- Minibatch gate pre-sampling (GEPA §5.1) --------------
-            # Bump state.i and sample subsample ids.  The parent-on-minibatch
-            # eval that used to live here is now deferred to §1b so that
-            # N parent evals overlap under ``num_parallel_proposals > 1``
+            # Sample subsample ids.  ``state.i`` is now advanced at the
+            # top of the run loop (GEPA engine.py:649) — and again per
+            # extra parallel proposal above (engine.py:408) — so the
+            # sampler always sees the right counter.  The parent-on-
+            # minibatch eval is deferred to §1b so that N parent evals
+            # overlap under ``num_parallel_proposals > 1``
             # (audit-mutation §C4 MODERATE E).
             subsample_ids: list[str] | None = None
             if use_minibatch_gate and train_loader is not None and batch_sampler is not None:
-                state.i += 1
                 subsample_ids = batch_sampler.next_minibatch_ids(train_loader, state)
                 TRACE.emit(
                     EventType.SAMPLE_MINIBATCH,
@@ -1833,13 +1838,29 @@ def run_evolution(
 
                 # Apply the configured acceptance criterion on the
                 # per-instance score vectors (GEPA §5.1).
+                #
+                # GEPA parity (adapter.py:154 — ``len(outputs) == len(scores)
+                # == len(batch)``): a missing instance id in the parent or
+                # child minibatch result is an evaluator bug, not a benign
+                # zero.  Both vectors must cover every id in
+                # ``_subsample_ids`` so the acceptance criterion compares
+                # like-for-like.  The merge path enforces the same invariant
+                # at evolution.py:1394-1411.
                 from types import SimpleNamespace as _SN
+                assert set(_subsample_ids).issubset(_parent_mb.instance_scores), (
+                    f"Parent minibatch eval missing ids: "
+                    f"{set(_subsample_ids) - set(_parent_mb.instance_scores)}"
+                )
                 _before = [
-                    float(_parent_mb.instance_scores.get(str(eid), 0.0))
+                    float(_parent_mb.instance_scores[str(eid)])
                     for eid in _subsample_ids
                 ]
+                assert set(_subsample_ids).issubset(gating_result.instance_scores), (
+                    f"Child minibatch eval missing ids: "
+                    f"{set(_subsample_ids) - set(gating_result.instance_scores)}"
+                )
                 _after = [
-                    float(gating_result.instance_scores.get(str(eid), 0.0))
+                    float(gating_result.instance_scores[str(eid)])
                     for eid in _subsample_ids
                 ]
                 _proposal = _SN(
@@ -1884,8 +1905,8 @@ def run_evolution(
                 # not the parent's stored val frontier result.
                 parent_acceptance_result = _eval_for_mutate
                 if not _gating_cached:
-                    _n = max(len(gating_result.instance_scores), 1)
-                    state.budget.evaluations += _n
+                    # GEPA parity: charge actual count, never clamp to 1.
+                    state.budget.evaluations += len(gating_result.instance_scores)
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
@@ -2026,8 +2047,8 @@ def run_evolution(
                 val_result.candidate_id = child.id
                 _last_eval_result = val_result
                 if not _val_cached:
-                    _n = max(len(val_result.instance_scores), 1)
-                    state.budget.evaluations += _n
+                    # GEPA parity: charge actual count, never clamp to 1.
+                    state.budget.evaluations += len(val_result.instance_scores)
 
             if budget_exhausted(state, config):
                 print_warning("Budget exhausted mid-generation -- stopping.")
