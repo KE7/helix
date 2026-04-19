@@ -321,6 +321,32 @@ At run start, HELIX hashes the evaluator command target plus any
 `.helix/evaluator_manifest.json`. Candidates that modify any protected file are
 rejected before evaluation.
 
+### Per-example Parallelism Inside the Evaluator
+
+HELIX parallelises across proposals (`num_parallel_proposals`) and across
+worktrees, but each evaluator invocation sees one candidate and a batch of
+instance ids as a single subprocess. Per-example parallelism — evaluating
+multiple ids of one candidate concurrently — lives **inside the evaluator**,
+not inside HELIX's engine.
+
+This is a deliberate architectural split: GEPA's reference adapter fans out
+per-example in-process, which is essentially free; HELIX's subprocess model
+would pay full subprocess-startup cost for each example. If you want N-way
+parallelism per batch, your `evaluate.py` should do it directly:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+instance_ids = load_batch_from_helix()   # or argv / HELIX_SPLIT path
+with ThreadPoolExecutor(max_workers=4) as pool:
+    results = dict(zip(instance_ids, pool.map(evaluate_one, instance_ids)))
+print(json.dumps({"accuracy": mean(results.values()), "instance_scores": results}))
+```
+
+Pick the worker count however you like (constant, CLI arg, derived from
+`os.cpu_count()`). HELIX remains agnostic — it just consumes the per-instance
+scores the evaluator returns.
+
 ### Score Parsers
 
 HELIX includes 4 built-in score parsers to extract metrics from evaluator output:
