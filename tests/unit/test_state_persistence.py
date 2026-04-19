@@ -324,6 +324,7 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "merge_description_triplets",
         "i",
         "num_metric_calls_by_discovery",
+        "frontier_type",
     }
     assert set(raw.keys()) == expected_keys, (
         f"state.json keys diverged from schema_version={SCHEMA_VERSION} "

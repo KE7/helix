@@ -1040,10 +1040,22 @@ def run_evolution(
             instance_scores={},
             budget=BudgetState(),
             config_hash=cfg_hash,
+            # Pin the frontier dimensionality to whatever the evolve
+            # run uses so ``helix frontier`` / ``helix best`` display
+            # with the SAME axis later — even if ``helix.toml``'s
+            # ``evolution.frontier_type`` is edited between runs.
+            frontier_type=config.evolution.frontier_type,
         )
         needs_seed = True
     else:
         needs_seed = False
+        # Keep ``state.frontier_type`` pinned to whatever was stored;
+        # it already matches the frontier that was built.  On a legacy
+        # state with no persisted field (defaulted to "instance" by
+        # ``load_state``) a config change to e.g. "hybrid" does NOT
+        # retroactively rebuild the frontier — display stays on
+        # "instance" for legacy runs.  A fresh run picks up the new
+        # type via the branch above.
         if state.config_hash != cfg_hash:
             print_warning(
                 "Config hash differs from the saved state; resuming with the current "

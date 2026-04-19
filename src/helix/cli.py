@@ -26,7 +26,7 @@ from helix.display import (
 )
 from helix.exceptions import RateLimitError
 from helix.lineage import load_lineage
-from helix.population import EvalResult, ParetoFrontier, Candidate
+from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
 from helix.worktree import remove_worktree
 
@@ -204,8 +204,26 @@ def _load_all_evaluations(base_dir: Path) -> tuple[dict[str, EvalResult], dict[s
 def _reconstruct_frontier(
     base_dir: Path, state: Any
 ) -> tuple[ParetoFrontier, dict[str, Candidate], list[str]]:
-    """Rebuild in-memory ParetoFrontier from persisted state and evaluations."""
-    frontier = ParetoFrontier()
+    """Rebuild in-memory ``ParetoFrontier`` from persisted state + evaluations.
+
+    The frontier is constructed with ``state.frontier_type`` rather
+    than the class default ``"instance"`` — so read-only display
+    commands (``helix frontier``, ``helix best``) show the frontier
+    with the SAME axis the evolution run used.  Legacy states (no
+    persisted ``frontier_type``) default to ``"instance"`` via
+    ``EvolutionState.frontier_type``'s field default, preserving the
+    pre-multi-axis display behaviour.
+    """
+    # ``frontier_type`` is part of ``EvolutionState`` after commit Q;
+    # getattr + whitelist narrowing keeps us defensive against an
+    # ad-hoc test that passes a mock state without the attribute
+    # (or a hand-crafted state.json with a bogus literal).
+    _raw_ft = getattr(state, "frontier_type", "instance")
+    _valid: tuple[FrontierType, ...] = (
+        "instance", "objective", "hybrid", "cartesian",
+    )
+    frontier_type: FrontierType = _raw_ft if _raw_ft in _valid else "instance"
+    frontier = ParetoFrontier(frontier_type=frontier_type)
     candidates: dict[str, Candidate] = {}
     skipped: list[str] = []
     worktrees_dir = base_dir / "worktrees"
