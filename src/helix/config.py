@@ -442,6 +442,13 @@ def load_config(path: Path) -> HelixConfig:
             print(f"   Error: {msg}", file=sys.stderr)
             if error["type"] == "missing":
                 print(f"   Hint: Add '{error['loc'][-1]}' to your helix.toml", file=sys.stderr)
+            elif error["type"] == "extra_forbidden":
+                print(
+                    f"   Hint: '{error['loc'][-1]}' is not a recognised key on this "
+                    "section — check for typos or a misplaced sub-section "
+                    "(e.g. a key that belongs under [evolution] placed under [evaluator]).",
+                    file=sys.stderr,
+                )
             elif "type" in str(error["type"]):
                 print(f"   Hint: Check that the value is the correct type", file=sys.stderr)
             print(file=sys.stderr)

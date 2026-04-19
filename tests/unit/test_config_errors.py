@@ -244,6 +244,27 @@ class TestUnknownKeysRejected:
         assert "Configuration validation error" in captured.err
         assert "bogus_top_level" in captured.err
 
+    def test_extra_forbidden_error_surfaces_tailored_hint(self, tmp_path, capsys):
+        """``load_config`` must print a dedicated hint for ``extra_forbidden``
+        errors that mentions typos and misplaced sub-sections — otherwise users
+        hitting the motivating footgun only see the generic pydantic message
+        ``"Extra inputs are not permitted"`` with no pointer to the fix."""
+        toml = write_toml(tmp_path, """
+            objective = "do something"
+
+            [evaluator]
+            command = "pytest"
+            batch_sampler = "stratified"
+        """)
+
+        with pytest.raises(SystemExit):
+            load_config(toml)
+
+        captured = capsys.readouterr()
+        assert "Hint:" in captured.err
+        assert "'batch_sampler'" in captured.err
+        assert "typos" in captured.err or "misplaced" in captured.err
+
 
 # ---------------------------------------------------------------------------
 # Valid TOML still works fine

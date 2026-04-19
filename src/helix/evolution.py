@@ -608,7 +608,7 @@ def _write_helix_batch(worktree_path: str | Path, example_ids: list[str]) -> Non
     """
     path = Path(worktree_path) / "helix_batch.json"
     try:
-        path.write_text(json.dumps(list(example_ids)))
+        path.write_text(json.dumps(example_ids))
     except FileNotFoundError:
         # Worktree directory does not exist (e.g. under unit-test mocks
         # that fabricate fake paths).  Silently skip — production paths
@@ -693,7 +693,7 @@ def _cached_evaluate_batch(
         # concurrent ``write_helix_batch`` + ``run_evaluator`` on the same
         # worktree when parent-minibatch evals run in parallel.
         with _worktree_lock(candidate.worktree_path):
-            _write_helix_batch(candidate.worktree_path, list(example_ids))
+            _write_helix_batch(candidate.worktree_path, example_ids)
             result = run_evaluator(
                 candidate, config, split=split, instance_ids=example_ids,
             )
@@ -722,7 +722,7 @@ def _cached_evaluate_batch(
         # parallelism (audit-mutation §C4) requires serialising the
         # ``write_helix_batch`` + ``run_evaluator`` pair on a given worktree.
         with _worktree_lock(candidate.worktree_path):
-            _write_helix_batch(candidate.worktree_path, list(batch))
+            _write_helix_batch(candidate.worktree_path, batch)
             fresh = run_evaluator(
                 candidate, config, split=split, instance_ids=batch,
             )

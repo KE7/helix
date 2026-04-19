@@ -250,8 +250,10 @@ protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutab
 
 [dataset]
 # Cardinality of the train / val splits.  Used by HELIX's minibatch
-# sampler to generate integer indices that the evaluator (running in
-# the worktree) filters against its own dataset via helix_batch.json.
+# sampler to generate example ids (stringified indices by default, or
+# opaque "group__N" ids when evolution.batch_sampler = "stratified")
+# that the evaluator (running in the worktree) filters against its own
+# dataset via helix_batch.json — written as an opaque JSON list[str].
 # Leave both unset for single-task mode (legacy full-batch path).
 # train_size = 200
 # val_size  = 200
@@ -299,13 +301,13 @@ HELIX splits dataset concerns across two TOML sections:
 
 | Section | Purpose |
 |---|---|
-| `[dataset]` | Cardinality only — `train_size` / `val_size` — drives the minibatch sampler when the evaluator owns the dataset and HELIX hands off positional indices via `helix_batch.json` (Architecture A). |
+| `[dataset]` | Cardinality only — `train_size` / `val_size` — drives the minibatch sampler when the evaluator owns the dataset and HELIX hands off example ids via `helix_batch.json` (Architecture A). |
 | `[seedless]` | Seedless-mode toggle + optional prompt-grounding paths (`train_path` / `val_path`) — used only during seed generation to show the LLM representative inputs. |
 
 | Mode | Config | Description |
 |---|---|---|
 | **Single-task** | neither set | Optimize for a single task. Legacy full-batch evaluator path. |
-| **Positional-index handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples integer indices into `range(train_size)`; the evaluator reads `helix_batch.json` from cwd and filters its own dataset. |
+| **Example-id handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples example ids — stringified indices into `range(train_size)` by default, or opaque task-prefixed ids like `"cube_stack__3"` under `evolution.batch_sampler = "stratified"`; the evaluator reads them from `helix_batch.json` (a JSON `list[str]`) in cwd and filters its own dataset. |
 | **Seedless multi-task** | `seedless.enabled = true`, `seedless.train_path` set | Seed generation prompt includes the first 3 training examples for grounding. |
 
 HELIX does not own separate dataset files for train/val; your evaluator remains
