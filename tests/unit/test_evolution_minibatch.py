@@ -82,7 +82,6 @@ def _make_minibatch_config(
         evolution=EvolutionConfig(
             max_generations=max_generations,
             max_metric_calls=max_metric_calls,
-            convergence_patience=99,
             perfect_score_threshold=None,
             minibatch_size=minibatch_size,
             num_parallel_proposals=num_parallel_proposals,
@@ -518,7 +517,6 @@ class TestMinibatchGateIntegration:
             evolution=EvolutionConfig(
                 max_generations=1,
                 max_metric_calls=100,
-                convergence_patience=99,
                 perfect_score_threshold=None,
             ),
             worktree=WorktreeConfig(),
@@ -594,7 +592,6 @@ class TestCachedEvaluateBatch:
             evolution=EvolutionConfig(
                 max_generations=1,
                 max_metric_calls=10,
-                convergence_patience=99,
                 perfect_score_threshold=None,
                 minibatch_size=3,
                 cache_evaluation=True,
@@ -1113,3 +1110,167 @@ class TestEvaluationCacheThreadSafety:
         # total size must be 8 * 50 = 400.  Without the lock, concurrent
         # dict mutations could drop entries.
         assert len(cache._cache) == 8 * 50
+
+
+# ---------------------------------------------------------------------------
+# Final-nits regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestStateIBumpUnconditional:
+    """GEPA parity (engine.py:649): ``state.i`` must advance once per outer
+    iteration regardless of which path (mutation, merge, early-exit) is
+    taken.  Previously HELIX bumped ``state.i`` only inside the §1a
+    minibatch pre-sample loop, so iterations that exited early (perfect
+    score, mutation==None) silently kept the same counter.
+    """
+
+    def test_state_i_bumps_when_mutation_returns_none(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Mutation returns None on every iteration → §1a never proceeds
+        to its sampler bump.  state.i must still advance once per outer
+        iteration via the new top-of-loop unconditional bump."""
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None  # forces no §1a child eval
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        state_i_snapshots: list[int] = []
+
+        def capture(state: Any, path: Any) -> None:
+            state_i_snapshots.append(state.i)
+
+        all_mocks["save_state"].side_effect = capture
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=3,
+            max_metric_calls=10_000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # Three iterations × one bump-per-iteration → state.i must reach
+        # at least 3 (starting from -1, after the seed-eval save it is
+        # -1, then each iter bump pushes it to 0, 1, 2 → final >= 2).
+        assert state_i_snapshots, "save_state should be called"
+        assert state_i_snapshots[-1] >= 2, (
+            f"state.i must bump per outer iteration even when §1a does "
+            f"not run; final state.i={state_i_snapshots[-1]}"
+        )
+
+
+class TestStrictInstanceScoresAccess:
+    """GEPA parity (adapter.py:154 — len(outputs) == len(scores) ==
+    len(batch)): a missing instance id in a parent or child minibatch
+    eval is an evaluator bug, not a benign zero.  HELIX must raise.
+    """
+
+    def test_missing_id_in_child_minibatch_raises(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                if candidate.id == "g1-s1":
+                    # Child evaluator drops one of the requested ids — the
+                    # GEPA invariant says this should be a hard error.
+                    dropped = list(instance_ids)[:-1]
+                    return _make_result(candidate.id, {i: 0.5 for i in dropped})
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        # Cache must be OFF: the cache layer (_cached_evaluate_batch's
+        # _evaluator at evolution.py:704-727) silently zeros missing ids
+        # before they reach the acceptance criterion, so we can only
+        # exercise the strict-access invariant on the no-cache path.
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_metric_calls=10_000,
+            cache_evaluation=False,
+        )
+        with pytest.raises(AssertionError, match="missing ids"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+
+class TestBudgetClampRemoved:
+    """GEPA parity: empty ``instance_scores`` must charge 0 (not 1).
+    GEPA core/engine.py:167 increments by ``num_actual_evals`` returned
+    from the adapter, with no clamp.
+    """
+
+    def test_empty_instance_scores_charges_zero(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Single-task / no-train_path mode: evaluator returns an empty
+        ``instance_scores`` dict on the seed eval.  Budget must charge 0
+        (not the legacy clamp-to-1)."""
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            return _make_result(candidate.id, {})  # empty scores
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        budget_snapshots: list[int] = []
+
+        def capture(state: Any, path: Any) -> None:
+            budget_snapshots.append(state.budget.evaluations)
+
+        all_mocks["save_state"].side_effect = capture
+
+        config = HelixConfig(
+            objective="empty-scores test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=1,
+                max_metric_calls=100,
+                perfect_score_threshold=None,
+            ),
+            worktree=WorktreeConfig(),
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # First snapshot is taken right after seed eval; with empty
+        # instance_scores GEPA charges 0, not the legacy clamp-to-1.
+        assert budget_snapshots, "save_state should be called"
+        assert budget_snapshots[0] == 0, (
+            f"empty instance_scores must charge 0, got {budget_snapshots[0]}"
+        )

@@ -203,7 +203,6 @@ class EvolutionConfig(BaseModel):
     max_generations: int = 10
     gating_threshold: float = 0.0
     perfect_score_threshold: float | None = None
-    convergence_patience: int = 5
     # GEPA parity: total evaluator call budget (GEPA name: max_metric_calls).
     # Kept as a finite default (GEPA's is None/unbounded) for safety.
     max_metric_calls: int = 200

@@ -71,7 +71,6 @@ class TestLoadConfig:
             max_generations = 20
             gating_threshold = 0.1
             perfect_score_threshold = 0.95
-            convergence_patience = 3
             max_metric_calls = 500
             parallel_eval = false
             merge_enabled = false
@@ -126,7 +125,6 @@ class TestLoadConfig:
         assert cfg.evolution.max_generations == 10
         assert cfg.evolution.gating_threshold == pytest.approx(0.0)
         assert cfg.evolution.perfect_score_threshold is None
-        assert cfg.evolution.convergence_patience == 5
         assert cfg.evolution.max_metric_calls == 200
         assert cfg.evolution.merge_enabled is False  # GEPA parity: off by default
         assert cfg.evolution.max_merge_invocations == 5

@@ -255,7 +255,6 @@ enabled = false
 max_generations = 20
 gating_threshold = 0.0           # minimum improvement to accept mutation
 perfect_score_threshold = 1.0    # stop early if score reaches this
-convergence_patience = 5         # stop if no improvement for N generations
 max_metric_calls = 200
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
