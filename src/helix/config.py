@@ -203,9 +203,11 @@ class EvolutionConfig(BaseModel):
     max_generations: int = 10
     gating_threshold: float = 0.0
     perfect_score_threshold: float | None = None
-    # GEPA parity: total evaluator call budget (GEPA name: max_metric_calls).
-    # Kept as a finite default (GEPA's is None/unbounded) for safety.
-    max_metric_calls: int = 200
+    # Evaluation-budget cap. `-1` (default) disables — HELIX runs until
+    # `max_generations` alone. Set to a positive int to match GEPA's
+    # budget-exhaustion termination (see GEPA core/engine.py, which uses
+    # the same evaluator-call budget the same way).
+    max_evaluations: int = -1
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False
     # Total cap on merge invocations across the entire run (not per-gen).

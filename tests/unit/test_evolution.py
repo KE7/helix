@@ -63,7 +63,7 @@ def make_eval_result(
 
 def make_config(
     max_generations: int = 5,
-    max_metric_calls: int = 1000,
+    max_evaluations: int = 1000,
     perfect_score_threshold: float | None = 1.0,
     gating_threshold: float = 0.0,
     merge_enabled: bool = False,
@@ -78,7 +78,7 @@ def make_config(
         dataset=DatasetConfig(),
         evolution=EvolutionConfig(
             max_generations=max_generations,
-            max_metric_calls=max_metric_calls,
+            max_evaluations=max_evaluations,
             perfect_score_threshold=perfect_score_threshold,
             gating_threshold=gating_threshold,
             merge_enabled=merge_enabled,
@@ -213,22 +213,22 @@ class TestBudgetExhausted:
 
     def test_not_exhausted_below_limit(self):
         state = make_budget_state(evaluations=10)
-        assert budget_exhausted(state, make_config(max_metric_calls=100)) is False
+        assert budget_exhausted(state, make_config(max_evaluations=100)) is False
 
     def test_exhausted_evaluations_at_limit(self):
         state = make_budget_state(evaluations=200)
-        assert budget_exhausted(state, make_config(max_metric_calls=200)) is True
+        assert budget_exhausted(state, make_config(max_evaluations=200)) is True
 
     def test_exhausted_evaluations_exceed_limit(self):
         state = make_budget_state(evaluations=250)
-        assert budget_exhausted(state, make_config(max_metric_calls=200)) is True
+        assert budget_exhausted(state, make_config(max_evaluations=200)) is True
 
     def test_budget_exhausted_only_checks_evaluations(self):
         """Budget only uses evaluations counter (GEPA parity C1)."""
         state = make_budget_state(evaluations=10)
-        assert budget_exhausted(state, make_config(max_metric_calls=1000)) is False
+        assert budget_exhausted(state, make_config(max_evaluations=1000)) is False
         state = make_budget_state(evaluations=1000)
-        assert budget_exhausted(state, make_config(max_metric_calls=1000)) is True
+        assert budget_exhausted(state, make_config(max_evaluations=1000)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +247,10 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # max_metric_calls=1: seed uses the only evaluation slot
+        # max_evaluations=1: seed uses the only evaluation slot
         config = make_config(
             max_generations=10,
-            max_metric_calls=1,
+            max_evaluations=1,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -271,7 +271,7 @@ class TestBudgetExhaustionStopsLoop:
         # Seed has 3 instances → +3 evaluations; set limit to 3
         config = make_config(
             max_generations=10,
-            max_metric_calls=3,
+            max_evaluations=3,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -300,7 +300,7 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["save_state"].side_effect = capture
 
-        config = make_config(max_generations=0, max_metric_calls=10000)
+        config = make_config(max_generations=0, max_evaluations=10000)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # After seed with 2 instances: evaluations == 2 (per-instance counting)
@@ -337,7 +337,7 @@ class TestPerfectScoreEarlyStopping:
         config = make_config(
             max_generations=10,
             perfect_score_threshold=1.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -360,7 +360,7 @@ class TestPerfectScoreEarlyStopping:
         config = make_config(
             max_generations=2,
             perfect_score_threshold=1.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -392,7 +392,7 @@ class TestGatingInEvolutionLoop:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -445,7 +445,7 @@ class TestGatingInEvolutionLoop:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         best = run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -491,7 +491,7 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -518,7 +518,7 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -542,7 +542,7 @@ class TestMergeBehavior:
         config = make_config(
             max_generations=1,
             merge_enabled=False,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -573,7 +573,7 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=0,  # cap at zero → no merges ever
             merge_val_overlap_floor=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -632,7 +632,7 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=1,  # total lifetime cap of 1
             merge_val_overlap_floor=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -680,7 +680,7 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -758,7 +758,7 @@ class TestMergeBehavior:
             # does not fall through to rng.choices with replacement (which
             # would duplicate ids and change the sum math below).
             merge_subsample_size=2,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -847,7 +847,7 @@ class TestMergeBehavior:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             merge_subsample_size=3,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -942,7 +942,7 @@ class TestMergeBehavior:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             merge_subsample_size=5,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1089,7 +1089,7 @@ class TestMergeBehavior:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             merge_subsample_size=2,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1195,7 +1195,7 @@ class TestMergeBehavior:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             merge_subsample_size=2,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1283,7 +1283,7 @@ class TestMergeBehavior:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             merge_subsample_size=2,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1345,7 +1345,7 @@ class TestMergeBehavior:
             merge_enabled=True,
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1378,7 +1378,7 @@ class TestTrainValSplitRouting:
 
         config = make_config(
             max_generations=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1407,7 +1407,7 @@ class TestTrainValSplitRouting:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1440,7 +1440,7 @@ class TestTrainValSplitRouting:
 
         config = make_config(
             max_generations=1,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1476,7 +1476,7 @@ class TestAppendOnlyPopulation:
             max_generations=1,
             cleanup_dominated=True,  # flag is ignored — no pruning regardless
             gating_threshold=0.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1513,7 +1513,7 @@ class TestGenerationsFlagOverridesConfig:
 
         config = make_config(
             max_generations=2,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1535,7 +1535,7 @@ class TestGenerationsFlagOverridesConfig:
 
         config = make_config(
             max_generations=0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1572,7 +1572,7 @@ class TestMutationCountersTracked:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1611,7 +1611,7 @@ class TestMutationCountersTracked:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            max_metric_calls=10000,
+            max_evaluations=10000,
 
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")

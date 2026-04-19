@@ -171,11 +171,13 @@ class HelixProgress:
 def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
     """Return True if evaluation budget is exhausted.
 
-    GEPA parity (C1): metric_calls was dead code (never incremented but
-    checked).  Budget now uses only the ``evaluations`` counter, matching
-    GEPA's ``total_num_evals`` budget.
+    Uses only the ``evaluations`` counter (GEPA parity C1 — matches
+    GEPA's ``total_num_evals`` budget).  When ``max_evaluations`` is the
+    sentinel ``-1`` (the default), the cap is disabled and this always
+    returns False; HELIX then runs until ``max_generations`` alone.
     """
-    return state.budget.evaluations >= config.evolution.max_metric_calls
+    cap = config.evolution.max_evaluations
+    return cap > 0 and state.budget.evaluations >= cap
 
 
 def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> bool:
