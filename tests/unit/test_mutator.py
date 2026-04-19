@@ -243,6 +243,107 @@ class TestPerExampleDiagnostics:
 
 
 # ---------------------------------------------------------------------------
+# Tests: mutation-prompt artifact persistence
+# ---------------------------------------------------------------------------
+
+
+class TestMutationPromptArtifact:
+    """``mutate()`` writes the rendered prompt to
+    ``<worktree>/.helix_mutation_prompt.md`` before invoking Claude Code
+    and adds the artifact + ``helix_batch.json`` to the worktree's
+    ``.gitignore`` so neither leaks into the candidate git tree."""
+
+    def _build(self, tmp_path, mocker):
+        parent = make_candidate("g0-s0", str(tmp_path / "parent"))
+        er = make_eval_result("g0-s0")
+        config = make_config()
+        wt = tmp_path / "g1-s0"
+        wt.mkdir()
+        child = make_candidate("g1-s0", str(wt))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch("helix.mutator.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
+        mocker.patch("helix.mutator.remove_worktree")
+        return parent, er, config, wt
+
+    def test_artifact_written_before_claude_invocation(
+        self, tmp_path: Path, mocker
+    ):
+        """The prompt file must exist at the time ``invoke_claude_code``
+        is called so Claude can in principle read it during the session
+        and so post-hoc inspection works even on a crashed mutation."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+
+        # Capture whether the artifact exists at the moment
+        # invoke_claude_code is entered.
+        artifact_path = wt / ".helix_mutation_prompt.md"
+        exists_at_invoke: list[bool] = []
+
+        def fake_invoke(*_a, **_kw):
+            exists_at_invoke.append(artifact_path.exists())
+            return {"result": "ok"}
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        mutate(parent, er, "g1-s0", config, tmp_path)
+        assert exists_at_invoke == [True]
+
+    def test_artifact_contains_rendered_prompt(
+        self, tmp_path: Path, mocker
+    ):
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        content = (wt / ".helix_mutation_prompt.md").read_text()
+        # Objective + autonomous-rules block are both in the rendered
+        # prompt via build_mutation_prompt.
+        assert config.objective in content
+        assert "[MUTATION COMPLETE]" in content
+
+    def test_gitignore_excludes_helix_artifacts(
+        self, tmp_path: Path, mocker
+    ):
+        """``.gitignore`` in the worktree gains entries for the prompt
+        file AND ``helix_batch.json`` so neither file enters the
+        candidate diff on the next generation."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        gi = (wt / ".gitignore").read_text()
+        assert ".helix_mutation_prompt.md" in gi
+        assert "helix_batch.json" in gi
+
+    def test_gitignore_append_is_idempotent(
+        self, tmp_path: Path, mocker
+    ):
+        """A pre-existing ``.gitignore`` with HELIX patterns already
+        present must not grow duplicate entries on subsequent mutate()
+        calls — otherwise long runs balloon the gitignore."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        # Seed a gitignore with the patterns already present + other lines.
+        (wt / ".gitignore").write_text(
+            "*.pyc\n"
+            "# HELIX per-invocation artifacts (never commit to candidate tree)\n"
+            ".helix_mutation_prompt.md\n"
+            "helix_batch.json\n"
+        )
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        gi = (wt / ".gitignore").read_text()
+        assert gi.count(".helix_mutation_prompt.md") == 1
+        assert gi.count("helix_batch.json") == 1
+        assert "*.pyc" in gi  # existing content preserved
+
+    def test_gitignore_created_when_absent(
+        self, tmp_path: Path, mocker
+    ):
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        # Ensure no pre-existing gitignore.
+        assert not (wt / ".gitignore").exists()
+        mutate(parent, er, "g1-s0", config, tmp_path)
+        assert (wt / ".gitignore").exists()
+
+
+# ---------------------------------------------------------------------------
 # Tests: invoke_claude_code
 # ---------------------------------------------------------------------------
 
