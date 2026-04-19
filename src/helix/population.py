@@ -33,14 +33,37 @@ class Candidate:
 class EvalResult:
     """Evaluation results for a candidate.
 
-    Stores aggregate scores, per-instance scores, and arbitrary
-    metadata returned by the evaluator.
+    Mirrors GEPA's :class:`gepa.core.adapter.EvaluationBatch` where it
+    can.  Key invariants:
+
+    - ``instance_scores`` is keyed **only** by HELIX's internal example
+      ids — the same strings HELIX writes to
+      ``{worktree}/helix_batch.json`` pre-invocation.  Never aggregate
+      metric names.  Previously this was the footgun: an evaluator
+      keying by ``task__metric`` instead of ``task__trialN`` silently
+      zero-filled every requested id in the minibatch gate.  The
+      per-example ``helix_result`` parser owns the id-keying now so
+      evaluators never type a HELIX-internal id.
+    - ``per_example_side_info`` is positional to ``instance_scores``
+      by id order (same order as ``helix_batch.json``).  GEPA analogue:
+      ``EvaluationBatch.trajectories`` (``src/gepa/core/adapter.py:25``).
+      Carries freeform per-example diagnostics for the reflection
+      prompt (prompt wiring lands in a follow-up PR).
     """
     candidate_id: str
     scores: dict[str, float]          # aggregate/summary scores
     asi: dict[str, str]               # arbitrary string info (metadata)
-    instance_scores: dict[str, float] # per-instance scores
-    side_info: dict[str, Any] | None = None  # optional diagnostics from HELIX_RESULT (reflection only)
+    instance_scores: dict[str, float] # per-instance scores, keyed by HELIX example-id
+    # Legacy batch-level diagnostics dict.  No longer populated by the
+    # ``helix_result`` parser (which uses ``per_example_side_info``);
+    # kept for back-compat with any other path that still sets it and
+    # for the mutation prompt's existing Diagnostics section.
+    side_info: dict[str, Any] | None = None
+    # Per-example freeform side_info (GEPA O.A. evaluator contract:
+    # ``(score, side_info)`` per example).  Positional to
+    # ``instance_scores`` by helix_batch.json id order.  Consumed by
+    # the reflection prompt in a follow-up PR.
+    per_example_side_info: list[dict[str, Any]] | None = None
 
     def aggregate_score(self) -> float:
         """Return mean of instance scores, or 0.0 if none."""
@@ -53,7 +76,11 @@ class EvalResult:
         return sum(self.instance_scores.values())
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dict."""
+        """Serialize to a JSON-compatible dict.
+
+        Optional fields are omitted when ``None`` so on-disk evaluations
+        stay byte-identical when they don't carry the newer data.
+        """
         d: dict[str, Any] = {
             "candidate_id": self.candidate_id,
             "scores": self.scores,
@@ -62,6 +89,8 @@ class EvalResult:
         }
         if self.side_info is not None:
             d["side_info"] = self.side_info
+        if self.per_example_side_info is not None:
+            d["per_example_side_info"] = self.per_example_side_info
         return d
 
     @classmethod
@@ -73,6 +102,7 @@ class EvalResult:
             instance_scores=data.get("instance_scores", {}),
             asi=data.get("asi", {}),
             side_info=data.get("side_info"),
+            per_example_side_info=data.get("per_example_side_info"),
         )
 
 

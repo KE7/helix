@@ -15,8 +15,22 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 class EvaluatorConfig(BaseModel):
     """Configuration for candidate evaluation.
 
-    Defines how candidates are evaluated via shell commands and how their
-    results are parsed into scores.
+    Defines how candidates are evaluated via shell commands and how
+    their results are parsed into scores.
+
+    ``score_parser`` selects how HELIX turns evaluator output into
+    ``(scores, instance_scores)``.  For the minibatch-gate at
+    :func:`helix.evolution._minibatch_gate_accept` the **per-id keys**
+    in ``instance_scores`` matter: the gate looks up
+    ``instance_scores[eid]`` where ``eid`` is whatever HELIX wrote to
+    ``helix_batch.json`` pre-invocation.  Pick ``"helix_result"`` to
+    hand HELIX a list of per-example ``[score, side_info]`` pairs
+    (GEPA ``optimize_anything`` evaluator parity) — HELIX owns the
+    id-keying so the evaluator never types a HELIX-internal id.  The
+    other parsers (``"pytest"``, ``"exitcode"``, ``"json_accuracy"``,
+    ``"json_score"``) aggregate to a single score and do NOT produce
+    id-keyed per-instance scores; combining them with ``instance_ids``
+    triggers the zero-fill warning in :mod:`helix.executor`.
     """
     model_config = ConfigDict(extra="forbid")
 
