@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from helix.parsers import exitcode, pytest as pytest_parser, json_accuracy, json_score
+from helix.parsers import (
+    exitcode,
+    pytest as pytest_parser,
+    json_accuracy,
+    json_score,
+    helix_result,
+)
 
 
 _PARSERS: dict[str, Callable[..., Any]] = {
@@ -12,6 +18,7 @@ _PARSERS: dict[str, Callable[..., Any]] = {
     "exitcode": exitcode.parse,
     "json_accuracy": json_accuracy.parse,
     "json_score": json_score.parse,
+    "helix_result": helix_result.parse,
 }
 
 
@@ -19,7 +26,8 @@ def get_parser(name: str) -> Callable[..., Any]:
     """Return the parse function for the given parser name.
 
     Args:
-        name: Parser name, one of "pytest" or "exitcode".
+        name: Parser name, one of "pytest", "exitcode", "json_accuracy",
+            "json_score", or "helix_result".
 
     Returns:
         A callable parse function.
