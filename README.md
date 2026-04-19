@@ -40,6 +40,22 @@ Instead of treating one file or one patch as the candidate, HELIX treats the **e
 
 The result is a new kind of evolutionary optimizer: one that preserves the reflective Pareto-evolutionary core while making it practical for whole repositories and realistic software engineering tasks.
 
+### Coding agent as the mutation engine
+
+The difference between HELIX and `/chat/completions`-style evolvers (GEPA, DSPy-Refine, ShinkaEvolve) is that HELIX's mutation is driven by a **coding agent**, not a single LLM call. A GEPA-style mutation is one prompt → one completion → apply the diff. HELIX's mutation is a full agentic session bounded only by `max_turns`:
+
+| | GEPA / chat-completion evolvers | HELIX |
+|---|---|---|
+| Mutation shape | Single request/response | Multi-step agentic session |
+| Working surface | A single prompt / predictor string | The entire repository in a git worktree |
+| Mid-mutation introspection | None | Read any file, grep, glob, `find`, follow imports |
+| Mid-mutation verification | None | Run the test suite, type-checker, linter; read failures and react |
+| External information | None | Fetch the web, hit GitHub API, query package indexes live |
+| Self-correction | None per proposal (retries are separate generations) | Inside one mutation: diagnose a test failure, edit another file, re-run, commit only if green |
+| Cost accounting | 1 LLM call = 1 proposal | 1 proposal = N turns, gated by `max_turns` + whatever the agent decides is enough |
+
+This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-OSS behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
+
 ---
 
 ## ✨ Key Features
@@ -258,7 +274,8 @@ merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates
 merge_subsample_size = 5         # stratified val subsample size for merge acceptance (GEPA parity)
-max_workers = 8                  # thread-pool cap for parent-eval + mutation pools (default: os.cpu_count() or 32)
+max_workers = 8                  # thread-pool cap for parent-eval + mutation pools
+                                 # (default: os.cpu_count(), or 32 if that returns None)
 num_parallel_proposals = 1       # parallel mutations per generation; "auto" resolves to max_workers // minibatch_size
 minibatch_size = 3               # train-set minibatch gate size
 cache_evaluation = true          # reuse per-instance evaluator results
