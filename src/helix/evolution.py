@@ -12,7 +12,7 @@ import shlex
 import threading
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -703,6 +703,15 @@ def _cached_evaluate_batch(
     # itself (helix.eval_cache.EvaluationCache.evaluate_with_cache_full,
     # which is a line-for-line port of GEPA state.py:94-130).
 
+    # Closure side-channel: the cache stores ``(output, score, objective_scores)``
+    # per id but has no slot for freeform ``side_info``.  Collect fresh
+    # per-example side_info in a closure dict so we can attach it to the
+    # merged ``EvalResult`` below.  Cache-hit ids (not in this dict) get
+    # ``{}`` as their per_example_side_info slot — their prior side_info
+    # was consumed by the reflection prompt at their original eval time
+    # and is not round-tripped through the cache.
+    fresh_side_info_by_id: dict[str, dict[str, Any]] = {}
+
     def _fetcher(ids: list[str]) -> list[str]:
         # HELIX evaluators read batches off disk via helix_batch.json;
         # the "batch" handed to the evaluator callable is just the list
@@ -740,10 +749,35 @@ def _cached_evaluate_batch(
             f"{sorted(missing)}"
         )
         scores = [float(fresh.instance_scores[eid]) for eid in batch]
-        return outputs, scores, None
+        # Thread per-example objective_scores through the cache: GEPA
+        # ``EvaluationBatch.objective_scores`` parity
+        # (``src/gepa/core/adapter.py:26``).  Feeds the multi-axis
+        # Pareto frontier when ``evolution.frontier_type`` is
+        # ``"objective"``, ``"hybrid"``, or ``"cartesian"``.  The
+        # underlying ``EvaluationCache`` already has a slot for this
+        # (``put_batch(..., objective_scores_list=...)``); previously
+        # ``_evaluator`` returned ``None`` here and the multi-axis data
+        # was dropped on the cached path.
+        obj_list: list[dict[str, float]] | None = None
+        if (
+            fresh.objective_scores is not None
+            and len(fresh.objective_scores) == len(batch)
+        ):
+            obj_list = [fresh.objective_scores[i] for i in range(len(batch))]
+        # Capture per-example side_info for the outer merge.  Only
+        # freshly-evaluated ids populate this; cache hits remain ``{}``.
+        if (
+            fresh.per_example_side_info is not None
+            and len(fresh.per_example_side_info) == len(batch)
+        ):
+            for i, eid in enumerate(batch):
+                fresh_side_info_by_id[eid] = fresh.per_example_side_info[i]
+        return outputs, scores, obj_list
 
-    _, scores_by_id, _, num_actual_evals = cache.evaluate_with_cache_full(
-        cand_dict, example_ids, _fetcher, _evaluator,
+    _, scores_by_id, objective_by_id, num_actual_evals = (
+        cache.evaluate_with_cache_full(
+            cand_dict, example_ids, _fetcher, _evaluator,
+        )
     )
 
     # Merge hits + fresh into a single EvalResult.  ``scores_by_id``
@@ -751,11 +785,31 @@ def _cached_evaluate_batch(
     # ``scores`` (aggregate dict) and ``asi`` (metadata) are not carried
     # on cached paths: the minibatch gate and frontier update logic only
     # read ``instance_scores``.
+    #
+    # Per-example ``objective_scores`` and ``per_example_side_info`` ARE
+    # attached when any data was produced (freshly-evaluated) or cached
+    # for any id in this batch — the multi-axis frontier and reflection
+    # paths both depend on them.  Missing entries get ``{}`` placeholders
+    # so the list length always equals ``len(example_ids)`` (positional
+    # alignment is the whole point of the per-example contract).
+    objective_scores_list: list[dict[str, float]] | None = None
+    if objective_by_id is not None:
+        objective_scores_list = [
+            objective_by_id.get(eid, {}) for eid in example_ids
+        ]
+    per_example_side_info_list: list[dict[str, Any]] | None = None
+    if fresh_side_info_by_id:
+        per_example_side_info_list = [
+            fresh_side_info_by_id.get(eid, {}) for eid in example_ids
+        ]
+
     merged = EvalResult(
         candidate_id=candidate.id,
         scores={},
         asi={},
         instance_scores={eid: scores_by_id[eid] for eid in example_ids},
+        per_example_side_info=per_example_side_info_list,
+        objective_scores=objective_scores_list,
     )
     return merged, num_actual_evals
 
