@@ -73,22 +73,26 @@ def _make_minibatch_config(
     num_parallel_proposals: int = 1,
     cache_evaluation: bool = True,
     acceptance_criterion: str = "strict_improvement",
+    max_workers: int | None = None,
 ) -> HelixConfig:
+    evo_kwargs: dict[str, Any] = dict(
+        max_generations=max_generations,
+        max_evaluations=max_evaluations,
+        perfect_score_threshold=None,
+        minibatch_size=minibatch_size,
+        num_parallel_proposals=num_parallel_proposals,
+        cache_evaluation=cache_evaluation,
+        acceptance_criterion=acceptance_criterion,
+        val_stage_size=val_stage_size,
+    )
+    if max_workers is not None:
+        evo_kwargs["max_workers"] = max_workers
     return HelixConfig(
         objective="Minibatch test",
         evaluator=EvaluatorConfig(command="pytest -q"),
         dataset=DatasetConfig(val_size=val_size),
         seedless=SeedlessConfig(train_path=train_path),
-        evolution=EvolutionConfig(
-            max_generations=max_generations,
-            max_evaluations=max_evaluations,
-            perfect_score_threshold=None,
-            minibatch_size=minibatch_size,
-            num_parallel_proposals=num_parallel_proposals,
-            cache_evaluation=cache_evaluation,
-            acceptance_criterion=acceptance_criterion,  # type: ignore[arg-type]
-            val_stage_size=val_stage_size,
-        ),
+        evolution=EvolutionConfig(**evo_kwargs),
         worktree=WorktreeConfig(),
     )
 
@@ -925,6 +929,137 @@ class TestParentMinibatchParallelism:
         assert len(parent_eval_threads) >= 2, (
             f"Expected >= 2 distinct worker thread ids for parent eval, "
             f"got {parent_eval_threads}"
+        )
+
+
+class TestMaxWorkersBoundsParentEvalPool:
+    def test_max_workers_bounds_parent_eval_pool(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Fix A: ``evolution.max_workers`` caps the parent-eval
+        ThreadPoolExecutor.  With ``max_workers=2`` and
+        ``num_parallel_proposals=3`` we must never see >2 parent evals
+        running concurrently, even though 3 proposals are pre-sampled.
+
+        Mirrors GEPA ``EngineConfig.max_workers`` plumbing
+        (optimize_anything.py:485).
+        """
+        import threading
+        import time
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        concurrency_lock = threading.Lock()
+        current_parent_evals = 0
+        peak_parent_evals = 0
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            nonlocal current_parent_evals, peak_parent_evals
+            if candidate.id == seed.id and instance_ids is not None:
+                with concurrency_lock:
+                    current_parent_evals += 1
+                    peak_parent_evals = max(peak_parent_evals, current_parent_evals)
+                try:
+                    time.sleep(0.1)
+                    return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+                finally:
+                    with concurrency_lock:
+                        current_parent_evals -= 1
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.4 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=3,
+            max_workers=2,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert peak_parent_evals <= 2, (
+            f"Parent-eval pool exceeded max_workers bound: "
+            f"peak={peak_parent_evals}, max_workers=2"
+        )
+
+
+class TestParentEvalExceptionDoesNotAbortGeneration:
+    def test_parent_eval_exception_drops_only_failed_proposal(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Fix B: when one of N parent-eval futures raises, the remaining
+        proposals must still complete.  Mirrors GEPA engine.py:427-443
+        which wraps ``future.result()`` in try/except so a single eval
+        failure does not abort the generation.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        parent_eval_attempts: list[bool] = []
+        mutate_calls: list[str] = []
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if candidate.id == seed.id and instance_ids is not None:
+                parent_eval_attempts.append(True)
+                # Raise on the second parent-eval only (stable because
+                # ``parent_eval_attempts`` is append-ordered).
+                if len(parent_eval_attempts) == 2:
+                    raise RuntimeError("simulated evaluator failure")
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.4 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        def _mutate_record(**kw: Any) -> Candidate:
+            mutate_calls.append(kw.get("new_id", ""))
+            return _make_candidate(next(mut_ids))
+
+        all_mocks["mutate"].side_effect = _mutate_record
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=3,
+        )
+        # Must not raise: single failed eval drops that proposal only.
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(parent_eval_attempts) == 3, (
+            f"All 3 parent evals should have been attempted; "
+            f"got {len(parent_eval_attempts)}"
+        )
+        # The 2 surviving proposals must reach the mutate step; the failed
+        # one must NOT (its proposal slot was dropped cleanly in §1c).
+        assert len(mutate_calls) == 2, (
+            f"Expected 2 mutations for the 2 surviving proposals; "
+            f"got {len(mutate_calls)}"
         )
 
 

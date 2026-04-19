@@ -1527,7 +1527,13 @@ def run_evolution(
         # the original single-mutation path.
         # =============================================================
 
-        n_proposals = config.evolution.num_parallel_proposals
+        # GEPA parity: ``num_parallel_proposals="auto"`` is resolved to an int
+        # in ``EvolutionConfig.model_post_init`` (mirrors GEPA
+        # optimize_anything._resolve_num_parallel_proposals).  The assert both
+        # documents that invariant and narrows the type for mypy --strict.
+        _np_raw = config.evolution.num_parallel_proposals
+        assert isinstance(_np_raw, int)
+        n_proposals = _np_raw
 
         # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
         # GEPA core/engine.py:381-452 has three stages:
@@ -1608,14 +1614,40 @@ def run_evolution(
         if n_proposals > 1 and len(presample_contexts) > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
             parent_eval_results = [(None, 0)] * len(presample_contexts)
-            with ThreadPoolExecutor(max_workers=len(presample_contexts)) as _pe_pool:
+            # GEPA parity: bound concurrency by ``max_workers``
+            # (optimize_anything.py:485) while preserving the "at most
+            # len(contexts)" natural cap.
+            _pe_max_workers = min(
+                len(presample_contexts), config.evolution.max_workers
+            )
+            with ThreadPoolExecutor(max_workers=_pe_max_workers) as _pe_pool:
                 _pe_future_to_idx = {
                     _pe_pool.submit(_eval_parent, _pre_ctx): _idx
                     for _idx, _pre_ctx in enumerate(presample_contexts)
                 }
                 for _pe_future in _as_completed(_pe_future_to_idx):
                     _pe_idx = _pe_future_to_idx[_pe_future]
-                    parent_eval_results[_pe_idx] = _pe_future.result()
+                    # GEPA parity: engine.py:427-443 wraps future.result() so a
+                    # single evaluator exception drops only that proposal
+                    # instead of aborting the whole generation.  (HELIX does
+                    # not expose GEPA's ``on_error`` callback surface.)
+                    try:
+                        parent_eval_results[_pe_idx] = _pe_future.result()
+                    except Exception as _pe_exc:
+                        _pe_ctx = presample_contexts[_pe_idx]
+                        _pe_parent = _pe_ctx[0]
+                        _pe_new_id = _pe_ctx[3]
+                        print_warning(
+                            f"Parent eval for proposal {_pe_new_id} "
+                            f"(parent: {_pe_parent.id}, gen {gen}) failed: "
+                            f"{type(_pe_exc).__name__}: {_pe_exc} — "
+                            f"proposal slot skipped."
+                        )
+                        # Sentinel: ``_mb_result=None, n_uncached=0``.  The
+                        # §1c loop below treats ``parent_mb_result is None``
+                        # for a minibatch-gated run as a drop signal and
+                        # ``continue``s without charging budget.
+                        parent_eval_results[_pe_idx] = (None, 0)
         else:
             parent_eval_results = [_eval_parent(_pre_ctx) for _pre_ctx in presample_contexts]
 
@@ -1635,6 +1667,22 @@ def run_evolution(
         ):
             parent, parent_frontier_result, subsample_ids, new_id = _pre_ctx
             parent_mb_result: EvalResult | None = _mb_result
+
+            # GEPA parity (engine.py:427-443): when the parallel parent-eval
+            # future raised, _mb_result is the None sentinel set above.  Skip
+            # the proposal just like GEPA skips on ``outputs[idx] is None``.
+            # We do NOT charge budget: the eval aborted before completing, so
+            # there is no corresponding ``num_metric_calls`` to account for
+            # (mirrors GEPA's ``total_evals`` being added inside
+            # ``execute_proposal`` only on successful evaluation).  Legacy
+            # single-task mode (``subsample_ids is None``) intentionally
+            # allows _mb_result=None and falls through to a train re-eval.
+            if subsample_ids is not None and parent_mb_result is None:
+                print_warning(
+                    f"Iteration {gen}: dropping proposal {new_id} "
+                    f"(parent {parent.id}) — parent-eval failed in §1b."
+                )
+                continue
 
             if subsample_ids is not None:
                 # MODERATE H (audit-budget-caching §C1): GEPA charges the
@@ -1722,7 +1770,13 @@ def run_evolution(
         if n_proposals > 1 and len(proposal_contexts) > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
             mutation_results = [None] * len(proposal_contexts)
-            with ThreadPoolExecutor(max_workers=len(proposal_contexts)) as pool:
+            # GEPA parity: bound concurrency by ``max_workers``
+            # (optimize_anything.py:485) while preserving the "at most
+            # len(contexts)" natural cap.
+            _mu_max_workers = min(
+                len(proposal_contexts), config.evolution.max_workers
+            )
+            with ThreadPoolExecutor(max_workers=_mu_max_workers) as pool:
                 future_to_idx = {
                     pool.submit(_do_mutate, ctx): idx
                     for idx, ctx in enumerate(proposal_contexts)

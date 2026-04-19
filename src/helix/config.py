@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -224,11 +225,13 @@ class EvolutionConfig(BaseModel):
     # sample N parents, run N mutations in parallel via ThreadPoolExecutor,
     # then accept sequentially. See GEPA core/engine.py
     # _run_parallel_reflective_batch.
-    num_parallel_proposals: int = Field(
+    num_parallel_proposals: int | Literal["auto"] = Field(
         default=1,
         description=(
             "Number of concurrent mutation proposals per iteration. "
-            "GEPA parity: EngineConfig.num_parallel_proposals."
+            "GEPA parity: EngineConfig.num_parallel_proposals. "
+            "Set to 'auto' to derive from max_workers // minibatch_size, "
+            "matching GEPA's optimize_anything._resolve_num_parallel_proposals."
         ),
     )
     minibatch_size: int = Field(
@@ -239,10 +242,13 @@ class EvolutionConfig(BaseModel):
         ),
     )
     max_workers: int = Field(
-        default=1,
+        default_factory=lambda: os.cpu_count() or 32,
         description=(
-            "Max parallel eval workers. GEPA parity: EngineConfig.max_workers "
-            "(HELIX defaults to 1 for safety)."
+            "Max parallel eval workers — bounds both the parent-eval and "
+            "mutation ThreadPools in the num_parallel_proposals pipeline. "
+            "GEPA parity: EngineConfig.max_workers "
+            "(/tmp/gepa-official/src/gepa/optimize_anything.py:485, "
+            "default os.cpu_count() or 32)."
         ),
     )
     cache_evaluation: bool = Field(
@@ -290,6 +296,14 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
+        # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
+        # ``max(1, max_workers // minibatch_size)`` once at construction
+        # time so every downstream consumer sees a plain int.  Mirrors
+        # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
+        if self.num_parallel_proposals == "auto":
+            self.num_parallel_proposals = max(
+                1, self.max_workers // max(1, self.minibatch_size)
+            )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(
                 f"evolution.val_stage_size must be >= 0 (got {self.val_stage_size})"

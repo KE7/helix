@@ -52,7 +52,7 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
 | 🔧 | **Tool access during mutation** | Claude Code can read, grep, run tests, inspect the codebase, and use the web mid-mutation |
 | ✅ | **Self-verification** | Mutations verify themselves by running commands before committing |
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
-| ⚡ | **Parallel evaluation** | Worktrees are isolated → embarrassingly parallel via `ProcessPoolExecutor` |
+| ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (GEPA parity, bounded by `evolution.max_workers`) |
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
 | 🎯 | **Convergence detection** | Auto-stop when the frontier stagnates for N generations |
 | 💾 | **State persistence & resume** | Crash-safe — resume from any generation with `helix resume` |
