@@ -9,6 +9,7 @@ import math
 import os
 import random as _random
 import shlex
+import threading
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -604,6 +605,27 @@ def _write_helix_batch(worktree_path: str | Path, indices: list[int]) -> None:
         logger.debug("worktree %s missing; skipping helix_batch.json write", worktree_path)
 
 
+# Per-worktree lock registry.  Used to serialize ``_write_helix_batch`` +
+# ``run_evaluator`` calls that share the same worktree path.  GEPA calls
+# ``adapter.evaluate`` in-process so has no file-handoff race (see GEPA
+# core/engine.py:381-452); HELIX's Architecture A writes per-batch indices
+# to ``{worktree}/helix_batch.json`` before subprocess launch, so concurrent
+# parallel parent-evals on the same worktree would clobber each other's
+# batch file.  Different worktrees may evaluate concurrently.
+_WORKTREE_LOCKS: dict[str, threading.Lock] = {}
+_WORKTREE_LOCKS_MUTEX = threading.Lock()
+
+
+def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
+    key = str(worktree_path)
+    with _WORKTREE_LOCKS_MUTEX:
+        lock = _WORKTREE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKTREE_LOCKS[key] = lock
+        return lock
+
+
 def _cached_eval(
     candidate: Candidate,
     config: HelixConfig,
@@ -656,12 +678,16 @@ def _cached_evaluate_batch(
 
     # Non-cached branch — mirrors GEPA state.py:628-633 verbatim.
     if cache is None:
-        _write_helix_batch(
-            candidate.worktree_path, [int(s) for s in example_ids]
-        )
-        result = run_evaluator(
-            candidate, config, split=split, instance_ids=example_ids,
-        )
+        # Per-worktree lock (see ``_worktree_lock`` docstring): serializes
+        # concurrent ``write_helix_batch`` + ``run_evaluator`` on the same
+        # worktree when parent-minibatch evals run in parallel.
+        with _worktree_lock(candidate.worktree_path):
+            _write_helix_batch(
+                candidate.worktree_path, [int(s) for s in example_ids]
+            )
+            result = run_evaluator(
+                candidate, config, split=split, instance_ids=example_ids,
+            )
         return result, len(example_ids)
 
     # Cached branch — delegate to the GEPA-parity helper on the cache
@@ -683,12 +709,16 @@ def _cached_evaluate_batch(
         # positional-index handoff read that file from cwd and filter their
         # own dataset to exactly these indices; run_evaluator additionally
         # post-filters instance_scores to ``batch`` in executor.py:245.
-        _write_helix_batch(
-            candidate.worktree_path, [int(s) for s in batch]
-        )
-        fresh = run_evaluator(
-            candidate, config, split=split, instance_ids=batch,
-        )
+        # Per-worktree lock: see ``_worktree_lock`` — parent-minibatch
+        # parallelism (audit-mutation §C4) requires serialising the
+        # ``write_helix_batch`` + ``run_evaluator`` pair on a given worktree.
+        with _worktree_lock(candidate.worktree_path):
+            _write_helix_batch(
+                candidate.worktree_path, [int(s) for s in batch]
+            )
+            fresh = run_evaluator(
+                candidate, config, split=split, instance_ids=batch,
+            )
         # HELIX does not track rollout outputs per-example; store ``None``
         # per slot (the cache's ``RolloutOutput`` type parameter is
         # ``object`` precisely for this reason — see evolution.py:536).
@@ -1407,15 +1437,19 @@ def run_evolution(
 
         n_proposals = config.evolution.num_parallel_proposals
 
-        # ---- Step 1: Pre-sample N contexts (sequential) ----
-        proposal_contexts: list[tuple[Candidate, EvalResult | None, EvalResult, str]] = []
-        # GEPA §5.1 minibatch integration: parallel lists aligned with
-        # proposal_contexts.  When the minibatch gate is active, these
-        # carry the per-proposal subsample ids and the parent's fresh
-        # minibatch result; otherwise they are all None and the legacy
-        # train-gating path handles acceptance.
-        proposal_subsamples: list[list[str] | None] = []
-        proposal_parent_mb_results: list[EvalResult | None] = []
+        # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
+        # GEPA core/engine.py:381-452 has three stages:
+        #   1. ``prepare_proposal`` — sequential (parent select + minibatch sample)
+        #   2. ``execute_proposal`` — PARALLEL (parent eval + reflect + child eval)
+        #   3. ``apply_proposal_output`` — sequential (budget + cache write)
+        # HELIX §1a mirrors GEPA's prepare_proposal: candidate selection,
+        # ``state.i`` bump, and minibatch sampling live here.  The parent
+        # minibatch EVAL is moved out to §1b (see below) to parallelise it,
+        # matching GEPA reflective_mutation.py:268 (``eval_curr = adapter.evaluate(...)``)
+        # running inside the thread pool submitted at engine.py:422-426.
+        #
+        # Entries are tuples ``(parent, parent_frontier_result, subsample_ids, new_id)``.
+        presample_contexts: list[tuple[Candidate, EvalResult | None, list[str] | None, str]] = []
         _budget_break = False
 
         for _p_idx in range(n_proposals):
@@ -1427,11 +1461,11 @@ def run_evolution(
             parent_frontier_result = frontier._results.get(parent.id)
 
             # --- Minibatch gate pre-sampling (GEPA §5.1) --------------
-            # Bump state.i, sample subsample ids, run the parent on the
-            # minibatch (uncached — this is a fresh eval of the baseline
-            # candidate on the per-proposal subset).
+            # Bump state.i and sample subsample ids.  The parent-on-minibatch
+            # eval that used to live here is now deferred to §1b so that
+            # N parent evals overlap under ``num_parallel_proposals > 1``
+            # (audit-mutation §C4 MODERATE E).
             subsample_ids: list[str] | None = None
-            parent_mb_result: EvalResult | None = None
             if use_minibatch_gate and train_loader is not None and batch_sampler is not None:
                 state.i += 1
                 subsample_ids = batch_sampler.next_minibatch_ids(train_loader, state)
@@ -1441,22 +1475,75 @@ def run_evolution(
                     example_ids=list(subsample_ids),
                     split="train",
                 )
-                # GEPA parity: route parent-on-minibatch through the
-                # per-example cache consumer (``cached_evaluate_full`` in
-                # gepa/core/state.py:618).  When some of this minibatch's
-                # indices are already cached for the parent, we write a
-                # REDUCED helix_batch.json and only spend budget on the
-                # uncached subset.  Fresh scores are put_batch'd back into
-                # the cache for reuse by child gating / later parent re-evals.
-                parent_mb_result, _n = _cached_evaluate_batch(
-                    parent,
-                    list(subsample_ids),
-                    minibatch_cache,
-                    config,
-                    "train",
+
+            state.mutation_counter += 1
+            new_id = f"g{gen}-s{state.mutation_counter}"
+            presample_contexts.append((parent, parent_frontier_result, subsample_ids, new_id))
+
+        # ---- Step 1b: Parent minibatch eval (PARALLEL) ----
+        # GEPA parity (audit-mutation §C4 MODERATE E): GEPA runs
+        # ``eval_curr = self.adapter.evaluate(ctx.minibatch, ctx.curr_prog, ...)``
+        # (reflective_mutation.py:268) inside ``execute_proposal``, which
+        # engine.py:422-426 submits to a ThreadPoolExecutor so N parent evals
+        # overlap.  HELIX used to run this sequentially in the pre-sample loop
+        # (evolution.py:1406-1444 pre-fix).  Legacy no-minibatch path still
+        # runs ``_cached_eval(parent, "train")`` here because there is no
+        # per-proposal subsample to use.
+        def _eval_parent(
+            pre_ctx: tuple[Candidate, EvalResult | None, list[str] | None, str],
+        ) -> tuple[EvalResult | None, int]:
+            _parent, _pfr, _sub_ids, _new_id = pre_ctx
+            if _sub_ids is not None:
+                _mb, _n_uncached = _cached_evaluate_batch(
+                    _parent, list(_sub_ids), minibatch_cache, config, "train",
                 )
-                parent_mb_result.candidate_id = parent.id
-                state.budget.evaluations += _n
+                _mb.candidate_id = _parent.id
+                return _mb, _n_uncached
+            return None, 0
+
+        parent_eval_results: list[tuple[EvalResult | None, int]]
+        if n_proposals > 1 and len(presample_contexts) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+            parent_eval_results = [(None, 0)] * len(presample_contexts)
+            with ThreadPoolExecutor(max_workers=len(presample_contexts)) as _pe_pool:
+                _pe_future_to_idx = {
+                    _pe_pool.submit(_eval_parent, _pre_ctx): _idx
+                    for _idx, _pre_ctx in enumerate(presample_contexts)
+                }
+                for _pe_future in _as_completed(_pe_future_to_idx):
+                    _pe_idx = _pe_future_to_idx[_pe_future]
+                    parent_eval_results[_pe_idx] = _pe_future.result()
+        else:
+            parent_eval_results = [_eval_parent(_pre_ctx) for _pre_ctx in presample_contexts]
+
+        # ---- Step 1c: Charge budget + skip-perfect (SEQUENTIAL) ----
+        # GEPA core/engine.py:361 applies deferred updates sequentially via
+        # ``apply_proposal_output``.  Here we (a) charge the minibatch size to
+        # the budget unconditionally per audit-budget-caching §C1 MODERATE H,
+        # mirroring reflective_mutation.py:269 (``total_evals +=
+        # eval_curr.num_metric_calls if not None else len(ctx.subsample_ids)``),
+        # and (b) apply the skip-perfect gate (reflective_mutation.py:308-312).
+        proposal_contexts: list[tuple[Candidate, EvalResult | None, EvalResult, str]] = []
+        proposal_subsamples: list[list[str] | None] = []
+        proposal_parent_mb_results: list[EvalResult | None] = []
+
+        for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
+            zip(presample_contexts, parent_eval_results)
+        ):
+            parent, parent_frontier_result, subsample_ids, new_id = _pre_ctx
+            parent_mb_result: EvalResult | None = _mb_result
+
+            if subsample_ids is not None:
+                # MODERATE H (audit-budget-caching §C1): GEPA charges the
+                # full minibatch size regardless of cache hit status
+                # (reflective_mutation.py:269 charges
+                # ``eval_curr.num_metric_calls if not None else
+                # len(ctx.subsample_ids)`` — the adapter.evaluate call at
+                # :268 bypasses the cache, so cache hits never reduce the
+                # charge).  HELIX formerly charged ``len(uncached_ids)``
+                # which let overlapping minibatches burn budget more slowly
+                # than GEPA; now charge the full minibatch width.
+                state.budget.evaluations += len(subsample_ids)
 
             if budget_exhausted(state, config):
                 _budget_break = True
@@ -1491,8 +1578,6 @@ def run_evolution(
                 _budget_break = True
                 break
 
-            state.mutation_counter += 1
-            new_id = f"g{gen}-s{state.mutation_counter}"
             proposal_contexts.append((parent, parent_frontier_result, eval_for_mutate, new_id))
             proposal_subsamples.append(subsample_ids)
             proposal_parent_mb_results.append(parent_mb_result)

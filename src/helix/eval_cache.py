@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, TypeAlias, TypeVar
 
@@ -40,11 +41,17 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
     _cache: dict[CacheKey, CachedEvaluation[RolloutOutput]] = field(
         default_factory=dict
     )
+    # Thread safety (audit-mutation §C4 / audit-budget-caching §C1): the
+    # parent-minibatch eval now runs inside a ThreadPoolExecutor (see
+    # evolution.py parent-eval parallel stage), so concurrent readers/writers
+    # can race on ``_cache``.  A single lock serialises every access.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def get(
         self, candidate: dict[str, str], example_id: DataId
     ) -> CachedEvaluation[RolloutOutput] | None:
-        return self._cache.get((_candidate_hash(candidate), example_id))
+        with self._lock:
+            return self._cache.get((_candidate_hash(candidate), example_id))
 
     def put(
         self,
@@ -54,9 +61,10 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         score: float,
         objective_scores: dict[str, float] | None = None,
     ) -> None:
-        self._cache[(_candidate_hash(candidate), example_id)] = CachedEvaluation(
-            output, score, objective_scores
-        )
+        with self._lock:
+            self._cache[(_candidate_hash(candidate), example_id)] = CachedEvaluation(
+                output, score, objective_scores
+            )
 
     def get_batch(
         self, candidate: dict[str, str], example_ids: list[DataId]
@@ -64,12 +72,13 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         h = _candidate_hash(candidate)
         cached: dict[DataId, CachedEvaluation[RolloutOutput]] = {}
         uncached: list[DataId] = []
-        for eid in example_ids:
-            entry = self._cache.get((h, eid))
-            if entry is not None:
-                cached[eid] = entry
-            else:
-                uncached.append(eid)
+        with self._lock:
+            for eid in example_ids:
+                entry = self._cache.get((h, eid))
+                if entry is not None:
+                    cached[eid] = entry
+                else:
+                    uncached.append(eid)
         TRACE.emit(
             EventType.CACHE_GET,
             candidate_id=h,
@@ -88,12 +97,13 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         objective_scores_list: list[dict[str, float]] | None = None,
     ) -> None:
         h = _candidate_hash(candidate)
-        for i, eid in enumerate(example_ids):
-            self._cache[(h, eid)] = CachedEvaluation(
-                outputs[i],
-                scores[i],
-                objective_scores_list[i] if objective_scores_list else None,
-            )
+        with self._lock:
+            for i, eid in enumerate(example_ids):
+                self._cache[(h, eid)] = CachedEvaluation(
+                    outputs[i],
+                    scores[i],
+                    objective_scores_list[i] if objective_scores_list else None,
+                )
         TRACE.emit(
             EventType.CACHE_PUT,
             candidate_id=h,
