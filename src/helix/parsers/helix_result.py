@@ -40,9 +40,11 @@ a 2-element ``[score: float, side_info: dict]`` list.
 
 Per-example side_info is a freeform dict (evaluator's own
 observability).  The executor stores the full list on
-:class:`helix.population.EvalResult.per_example_side_info` for the
-reflection prompt (actual wiring into the mutation prompt is a
-follow-up PR).
+:class:`helix.population.EvalResult.per_example_side_info`;
+:func:`helix.mutator._render_per_example_diagnostics` renders it into
+the mutation prompt's ``## Diagnostics`` section (GEPA
+``format_samples`` parity at
+``src/gepa/strategies/instruction_proposal.py:54-95``).
 
 Reserved key: ``side_info_i["scores"]``
 ---------------------------------------
@@ -95,9 +97,9 @@ def _read_helix_batch(worktree_path: str | Path) -> list[str]:
     batch_file = Path(worktree_path) / "helix_batch.json"
     if not batch_file.exists():
         raise EvaluatorError(
-            "helix_result parser requires {worktree}/helix_batch.json "
-            "to be present (HELIX writes it before every evaluator "
-            "invocation).  Make sure the evaluator runs with "
+            f"helix_result parser requires {batch_file} to be present "
+            "(HELIX writes it before every evaluator invocation).  "
+            "Make sure the evaluator runs with "
             "cwd=candidate.worktree_path.",
             operation="parse_helix_result",
             cwd=str(worktree_path),
@@ -279,11 +281,11 @@ def parse(
     if not isinstance(payload, list):
         raise EvaluatorError(
             "HELIX_RESULT= payload must be a list of per-example "
-            "[score, side_info] pairs; "
-            f"got {type(payload).__name__}.  See the "
-            "helix.parsers.helix_result module docstring for the "
-            "BREAKING change from the previous [score, side_info_dict] "
-            "shape.",
+            "entries (bare score or [score, side_info] pair, one per "
+            "id in helix_batch.json); "
+            f"got {type(payload).__name__}.  If you're migrating from "
+            "the previous ``[score: float, side_info: dict]`` contract, "
+            "see helix.parsers.helix_result for the reshape guidance.",
             operation="parse_helix_result",
             stdout=stdout,
             stderr=stderr,
@@ -357,15 +359,12 @@ def parse(
         # float to ``(score, None, {})`` — HELIX does the same here,
         # materialising ``side_info = {}`` for bare entries so the
         # downstream objective harvest is a no-op rather than a crash.
-        # Mixed bare / rich within one payload is allowed.
-        #
-        # Note on precedence: ``bool`` is a subclass of ``int`` but we
-        # only see it at this layer when an evaluator emits
-        # ``true`` / ``false`` as a bare score; route through the
-        # numeric branch below (``_coerce_score`` handles the bool
-        # ⇒ 1.0 / 0.0 coercion consistently).
+        # Mixed bare / rich within one payload is allowed.  ``bool`` is
+        # a subclass of ``int`` in Python so it already flows through
+        # the ``(int, float)`` numeric branch; ``_coerce_score`` then
+        # handles the ``True/False`` ⇒ ``1.0/0.0`` coercion.
         raw_side_info: Any
-        if isinstance(entry, bool) or isinstance(entry, (int, float)):
+        if isinstance(entry, (int, float)):
             # Bare score — empty per-example side_info.
             raw_score = entry
             raw_side_info = None

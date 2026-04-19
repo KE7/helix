@@ -345,9 +345,11 @@ def run_evaluator(
         # ``per_example_side_info`` replaces it for the reflection path.
         per_example_side_info=per_example_side_info,
         # ``objective_scores`` — per-example ``side_info["scores"]``
-        # harvest.  Feeds the multi-axis Pareto frontier; currently
-        # pass-through on EvalResult until the frontier config + state
-        # land (follow-up commits in this branch).
+        # harvest.  Feeds the multi-axis Pareto frontier
+        # (``ParetoFrontier._update_objective`` /
+        # ``_update_cartesian``) when
+        # ``config.evolution.frontier_type`` is ``"objective"``,
+        # ``"hybrid"``, or ``"cartesian"``.
         objective_scores=objective_scores,
     )
     TRACE.emit(
