@@ -284,7 +284,7 @@ val_stage_size = 0               # optional first-N val gate before full val
 
 [claude]
 model = "sonnet"                 # or "opus", "haiku", full model name
-effort = "medium"                # optional: "low" | "medium" | "high" | "max"
+effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
 allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 # background = "Only modify files under src/. Do not touch tests/ or config/."
@@ -411,7 +411,7 @@ print(json.dumps({
 --generations INT   Override max_generations
 --no-merge          Disable merge operations
 --model TEXT        Claude model (e.g. sonnet, opus, claude-sonnet-4-5)
---effort LEVEL      Reasoning effort: low | medium | high | max
+--effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
 
 ---
