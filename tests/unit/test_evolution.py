@@ -70,6 +70,7 @@ def make_config(
     cleanup_dominated: bool = False,
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 5,
+    merge_subsample_size: int = 5,
 ) -> HelixConfig:
     return HelixConfig(
         objective="Improve the code",
@@ -84,6 +85,7 @@ def make_config(
             merge_enabled=merge_enabled,
             max_merge_invocations=max_merge_invocations,
             merge_val_overlap_floor=merge_val_overlap_floor,
+            merge_subsample_size=merge_subsample_size,
         ),
         worktree=WorktreeConfig(cleanup_dominated=cleanup_dominated),
     )
@@ -521,7 +523,7 @@ class TestMergeBehavior:
             max_generations=2,  # Need 2 gens: gen 1 accepts, gen 2 fires merge
             merge_enabled=True,
             max_merge_invocations=5,
-            merge_val_overlap_floor=0,
+            merge_val_overlap_floor=1,
             max_metric_calls=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -548,7 +550,7 @@ class TestMergeBehavior:
             max_generations=1,
             merge_enabled=True,
             max_merge_invocations=5,
-            merge_val_overlap_floor=0,
+            merge_val_overlap_floor=1,
             max_metric_calls=10000,
 
         )
@@ -603,7 +605,7 @@ class TestMergeBehavior:
             max_generations=3,
             merge_enabled=True,
             max_merge_invocations=0,  # cap at zero → no merges ever
-            merge_val_overlap_floor=0,
+            merge_val_overlap_floor=1,
             convergence_patience=10,
             max_metric_calls=10000,
 
@@ -663,7 +665,7 @@ class TestMergeBehavior:
             max_generations=3,
             merge_enabled=True,
             max_merge_invocations=1,  # total lifetime cap of 1
-            merge_val_overlap_floor=0,
+            merge_val_overlap_floor=1,
             convergence_patience=10,
             max_metric_calls=10000,
         )
@@ -712,7 +714,7 @@ class TestMergeBehavior:
             max_generations=2,  # Need 2 gens: gen 1 accepts, gen 2 fires merge
             merge_enabled=True,
             max_merge_invocations=5,
-            merge_val_overlap_floor=0,
+            merge_val_overlap_floor=1,
             max_metric_calls=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -786,7 +788,11 @@ class TestMergeBehavior:
             max_generations=2,
             merge_enabled=True,
             max_merge_invocations=5,
-            merge_val_overlap_floor=0,
+            merge_val_overlap_floor=1,
+            # Cap subsample to the 2 common ids exactly so the GEPA port
+            # does not fall through to rng.choices with replacement (which
+            # would duplicate ids and change the sum math below).
+            merge_subsample_size=2,
             max_metric_calls=10000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -811,6 +817,197 @@ class TestMergeBehavior:
         ]
         assert "g2-m1" not in removed_ids, (
             f"merge should be accepted under subsample comparison; "
+            f"remove_worktree was called on: {removed_ids}"
+        )
+
+    def test_merge_subsample_size_configurable(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """evolution.merge_subsample_size caps the merge-eval batch size.
+
+        GEPA parity (merge.py:262 num_subsample_ids=5, overridable): when
+        both parents cover 10 common val ids but config sets
+        merge_subsample_size=3, the merge eval must run on exactly 3 ids
+        drawn from the 10-id intersection.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        common_ids = [str(i) for i in range(10)]
+        merged_eval_batches: list[tuple[str, ...]] = []
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            if split == "train":
+                # Gating trivially passes (child > seed on id "0").
+                if candidate.id == "g0-s0":
+                    scores = {"0": 0.1}
+                else:
+                    scores = {"0": 0.9}
+            else:
+                # Seed wins on even ids; child wins on odd ids → non-dominated.
+                if candidate.id == "g0-s0":
+                    scores = {i: (0.9 if int(i) % 2 == 0 else 0.1) for i in common_ids}
+                elif candidate.id == "g1-s1":
+                    scores = {i: (0.1 if int(i) % 2 == 0 else 0.9) for i in common_ids}
+                elif candidate.id == "g2-m1":
+                    merged_eval_batches.append(
+                        tuple(instance_ids) if instance_ids is not None else ()
+                    )
+                    scores = {i: 1.0 for i in common_ids}
+                else:
+                    scores = {"0": 0.0}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            merge_subsample_size=3,
+            max_metric_calls=10000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert merged_eval_batches, "merged candidate was never evaluated"
+        for batch in merged_eval_batches:
+            assert len(batch) == 3, (
+                f"merge eval must use exactly merge_subsample_size ids, saw {len(batch)}: {batch}"
+            )
+            assert all(b in common_ids for b in batch), (
+                f"merge subsample must be drawn from common val ids, saw: {batch}"
+            )
+
+    def test_merge_duplicate_subsample_counts_duplicates_symmetrically(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """GEPA's merge acceptance iterates the subsample list on BOTH sides.
+
+        When only 2 common val ids exist but ``merge_subsample_size=5``, the
+        GEPA port falls through to ``rng.choices(common_ids, k=remaining)``
+        (merger.select_eval_subsample_for_merged_program → GEPA
+        merge.py:286), producing a subsample with duplicate ids.  GEPA
+        (merge.py:344-345, 394-395) sums scores by iterating those
+        duplicate-bearing lists on both parents and the merged program, so
+        duplicates contribute equally to all three aggregates.
+
+        HELIX previously used ``merge_result.sum_score()`` (iterating the
+        instance_scores dict — unique keys only) on the merged side while
+        the parent sides already iterated the list, producing an
+        asymmetric comparison.  This test constructs a scenario where the
+        old (unique-counted merged) path rejects but the new
+        (duplicate-counted merged) path accepts, and asserts the merge is
+        accepted.
+
+        Intentional divergence from HELIX's usual dict-based aggregation;
+        flagged for a future ablation study (unique vs duplicate counting
+        would be an interesting knob once we have an evolution baseline).
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        merged_eval_batches: list[tuple[str, ...]] = []
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            if split == "train":
+                # Gating trivially passes (child > seed on id "1").
+                if candidate.id == "g0-s0":
+                    scores = {"1": 0.0}
+                else:
+                    scores = {"1": 1.0}
+            else:
+                # Parent-side val scores: two common ids with flipped
+                # winners so unique-counted parent sums both equal 1.0.
+                # Only 2 common ids → subsample of size 5 must fall
+                # through to rng.choices (with replacement) → duplicates.
+                if candidate.id == "g0-s0":
+                    scores = {"1": 0.0, "2": 1.0}
+                elif candidate.id == "g1-s1":
+                    scores = {"1": 1.0, "2": 0.0}
+                elif candidate.id == "g2-m1":
+                    merged_eval_batches.append(
+                        tuple(instance_ids) if instance_ids is not None else ()
+                    )
+                    # Merged scores chosen so duplicate-counted sum is
+                    # high (5.0 across any 5-item subsample) but unique
+                    # dict sum is only 2.0 — well below required_score.
+                    scores = {"1": 1.0, "2": 1.0}
+                else:
+                    scores = {"1": 0.0}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        # Default merge_subsample_size=5 triggers the fallback path here
+        # because the parents only share 2 val ids.
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            merge_subsample_size=5,
+            max_metric_calls=10000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert merged_eval_batches, "merged candidate was never evaluated"
+        batch = merged_eval_batches[0]
+        # The fallback path must have produced duplicates (5 items, ≤2 unique).
+        assert len(batch) == 5, f"expected size-5 subsample, got {batch}"
+        assert len(set(batch)) <= 2, (
+            f"fallback must produce duplicates when |common|=2, got {batch}"
+        )
+
+        # Counter-check: dup-counted and unique-counted merged sums differ.
+        merged_full = {"1": 1.0, "2": 1.0}
+        duplicate_counted = sum(merged_full[k] for k in batch)  # 5.0
+        unique_counted = sum(merged_full.values())               # 2.0
+        assert duplicate_counted != unique_counted, (
+            "test is only meaningful when the two semantics disagree: "
+            f"dup={duplicate_counted} unique={unique_counted} batch={batch}"
+        )
+
+        # Parent sums (duplicate-counted, as the acceptance code does):
+        # with any mix of "1" and "2" across 5 slots, one parent's sum
+        # is always ≥ 3 (the other's is 5 minus that).  So required_score
+        # ≥ 3 > 2.0 (unique-counted merged) but ≤ 5.0 (dup-counted merged).
+        era_scores = {"1": 0.0, "2": 1.0}
+        erb_scores = {"1": 1.0, "2": 0.0}
+        a_score = sum(era_scores[k] for k in batch)
+        b_score = sum(erb_scores[k] for k in batch)
+        required = max(a_score, b_score)
+        assert required > unique_counted, (
+            f"scenario invalid: unique-counted merged {unique_counted} "
+            f">= required {required}; old code would also accept"
+        )
+        assert duplicate_counted >= required, (
+            f"scenario invalid: dup-counted merged {duplicate_counted} "
+            f"< required {required}; new code would also reject"
+        )
+
+        # Acceptance under dup-counted math manifests as the merged
+        # candidate staying (no remove_worktree call on it).
+        removed_ids = [
+            c.args[0].id for c in all_mocks["remove_worktree"].call_args_list
+        ]
+        assert "g2-m1" not in removed_ids, (
+            f"merge must be accepted under symmetric duplicate-counted "
+            f"comparison (dup={duplicate_counted} >= required={required}); "
             f"remove_worktree was called on: {removed_ids}"
         )
 

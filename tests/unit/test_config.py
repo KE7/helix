@@ -212,6 +212,22 @@ class TestDirectModelConstruction:
         cfg = EvolutionConfig()
         assert cfg.max_generations == 10
 
+    def test_merge_subsample_size_default_is_5(self) -> None:
+        """Pin default to 5 per GEPA merge.py:262.
+
+        Changing this default without intent should be a conscious act — the
+        constant is algorithmically load-bearing (stratification math uses
+        `ceil(5/3) = 2` per bucket across 3 buckets).  An ablation study
+        would vary the config field, not the default.
+        """
+        cfg = EvolutionConfig()
+        assert cfg.merge_subsample_size == 5, (
+            "Default must match GEPA's num_subsample_ids=5 constant "
+            "(gepa/src/gepa/proposer/merge.py:262).  If you are intentionally "
+            "changing this default, update this test AND the comment in "
+            "config.py that cites the GEPA line."
+        )
+
     def test_claude_config_default_tools(self):
         cfg = ClaudeConfig()
         assert "Read" in cfg.allowed_tools

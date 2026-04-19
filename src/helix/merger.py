@@ -2,13 +2,60 @@
 
 from __future__ import annotations
 
+import math
+import random
 from pathlib import Path
+from typing import Mapping
 
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
 from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
+
+# ---------------------------------------------------------------------------
+# Merge-acceptance subsample selection (GEPA parity)
+# ---------------------------------------------------------------------------
+
+
+def select_eval_subsample_for_merged_program(
+    scores1: Mapping[str, float],
+    scores2: Mapping[str, float],
+    rng: random.Random,
+    num_subsample_ids: int = 5,
+) -> list[str]:
+    """Port of GEPA's MergeProposer.select_eval_subsample_for_merged_program
+    (gepa/src/gepa/proposer/merge.py:258-288). Stratifies the subsample
+    across ids where one parent wins, the other parent wins, or they tie,
+    then tops up from unused common ids (with-replacement fallback when
+    common ids are exhausted).
+    """
+    common_ids = list(set(scores1.keys()) & set(scores2.keys()))
+
+    p1: list[str] = [idx for idx in common_ids if scores1[idx] > scores2[idx]]
+    p2: list[str] = [idx for idx in common_ids if scores2[idx] > scores1[idx]]
+    p3: list[str] = [idx for idx in common_ids if idx not in p1 and idx not in p2]
+
+    n_each = max(1, math.ceil(num_subsample_ids / 3))
+    selected: list[str] = []
+    for bucket in (p1, p2, p3):
+        if len(selected) >= num_subsample_ids:
+            break
+        available = [idx for idx in bucket if idx not in selected]
+        take = min(len(available), n_each, num_subsample_ids - len(selected))
+        if take > 0:
+            selected += rng.sample(available, k=take)
+
+    remaining = num_subsample_ids - len(selected)
+    if remaining > 0:
+        unused = [idx for idx in common_ids if idx not in selected]
+        if len(unused) >= remaining:
+            selected += rng.sample(unused, k=remaining)
+        elif common_ids:
+            selected += rng.choices(common_ids, k=remaining)
+
+    return selected[:num_subsample_ids]
+
 
 # ---------------------------------------------------------------------------
 # Prompts
