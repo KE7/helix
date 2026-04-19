@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from helix.population import FrontierType
+
 
 # GEPA parity (audit-rng-state-persist D1):
 # GEPA core/state.py:153 declares ``_VALIDATION_SCHEMA_VERSION: ClassVar[int] = 5``
@@ -93,6 +95,15 @@ class EvolutionState:
     # the frontier.  Empty by default; populated at every accept site (seed,
     # mutation, merge) in evolution.py.
     num_metric_calls_by_discovery: dict[str, int] = field(default_factory=dict)
+    # Persisted ``evolution.frontier_type`` (GEPA ``FrontierType`` parity
+    # — ``src/gepa/core/state.py:22-23``).  Captured at evolve-time so
+    # read-only CLI commands (``helix frontier``, ``helix best``,
+    # ``helix log``) display the frontier with the SAME dimensionality
+    # the evolution run actually used — regardless of what
+    # ``helix.toml`` currently says.  Legacy states without the field
+    # fall back to ``"instance"`` (HELIX's historical single-axis
+    # default) in ``load_state``.
+    frontier_type: FrontierType = "instance"
     # GEPA parity (audit-rng-state-persist D1): persisted schema version.
     # Mirrors GEPA core/state.py:182 / class-var :153.  Bumped when the
     # serialized schema changes; ``load_state`` migrates older payloads by
@@ -141,6 +152,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "merge_description_triplets": state.merge_description_triplets,
         "i": state.i,
         "num_metric_calls_by_discovery": state.num_metric_calls_by_discovery,
+        "frontier_type": state.frontier_type,
     }
 
     # Atomic write: write to tmp file in same directory, then rename
@@ -183,6 +195,17 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         evaluations=budget_data.get("evaluations", 0),
     )
 
+    # Migrate legacy frontier_type: default to "instance" (HELIX's
+    # historical single-axis behaviour) for states written before the
+    # field existed.  Narrow the str → FrontierType via a whitelist so
+    # a corrupted state.json can't produce an invalid literal.
+    raw_frontier_type = data.get("frontier_type", "instance")
+    frontier_type: FrontierType = (
+        raw_frontier_type
+        if raw_frontier_type in ("instance", "objective", "hybrid", "cartesian")
+        else "instance"
+    )
+
     return EvolutionState(
         generation=data["generation"],
         frontier=data["frontier"],
@@ -196,6 +219,7 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         merge_description_triplets=data.get("merge_description_triplets", []),
         i=data.get("i", -1),
         num_metric_calls_by_discovery=data.get("num_metric_calls_by_discovery", {}),
+        frontier_type=frontier_type,
         schema_version=SCHEMA_VERSION,
     )
 
