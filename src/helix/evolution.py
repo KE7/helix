@@ -569,12 +569,13 @@ def _make_data_loader(path: Path | None) -> HelixDataLoader | None:
 
 
 class _RangeDataLoader:
-    """Synthetic loader for Architecture A positional-index handoff.
+    """Synthetic loader for Architecture A example-id handoff.
 
     Exposes ids ``["0", "1", ..., str(size-1)]`` — no underlying
     payload is loaded.  The evaluator (running in the worktree) is
     responsible for loading its own dataset and filtering by the
-    integer indices written to ``helix_batch.json``.
+    ids written to ``helix_batch.json`` (casting back to ``int``
+    for positional indexing if that matches its dataset layout).
     """
 
     def __init__(self, size: int) -> None:
@@ -590,16 +591,24 @@ class _RangeDataLoader:
         return self._size
 
 
-def _write_helix_batch(worktree_path: str | Path, indices: list[int]) -> None:
-    """Write positional indices to ``{worktree}/helix_batch.json``.
+def _write_helix_batch(worktree_path: str | Path, example_ids: list[str]) -> None:
+    """Write example ids to ``{worktree}/helix_batch.json``.
 
     Side-channel handoff to the evaluator (Architecture A).  The
     evaluator, when run with cwd=worktree_path, reads this file and
-    filters its dataset by the supplied indices.
+    filters its dataset by the supplied ids.
+
+    Ids are written verbatim as JSON strings; the evaluator is
+    responsible for whatever interpretation its dataset requires
+    (stringified integer indices, composite ``group__N`` task ids, etc.).
+    Historically this function coerced every id to ``int`` which made
+    structured ids like ``"cube_stack__3"`` — required by
+    :class:`helix.batch_sampler.StratifiedBatchSampler` — raise
+    ``ValueError`` at the serialization boundary.
     """
     path = Path(worktree_path) / "helix_batch.json"
     try:
-        path.write_text(json.dumps([int(i) for i in indices]))
+        path.write_text(json.dumps(list(example_ids)))
     except FileNotFoundError:
         # Worktree directory does not exist (e.g. under unit-test mocks
         # that fabricate fake paths).  Silently skip — production paths
@@ -684,9 +693,7 @@ def _cached_evaluate_batch(
         # concurrent ``write_helix_batch`` + ``run_evaluator`` on the same
         # worktree when parent-minibatch evals run in parallel.
         with _worktree_lock(candidate.worktree_path):
-            _write_helix_batch(
-                candidate.worktree_path, [int(s) for s in example_ids]
-            )
+            _write_helix_batch(candidate.worktree_path, list(example_ids))
             result = run_evaluator(
                 candidate, config, split=split, instance_ids=example_ids,
             )
@@ -707,17 +714,15 @@ def _cached_evaluate_batch(
         batch: list[str], _candidate: dict[str, str],
     ) -> tuple[list[object], list[float], list[dict[str, float]] | None]:
         # Write a REDUCED helix_batch.json containing only the uncached
-        # indices, then invoke the evaluator subprocess. Evaluators using
-        # positional-index handoff read that file from cwd and filter their
-        # own dataset to exactly these indices; run_evaluator additionally
-        # post-filters instance_scores to ``batch`` in executor.py:245.
+        # example ids, then invoke the evaluator subprocess.  Evaluators
+        # read that file from cwd and filter their own dataset to exactly
+        # these ids; run_evaluator additionally post-filters
+        # instance_scores to ``batch`` in executor.py:245.
         # Per-worktree lock: see ``_worktree_lock`` — parent-minibatch
         # parallelism (audit-mutation §C4) requires serialising the
         # ``write_helix_batch`` + ``run_evaluator`` pair on a given worktree.
         with _worktree_lock(candidate.worktree_path):
-            _write_helix_batch(
-                candidate.worktree_path, [int(s) for s in batch]
-            )
+            _write_helix_batch(candidate.worktree_path, list(batch))
             fresh = run_evaluator(
                 candidate, config, split=split, instance_ids=batch,
             )
@@ -756,7 +761,7 @@ def _cached_evaluate_batch(
 
 
 def _full_val_example_ids(config: HelixConfig) -> list[str]:
-    """Return deterministic full validation ids for positional-index evaluators."""
+    """Return deterministic full validation ids for the cardinality-only dataset."""
     val_size = config.dataset.val_size
     if val_size is None or val_size <= 0:
         return []
@@ -841,11 +846,11 @@ def run_evolution(
         if config.seedless.val_path is not None
         else train_loader
     )
-    # Architecture A (positional-index handoff): a dataset.train_size
+    # Architecture A (example-id handoff): a dataset.train_size
     # synthesises a _RangeDataLoader that yields the ids "0"…"N-1".
-    # HELIX writes these indices to {worktree}/helix_batch.json and the
-    # evaluator filters its own dataset accordingly.  dataset.val_size
-    # handles the full-valset evaluation identically.
+    # HELIX writes these ids to {worktree}/helix_batch.json as opaque
+    # strings and the evaluator filters its own dataset accordingly.
+    # dataset.val_size handles the full-valset evaluation identically.
     if (
         train_loader is None
         and config.dataset.train_size is not None
