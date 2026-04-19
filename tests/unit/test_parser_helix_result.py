@@ -247,6 +247,97 @@ class TestObjectiveScoresHarvest:
 
 
 # ---------------------------------------------------------------------------
+# GEPA O.A. union parity — bare score / rich pair / mixed
+# ---------------------------------------------------------------------------
+
+
+class TestBareAndMixedForms:
+    """Per-example entry matches GEPA O.A.'s ``tuple[float, SideInfo] | float``
+    union (``src/gepa/optimize_anything.py:971``): either a bare score or a
+    ``[score, side_info]`` pair.  Mixed within one payload is allowed."""
+
+    def test_all_bare_scores_accepted(self, tmp_path: Path) -> None:
+        """``HELIX_RESULT=[s_0, s_1, s_2]`` — all bare floats."""
+        _write_batch(tmp_path, ["a", "b", "c"])
+        line = "HELIX_RESULT=[1.0, 0.5, 0.0]"
+
+        scores, instance_scores, pesi, obj = helix_result_parse(
+            0, line + "\n", "", tmp_path
+        )
+
+        assert instance_scores == {"a": 1.0, "b": 0.5, "c": 0.0}
+        assert scores["success"] == pytest.approx(0.5)
+        # Bare scores materialise empty per-example side_info + empty harvest.
+        assert pesi == [{}, {}, {}]
+        assert obj == [{}, {}, {}]
+
+    def test_mixed_bare_and_rich_accepted(self, tmp_path: Path) -> None:
+        """Mixed within one payload.  Bare entries get empty side_info;
+        rich entries flow through verbatim."""
+        _write_batch(tmp_path, ["a", "b", "c"])
+        line = (
+            "HELIX_RESULT="
+            + json.dumps(
+                [
+                    1.0,
+                    [0.5, {"note": "middle", "scores": {"obj": 0.5}}],
+                    0.0,
+                ]
+            )
+        )
+
+        scores, instance_scores, pesi, obj = helix_result_parse(
+            0, line + "\n", "", tmp_path
+        )
+
+        assert instance_scores == {"a": 1.0, "b": 0.5, "c": 0.0}
+        assert scores["success"] == pytest.approx(0.5)
+        assert pesi == [
+            {},
+            {"note": "middle", "scores": {"obj": 0.5}},
+            {},
+        ]
+        # Objective harvest: bare → {}, rich-with-scores → extracted.
+        assert obj == [{}, {"obj": 0.5}, {}]
+
+    def test_bare_int_and_bool_scores_coerced(self, tmp_path: Path) -> None:
+        """Bare ``int`` / ``bool`` values follow the same coercion as
+        scores inside rich pairs."""
+        _write_batch(tmp_path, ["a", "b", "c", "d"])
+        line = "HELIX_RESULT=[1, 0, true, false]"
+
+        scores, instance_scores, pesi, _obj = helix_result_parse(
+            0, line + "\n", "", tmp_path
+        )
+
+        assert instance_scores == {"a": 1.0, "b": 0.0, "c": 1.0, "d": 0.0}
+        assert scores["success"] == pytest.approx(0.5)
+        assert pesi == [{}, {}, {}, {}]
+
+    def test_nonzero_returncode_zeros_bare_aggregate(
+        self, tmp_path: Path
+    ) -> None:
+        """Bare-score payload respects the same returncode semantics
+        as the rich form."""
+        _write_batch(tmp_path, ["a", "b"])
+        line = "HELIX_RESULT=[1.0, 1.0]"
+
+        scores, instance_scores, _pesi, _obj = helix_result_parse(
+            1, line + "\n", "", tmp_path
+        )
+
+        assert scores["success"] == 0.0
+        assert instance_scores == {"a": 1.0, "b": 1.0}
+
+    def test_bare_non_finite_raises(self, tmp_path: Path) -> None:
+        _write_batch(tmp_path, ["a"])
+        stdout = "HELIX_RESULT=[NaN]\n"
+
+        with pytest.raises(EvaluatorError, match="non-finite"):
+            helix_result_parse(0, stdout, "", tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Strict contract — mismatch raises EvaluatorError
 # ---------------------------------------------------------------------------
 
@@ -318,13 +409,31 @@ class TestHelixResultStrictness:
         with pytest.raises(EvaluatorError, match="per-example"):
             helix_result_parse(0, line + "\n", "", tmp_path)
 
-    def test_per_example_entry_not_a_pair_raises(self, tmp_path: Path) -> None:
-        """Each per-example entry must be a 2-element list."""
-        _write_batch(tmp_path, ["a", "b"])
-        # Second entry is a bare scalar instead of [score, side_info].
-        line = f"HELIX_RESULT={json.dumps([[1.0, {}], 0.5])}"
+    def test_per_example_entry_three_element_list_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """A 3-element list is neither a bare score nor a valid
+        [score, side_info] pair."""
+        _write_batch(tmp_path, ["a"])
+        line = f"HELIX_RESULT={json.dumps([[1.0, {}, 'extra']])}"
 
-        with pytest.raises(EvaluatorError, match="2-element"):
+        with pytest.raises(EvaluatorError, match="bare score.*2-element"):
+            helix_result_parse(0, line + "\n", "", tmp_path)
+
+    def test_per_example_entry_dict_rejected(self, tmp_path: Path) -> None:
+        """A bare dict is not a valid entry — must be bare score or
+        rich pair."""
+        _write_batch(tmp_path, ["a"])
+        line = f"HELIX_RESULT={json.dumps([{'looks': 'like a side_info'}])}"
+
+        with pytest.raises(EvaluatorError, match="bare score.*2-element"):
+            helix_result_parse(0, line + "\n", "", tmp_path)
+
+    def test_per_example_entry_string_rejected(self, tmp_path: Path) -> None:
+        _write_batch(tmp_path, ["a"])
+        line = f"HELIX_RESULT={json.dumps(['not-a-score'])}"
+
+        with pytest.raises(EvaluatorError, match="bare score.*2-element"):
             helix_result_parse(0, line + "\n", "", tmp_path)
 
     def test_per_example_side_info_non_dict_raises(self, tmp_path: Path) -> None:

@@ -242,11 +242,15 @@ rng_seed = 0
 [evaluator]
 command = "uv run python evaluate.py"
 # Available parsers: "pytest" | "exitcode" | "json_accuracy" | "json_score" | "helix_result"
-# "helix_result" takes a per-example list of [score, side_info] pairs — the
-# evaluator emits `HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ...]` positional
-# to `helix_batch.json`. HELIX zips it into id-keyed `instance_scores` and
-# stores the side_info list for the reflection prompt. GEPA `optimize_anything`
-# parity; use for minibatch runs (`dataset.train_size` set).
+# "helix_result" takes a per-example list matching GEPA optimize_anything's
+# `tuple[float, SideInfo] | float` union — each entry is either a bare
+# score or a [score, side_info] pair, mixed allowed:
+#   HELIX_RESULT=[s_0, s_1, ...]                        # all bare
+#   HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ...]        # all rich
+#   HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]           # mixed
+# Positional to `helix_batch.json`. HELIX zips it into id-keyed
+# `instance_scores` and stores the side_info list for the reflection
+# prompt. Use for minibatch runs (`dataset.train_size` set).
 score_parser = "json_score"
 include_stdout = true
 include_stderr = true
