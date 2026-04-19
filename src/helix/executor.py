@@ -314,7 +314,7 @@ def run_evaluator(
 
     # If HELIX_RESULT= provided a score, override the parser-derived aggregate
     if helix_result_score is not None:
-        scores["success"] = helix_result_score
+        scores["success"] = 0.0 if returncode != 0 else helix_result_score
 
     # Post-filter instance_scores when a subset was requested: evaluators
     # that ignore HELIX_INSTANCE_IDS will still have returned the whole
