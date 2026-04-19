@@ -317,6 +317,35 @@ class EvolutionConfig(BaseModel):
             "'cube_stack__s3' -> 'cube_stack' when separator='__')."
         ),
     )
+    frontier_type: Literal["instance", "objective", "hybrid", "cartesian"] = Field(
+        default="hybrid",
+        description=(
+            "Pareto frontier dimensionality.  Mirrors GEPA's "
+            "``FrontierType`` at ``src/gepa/core/state.py:22-23``.  Default "
+            "is ``\"hybrid\"`` to match GEPA ``optimize_anything``'s own "
+            "default at ``src/gepa/optimize_anything.py:476`` — O.A. is the "
+            "right parent for HELIX, not the base ``api.py`` path whose "
+            "default is ``\"instance\"``.\n\n"
+            "- ``\"instance\"``: one frontier key per example-id.  Matches "
+            "HELIX's historical behaviour and GEPA's ``frontier_type="
+            "\"instance\"``.\n"
+            "- ``\"objective\"``: one frontier key per objective-name, "
+            "score = mean of that objective across the valset.  Harvested "
+            "from ``side_info[\"scores\"]`` via ``helix_result``.\n"
+            "- ``\"hybrid\"``: both instance and objective frontiers "
+            "maintained; a candidate is retained if it survives on either.\n"
+            "- ``\"cartesian\"``: one frontier key per (val_id, "
+            "objective_name) pair.  Mirrors GEPA "
+            "``_update_pareto_front_for_cartesian``.\n\n"
+            "The acceptance gate stays positional on ``scores_list`` "
+            "regardless of ``frontier_type`` (GEPA ``acceptance.py:39-48``); "
+            "only the Pareto retention / parent-selection decision is "
+            "multi-axis.  Non-``instance`` paths require ``helix_result`` "
+            "to emit per-example ``side_info[\"scores\"]`` dicts — without "
+            "them the objective / cartesian frontiers stay empty and "
+            "behaviour degenerates to the instance path."
+        ),
+    )
 
     def model_post_init(self, __context: object) -> None:
         # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
