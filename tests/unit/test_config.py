@@ -69,10 +69,8 @@ class TestLoadConfig:
 
             [evolution]
             max_generations = 20
-            gating_threshold = 0.1
             perfect_score_threshold = 0.95
-            convergence_patience = 3
-            max_metric_calls = 500
+            max_evaluations = 500
             parallel_eval = false
             merge_enabled = false
             max_merge_invocations = 2
@@ -124,10 +122,8 @@ class TestLoadConfig:
 
         # EvolutionConfig defaults
         assert cfg.evolution.max_generations == 10
-        assert cfg.evolution.gating_threshold == pytest.approx(0.0)
         assert cfg.evolution.perfect_score_threshold is None
-        assert cfg.evolution.convergence_patience == 5
-        assert cfg.evolution.max_metric_calls == 200
+        assert cfg.evolution.max_evaluations == -1
         assert cfg.evolution.merge_enabled is False  # GEPA parity: off by default
         assert cfg.evolution.max_merge_invocations == 5
 
@@ -211,6 +207,22 @@ class TestDirectModelConstruction:
     def test_evolution_config_defaults(self):
         cfg = EvolutionConfig()
         assert cfg.max_generations == 10
+
+    def test_merge_subsample_size_default_is_5(self) -> None:
+        """Pin default to 5 per GEPA merge.py:262.
+
+        Changing this default without intent should be a conscious act — the
+        constant is algorithmically load-bearing (stratification math uses
+        `ceil(5/3) = 2` per bucket across 3 buckets).  An ablation study
+        would vary the config field, not the default.
+        """
+        cfg = EvolutionConfig()
+        assert cfg.merge_subsample_size == 5, (
+            "Default must match GEPA's num_subsample_ids=5 constant "
+            "(gepa/src/gepa/proposer/merge.py:262).  If you are intentionally "
+            "changing this default, update this test AND the comment in "
+            "config.py that cites the GEPA line."
+        )
 
     def test_claude_config_default_tools(self):
         cfg = ClaudeConfig()

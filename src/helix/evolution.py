@@ -9,6 +9,7 @@ import math
 import os
 import random as _random
 import shlex
+import threading
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -51,10 +52,18 @@ from helix.display import (
 from helix.exceptions import HelixError, RateLimitError, print_helix_error
 from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
-from helix.merger import merge
+from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.population import Candidate, EvalResult, ParetoFrontier
-from helix.state import BudgetState, EvaluationCache, EvolutionState, load_state, save_state
+from helix.state import (
+    BudgetState,
+    EvaluationCache,
+    EvolutionState,
+    load_eval_cache,
+    load_state,
+    save_eval_cache,
+    save_state,
+)
 from helix.trace import TRACE, EventType
 from helix.worktree import create_seed_worktree, create_empty_seed_worktree, remove_worktree, snapshot_candidate
 
@@ -162,11 +171,13 @@ class HelixProgress:
 def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
     """Return True if evaluation budget is exhausted.
 
-    GEPA parity (C1): metric_calls was dead code (never incremented but
-    checked).  Budget now uses only the ``evaluations`` counter, matching
-    GEPA's ``total_num_evals`` budget.
+    Uses only the ``evaluations`` counter (GEPA parity C1 — matches
+    GEPA's ``total_num_evals`` budget).  When ``max_evaluations`` is the
+    sentinel ``-1`` (the default), the cap is disabled and this always
+    returns False; HELIX then runs until ``max_generations`` alone.
     """
-    return state.budget.evaluations >= config.evolution.max_metric_calls
+    cap = config.evolution.max_evaluations
+    return cap > 0 and state.budget.evaluations >= cap
 
 
 def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> bool:
@@ -596,6 +607,27 @@ def _write_helix_batch(worktree_path: str | Path, indices: list[int]) -> None:
         logger.debug("worktree %s missing; skipping helix_batch.json write", worktree_path)
 
 
+# Per-worktree lock registry.  Used to serialize ``_write_helix_batch`` +
+# ``run_evaluator`` calls that share the same worktree path.  GEPA calls
+# ``adapter.evaluate`` in-process so has no file-handoff race (see GEPA
+# core/engine.py:381-452); HELIX's Architecture A writes per-batch indices
+# to ``{worktree}/helix_batch.json`` before subprocess launch, so concurrent
+# parallel parent-evals on the same worktree would clobber each other's
+# batch file.  Different worktrees may evaluate concurrently.
+_WORKTREE_LOCKS: dict[str, threading.Lock] = {}
+_WORKTREE_LOCKS_MUTEX = threading.Lock()
+
+
+def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
+    key = str(worktree_path)
+    with _WORKTREE_LOCKS_MUTEX:
+        lock = _WORKTREE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKTREE_LOCKS[key] = lock
+        return lock
+
+
 def _cached_eval(
     candidate: Candidate,
     config: HelixConfig,
@@ -642,18 +674,22 @@ def _cached_evaluate_batch(
     ``len(uncached_ids)`` return value.
     """
     # Cache keys must remain stable across re-evals of the same candidate
-    # identity, but dev/val batches must not alias when they share
+    # identity, but train/val batches must not alias when they share
     # positional ids like "0", "1", ... .
     cand_dict: dict[str, str] = {"id": candidate.id, "split": split}
 
     # Non-cached branch — mirrors GEPA state.py:628-633 verbatim.
     if cache is None:
-        _write_helix_batch(
-            candidate.worktree_path, [int(s) for s in example_ids]
-        )
-        result = run_evaluator(
-            candidate, config, split=split, instance_ids=example_ids,
-        )
+        # Per-worktree lock (see ``_worktree_lock`` docstring): serializes
+        # concurrent ``write_helix_batch`` + ``run_evaluator`` on the same
+        # worktree when parent-minibatch evals run in parallel.
+        with _worktree_lock(candidate.worktree_path):
+            _write_helix_batch(
+                candidate.worktree_path, [int(s) for s in example_ids]
+            )
+            result = run_evaluator(
+                candidate, config, split=split, instance_ids=example_ids,
+            )
         return result, len(example_ids)
 
     # Cached branch — delegate to the GEPA-parity helper on the cache
@@ -675,17 +711,30 @@ def _cached_evaluate_batch(
         # positional-index handoff read that file from cwd and filter their
         # own dataset to exactly these indices; run_evaluator additionally
         # post-filters instance_scores to ``batch`` in executor.py:245.
-        _write_helix_batch(
-            candidate.worktree_path, [int(s) for s in batch]
-        )
-        fresh = run_evaluator(
-            candidate, config, split=split, instance_ids=batch,
-        )
+        # Per-worktree lock: see ``_worktree_lock`` — parent-minibatch
+        # parallelism (audit-mutation §C4) requires serialising the
+        # ``write_helix_batch`` + ``run_evaluator`` pair on a given worktree.
+        with _worktree_lock(candidate.worktree_path):
+            _write_helix_batch(
+                candidate.worktree_path, [int(s) for s in batch]
+            )
+            fresh = run_evaluator(
+                candidate, config, split=split, instance_ids=batch,
+            )
         # HELIX does not track rollout outputs per-example; store ``None``
         # per slot (the cache's ``RolloutOutput`` type parameter is
         # ``object`` precisely for this reason — see evolution.py:536).
         outputs: list[object] = [None] * len(batch)
-        scores = [float(fresh.instance_scores.get(eid, 0.0)) for eid in batch]
+        # GEPA parity (adapter.py:154 — ``len(outputs) == len(scores) ==
+        # len(batch)``): a missing instance id is an evaluator bug, not a
+        # benign zero.  Mirrors the minibatch-acceptance and merge-gate
+        # asserts (evolution.py:1394-1411, :1838-1862).
+        missing = set(batch) - set(fresh.instance_scores)
+        assert not missing, (
+            f"Evaluator did not return scores for requested ids: "
+            f"{sorted(missing)}"
+        )
+        scores = [float(fresh.instance_scores[eid]) for eid in batch]
         return outputs, scores, None
 
     _, scores_by_id, _, num_actual_evals = cache.evaluate_with_cache_full(
@@ -850,11 +899,25 @@ def run_evolution(
     # (candidate_id, split) and used for merge / non-minibatch paths.
     # Use ``object`` for the output type parameter: HELIX only stores
     # per-(candidate, example) scores here, not rollout outputs.
+    #
+    # GEPA parity (audit-rng-state-persist C1): on resume, restore the
+    # cache contents from .helix/eval_cache.pkl when caching is enabled.
+    # Mirrors GEPA's behaviour at gepa/core/state.py:683-687
+    # (initialize_gepa_state) — when ``cache_evaluation`` is off we drop any
+    # persisted cache, when it is on we merge the on-disk dict into the
+    # fresh cache instance.  The actual persistence happens via the
+    # ``_save_state`` helper defined below, called at every existing
+    # ``save_state`` site so the cache survives crash/resume the same way
+    # GEPA's pickled state does.
     minibatch_cache: MinibatchEvalCache[object, str] | None = (
         MinibatchEvalCache[object, str]()
         if config.evolution.cache_evaluation
         else None
     )
+    if minibatch_cache is not None:
+        _persisted_cache = load_eval_cache(project_root)
+        if _persisted_cache is not None:
+            minibatch_cache._cache.update(_persisted_cache)
 
     # Acceptance criterion (GEPA §5.1).
     acceptance = (
@@ -875,6 +938,16 @@ def run_evolution(
     state = load_state(project_root)
     cfg_hash = _config_hash(config)
     evaluator_manifest = _load_evaluator_integrity_manifest(base_dir)
+
+    # GEPA parity (audit-rng-state-persist C1): bundle eval-cache persistence
+    # with state.json writes.  GEPA's single ``GEPAState.save`` call pickles
+    # the cache atomically alongside everything else (state.py:306-340); HELIX
+    # routes the (candidate_id, example_id)-keyed companion pickle through
+    # this helper so every save site stays consistent without rewriting them.
+    def _save_state(s: EvolutionState) -> None:
+        save_state(s, project_root)
+        if minibatch_cache is not None:
+            save_eval_cache(minibatch_cache._cache, project_root)
 
     if state is None:
         state = EvolutionState(
@@ -979,14 +1052,23 @@ def run_evolution(
         else:
             seed_result = run_evaluator(seed, config)
             seed_result.candidate_id = seed.id
-            _n = max(len(seed_result.instance_scores), 1)
-            state.budget.evaluations += _n
+            # GEPA parity: charge the actual number of per-instance evals,
+            # never clamp to 1.  When the evaluator returns an empty
+            # ``instance_scores`` dict GEPA charges 0 (engine.py:167 via
+            # ``state.increment_evals(num_actual_evals)``).
+            state.budget.evaluations += len(seed_result.instance_scores)
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
         state.frontier = list(frontier._candidates.keys())
         state.instance_scores[seed.id] = seed_result.instance_scores
-        save_state(state, project_root)
+        # GEPA parity (audit-rng-state-persist C/§3): record per-program
+        # discovery budget at the moment the program enters the frontier.
+        # Mirrors GEPA core/state.py:537 (``num_metric_calls_by_discovery
+        # .append(num_metric_calls_by_discovery_of_new_program)`` inside
+        # ``update_state_with_new_program``).
+        state.num_metric_calls_by_discovery[seed.id] = state.budget.evaluations
+        _save_state(state)
 
         record_entry(
             lineage_path,
@@ -1017,8 +1099,6 @@ def run_evolution(
     # ------------------------------------------------------------------
     # Generation loop
     # ------------------------------------------------------------------
-    prev_signature = frontier.signature()
-    convergence_count = 0
     start_gen = state.generation + 1
     # GEPA parity: discovery-based merge trigger.  merges_due increments
     # when a new candidate is accepted to the frontier.
@@ -1050,24 +1130,15 @@ def run_evolution(
 
     for gen in range(start_gen, config.evolution.max_generations + 1):
         state.generation = gen
+        # GEPA parity (engine.py:649): bump ``state.i`` unconditionally at
+        # the top of every iteration so the proposal counter — used by the
+        # batch sampler and as a tiebreaker elsewhere — advances regardless
+        # of which path (merge, mutation, early-exit) the iteration takes.
+        state.i += 1
         TRACE.emit(EventType.ITER_START, decision=str(gen))
 
         if budget_exhausted(state, config):
             print_warning("Budget exhausted -- stopping early.")
-            break
-
-        # Convergence check
-        sig = frontier.signature()
-        if sig == prev_signature:
-            convergence_count += 1
-        else:
-            convergence_count = 0
-            prev_signature = sig
-
-        if convergence_count >= config.evolution.convergence_patience:
-            print_warning(
-                f"Converged after {convergence_count} stagnant generations -- stopping."
-            )
             break
 
         # =============================================================
@@ -1076,6 +1147,18 @@ def run_evolution(
         # previous acceptance).  If merge fires, skip mutation entirely
         # (``continue``).  This matches GEPA core/engine.py:664-737.
         # =============================================================
+        # GEPA parity (M2 fallthrough — audit-init-engine.md B3):
+        # merge_attempted tracks whether an actual merge eval happened this
+        # iteration.  GEPA engine.py:664-741 only ``continue``s past the
+        # reflective mutation block when a merge is accepted (line 719) or
+        # rejected (line 737) — i.e. after the merged candidate has been
+        # evaluated.  All earlier fail-fast paths (<2 non-dominated, no
+        # triplet, pair already attempted, missing/insufficient val overlap,
+        # merge operator failure, evaluator-tamper pre-eval reject) fall
+        # through to reflective mutation.  HELIX previously ``continue``d
+        # on every merge-gate entry regardless of attempt outcome, cutting
+        # the effective mutation count by the merge-gate failure rate.
+        merge_attempted = False
         if (
             config.evolution.merge_enabled
             and merges_due > 0
@@ -1103,81 +1186,308 @@ def run_evolution(
             non_dominated = frontier.get_non_dominated()
             merge_candidate_ids = [cid for cid in frontier._candidates if cid in non_dominated]
 
-            # GEPA parity (L3): need >= 2 non-dominated candidates for merge.
-            # Mirrors GEPA merge.py:128-131.
-            if len(merge_candidate_ids) < 2:
-                save_state(state, project_root)
-                if not _hprog.is_active:
-                    render_budget(state.budget, config.evolution)
-                _hprog.update(gen, _frontier_best_score())
-                continue
+            # GEPA parity (L3): ``find_merge_triplet`` returns None when
+            # ``len(frontier_ids) < 2`` (lineage.py:145) without consuming
+            # rng, so the "< 2 non-dominated" fail-fast reduces to
+            # ``triplet is None`` — both paths now fall through to
+            # reflective mutation (GEPA engine.py:741-742).
+            #
+            # GEPA parity (merge-pairing audit D1, /tmp/audit_audit-merge-pairing.md:49-50):
+            # mirror GEPA ``merge.py:130-131`` — you need two siblings plus
+            # one ancestor, so fewer than 3 total candidates can never
+            # yield a valid triplet.  Kept as an explicit guard for
+            # clarity; functionally equivalent to ``find_merge_triplet``
+            # returning ``None`` in that regime.  Fall-through style
+            # (audit B3): when the gate fails we leave ``merge_attempted``
+            # False and drop into reflective mutation below.
+            triplet: tuple[str, str, str] | None
+            if len(lineage) < 3:
+                triplet = None
+            else:
+                # GEPA parity (merge-pairing audit B1/B2,
+                # /tmp/audit_audit-merge-pairing.md:10-22): push the
+                # "already-attempted pair" and "val-support overlap"
+                # filters INTO ``find_merge_triplet``'s retry loop so a
+                # blocked sample triggers resampling rather than bailing
+                # the iteration.  Mirrors GEPA
+                # ``sample_and_attempt_merge_programs_by_common_predictors``
+                # (merge.py:118-207) where the same filters are inside the
+                # ``for _ in range(max_attempts)`` loop.
+                _attempted_pairs: set[tuple[str, str]] = {
+                    (p[0], p[1]) for p in state.merge_attempted_pairs if len(p) >= 2
+                }
 
-            triplet = find_merge_triplet(
-                lineage,
-                merge_candidate_ids,
-                score_map,
-                rng=rng,
-            )
+                def _has_val_support_overlap(i: str, j: str) -> bool:
+                    era_i = frontier._results.get(i)
+                    erb_j = frontier._results.get(j)
+                    if era_i is None or erb_j is None:
+                        return False
+                    common = set(era_i.instance_scores.keys()) & set(erb_j.instance_scores.keys())
+                    return len(common) >= config.evolution.merge_val_overlap_floor
+
+                triplet = find_merge_triplet(
+                    lineage,
+                    merge_candidate_ids,
+                    score_map,
+                    rng=rng,
+                    attempted_pairs=_attempted_pairs,
+                    has_val_support_overlap=_has_val_support_overlap,
+                )
 
             if triplet is not None:
+                # GEPA parity (merge-pairing audit C3, merge.py:94-95):
+                # ``find_merge_triplet`` now returns the canonical
+                # ``(i, j)`` (lex-sorted), so ``cid_i <= cid_j`` always —
+                # the merge subprocess, attempted-pair ledger and the
+                # description-triplet dedup all see the same tuple order.
                 cid_i, cid_j, _ancestor_id = triplet
+                pair_key = [cid_i, cid_j]
 
-                # GEPA parity (Fix 12): skip merge pairs already attempted.
-                pair_key = sorted([cid_i, cid_j])
-                if pair_key in state.merge_attempted_pairs:
-                    print_warning(
-                        f"Merge pair ({cid_i}, {cid_j}) already attempted -- skipping."
+                # Resolve parent val results once; by contract the
+                # ``_has_val_support_overlap`` closure passed to
+                # ``find_merge_triplet`` guarantees era/erb are non-None
+                # and their common-id set meets the overlap floor, but we
+                # narrow for mypy and downstream asserts.
+                era = frontier._results.get(cid_i)
+                erb = frontier._results.get(cid_j)
+                assert era is not None and erb is not None, (
+                    "find_merge_triplet returned a pair that failed "
+                    "_has_val_support_overlap -- invariant violation"
+                )
+
+                state.merge_attempted_pairs.append(pair_key)
+
+                a = frontier._candidates[cid_i]
+                b = frontier._candidates[cid_j]
+
+                state.merge_counter += 1
+                merge_id = f"g{gen}-m{state.merge_counter}"
+
+                merged = merge(
+                    candidate_a=a,
+                    candidate_b=b,
+                    new_id=merge_id,
+                    config=config,
+                    base_dir=worktrees_dir,
+                    background=config.claude.background,
+                    eval_result_a=era,
+                    eval_result_b=erb,
+                )
+
+                if merged is None:
+                    # GEPA parity (M2/B3): merge operator failed before
+                    # any eval; no attempt, fall through to mutation.
+                    print_error(
+                        f"Merge {merge_id} failed "
+                        f"(candidates: {a.id} + {b.id}, gen {gen}). "
+                        f"Claude Code returned no output or the merge subprocess errored. "
+                        f"Check the HELIX ERROR panel above for full diagnostics."
                     )
                 else:
-                    # GEPA parity (L2): require merge candidates share
-                    # >= merge_val_overlap_floor common val instance IDs.
-                    # Mirrors GEPA merge.py:199-201.
-                    era = frontier._results.get(cid_i)
-                    erb = frontier._results.get(cid_j)
-                    if era is not None and erb is not None:
-                        common_val_ids = (
-                            set(era.instance_scores.keys())
-                            & set(erb.instance_scores.keys())
+                    merge_tamper = _detect_evaluator_tamper(
+                        merged, evaluator_manifest
+                    )
+                    if merge_tamper:
+                        # Evaluator-tamper reject happens PRE-eval — no
+                        # merge was attempted in the GEPA sense
+                        # (audit-init-engine.md B3).  Fall through.
+                        print_warning(
+                            f"Merge {merge_id} touched protected evaluator files "
+                            f"({', '.join(merge_tamper)}) -- rejecting."
                         )
-                        if len(common_val_ids) < config.evolution.merge_val_overlap_floor:
+                        try:
+                            remove_worktree(merged)
+                        except Exception as _rm_exc:
                             print_warning(
-                                f"Merge pair ({cid_i}, {cid_j}) has only "
-                                f"{len(common_val_ids)} common val IDs "
-                                f"(need {config.evolution.merge_val_overlap_floor}) -- skipping."
+                                f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
                             )
-                            save_state(state, project_root)
+                    else:
+                        candidates[merged.id] = merged
+                        record_entry(
+                            lineage_path,
+                            LineageEntry(
+                                id=merged.id,
+                                parent=a.id,
+                                parents=[a.id, b.id],
+                                operation="merge",
+                                generation=gen,
+                                files_changed=[],
+                            ),
+                        )
+                        # Save state BEFORE snapshot so that if the commit
+                        # crashes (e.g. empty-commit), state is already
+                        # persisted and resume can skip re-doing this merge.
+                        _save_state(state)
+                        # GEPA parity (merge-pairing audit C1,
+                        # /tmp/audit_audit-merge-pairing.md:28-31): the
+                        # HEAD SHA of the snapshotted worktree is HELIX's
+                        # port of GEPA's ``new_prog_desc`` (merge.py:195-203);
+                        # content-addressed so two different triplets that
+                        # land on the same merged output hash once and skip
+                        # the eval on the duplicate, while the same pair
+                        # with a differently-merged result is still allowed
+                        # to retry.
+                        merged_sha = snapshot_candidate(
+                            merged,
+                            f"helix: merge {merge_id} ({cid_i}+{cid_j})",
+                        )
+                        _desc_triplet = [cid_i, cid_j, merged_sha]
+                        if _desc_triplet in state.merge_description_triplets:
+                            print_warning(
+                                f"Merge {merge_id} produced a previously-seen "
+                                f"output (desc {merged_sha[:8]}) -- skipping."
+                            )
+                            try:
+                                remove_worktree(merged)
+                            except Exception as _rm_exc:
+                                print_warning(
+                                    f"Could not remove worktree for duplicate-desc merge {merge_id}: {_rm_exc}"
+                                )
+                            if merged.id in candidates:
+                                del candidates[merged.id]
+                            _save_state(state)
                             if not _hprog.is_active:
                                 render_budget(state.budget, config.evolution)
                             _hprog.update(gen, _frontier_best_score())
                             continue
-
-                    state.merge_attempted_pairs.append(pair_key)
-
-                    a = frontier._candidates[cid_i]
-                    b = frontier._candidates[cid_j]
-
-                    state.merge_counter += 1
-                    merge_id = f"g{gen}-m{state.merge_counter}"
-
-                    merged = merge(
-                        candidate_a=a,
-                        candidate_b=b,
-                        new_id=merge_id,
-                        config=config,
-                        base_dir=worktrees_dir,
-                        background=config.claude.background,
-                        eval_result_a=era,
-                        eval_result_b=erb,
-                    )
-
-                    if merged is not None:
-                        merge_tamper = _detect_evaluator_tamper(
-                            merged, evaluator_manifest
+                        state.merge_description_triplets.append(_desc_triplet)
+                        # GEPA parity (M5): merge acceptance evaluates merged on a
+                        # size-bounded stratified subsample of ids both parents have
+                        # val-scored. Subsample selection ported from GEPA
+                        # merge.py:258-288 (select_eval_subsample_for_merged_program);
+                        # default size 5 matches GEPA's hardcoded constant, overridable
+                        # via evolution.merge_subsample_size. Required score is
+                        # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
+                        merge_subsample_ids = sorted(
+                            select_eval_subsample_for_merged_program(
+                                era.instance_scores,
+                                erb.instance_scores,
+                                rng,
+                                num_subsample_ids=config.evolution.merge_subsample_size,
+                            )
                         )
-                        if merge_tamper:
+                        # GEPA parity (M2/B3): from here on, the merged
+                        # candidate is evaluated, so this iteration is
+                        # consumed (GEPA engine.py:719 on accept,
+                        # engine.py:737 on reject).  merge_attempted=True
+                        # causes the end-of-branch guard below to
+                        # ``continue`` past reflective mutation.
+                        merge_attempted = True
+                        merge_result, _merge_evals = _cached_evaluate_batch(
+                            merged, merge_subsample_ids, minibatch_cache, config, "val",
+                        )
+                        merge_result.candidate_id = merged.id
+                        state.budget.evaluations += _merge_evals
+                        _save_evaluation(base_dir, merge_result)
+
+                        # GEPA parity (Fix 13): mid-generation budget check.
+                        if budget_exhausted(state, config):
+                            print_warning("Budget exhausted mid-generation -- stopping.")
+                            _save_state(state)
+                            break
+
+                        # Merged subsample sum must be >= max of parent
+                        # subsample sums (GEPA merge.py:344-345, 394-395).
+                        # merge_subsample_ids is sorted(select_eval_subsample_for_merged_program(
+                        #   era.instance_scores, erb.instance_scores, ...))
+                        # — every sampled id is drawn from the intersection
+                        # of era.instance_scores and erb.instance_scores
+                        # (common_val_ids above).  The asserts keep the
+                        # invariant loud (GEPA merge.py:342-343).
+                        assert set(merge_subsample_ids).issubset(
+                            era.instance_scores
+                        ), (
+                            "merge_subsample_ids must be a subset of "
+                            "era.instance_scores"
+                        )
+                        a_score = sum(
+                            era.instance_scores[k] for k in merge_subsample_ids
+                        )
+                        assert set(merge_subsample_ids).issubset(
+                            erb.instance_scores
+                        ), (
+                            "merge_subsample_ids must be a subset of "
+                            "erb.instance_scores"
+                        )
+                        b_score = sum(
+                            erb.instance_scores[k] for k in merge_subsample_ids
+                        )
+                        required_score = max(a_score, b_score)
+
+                        # GEPA parity: iterate the subsample list (not the dict) so the
+                        # rng.choices fallback path (duplicate ids when |common| < size)
+                        # counts duplicates equally on both sides.  Intentional divergence
+                        # from HELIX's usual dict-based aggregation; flagged for a future
+                        # ablation study (unique-count vs duplicate-count would be an
+                        # interesting knob to vary once we have an evolution baseline).
+                        assert set(merge_subsample_ids).issubset(merge_result.instance_scores), (
+                            "merge_subsample_ids must be a subset of merge_result.instance_scores"
+                        )
+                        merge_score = sum(
+                            merge_result.instance_scores[k] for k in merge_subsample_ids
+                        )
+
+                        if merge_score >= required_score:
+                            # GEPA parity (merge-gate audit M3,
+                            # /tmp/audit_audit-merge-gate.md:10-32): after
+                            # the subsample gate passes, run a FULL-valset
+                            # eval on the merged candidate and pass THAT
+                            # result (not the 5-id subsample) to
+                            # ``frontier.add`` / ``state.instance_scores``.
+                            # Mirrors GEPA ``engine.py:688-696`` →
+                            # ``_run_full_eval_and_add`` (engine.py:175-197)
+                            # → ``_evaluate_on_valset`` (engine.py:154-173).
+                            # Without this, the merged entry carries only
+                            # subsample coverage and Pareto dominance /
+                            # ``sum_score`` comparisons skew against the
+                            # merged candidate once it is picked as a parent.
+                            # Budget accounting is via ``_cached_evaluate_batch``'s
+                            # ``num_actual_evals`` (uncached-only), mirroring
+                            # GEPA ``state.increment_evals(num_actual_evals)``
+                            # at ``engine.py:167``.
+                            if full_val_example_ids:
+                                _full_val_ids = list(full_val_example_ids)
+                                full_val_result, _full_n = _cached_evaluate_batch(
+                                    merged, _full_val_ids, minibatch_cache, config, "val",
+                                )
+                                full_val_result.candidate_id = merged.id
+                                state.budget.evaluations += _full_n
+                            else:
+                                full_val_result, _full_val_cached = _cached_eval(
+                                    merged, config, "val", eval_cache,
+                                )
+                                full_val_result.candidate_id = merged.id
+                                if not _full_val_cached:
+                                    # GEPA parity: charge the actual count
+                                    # of per-instance evals (never clamp to 1).
+                                    state.budget.evaluations += len(
+                                        full_val_result.instance_scores
+                                    )
+                            _save_evaluation(base_dir, full_val_result)
+
+                            if budget_exhausted(state, config):
+                                print_warning(
+                                    "Budget exhausted during merge full-val eval -- stopping."
+                                )
+                                _save_state(state)
+                                break
+
+                            merges_due -= 1
+                            state.total_merge_invocations += 1
+                            frontier.add(merged, full_val_result)
+                            state.frontier = list(frontier._candidates.keys())
+                            state.instance_scores[merged.id] = full_val_result.instance_scores
+                            # GEPA parity (audit-rng-state-persist C/§3):
+                            # record per-program discovery budget at the
+                            # moment the merged program enters the
+                            # frontier.  GEPA core/state.py:537.
+                            state.num_metric_calls_by_discovery[merged.id] = (
+                                state.budget.evaluations
+                            )
+                        else:
                             print_warning(
-                                f"Merge {merge_id} touched protected evaluator files "
-                                f"({', '.join(merge_tamper)}) -- rejecting."
+                                f"Merge {merge_id} score {merge_score:.4f} < "
+                                f"max parent {required_score:.4f} -- rejecting."
                             )
                             try:
                                 remove_worktree(merged)
@@ -1185,86 +1495,15 @@ def run_evolution(
                                 print_warning(
                                     f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
                                 )
-                        else:
-                            candidates[merged.id] = merged
-                            record_entry(
-                                lineage_path,
-                                LineageEntry(
-                                    id=merged.id,
-                                    parent=a.id,
-                                    parents=[a.id, b.id],
-                                    operation="merge",
-                                    generation=gen,
-                                    files_changed=[],
-                                ),
-                            )
-                            # Save state BEFORE snapshot so that if the commit
-                            # crashes (e.g. empty-commit), state is already
-                            # persisted and resume can skip re-doing this merge.
-                            save_state(state, project_root)
-                            snapshot_candidate(
-                                merged,
-                                f"helix: merge {merge_id} ({cid_i}+{cid_j})",
-                            )
-                            # GEPA parity (M5): merge acceptance uses subsample
-                            # (dev) evaluation, not full val.  Mirrors GEPA
-                            # merge.py:332-335,399 and engine.py:675-688.
-                            merge_result, _merge_cached = _cached_eval(
-                                merged, config, "dev", eval_cache,
-                            )
-                            merge_result.candidate_id = merged.id
-                            if not _merge_cached:
-                                _n = max(len(merge_result.instance_scores), 1)
-                                state.budget.evaluations += _n
-                            _save_evaluation(base_dir, merge_result)
+                            if merged.id in candidates:
+                                del candidates[merged.id]
 
-                            # GEPA parity (Fix 13): mid-generation budget check.
-                            if budget_exhausted(state, config):
-                                print_warning("Budget exhausted mid-generation -- stopping.")
-                                save_state(state, project_root)
-                                break
-
-                            # Merged score must be >= max(both parent sums).
-                            # GEPA parity (W2): use float("-inf") fallback when era/erb
-                            # is None/empty, matching GEPA's behaviour (not 0.0).
-                            a_score = era.sum_score() if era else float("-inf")
-                            b_score = erb.sum_score() if erb else float("-inf")
-                            required_score = max(a_score, b_score)
-
-                            if merge_result.sum_score() >= required_score:
-                                merges_due -= 1
-                                state.total_merge_invocations += 1
-                                frontier.add(merged, merge_result)
-                                state.frontier = list(frontier._candidates.keys())
-                                state.instance_scores[merged.id] = merge_result.instance_scores
-                            else:
-                                # GEPA parity (L4): print sum_score (not
-                                # aggregate_score / mean) since required_score
-                                # is also a sum.
-                                print_warning(
-                                    f"Merge {merge_id} score "
-                                    f"{merge_result.sum_score():.4f} < "
-                                    f"max parent {required_score:.4f} -- rejecting."
-                                )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                    )
-                                if merged.id in candidates:
-                                    del candidates[merged.id]
-                    else:
-                        print_error(
-                            f"Merge {merge_id} failed "
-                            f"(candidates: {a.id} + {b.id}, gen {gen}). "
-                            f"Claude Code returned no output or the merge subprocess errored. "
-                            f"Check the HELIX ERROR panel above for full diagnostics."
-                        )
-
-                # GEPA parity (Fix 6): merge consumed this iteration,
-                # skip mutation entirely (``continue``).
-                save_state(state, project_root)
+            # GEPA parity (M2/B3): only consume this iteration when a merge
+            # was actually evaluated (engine.py:719,737).  On any fall-through
+            # (triplet None, pair already attempted, overlap fail, merge op
+            # failure, tamper reject) we drop into reflective mutation below.
+            if merge_attempted:
+                _save_state(state)
                 if not _hprog.is_active:
                     render_budget(state.budget, config.evolution)
                 _hprog.update(gen, _frontier_best_score())
@@ -1288,17 +1527,27 @@ def run_evolution(
         # the original single-mutation path.
         # =============================================================
 
-        n_proposals = config.evolution.num_parallel_proposals
+        # GEPA parity: ``num_parallel_proposals="auto"`` is resolved to an int
+        # in ``EvolutionConfig.model_post_init`` (mirrors GEPA
+        # optimize_anything._resolve_num_parallel_proposals).  The assert both
+        # documents that invariant and narrows the type for mypy --strict.
+        _np_raw = config.evolution.num_parallel_proposals
+        assert isinstance(_np_raw, int)
+        n_proposals = _np_raw
 
-        # ---- Step 1: Pre-sample N contexts (sequential) ----
-        proposal_contexts: list[tuple[Candidate, EvalResult | None, EvalResult, str]] = []
-        # GEPA §5.1 minibatch integration: parallel lists aligned with
-        # proposal_contexts.  When the minibatch gate is active, these
-        # carry the per-proposal subsample ids and the parent's fresh
-        # minibatch result; otherwise they are all None and the legacy
-        # dev-gating path handles acceptance.
-        proposal_subsamples: list[list[str] | None] = []
-        proposal_parent_mb_results: list[EvalResult | None] = []
+        # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
+        # GEPA core/engine.py:381-452 has three stages:
+        #   1. ``prepare_proposal`` — sequential (parent select + minibatch sample)
+        #   2. ``execute_proposal`` — PARALLEL (parent eval + reflect + child eval)
+        #   3. ``apply_proposal_output`` — sequential (budget + cache write)
+        # HELIX §1a mirrors GEPA's prepare_proposal: candidate selection,
+        # ``state.i`` bump, and minibatch sampling live here.  The parent
+        # minibatch EVAL is moved out to §1b (see below) to parallelise it,
+        # matching GEPA reflective_mutation.py:268 (``eval_curr = adapter.evaluate(...)``)
+        # running inside the thread pool submitted at engine.py:422-426.
+        #
+        # Entries are tuples ``(parent, parent_frontier_result, subsample_ids, new_id)``.
+        presample_contexts: list[tuple[Candidate, EvalResult | None, list[str] | None, str]] = []
         _budget_break = False
 
         for _p_idx in range(n_proposals):
@@ -1306,40 +1555,146 @@ def run_evolution(
                 _budget_break = True
                 break
 
+            # GEPA parity (engine.py:405-410): the FIRST proposal reuses
+            # the iteration slot already created at the top of the outer
+            # loop (state.i bumped at evolution.py loop head).  For each
+            # ADDITIONAL parallel proposal, GEPA bumps state.i again so
+            # the per-proposal counter advances independently of the
+            # outer loop.  The bump is unconditional (no minibatch gate).
+            if _p_idx > 0:
+                state.i += 1
+
             parent = frontier.select_parent()
             parent_frontier_result = frontier._results.get(parent.id)
 
             # --- Minibatch gate pre-sampling (GEPA §5.1) --------------
-            # Bump state.i, sample subsample ids, run the parent on the
-            # minibatch (uncached — this is a fresh eval of the baseline
-            # candidate on the per-proposal subset).
+            # Sample subsample ids.  ``state.i`` is now advanced at the
+            # top of the run loop (GEPA engine.py:649) — and again per
+            # extra parallel proposal above (engine.py:408) — so the
+            # sampler always sees the right counter.  The parent-on-
+            # minibatch eval is deferred to §1b so that N parent evals
+            # overlap under ``num_parallel_proposals > 1``
+            # (audit-mutation §C4 MODERATE E).
             subsample_ids: list[str] | None = None
-            parent_mb_result: EvalResult | None = None
             if use_minibatch_gate and train_loader is not None and batch_sampler is not None:
-                state.i += 1
                 subsample_ids = batch_sampler.next_minibatch_ids(train_loader, state)
                 TRACE.emit(
                     EventType.SAMPLE_MINIBATCH,
                     candidate_id=parent.id,
                     example_ids=list(subsample_ids),
-                    split="dev",
+                    split="train",
                 )
-                # GEPA parity: route parent-on-minibatch through the
-                # per-example cache consumer (``cached_evaluate_full`` in
-                # gepa/core/state.py:618).  When some of this minibatch's
-                # indices are already cached for the parent, we write a
-                # REDUCED helix_batch.json and only spend budget on the
-                # uncached subset.  Fresh scores are put_batch'd back into
-                # the cache for reuse by child gating / later parent re-evals.
-                parent_mb_result, _n = _cached_evaluate_batch(
-                    parent,
-                    list(subsample_ids),
-                    minibatch_cache,
-                    config,
-                    "dev",
+
+            state.mutation_counter += 1
+            new_id = f"g{gen}-s{state.mutation_counter}"
+            presample_contexts.append((parent, parent_frontier_result, subsample_ids, new_id))
+
+        # ---- Step 1b: Parent minibatch eval (PARALLEL) ----
+        # GEPA parity (audit-mutation §C4 MODERATE E): GEPA runs
+        # ``eval_curr = self.adapter.evaluate(ctx.minibatch, ctx.curr_prog, ...)``
+        # (reflective_mutation.py:268) inside ``execute_proposal``, which
+        # engine.py:422-426 submits to a ThreadPoolExecutor so N parent evals
+        # overlap.  HELIX used to run this sequentially in the pre-sample loop
+        # (evolution.py:1406-1444 pre-fix).  Legacy no-minibatch path still
+        # runs ``_cached_eval(parent, "train")`` here because there is no
+        # per-proposal subsample to use.
+        def _eval_parent(
+            pre_ctx: tuple[Candidate, EvalResult | None, list[str] | None, str],
+        ) -> tuple[EvalResult | None, int]:
+            _parent, _pfr, _sub_ids, _new_id = pre_ctx
+            if _sub_ids is not None:
+                _mb, _n_uncached = _cached_evaluate_batch(
+                    _parent, list(_sub_ids), minibatch_cache, config, "train",
                 )
-                parent_mb_result.candidate_id = parent.id
-                state.budget.evaluations += _n
+                _mb.candidate_id = _parent.id
+                return _mb, _n_uncached
+            return None, 0
+
+        parent_eval_results: list[tuple[EvalResult | None, int]]
+        if n_proposals > 1 and len(presample_contexts) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+            parent_eval_results = [(None, 0)] * len(presample_contexts)
+            # GEPA parity: bound concurrency by ``max_workers``
+            # (optimize_anything.py:485) while preserving the "at most
+            # len(contexts)" natural cap.
+            _pe_max_workers = min(
+                len(presample_contexts), config.evolution.max_workers
+            )
+            with ThreadPoolExecutor(max_workers=_pe_max_workers) as _pe_pool:
+                _pe_future_to_idx = {
+                    _pe_pool.submit(_eval_parent, _pre_ctx): _idx
+                    for _idx, _pre_ctx in enumerate(presample_contexts)
+                }
+                for _pe_future in _as_completed(_pe_future_to_idx):
+                    _pe_idx = _pe_future_to_idx[_pe_future]
+                    # GEPA parity: engine.py:427-443 wraps future.result() so a
+                    # single evaluator exception drops only that proposal
+                    # instead of aborting the whole generation.  (HELIX does
+                    # not expose GEPA's ``on_error`` callback surface.)
+                    try:
+                        parent_eval_results[_pe_idx] = _pe_future.result()
+                    except Exception as _pe_exc:
+                        _pe_ctx = presample_contexts[_pe_idx]
+                        _pe_parent = _pe_ctx[0]
+                        _pe_new_id = _pe_ctx[3]
+                        print_warning(
+                            f"Parent eval for proposal {_pe_new_id} "
+                            f"(parent: {_pe_parent.id}, gen {gen}) failed: "
+                            f"{type(_pe_exc).__name__}: {_pe_exc} — "
+                            f"proposal slot skipped."
+                        )
+                        # Sentinel: ``_mb_result=None, n_uncached=0``.  The
+                        # §1c loop below treats ``parent_mb_result is None``
+                        # for a minibatch-gated run as a drop signal and
+                        # ``continue``s without charging budget.
+                        parent_eval_results[_pe_idx] = (None, 0)
+        else:
+            parent_eval_results = [_eval_parent(_pre_ctx) for _pre_ctx in presample_contexts]
+
+        # ---- Step 1c: Charge budget + skip-perfect (SEQUENTIAL) ----
+        # GEPA core/engine.py:361 applies deferred updates sequentially via
+        # ``apply_proposal_output``.  Here we (a) charge the minibatch size to
+        # the budget unconditionally per audit-budget-caching §C1 MODERATE H,
+        # mirroring reflective_mutation.py:269 (``total_evals +=
+        # eval_curr.num_metric_calls if not None else len(ctx.subsample_ids)``),
+        # and (b) apply the skip-perfect gate (reflective_mutation.py:308-312).
+        proposal_contexts: list[tuple[Candidate, EvalResult | None, EvalResult, str]] = []
+        proposal_subsamples: list[list[str] | None] = []
+        proposal_parent_mb_results: list[EvalResult | None] = []
+
+        for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
+            zip(presample_contexts, parent_eval_results)
+        ):
+            parent, parent_frontier_result, subsample_ids, new_id = _pre_ctx
+            parent_mb_result: EvalResult | None = _mb_result
+
+            # GEPA parity (engine.py:427-443): when the parallel parent-eval
+            # future raised, _mb_result is the None sentinel set above.  Skip
+            # the proposal just like GEPA skips on ``outputs[idx] is None``.
+            # We do NOT charge budget: the eval aborted before completing, so
+            # there is no corresponding ``num_metric_calls`` to account for
+            # (mirrors GEPA's ``total_evals`` being added inside
+            # ``execute_proposal`` only on successful evaluation).  Legacy
+            # single-task mode (``subsample_ids is None``) intentionally
+            # allows _mb_result=None and falls through to a train re-eval.
+            if subsample_ids is not None and parent_mb_result is None:
+                print_warning(
+                    f"Iteration {gen}: dropping proposal {new_id} "
+                    f"(parent {parent.id}) — parent-eval failed in §1b."
+                )
+                continue
+
+            if subsample_ids is not None:
+                # MODERATE H (audit-budget-caching §C1): GEPA charges the
+                # full minibatch size regardless of cache hit status
+                # (reflective_mutation.py:269 charges
+                # ``eval_curr.num_metric_calls if not None else
+                # len(ctx.subsample_ids)`` — the adapter.evaluate call at
+                # :268 bypasses the cache, so cache hits never reduce the
+                # charge).  HELIX formerly charged ``len(uncached_ids)``
+                # which let overlapping minibatches burn budget more slowly
+                # than GEPA; now charge the full minibatch width.
+                state.budget.evaluations += len(subsample_ids)
 
             if budget_exhausted(state, config):
                 _budget_break = True
@@ -1347,42 +1702,51 @@ def run_evolution(
 
             # GEPA parity: the eval_result passed to the mutator is the
             # parent's minibatch eval (reflective_mutation.py:268,341), not
-            # a full-train dev re-eval. HELIX previously ran a redundant
-            # _cached_eval(parent, 'dev') here, which forced evaluator-owned
+            # a full-train re-eval. HELIX previously ran a redundant
+            # _cached_eval(parent, 'train') here, which forced evaluator-owned
             # datasets to rescore the entire training split just to provide
             # prompt context. Legacy (no-minibatch) single-task mode keeps a
-            # dev eval because there is no minibatch to use.
+            # train eval because there is no minibatch to use.
             eval_for_mutate: EvalResult
             if parent_mb_result is not None:
                 eval_for_mutate = parent_mb_result
             else:
-                set_phase(HelixPhase.DEV_EVALUATION)
-                eval_for_mutate, _ = _cached_eval(parent, config, "dev", eval_cache)
+                set_phase(HelixPhase.TRAIN_EVALUATION)
+                eval_for_mutate, _ = _cached_eval(parent, config, "train", eval_cache)
                 eval_for_mutate.candidate_id = parent.id
 
-            # Skip-if-perfect (GEPA reflective_mutation.py:308-312): check
-            # the eval used for the mutator, which is the minibatch score
-            # in GEPA-parity mode or the single-task dev eval in legacy mode.
+            # Skip-if-perfect (GEPA reflective_mutation.py:308-327, audit
+            # finding M1 in audit-init-engine.md B1/B2):
+            #   * GEPA returns ProposalOutput(proposal=None) and the outer
+            #     iteration loop CONTINUES with a new parent — it does NOT
+            #     terminate the whole run.  Mirror that by ``continue``-ing
+            #     the per-proposal sampling loop (HELIX evolution.py).
+            #   * GEPA's condition is ``all(s >= perfect_score for s in
+            #     eval_curr.scores)`` (reflective_mutation.py:311) — every
+            #     per-example score must clear the bar.  HELIX previously
+            #     used the mean ``aggregate_score()``, which fires sooner
+            #     when a minibatch is [0.5, 1.0, 1.0] @ threshold=0.8.
             if (
                 config.evolution.perfect_score_threshold is not None
-                and eval_for_mutate.aggregate_score()
-                >= config.evolution.perfect_score_threshold
-            ):
-                print_success(
-                    f"Perfect score {eval_for_mutate.aggregate_score():.4f} -- stopping early."
+                and all(
+                    s >= config.evolution.perfect_score_threshold
+                    for s in eval_for_mutate.instance_scores.values()
                 )
-                _budget_break = True
-                break
+            ):
+                print_info(
+                    f"Iteration {gen}: all subsample scores perfect for "
+                    f"parent {parent.id}; skipping proposal "
+                    f"(GEPA reflective_mutation.py:308-327)."
+                )
+                continue
 
-            state.mutation_counter += 1
-            new_id = f"g{gen}-s{state.mutation_counter}"
             proposal_contexts.append((parent, parent_frontier_result, eval_for_mutate, new_id))
             proposal_subsamples.append(subsample_ids)
             proposal_parent_mb_results.append(parent_mb_result)
 
         if _budget_break and not proposal_contexts:
             print_warning("Budget exhausted mid-generation -- stopping.")
-            save_state(state, project_root)
+            _save_state(state)
             break
 
         # ---- Step 2: Execute mutations (parallel if N > 1) ----
@@ -1392,7 +1756,7 @@ def run_evolution(
             _parent, _parent_frontier_result, _eval_for_mutate, _new_id = ctx
             # GEPA parity: mutator receives the parent's minibatch eval
             # (see make_reflective_dataset(curr_prog, eval_curr, ...) in
-            # reflective_mutation.py:341), not a full-train dev re-eval.
+            # reflective_mutation.py:341), not a full-train re-eval.
             return mutate(
                 parent=_parent,
                 eval_result=_eval_for_mutate,
@@ -1406,7 +1770,13 @@ def run_evolution(
         if n_proposals > 1 and len(proposal_contexts) > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
             mutation_results = [None] * len(proposal_contexts)
-            with ThreadPoolExecutor(max_workers=len(proposal_contexts)) as pool:
+            # GEPA parity: bound concurrency by ``max_workers``
+            # (optimize_anything.py:485) while preserving the "at most
+            # len(contexts)" natural cap.
+            _mu_max_workers = min(
+                len(proposal_contexts), config.evolution.max_workers
+            )
+            with ThreadPoolExecutor(max_workers=_mu_max_workers) as pool:
                 future_to_idx = {
                     pool.submit(_do_mutate, ctx): idx
                     for idx, ctx in enumerate(proposal_contexts)
@@ -1494,18 +1864,19 @@ def run_evolution(
             # Save state BEFORE snapshot so that if the commit crashes
             # (e.g. empty-commit), state is already persisted and resume
             # can skip re-doing this mutation.
-            save_state(state, project_root)
+            _save_state(state)
             snapshot_candidate(child, f"helix: mutate {child.id}")
 
             # --- Gating evaluation ----------------------------------------
-            # Two paths here:
+            # Two paths here — both gate on GEPA's strict-sum acceptance
+            # (``acceptance.should_accept``), matching GEPA engine.py:303:
             #  (a) Minibatch gate (GEPA §5.1): when train_loader exists,
             #      run the child on the SAME subsample as the parent and
-            #      accept on strict/relaxed sum improvement over the
-            #      parent's minibatch scores.  No separate dev re-eval.
-            #  (b) Legacy dev-gating: no train_loader — preserve the
-            #      original behaviour (degrades() + strict improvement
-            #      on dev instance scores).
+            #      accept on sum improvement over the parent's minibatch
+            #      scores.  No separate train re-eval.
+            #  (b) Legacy train-gating: no train_loader — run the child
+            #      on the full train split and apply the same acceptance
+            #      criterion (GEPA parity MODERATE D — audit-mutation.md C3).
             if use_minibatch_gate and _subsample_ids is not None and _parent_mb is not None:
                 set_phase(HelixPhase.MUTATION_GATING)
                 # GEPA parity: route child-on-minibatch through the
@@ -1518,7 +1889,7 @@ def run_evolution(
                     list(_subsample_ids),
                     minibatch_cache,
                     config,
-                    "dev",
+                    "train",
                 )
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
@@ -1526,19 +1897,35 @@ def run_evolution(
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
-                    save_state(state, project_root)
+                    _save_state(state)
                     _budget_break = True
                     break
 
                 # Apply the configured acceptance criterion on the
                 # per-instance score vectors (GEPA §5.1).
+                #
+                # GEPA parity (adapter.py:154 — ``len(outputs) == len(scores)
+                # == len(batch)``): a missing instance id in the parent or
+                # child minibatch result is an evaluator bug, not a benign
+                # zero.  Both vectors must cover every id in
+                # ``_subsample_ids`` so the acceptance criterion compares
+                # like-for-like.  The merge path enforces the same invariant
+                # at evolution.py:1394-1411.
                 from types import SimpleNamespace as _SN
+                assert set(_subsample_ids).issubset(_parent_mb.instance_scores), (
+                    f"Parent minibatch eval missing ids: "
+                    f"{set(_subsample_ids) - set(_parent_mb.instance_scores)}"
+                )
                 _before = [
-                    float(_parent_mb.instance_scores.get(str(eid), 0.0))
+                    float(_parent_mb.instance_scores[str(eid)])
                     for eid in _subsample_ids
                 ]
+                assert set(_subsample_ids).issubset(gating_result.instance_scores), (
+                    f"Child minibatch eval missing ids: "
+                    f"{set(_subsample_ids) - set(gating_result.instance_scores)}"
+                )
                 _after = [
-                    float(gating_result.instance_scores.get(str(eid), 0.0))
+                    float(gating_result.instance_scores[str(eid)])
                     for eid in _subsample_ids
                 ]
                 _proposal = _SN(
@@ -1575,48 +1962,51 @@ def run_evolution(
                     )
             else:
                 set_phase(HelixPhase.MUTATION_GATING)
-                gating_result, _gating_cached = _cached_eval(child, config, "dev", eval_cache)
+                gating_result, _gating_cached = _cached_eval(child, config, "train", eval_cache)
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
-                # Legacy single-task mode still gates on dev, but the parent baseline
-                # must come from the same dev eval that was passed into the mutator,
+                # Legacy single-task mode still gates on train, but the parent baseline
+                # must come from the same train eval that was passed into the mutator,
                 # not the parent's stored val frontier result.
                 parent_acceptance_result = _eval_for_mutate
                 if not _gating_cached:
-                    _n = max(len(gating_result.instance_scores), 1)
-                    state.budget.evaluations += _n
+                    # GEPA parity: charge actual count, never clamp to 1.
+                    state.budget.evaluations += len(gating_result.instance_scores)
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
-                    save_state(state, project_root)
+                    _save_state(state)
                     _budget_break = True
                     break
 
-                if degrades(
-                    gating_result, parent_acceptance_result, config.evolution.gating_threshold
-                ):
+                # GEPA parity (MODERATE D — audit-mutation.md C3):
+                # GEPA has a single acceptance path — sum-score strict
+                # improvement on the same minibatch (engine.py:287-303,
+                # reflective_mutation.py:420).  HELIX previously ran
+                # ``degrades()`` as a pre-check in this legacy (no-minibatch)
+                # path, applying a tolerance that GEPA does not have.  The
+                # pre-check is removed so both paths now gate on the SAME
+                # criterion (``acceptance.should_accept`` = strict sum by
+                # default).  Routing through the acceptance criterion
+                # instead of the inline ``child_sum <= parent_sum`` check
+                # mirrors GEPA engine.py:303 and lets callers swap in
+                # ``ImprovementOrEqualAcceptance`` uniformly across both
+                # paths.
+                from types import SimpleNamespace as _SN
+                _legacy_before = list(
+                    parent_acceptance_result.instance_scores.values()
+                )
+                _legacy_after = list(gating_result.instance_scores.values())
+                _legacy_proposal = _SN(
+                    subsample_scores_before=_legacy_before,
+                    subsample_scores_after=_legacy_after,
+                )
+                if not acceptance.should_accept(_legacy_proposal):
+                    parent_sum = sum(_legacy_before)
+                    child_sum = sum(_legacy_after)
                     print_warning(
-                        f"Gating: {child.id} regresses "
-                        f"({gating_result.aggregate_score():.4f} < "
-                        f"{parent_acceptance_result.aggregate_score():.4f}) -- removing."
-                    )
-                    try:
-                        remove_worktree(child)
-                    except Exception as _rm_exc:
-                        print_warning(
-                            f"Could not remove worktree for gated candidate {child.id}: {_rm_exc}"
-                        )
-                    del candidates[child.id]
-                    continue
-
-                # GEPA parity (Fix 3 / W3): Strict improvement acceptance on the
-                # same dev split used for the child gating run.
-                parent_sum = sum(parent_acceptance_result.instance_scores.values())
-                child_sum = sum(gating_result.instance_scores.values())
-                if child_sum <= parent_sum:
-                    print_warning(
-                        f"Acceptance: {child.id} does not strictly improve "
-                        f"(child_sum={child_sum:.4f} <= parent_sum={parent_sum:.4f}) -- removing."
+                        f"Acceptance: {child.id} does not improve "
+                        f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
                     )
                     try:
                         remove_worktree(child)
@@ -1646,7 +2036,7 @@ def run_evolution(
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
-                    save_state(state, project_root)
+                    _save_state(state)
                     _budget_break = True
                     break
 
@@ -1722,12 +2112,12 @@ def run_evolution(
                 val_result.candidate_id = child.id
                 _last_eval_result = val_result
                 if not _val_cached:
-                    _n = max(len(val_result.instance_scores), 1)
-                    state.budget.evaluations += _n
+                    # GEPA parity: charge actual count, never clamp to 1.
+                    state.budget.evaluations += len(val_result.instance_scores)
 
             if budget_exhausted(state, config):
                 print_warning("Budget exhausted mid-generation -- stopping.")
-                save_state(state, project_root)
+                _save_state(state)
                 _budget_break = True
                 break
 
@@ -1737,6 +2127,10 @@ def run_evolution(
             frontier.add(child, val_result)
             state.frontier = list(frontier._candidates.keys())
             state.instance_scores[child.id] = val_result.instance_scores
+            # GEPA parity (audit-rng-state-persist C/§3): record per-program
+            # discovery budget at the moment the child enters the frontier.
+            # GEPA core/state.py:537.
+            state.num_metric_calls_by_discovery[child.id] = state.budget.evaluations
             TRACE.emit(
                 EventType.FRONTIER_UPDATE,
                 candidate_id=child.id,
@@ -1771,7 +2165,7 @@ def run_evolution(
         # every acceptance — the old block bypassed _cached_eval() and burned
         # budget quadratically with growing frontier size.
 
-        save_state(state, project_root)
+        _save_state(state)
         if not _hprog.is_active:
             render_budget(state.budget, config.evolution)
         _hprog.update(gen, _frontier_best_score())

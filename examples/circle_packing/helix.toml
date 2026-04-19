@@ -13,8 +13,7 @@ score_parser = "json_score"
 max_generations = 30
 merge_enabled = false
 perfect_score_threshold = 100.0
-convergence_patience = 15
-max_metric_calls = 500
+max_evaluations = 500
 max_claude_calls = 80
 
 [claude]

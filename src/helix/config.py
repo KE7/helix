@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -197,33 +198,37 @@ def load_dataset_examples(train_path: Path, max_examples: int = 3) -> list[str]:
 class EvolutionConfig(BaseModel):
     """Configuration for the evolution process.
 
-    Controls generation count, frontier management, gating thresholds,
-    mutation rates, and parallel proposal settings.
+    Controls generation count, frontier management, termination caps,
+    and parallel proposal settings.
     """
     max_generations: int = 10
-    gating_threshold: float = 0.0
     perfect_score_threshold: float | None = None
-    convergence_patience: int = 5
-    # GEPA parity: total evaluator call budget (GEPA name: max_metric_calls).
-    # Kept as a finite default (GEPA's is None/unbounded) for safety.
-    max_metric_calls: int = 200
+    # Evaluation-budget cap. `-1` (default) disables — HELIX runs until
+    # `max_generations` alone. Set to a positive int to match GEPA's
+    # budget-exhaustion termination (see GEPA core/engine.py, which uses
+    # the same evaluator-call budget the same way).
+    max_evaluations: int = -1
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False
     # Total cap on merge invocations across the entire run (not per-gen).
     max_merge_invocations: int = 5
-    # Minimum val-set overlap floor for merge candidates (0 = no floor).
+    # Minimum val-set overlap floor for merge candidates. Must be > 0
+    # (GEPA parity: merge.py:243-244 rejects val_overlap_floor <= 0).
     merge_val_overlap_floor: int = 5
-    # Probability that a selected parent undergoes mutation (1.0 = always).
-    mutation_rate: float = 1.0
+    # Number of val ids sampled for merge acceptance. Default 5 matches
+    # GEPA (merge.py:262 num_subsample_ids=5). Must be >= 1.
+    merge_subsample_size: int = 5
     # GEPA parity: number of parallel proposals per generation. When > 1,
     # sample N parents, run N mutations in parallel via ThreadPoolExecutor,
     # then accept sequentially. See GEPA core/engine.py
     # _run_parallel_reflective_batch.
-    num_parallel_proposals: int = Field(
+    num_parallel_proposals: int | Literal["auto"] = Field(
         default=1,
         description=(
             "Number of concurrent mutation proposals per iteration. "
-            "GEPA parity: EngineConfig.num_parallel_proposals."
+            "GEPA parity: EngineConfig.num_parallel_proposals. "
+            "Set to 'auto' to derive from max_workers // minibatch_size, "
+            "matching GEPA's optimize_anything._resolve_num_parallel_proposals."
         ),
     )
     minibatch_size: int = Field(
@@ -234,10 +239,13 @@ class EvolutionConfig(BaseModel):
         ),
     )
     max_workers: int = Field(
-        default=1,
+        default_factory=lambda: os.cpu_count() or 32,
         description=(
-            "Max parallel eval workers. GEPA parity: EngineConfig.max_workers "
-            "(HELIX defaults to 1 for safety)."
+            "Max parallel eval workers — bounds both the parent-eval and "
+            "mutation ThreadPools in the num_parallel_proposals pipeline. "
+            "GEPA parity: EngineConfig.max_workers "
+            "(/tmp/gepa-official/src/gepa/optimize_anything.py:485, "
+            "default os.cpu_count() or 32)."
         ),
     )
     cache_evaluation: bool = Field(
@@ -285,9 +293,28 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
+        # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
+        # ``max(1, max_workers // minibatch_size)`` once at construction
+        # time so every downstream consumer sees a plain int.  Mirrors
+        # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
+        if self.num_parallel_proposals == "auto":
+            self.num_parallel_proposals = max(
+                1, self.max_workers // max(1, self.minibatch_size)
+            )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(
                 f"evolution.val_stage_size must be >= 0 (got {self.val_stage_size})"
+            )
+        # GEPA parity (merge.py:243-244): reject non-positive overlap floors.
+        if self.merge_val_overlap_floor <= 0:
+            raise ValueError(
+                "evolution.merge_val_overlap_floor must be > 0 "
+                f"(got {self.merge_val_overlap_floor})"
+            )
+        if self.merge_subsample_size < 1:
+            raise ValueError(
+                "evolution.merge_subsample_size must be >= 1 "
+                f"(got {self.merge_subsample_size})"
             )
         # group_key_separator is only consumed by the stratified sampler;
         # validate it only on that path so default ('__') configs that use

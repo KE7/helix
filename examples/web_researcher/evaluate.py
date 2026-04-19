@@ -2,8 +2,8 @@
 Evaluator for the web_researcher agent.
 
 Loads question JSON files from the selected split directory (train/ or val/).
-HELIX passes `HELIX_SPLIT=dev|val`; this evaluator maps `dev -> train` and also
-accepts the legacy `SPLIT` env var for standalone local runs. For each question:
+HELIX passes `HELIX_SPLIT=train|val`; this evaluator also accepts the legacy
+`SPLIT` env var for standalone local runs. For each question:
   1. Resolves ground truth — tries to fetch live answer from the source URL if
      ground_truth starts with 'FETCH:', else uses the static value.
   2. Runs agent.solve(question) -> str
@@ -171,8 +171,6 @@ def answers_match(got: str, expected: str, match_mode: str) -> bool:
 def evaluate():
     requested_split = os.environ.get("HELIX_SPLIT") or os.environ.get("SPLIT", "val")
     split = requested_split.strip().lower()
-    if split == "dev":
-        split = "train"
     if split not in ("train", "val"):
         split = "val"
 
