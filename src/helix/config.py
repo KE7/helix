@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class EvaluatorConfig(BaseModel):
@@ -18,6 +18,8 @@ class EvaluatorConfig(BaseModel):
     Defines how candidates are evaluated via shell commands and how their
     results are parsed into scores.
     """
+    model_config = ConfigDict(extra="forbid")
+
     command: str
     score_parser: Literal[
         "pytest", "exitcode", "json_accuracy", "json_score", "helix_result"
@@ -50,6 +52,8 @@ class DatasetConfig(BaseModel):
     live on :class:`SeedlessConfig` — they only affect the seed-
     generation prompt and are unrelated to runtime minibatch sampling.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     train_size: int | None = Field(
         default=None,
@@ -99,6 +103,8 @@ class SeedlessConfig(BaseModel):
       included in the ``## Sample Inputs`` section of the seed prompt — exactly
       mirroring GEPA's ``_build_seed_generation_prompt(dataset=dataset[:3])``.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=False,
@@ -201,6 +207,8 @@ class EvolutionConfig(BaseModel):
     Controls generation count, frontier management, termination caps,
     and parallel proposal settings.
     """
+    model_config = ConfigDict(extra="forbid")
+
     max_generations: int = 10
     perfect_score_threshold: float | None = None
     # Evaluation-budget cap. `-1` (default) disables — HELIX runs until
@@ -333,6 +341,8 @@ class ClaudeConfig(BaseModel):
     Specifies which Claude model to use, allowed tools, effort level,
     and optional background context for mutation sessions.
     """
+    model_config = ConfigDict(extra="forbid")
+
     model: str = "sonnet"
     effort: str | None = None
     max_turns: int | None = None
@@ -347,6 +357,8 @@ class WorktreeConfig(BaseModel):
 
     Defines where candidate worktrees are created during evolution.
     """
+    model_config = ConfigDict(extra="forbid")
+
     base_dir: str = ".helix/worktrees"
     # Deprecated: GEPA uses append-only population — dominated candidates are
     # filtered at selection time, never pruned from storage.  Kept for TOML
@@ -360,6 +372,8 @@ class HelixConfig(BaseModel):
     Combines all configuration sections (objective, evaluator, dataset,
     evolution, claude, worktree) and validates compatibility constraints.
     """
+    model_config = ConfigDict(extra="forbid")
+
     objective: str
     seed: str = "."
     rng_seed: int = 0  # GEPA parity: deterministic RNG for selection

@@ -71,7 +71,6 @@ class TestLoadConfig:
             max_generations = 20
             perfect_score_threshold = 0.95
             max_evaluations = 500
-            parallel_eval = false
             merge_enabled = false
             max_merge_invocations = 2
 

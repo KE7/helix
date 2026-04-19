@@ -174,6 +174,78 @@ class TestValidationErrors:
 
 
 # ---------------------------------------------------------------------------
+# Unknown / misplaced keys are rejected (extra='forbid' on every sub-model)
+# ---------------------------------------------------------------------------
+
+class TestUnknownKeysRejected:
+    """Catch the silent-drop footgun — any key not declared on a sub-model
+    must raise a validation error instead of being quietly ignored."""
+
+    def test_misplaced_batch_sampler_under_evaluator_exits(self, tmp_path, capsys):
+        """``batch_sampler`` lives on ``[evolution]``; placing it under
+        ``[evaluator]`` used to be silently dropped by pydantic's default
+        ``extra='ignore'``, leaving users on the default ``epoch_shuffled``
+        sampler with no warning. With ``extra='forbid'`` it is now rejected."""
+        toml = write_toml(tmp_path, """
+            objective = "do something"
+
+            [evaluator]
+            command = "pytest"
+            batch_sampler = "stratified"
+
+            [evolution]
+            minibatch_size = 3
+        """)
+
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(toml)
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Configuration validation error" in captured.err
+        assert "batch_sampler" in captured.err
+
+    def test_typo_in_evolution_section_exits(self, tmp_path, capsys):
+        """Typos like ``batch_samplr`` in ``[evolution]`` must also be caught."""
+        toml = write_toml(tmp_path, """
+            objective = "do something"
+
+            [evaluator]
+            command = "pytest"
+
+            [evolution]
+            batch_samplr = "stratified"
+        """)
+
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(toml)
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Configuration validation error" in captured.err
+        assert "batch_samplr" in captured.err
+
+    def test_unknown_top_level_key_exits(self, tmp_path, capsys):
+        """Unknown keys at the root of the TOML (e.g. a stale section name) are
+        also rejected by ``HelixConfig``'s own ``extra='forbid'``."""
+        toml = write_toml(tmp_path, """
+            objective = "do something"
+            bogus_top_level = true
+
+            [evaluator]
+            command = "pytest"
+        """)
+
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(toml)
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Configuration validation error" in captured.err
+        assert "bogus_top_level" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # Valid TOML still works fine
 # ---------------------------------------------------------------------------
 
