@@ -1220,6 +1220,46 @@ class TestStrictInstanceScoresAccess:
         with pytest.raises(AssertionError, match="missing ids"):
             run_evolution(config, tmp_path, tmp_path / ".helix")
 
+    def test_missing_id_in_cached_evaluator_raises(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The cache layer (``_cached_evaluate_batch`` inner ``_evaluator``)
+        must enforce the same strict-id invariant as the acceptance path.
+        With ``cache_evaluation=True`` (default), a missing id reported by
+        the evaluator must raise before the cached scores reach the
+        acceptance criterion.  Mirrors the fix at evolution.py:730-738.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                # Drop the last requested id on EVERY eval — cache layer
+                # should raise on first occurrence.
+                dropped = list(instance_ids)[:-1]
+                return _make_result(candidate.id, {i: 0.5 for i in dropped})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_metric_calls=10_000,
+            cache_evaluation=True,
+        )
+        with pytest.raises(AssertionError, match="Evaluator did not return scores"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
 
 class TestBudgetClampRemoved:
     """GEPA parity: empty ``instance_scores`` must charge 0 (not 1).
