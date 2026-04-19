@@ -1188,93 +1188,301 @@ def run_evolution(
             # rng, so the "< 2 non-dominated" fail-fast reduces to
             # ``triplet is None`` — both paths now fall through to
             # reflective mutation (GEPA engine.py:741-742).
-            triplet = find_merge_triplet(
-                lineage,
-                merge_candidate_ids,
-                score_map,
-                rng=rng,
-            )
+            #
+            # GEPA parity (merge-pairing audit D1, /tmp/audit_audit-merge-pairing.md:49-50):
+            # mirror GEPA ``merge.py:130-131`` — you need two siblings plus
+            # one ancestor, so fewer than 3 total candidates can never
+            # yield a valid triplet.  Kept as an explicit guard for
+            # clarity; functionally equivalent to ``find_merge_triplet``
+            # returning ``None`` in that regime.  Fall-through style
+            # (audit B3): when the gate fails we leave ``merge_attempted``
+            # False and drop into reflective mutation below.
+            triplet: tuple[str, str, str] | None
+            if len(lineage) < 3:
+                triplet = None
+            else:
+                # GEPA parity (merge-pairing audit B1/B2,
+                # /tmp/audit_audit-merge-pairing.md:10-22): push the
+                # "already-attempted pair" and "val-support overlap"
+                # filters INTO ``find_merge_triplet``'s retry loop so a
+                # blocked sample triggers resampling rather than bailing
+                # the iteration.  Mirrors GEPA
+                # ``sample_and_attempt_merge_programs_by_common_predictors``
+                # (merge.py:118-207) where the same filters are inside the
+                # ``for _ in range(max_attempts)`` loop.
+                _attempted_pairs: set[tuple[str, str]] = {
+                    (p[0], p[1]) for p in state.merge_attempted_pairs if len(p) >= 2
+                }
+
+                def _has_val_support_overlap(i: str, j: str) -> bool:
+                    era_i = frontier._results.get(i)
+                    erb_j = frontier._results.get(j)
+                    if era_i is None or erb_j is None:
+                        return False
+                    common = set(era_i.instance_scores.keys()) & set(erb_j.instance_scores.keys())
+                    return len(common) >= config.evolution.merge_val_overlap_floor
+
+                triplet = find_merge_triplet(
+                    lineage,
+                    merge_candidate_ids,
+                    score_map,
+                    rng=rng,
+                    attempted_pairs=_attempted_pairs,
+                    has_val_support_overlap=_has_val_support_overlap,
+                )
 
             if triplet is not None:
+                # GEPA parity (merge-pairing audit C3, merge.py:94-95):
+                # ``find_merge_triplet`` now returns the canonical
+                # ``(i, j)`` (lex-sorted), so ``cid_i <= cid_j`` always —
+                # the merge subprocess, attempted-pair ledger and the
+                # description-triplet dedup all see the same tuple order.
                 cid_i, cid_j, _ancestor_id = triplet
-                pair_key = sorted([cid_i, cid_j])
+                pair_key = [cid_i, cid_j]
 
-                # Resolve parent val results + overlap once; GEPA parity (L2)
-                # merge.py:199-201 requires >= merge_val_overlap_floor common
-                # val instance IDs.  Pre-compute so all early-reject paths
-                # (pair already attempted, missing parent eval, insufficient
-                # overlap) share the same fall-through semantics.
+                # Resolve parent val results once; by contract the
+                # ``_has_val_support_overlap`` closure passed to
+                # ``find_merge_triplet`` guarantees era/erb are non-None
+                # and their common-id set meets the overlap floor, but we
+                # narrow for mypy and downstream asserts.
                 era = frontier._results.get(cid_i)
                 erb = frontier._results.get(cid_j)
-                common_val_ids: set[str] = set()
-                if era is not None and erb is not None:
-                    common_val_ids = (
-                        set(era.instance_scores.keys())
-                        & set(erb.instance_scores.keys())
-                    )
+                assert era is not None and erb is not None, (
+                    "find_merge_triplet returned a pair that failed "
+                    "_has_val_support_overlap -- invariant violation"
+                )
 
-                if pair_key in state.merge_attempted_pairs:
-                    # GEPA parity (Fix 12): already-attempted pair.
-                    # Fall through to reflective mutation (audit B3).
-                    print_warning(
-                        f"Merge pair ({cid_i}, {cid_j}) already attempted -- skipping."
-                    )
-                elif era is None or erb is None:
-                    # Missing parent val eval → no way to pick subsample →
-                    # no attempt.  Fall through (audit B3).
-                    print_warning(
-                        f"Merge pair ({cid_i}, {cid_j}) missing parent val "
-                        f"eval result -- skipping."
-                    )
-                elif len(common_val_ids) < config.evolution.merge_val_overlap_floor:
-                    # GEPA parity (L2): overlap floor fails → no attempt.
-                    # Fall through (audit B3; GEPA merge.py:199-201 returns
-                    # None, engine.py falls through to reflective mutation).
-                    print_warning(
-                        f"Merge pair ({cid_i}, {cid_j}) has only "
-                        f"{len(common_val_ids)} common val IDs "
-                        f"(need {config.evolution.merge_val_overlap_floor}) -- skipping."
+                state.merge_attempted_pairs.append(pair_key)
+
+                a = frontier._candidates[cid_i]
+                b = frontier._candidates[cid_j]
+
+                state.merge_counter += 1
+                merge_id = f"g{gen}-m{state.merge_counter}"
+
+                merged = merge(
+                    candidate_a=a,
+                    candidate_b=b,
+                    new_id=merge_id,
+                    config=config,
+                    base_dir=worktrees_dir,
+                    background=config.claude.background,
+                    eval_result_a=era,
+                    eval_result_b=erb,
+                )
+
+                if merged is None:
+                    # GEPA parity (M2/B3): merge operator failed before
+                    # any eval; no attempt, fall through to mutation.
+                    print_error(
+                        f"Merge {merge_id} failed "
+                        f"(candidates: {a.id} + {b.id}, gen {gen}). "
+                        f"Claude Code returned no output or the merge subprocess errored. "
+                        f"Check the HELIX ERROR panel above for full diagnostics."
                     )
                 else:
-                    state.merge_attempted_pairs.append(pair_key)
-
-                    a = frontier._candidates[cid_i]
-                    b = frontier._candidates[cid_j]
-
-                    state.merge_counter += 1
-                    merge_id = f"g{gen}-m{state.merge_counter}"
-
-                    merged = merge(
-                        candidate_a=a,
-                        candidate_b=b,
-                        new_id=merge_id,
-                        config=config,
-                        base_dir=worktrees_dir,
-                        background=config.claude.background,
-                        eval_result_a=era,
-                        eval_result_b=erb,
+                    merge_tamper = _detect_evaluator_tamper(
+                        merged, evaluator_manifest
                     )
-
-                    if merged is None:
-                        # GEPA parity (M2/B3): merge operator failed before
-                        # any eval; no attempt, fall through to mutation.
-                        print_error(
-                            f"Merge {merge_id} failed "
-                            f"(candidates: {a.id} + {b.id}, gen {gen}). "
-                            f"Claude Code returned no output or the merge subprocess errored. "
-                            f"Check the HELIX ERROR panel above for full diagnostics."
+                    if merge_tamper:
+                        # Evaluator-tamper reject happens PRE-eval — no
+                        # merge was attempted in the GEPA sense
+                        # (audit-init-engine.md B3).  Fall through.
+                        print_warning(
+                            f"Merge {merge_id} touched protected evaluator files "
+                            f"({', '.join(merge_tamper)}) -- rejecting."
                         )
-                    else:
-                        merge_tamper = _detect_evaluator_tamper(
-                            merged, evaluator_manifest
-                        )
-                        if merge_tamper:
-                            # Evaluator-tamper reject happens PRE-eval — no
-                            # merge was attempted in the GEPA sense
-                            # (audit-init-engine.md B3).  Fall through.
+                        try:
+                            remove_worktree(merged)
+                        except Exception as _rm_exc:
                             print_warning(
-                                f"Merge {merge_id} touched protected evaluator files "
-                                f"({', '.join(merge_tamper)}) -- rejecting."
+                                f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
+                            )
+                    else:
+                        candidates[merged.id] = merged
+                        record_entry(
+                            lineage_path,
+                            LineageEntry(
+                                id=merged.id,
+                                parent=a.id,
+                                parents=[a.id, b.id],
+                                operation="merge",
+                                generation=gen,
+                                files_changed=[],
+                            ),
+                        )
+                        # Save state BEFORE snapshot so that if the commit
+                        # crashes (e.g. empty-commit), state is already
+                        # persisted and resume can skip re-doing this merge.
+                        _save_state(state)
+                        # GEPA parity (merge-pairing audit C1,
+                        # /tmp/audit_audit-merge-pairing.md:28-31): the
+                        # HEAD SHA of the snapshotted worktree is HELIX's
+                        # port of GEPA's ``new_prog_desc`` (merge.py:195-203);
+                        # content-addressed so two different triplets that
+                        # land on the same merged output hash once and skip
+                        # the eval on the duplicate, while the same pair
+                        # with a differently-merged result is still allowed
+                        # to retry.
+                        merged_sha = snapshot_candidate(
+                            merged,
+                            f"helix: merge {merge_id} ({cid_i}+{cid_j})",
+                        )
+                        _desc_triplet = [cid_i, cid_j, merged_sha]
+                        if _desc_triplet in state.merge_description_triplets:
+                            print_warning(
+                                f"Merge {merge_id} produced a previously-seen "
+                                f"output (desc {merged_sha[:8]}) -- skipping."
+                            )
+                            try:
+                                remove_worktree(merged)
+                            except Exception as _rm_exc:
+                                print_warning(
+                                    f"Could not remove worktree for duplicate-desc merge {merge_id}: {_rm_exc}"
+                                )
+                            if merged.id in candidates:
+                                del candidates[merged.id]
+                            _save_state(state)
+                            if not _hprog.is_active:
+                                render_budget(state.budget, config.evolution)
+                            _hprog.update(gen, _frontier_best_score())
+                            continue
+                        state.merge_description_triplets.append(_desc_triplet)
+                        # GEPA parity (M5): merge acceptance evaluates merged on a
+                        # size-bounded stratified subsample of ids both parents have
+                        # val-scored. Subsample selection ported from GEPA
+                        # merge.py:258-288 (select_eval_subsample_for_merged_program);
+                        # default size 5 matches GEPA's hardcoded constant, overridable
+                        # via evolution.merge_subsample_size. Required score is
+                        # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
+                        merge_subsample_ids = sorted(
+                            select_eval_subsample_for_merged_program(
+                                era.instance_scores,
+                                erb.instance_scores,
+                                rng,
+                                num_subsample_ids=config.evolution.merge_subsample_size,
+                            )
+                        )
+                        # GEPA parity (M2/B3): from here on, the merged
+                        # candidate is evaluated, so this iteration is
+                        # consumed (GEPA engine.py:719 on accept,
+                        # engine.py:737 on reject).  merge_attempted=True
+                        # causes the end-of-branch guard below to
+                        # ``continue`` past reflective mutation.
+                        merge_attempted = True
+                        merge_result, _merge_evals = _cached_evaluate_batch(
+                            merged, merge_subsample_ids, minibatch_cache, config, "val",
+                        )
+                        merge_result.candidate_id = merged.id
+                        state.budget.evaluations += _merge_evals
+                        _save_evaluation(base_dir, merge_result)
+
+                        # GEPA parity (Fix 13): mid-generation budget check.
+                        if budget_exhausted(state, config):
+                            print_warning("Budget exhausted mid-generation -- stopping.")
+                            _save_state(state)
+                            break
+
+                        # Merged subsample sum must be >= max of parent
+                        # subsample sums (GEPA merge.py:344-345, 394-395).
+                        # merge_subsample_ids is sorted(select_eval_subsample_for_merged_program(
+                        #   era.instance_scores, erb.instance_scores, ...))
+                        # — every sampled id is drawn from the intersection
+                        # of era.instance_scores and erb.instance_scores
+                        # (common_val_ids above).  The asserts keep the
+                        # invariant loud (GEPA merge.py:342-343).
+                        assert set(merge_subsample_ids).issubset(
+                            era.instance_scores
+                        ), (
+                            "merge_subsample_ids must be a subset of "
+                            "era.instance_scores"
+                        )
+                        a_score = sum(
+                            era.instance_scores[k] for k in merge_subsample_ids
+                        )
+                        assert set(merge_subsample_ids).issubset(
+                            erb.instance_scores
+                        ), (
+                            "merge_subsample_ids must be a subset of "
+                            "erb.instance_scores"
+                        )
+                        b_score = sum(
+                            erb.instance_scores[k] for k in merge_subsample_ids
+                        )
+                        required_score = max(a_score, b_score)
+
+                        # GEPA parity: iterate the subsample list (not the dict) so the
+                        # rng.choices fallback path (duplicate ids when |common| < size)
+                        # counts duplicates equally on both sides.  Intentional divergence
+                        # from HELIX's usual dict-based aggregation; flagged for a future
+                        # ablation study (unique-count vs duplicate-count would be an
+                        # interesting knob to vary once we have an evolution baseline).
+                        assert set(merge_subsample_ids).issubset(merge_result.instance_scores), (
+                            "merge_subsample_ids must be a subset of merge_result.instance_scores"
+                        )
+                        merge_score = sum(
+                            merge_result.instance_scores[k] for k in merge_subsample_ids
+                        )
+
+                        if merge_score >= required_score:
+                            # GEPA parity (merge-gate audit M3,
+                            # /tmp/audit_audit-merge-gate.md:10-32): after
+                            # the subsample gate passes, run a FULL-valset
+                            # eval on the merged candidate and pass THAT
+                            # result (not the 5-id subsample) to
+                            # ``frontier.add`` / ``state.instance_scores``.
+                            # Mirrors GEPA ``engine.py:688-696`` →
+                            # ``_run_full_eval_and_add`` (engine.py:175-197)
+                            # → ``_evaluate_on_valset`` (engine.py:154-173).
+                            # Without this, the merged entry carries only
+                            # subsample coverage and Pareto dominance /
+                            # ``sum_score`` comparisons skew against the
+                            # merged candidate once it is picked as a parent.
+                            # Budget accounting is via ``_cached_evaluate_batch``'s
+                            # ``num_actual_evals`` (uncached-only), mirroring
+                            # GEPA ``state.increment_evals(num_actual_evals)``
+                            # at ``engine.py:167``.
+                            if full_val_example_ids:
+                                _full_val_ids = list(full_val_example_ids)
+                                full_val_result, _full_n = _cached_evaluate_batch(
+                                    merged, _full_val_ids, minibatch_cache, config, "val",
+                                )
+                                full_val_result.candidate_id = merged.id
+                                state.budget.evaluations += _full_n
+                            else:
+                                full_val_result, _full_val_cached = _cached_eval(
+                                    merged, config, "val", eval_cache,
+                                )
+                                full_val_result.candidate_id = merged.id
+                                if not _full_val_cached:
+                                    state.budget.evaluations += max(
+                                        len(full_val_result.instance_scores), 1
+                                    )
+                            _save_evaluation(base_dir, full_val_result)
+
+                            if budget_exhausted(state, config):
+                                print_warning(
+                                    "Budget exhausted during merge full-val eval -- stopping."
+                                )
+                                _save_state(state)
+                                break
+
+                            merges_due -= 1
+                            state.total_merge_invocations += 1
+                            frontier.add(merged, full_val_result)
+                            state.frontier = list(frontier._candidates.keys())
+                            state.instance_scores[merged.id] = full_val_result.instance_scores
+                            # GEPA parity (audit-rng-state-persist C/§3):
+                            # record per-program discovery budget at the
+                            # moment the merged program enters the
+                            # frontier.  GEPA core/state.py:537.
+                            state.num_metric_calls_by_discovery[merged.id] = (
+                                state.budget.evaluations
+                            )
+                        else:
+                            print_warning(
+                                f"Merge {merge_id} score {merge_score:.4f} < "
+                                f"max parent {required_score:.4f} -- rejecting."
                             )
                             try:
                                 remove_worktree(merged)
@@ -1282,129 +1490,8 @@ def run_evolution(
                                 print_warning(
                                     f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
                                 )
-                        else:
-                            candidates[merged.id] = merged
-                            record_entry(
-                                lineage_path,
-                                LineageEntry(
-                                    id=merged.id,
-                                    parent=a.id,
-                                    parents=[a.id, b.id],
-                                    operation="merge",
-                                    generation=gen,
-                                    files_changed=[],
-                                ),
-                            )
-                            # Save state BEFORE snapshot so that if the commit
-                            # crashes (e.g. empty-commit), state is already
-                            # persisted and resume can skip re-doing this merge.
-                            _save_state(state)
-                            snapshot_candidate(
-                                merged,
-                                f"helix: merge {merge_id} ({cid_i}+{cid_j})",
-                            )
-                            # GEPA parity (M5): merge acceptance evaluates merged on a
-                            # size-bounded stratified subsample of ids both parents have
-                            # val-scored. Subsample selection ported from GEPA
-                            # merge.py:258-288 (select_eval_subsample_for_merged_program);
-                            # default size 5 matches GEPA's hardcoded constant, overridable
-                            # via evolution.merge_subsample_size. Required score is
-                            # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
-                            merge_subsample_ids = sorted(
-                                select_eval_subsample_for_merged_program(
-                                    era.instance_scores,
-                                    erb.instance_scores,
-                                    rng,
-                                    num_subsample_ids=config.evolution.merge_subsample_size,
-                                )
-                            )
-                            # GEPA parity (M2/B3): from here on, the merged
-                            # candidate is evaluated, so this iteration is
-                            # consumed (GEPA engine.py:719 on accept,
-                            # engine.py:737 on reject).  merge_attempted=True
-                            # causes the end-of-branch guard below to
-                            # ``continue`` past reflective mutation.
-                            merge_attempted = True
-                            merge_result, _merge_evals = _cached_evaluate_batch(
-                                merged, merge_subsample_ids, minibatch_cache, config, "val",
-                            )
-                            merge_result.candidate_id = merged.id
-                            state.budget.evaluations += _merge_evals
-                            _save_evaluation(base_dir, merge_result)
-
-                            # GEPA parity (Fix 13): mid-generation budget check.
-                            if budget_exhausted(state, config):
-                                print_warning("Budget exhausted mid-generation -- stopping.")
-                                _save_state(state)
-                                break
-
-                            # Merged subsample sum must be >= max of parent
-                            # subsample sums (GEPA merge.py:344-345, 394-395).
-                            # merge_subsample_ids is sorted(select_eval_subsample_for_merged_program(
-                            #   era.instance_scores, erb.instance_scores, ...))
-                            # — every sampled id is drawn from the intersection
-                            # of era.instance_scores and erb.instance_scores
-                            # (common_val_ids above).  The asserts keep the
-                            # invariant loud (GEPA merge.py:342-343).
-                            assert set(merge_subsample_ids).issubset(
-                                era.instance_scores
-                            ), (
-                                "merge_subsample_ids must be a subset of "
-                                "era.instance_scores"
-                            )
-                            a_score = sum(
-                                era.instance_scores[k] for k in merge_subsample_ids
-                            )
-                            assert set(merge_subsample_ids).issubset(
-                                erb.instance_scores
-                            ), (
-                                "merge_subsample_ids must be a subset of "
-                                "erb.instance_scores"
-                            )
-                            b_score = sum(
-                                erb.instance_scores[k] for k in merge_subsample_ids
-                            )
-                            required_score = max(a_score, b_score)
-
-                            # GEPA parity: iterate the subsample list (not the dict) so the
-                            # rng.choices fallback path (duplicate ids when |common| < size)
-                            # counts duplicates equally on both sides.  Intentional divergence
-                            # from HELIX's usual dict-based aggregation; flagged for a future
-                            # ablation study (unique-count vs duplicate-count would be an
-                            # interesting knob to vary once we have an evolution baseline).
-                            assert set(merge_subsample_ids).issubset(merge_result.instance_scores), (
-                                "merge_subsample_ids must be a subset of merge_result.instance_scores"
-                            )
-                            merge_score = sum(
-                                merge_result.instance_scores[k] for k in merge_subsample_ids
-                            )
-
-                            if merge_score >= required_score:
-                                merges_due -= 1
-                                state.total_merge_invocations += 1
-                                frontier.add(merged, merge_result)
-                                state.frontier = list(frontier._candidates.keys())
-                                state.instance_scores[merged.id] = merge_result.instance_scores
-                                # GEPA parity (audit-rng-state-persist C/§3):
-                                # record per-program discovery budget at the
-                                # moment the merged program enters the
-                                # frontier.  GEPA core/state.py:537.
-                                state.num_metric_calls_by_discovery[merged.id] = (
-                                    state.budget.evaluations
-                                )
-                            else:
-                                print_warning(
-                                    f"Merge {merge_id} score {merge_score:.4f} < "
-                                    f"max parent {required_score:.4f} -- rejecting."
-                                )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                    )
-                                if merged.id in candidates:
-                                    del candidates[merged.id]
+                            if merged.id in candidates:
+                                del candidates[merged.id]
 
             # GEPA parity (M2/B3): only consume this iteration when a merge
             # was actually evaluated (engine.py:719,737).  On any fall-through
