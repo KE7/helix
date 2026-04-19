@@ -255,7 +255,7 @@ enabled = false
 max_generations = 20
 gating_threshold = 0.0           # minimum improvement to accept mutation
 perfect_score_threshold = 1.0    # stop early if score reaches this
-max_metric_calls = 200
+max_evaluations = -1              # evaluation budget cap (-1 = no cap)
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates

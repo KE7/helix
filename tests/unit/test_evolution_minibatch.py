@@ -69,7 +69,7 @@ def _make_minibatch_config(
     val_size: int | None = None,
     val_stage_size: int | None = None,
     max_generations: int = 1,
-    max_metric_calls: int = 1000,
+    max_evaluations: int = 1000,
     num_parallel_proposals: int = 1,
     cache_evaluation: bool = True,
     acceptance_criterion: str = "strict_improvement",
@@ -81,7 +81,7 @@ def _make_minibatch_config(
         seedless=SeedlessConfig(train_path=train_path),
         evolution=EvolutionConfig(
             max_generations=max_generations,
-            max_metric_calls=max_metric_calls,
+            max_evaluations=max_evaluations,
             perfect_score_threshold=None,
             minibatch_size=minibatch_size,
             num_parallel_proposals=num_parallel_proposals,
@@ -203,7 +203,7 @@ class TestMinibatchGateIntegration:
         all_mocks["run_evaluator"].side_effect = run_eval
 
         config = _make_minibatch_config(
-            train_path, minibatch_size=2, max_generations=1, max_metric_calls=100,
+            train_path, minibatch_size=2, max_generations=1, max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -246,7 +246,7 @@ class TestMinibatchGateIntegration:
         all_mocks["run_evaluator"].side_effect = run_eval
 
         config = _make_minibatch_config(
-            train_path, minibatch_size=2, max_generations=1, max_metric_calls=100,
+            train_path, minibatch_size=2, max_generations=1, max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -289,7 +289,7 @@ class TestMinibatchGateIntegration:
         all_mocks["run_evaluator"].side_effect = run_eval
 
         config = _make_minibatch_config(
-            train_path, minibatch_size=2, max_generations=1, max_metric_calls=100,
+            train_path, minibatch_size=2, max_generations=1, max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -337,7 +337,7 @@ class TestMinibatchGateIntegration:
             val_size=4,
             val_stage_size=2,
             max_generations=1,
-            max_metric_calls=100,
+            max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -385,7 +385,7 @@ class TestMinibatchGateIntegration:
             val_size=4,
             val_stage_size=2,
             max_generations=1,
-            max_metric_calls=100,
+            max_evaluations=100,
             cache_evaluation=True,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -437,7 +437,7 @@ class TestMinibatchGateIntegration:
             val_size=4,
             val_stage_size=None,
             max_generations=1,
-            max_metric_calls=100,
+            max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -479,7 +479,7 @@ class TestMinibatchGateIntegration:
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_metric_calls=1000,
+            max_evaluations=1000,
             num_parallel_proposals=2,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -516,7 +516,7 @@ class TestMinibatchGateIntegration:
             dataset=DatasetConfig(),  # no train_path
             evolution=EvolutionConfig(
                 max_generations=1,
-                max_metric_calls=100,
+                max_evaluations=100,
                 perfect_score_threshold=None,
             ),
             worktree=WorktreeConfig(),
@@ -560,7 +560,7 @@ class TestMinibatchGateIntegration:
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_metric_calls=100,
+            max_evaluations=100,
             cache_evaluation=True,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -591,7 +591,7 @@ class TestCachedEvaluateBatch:
             seedless=SeedlessConfig(),
             evolution=EvolutionConfig(
                 max_generations=1,
-                max_metric_calls=10,
+                max_evaluations=10,
                 perfect_score_threshold=None,
                 minibatch_size=3,
                 cache_evaluation=True,
@@ -908,7 +908,7 @@ class TestParentMinibatchParallelism:
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_metric_calls=1000,
+            max_evaluations=1000,
             num_parallel_proposals=2,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -976,7 +976,7 @@ class TestParentMinibatchBudgetCharge:
             train_path,
             minibatch_size=2,
             max_generations=2,
-            max_metric_calls=10_000,
+            max_evaluations=10_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1065,7 +1065,7 @@ class TestParentMinibatchBudgetCharge:
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_metric_calls=10_000,
+            max_evaluations=10_000,
             val_stage_size=None,  # GEPA-parity mode: no HELIX-only staged gate
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1160,7 +1160,7 @@ class TestStateIBumpUnconditional:
             train_path,
             minibatch_size=2,
             max_generations=3,
-            max_metric_calls=10_000,
+            max_evaluations=10_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1214,7 +1214,7 @@ class TestStrictInstanceScoresAccess:
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_metric_calls=10_000,
+            max_evaluations=10_000,
             cache_evaluation=False,
         )
         with pytest.raises(AssertionError, match="missing ids"):
@@ -1254,7 +1254,7 @@ class TestStrictInstanceScoresAccess:
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_metric_calls=10_000,
+            max_evaluations=10_000,
             cache_evaluation=True,
         )
         with pytest.raises(AssertionError, match="Evaluator did not return scores"):
@@ -1301,7 +1301,7 @@ class TestBudgetClampRemoved:
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
                 max_generations=1,
-                max_metric_calls=100,
+                max_evaluations=100,
                 perfect_score_threshold=None,
             ),
             worktree=WorktreeConfig(),

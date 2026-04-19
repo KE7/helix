@@ -62,7 +62,7 @@ class TestPerfectScoreContinues:
         config = make_config(
             max_generations=5,
             perfect_score_threshold=1.0,
-            max_metric_calls=100_000,
+            max_evaluations=100_000,
         )
 
         with TRACE.record() as events:
@@ -116,7 +116,7 @@ class TestPerfectScoreContinues:
         config = make_config(
             max_generations=1,
             perfect_score_threshold=0.8,
-            max_metric_calls=100_000,
+            max_evaluations=100_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -184,7 +184,7 @@ class TestMergeFallthroughToMutation:
             merge_enabled=True,
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
-            max_metric_calls=100_000,
+            max_evaluations=100_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -246,7 +246,7 @@ class TestMergeFallthroughToMutation:
             merge_enabled=True,
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
-            max_metric_calls=100_000,
+            max_evaluations=100_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -309,7 +309,7 @@ class TestLegacyGatingUsesSumOnly:
         config = make_config(
             max_generations=1,
             gating_threshold=0.0,
-            max_metric_calls=100_000,
+            max_evaluations=100_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -346,7 +346,7 @@ class TestLegacyGatingUsesSumOnly:
         config = make_config(
             max_generations=1,
             gating_threshold=-0.1,  # degrades would require strict > +0.1
-            max_metric_calls=100_000,
+            max_evaluations=100_000,
         )
         best = run_evolution(config, tmp_path, tmp_path / ".helix")
 

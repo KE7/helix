@@ -55,7 +55,7 @@ def make_config(
     seedless: bool = False,
     objective: str = "Optimise the solver",
     max_generations: int = 1,
-    max_metric_calls: int = 1000,
+    max_evaluations: int = 1000,
 ) -> HelixConfig:
     from helix.config import SeedlessConfig
 
@@ -66,7 +66,7 @@ def make_config(
         dataset=DatasetConfig(),
         evolution=EvolutionConfig(
             max_generations=max_generations,
-            max_metric_calls=max_metric_calls,
+            max_evaluations=max_evaluations,
             perfect_score_threshold=None,
         ),
         worktree=WorktreeConfig(),
