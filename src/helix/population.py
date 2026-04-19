@@ -64,6 +64,14 @@ class EvalResult:
     # ``instance_scores`` by helix_batch.json id order.  Consumed by
     # the reflection prompt in a follow-up PR.
     per_example_side_info: list[dict[str, Any]] | None = None
+    # Per-example objective-axis harvest: each slot is
+    # ``side_info_i.get("scores", {})`` filtered down to
+    # ``{str: float}`` entries.  GEPA analogue:
+    # :attr:`gepa.core.adapter.EvaluationBatch.objective_scores`
+    # (``src/gepa/core/adapter.py:26``).  Feeds the multi-axis Pareto
+    # frontier when ``evolution.frontier_type`` ∈ {"objective",
+    # "hybrid", "cartesian"}; harmless on the default "instance" path.
+    objective_scores: list[dict[str, float]] | None = None
 
     def aggregate_score(self) -> float:
         """Return mean of instance scores, or 0.0 if none."""
@@ -91,6 +99,8 @@ class EvalResult:
             d["side_info"] = self.side_info
         if self.per_example_side_info is not None:
             d["per_example_side_info"] = self.per_example_side_info
+        if self.objective_scores is not None:
+            d["objective_scores"] = self.objective_scores
         return d
 
     @classmethod
@@ -103,6 +113,7 @@ class EvalResult:
             asi=data.get("asi", {}),
             side_info=data.get("side_info"),
             per_example_side_info=data.get("per_example_side_info"),
+            objective_scores=data.get("objective_scores"),
         )
 
 

@@ -58,7 +58,9 @@ class TestHelixResultHappyPath:
         line = f"HELIX_RESULT={json.dumps(payload)}"
         stdout = f"preamble\n{line}\ntrailing\n"
 
-        scores, instance_scores, pesi = helix_result_parse(0, stdout, "", tmp_path)
+        scores, instance_scores, pesi, obj = helix_result_parse(
+            0, stdout, "", tmp_path
+        )
 
         assert instance_scores == {
             "cube_lifting__0": 1.0,
@@ -69,13 +71,15 @@ class TestHelixResultHappyPath:
         assert scores["success"] == pytest.approx(0.5)
         # Per-example side_info captured in id order (empty dicts here).
         assert pesi == [{}, {}, {}]
+        # No side_info["scores"] key → empty objective harvest per example.
+        assert obj == [{}, {}, {}]
 
     def test_success_is_mean_of_scores(self, tmp_path: Path) -> None:
         _write_batch(tmp_path, ["0", "1", "2", "3"])
         payload = _pairs([0.25, 0.5, 0.75, 1.0])
         line = f"HELIX_RESULT={json.dumps(payload)}"
 
-        scores, _is, _pesi = helix_result_parse(0, line + "\n", "", tmp_path)
+        scores, _is, _pesi, _obj = helix_result_parse(0, line + "\n", "", tmp_path)
 
         assert scores["success"] == pytest.approx(0.625)
 
@@ -85,7 +89,7 @@ class TestHelixResultHappyPath:
         payload = [[1, {}], [0, {}], [True, {}], [False, {}]]
         line = f"HELIX_RESULT={json.dumps(payload)}"
 
-        scores, instance_scores, _pesi = helix_result_parse(
+        scores, instance_scores, _pesi, _obj = helix_result_parse(
             0, line + "\n", "", tmp_path
         )
 
@@ -99,7 +103,9 @@ class TestHelixResultHappyPath:
         last = f"HELIX_RESULT={json.dumps(_pairs([0.9, 0.9]))}"
         stdout = f"{first}\n{last}\n"
 
-        scores, instance_scores, _pesi = helix_result_parse(0, stdout, "", tmp_path)
+        scores, instance_scores, _pesi, _obj = helix_result_parse(
+            0, stdout, "", tmp_path
+        )
 
         assert instance_scores == {"x": 0.9, "y": 0.9}
         assert scores["success"] == pytest.approx(0.9)
@@ -110,7 +116,7 @@ class TestHelixResultHappyPath:
         _write_batch(tmp_path, ["a", "b"])
         line = f"HELIX_RESULT={json.dumps(_pairs([1.0, 1.0]))}"
 
-        scores, instance_scores, _pesi = helix_result_parse(
+        scores, instance_scores, _pesi, _obj = helix_result_parse(
             1, line + "\n", "", tmp_path
         )
 
@@ -124,13 +130,14 @@ class TestHelixResultHappyPath:
         _write_batch(tmp_path, [])
         line = f"HELIX_RESULT={json.dumps([])}"
 
-        scores, instance_scores, pesi = helix_result_parse(
+        scores, instance_scores, pesi, obj = helix_result_parse(
             0, line + "\n", "", tmp_path
         )
 
         assert scores == {"success": 0.0}
         assert instance_scores == {}
         assert pesi == []
+        assert obj == []
 
     def test_per_example_side_info_passthrough(self, tmp_path: Path) -> None:
         """Each per-example ``side_info`` dict flows through verbatim,
@@ -142,7 +149,7 @@ class TestHelixResultHappyPath:
         payload = [[1.0, side_a], [0.0, side_b]]
         line = f"HELIX_RESULT={json.dumps(payload)}"
 
-        _s, _is, pesi = helix_result_parse(0, line + "\n", "", tmp_path)
+        _s, _is, pesi, _obj = helix_result_parse(0, line + "\n", "", tmp_path)
 
         assert pesi == [side_a, side_b]
 
@@ -154,9 +161,89 @@ class TestHelixResultHappyPath:
         # JSON null parses to Python None.
         line = 'HELIX_RESULT=[[1.0, null], [0.5, null]]'
 
-        _s, _is, pesi = helix_result_parse(0, line + "\n", "", tmp_path)
+        _s, _is, pesi, obj = helix_result_parse(0, line + "\n", "", tmp_path)
 
         assert pesi == [{}, {}]
+        assert obj == [{}, {}]
+
+
+# ---------------------------------------------------------------------------
+# Reserved side_info["scores"] → per-example objective_scores harvest
+# ---------------------------------------------------------------------------
+
+
+class TestObjectiveScoresHarvest:
+    """Mirrors GEPA's ``OptimizeAnythingAdapter._process_side_info``
+    (``optimize_anything_adapter.py:260-272``): each per-example
+    ``side_info["scores"]`` dict is harvested into the corresponding
+    slot of ``objective_scores``.  No frontier wiring yet (that's a
+    later commit in this branch); this test just pins the harvest.
+    """
+
+    def test_scores_key_harvested_per_example(self, tmp_path: Path) -> None:
+        ids = ["a", "b", "c"]
+        _write_batch(tmp_path, ids)
+        payload = [
+            [1.0, {"scores": {"obj_alpha": 0.9, "obj_beta": 0.1}}],
+            [0.5, {"scores": {"obj_alpha": 0.5}}],
+            [0.0, {"no": "scores key here"}],
+        ]
+        line = f"HELIX_RESULT={json.dumps(payload)}"
+
+        _s, _is, _pesi, obj = helix_result_parse(0, line + "\n", "", tmp_path)
+
+        assert obj == [
+            {"obj_alpha": 0.9, "obj_beta": 0.1},
+            {"obj_alpha": 0.5},
+            {},
+        ]
+
+    def test_scores_key_non_dict_ignored(self, tmp_path: Path) -> None:
+        _write_batch(tmp_path, ["a"])
+        payload = [[1.0, {"scores": "not-a-dict"}]]
+        line = f"HELIX_RESULT={json.dumps(payload)}"
+
+        _s, _is, _pesi, obj = helix_result_parse(0, line + "\n", "", tmp_path)
+
+        assert obj == [{}]
+
+    def test_scores_drops_non_numeric_and_non_finite(self, tmp_path: Path) -> None:
+        _write_batch(tmp_path, ["a"])
+        # Hand-rolled JSON to smuggle NaN / Infinity past json.dumps.
+        stdout = (
+            'HELIX_RESULT=[[1.0, {"scores": '
+            '{"good": 0.5, "bad_str": "nope", "nan": NaN, "inf": Infinity}}]]\n'
+        )
+
+        _s, _is, _pesi, obj = helix_result_parse(0, stdout, "", tmp_path)
+
+        assert obj == [{"good": 0.5}]
+
+    def test_scores_harvest_coerces_bool_and_int(self, tmp_path: Path) -> None:
+        _write_batch(tmp_path, ["a"])
+        payload = [
+            [1.0, {"scores": {"bool_true": True, "bool_false": False, "int_one": 1}}]
+        ]
+        line = f"HELIX_RESULT={json.dumps(payload)}"
+
+        _s, _is, _pesi, obj = helix_result_parse(0, line + "\n", "", tmp_path)
+
+        assert obj == [{"bool_true": 1.0, "bool_false": 0.0, "int_one": 1.0}]
+
+    def test_side_info_scores_preserved_alongside_harvest(
+        self, tmp_path: Path
+    ) -> None:
+        """The harvest does not strip ``side_info["scores"]`` from the
+        per-example side_info — it still flows through for reflection."""
+        _write_batch(tmp_path, ["a"])
+        side_info = {"trajectory": "ok", "scores": {"latency_ms": 42.0}}
+        payload = [[1.0, side_info]]
+        line = f"HELIX_RESULT={json.dumps(payload)}"
+
+        _s, _is, pesi, obj = helix_result_parse(0, line + "\n", "", tmp_path)
+
+        assert pesi == [side_info]
+        assert obj == [{"latency_ms": 42.0}]
 
 
 # ---------------------------------------------------------------------------

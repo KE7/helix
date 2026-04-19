@@ -260,12 +260,14 @@ def run_evaluator(
                     "Expected exactly one."
                 )
 
-    # Parse scores.  ``helix_result`` returns a 3-tuple including
-    # ``per_example_side_info`` (GEPA O.A. evaluator contract: one
-    # ``(score, side_info)`` pair per example).  All other parsers
-    # return the 2-tuple ``(scores, instance_scores)``.
+    # Parse scores.  ``helix_result`` returns a 4-tuple with per-example
+    # side_info (GEPA O.A. evaluator contract: one ``(score, side_info)``
+    # pair per example) and the per-example ``objective_scores`` harvest
+    # from ``side_info["scores"]``.  All other parsers return the
+    # 2-tuple ``(scores, instance_scores)``.
     parser = get_parser(evaluator.score_parser)
     per_example_side_info: list[dict[str, Any]] | None = None
+    objective_scores: list[dict[str, float]] | None = None
 
     if evaluator.score_parser == "pytest":
         scores, instance_scores = parser(stdout, stderr)
@@ -273,9 +275,12 @@ def run_evaluator(
         # helix_result reads ``{worktree}/helix_batch.json`` to recover
         # the id list HELIX wrote pre-invocation and zips it with the
         # per-example ``[score, side_info]`` payload on stdout.
-        scores, instance_scores, per_example_side_info = parser(
-            returncode, stdout, stderr, candidate.worktree_path,
-        )
+        (
+            scores,
+            instance_scores,
+            per_example_side_info,
+            objective_scores,
+        ) = parser(returncode, stdout, stderr, candidate.worktree_path)
     else:
         # exitcode, json_accuracy, and other parsers take (returncode, stdout, stderr)
         scores, instance_scores = parser(returncode, stdout, stderr)
@@ -330,6 +335,11 @@ def run_evaluator(
         # by the executor.  The per-example list in
         # ``per_example_side_info`` replaces it for the reflection path.
         per_example_side_info=per_example_side_info,
+        # ``objective_scores`` — per-example ``side_info["scores"]``
+        # harvest.  Feeds the multi-axis Pareto frontier; currently
+        # pass-through on EvalResult until the frontier config + state
+        # land (follow-up commits in this branch).
+        objective_scores=objective_scores,
     )
     TRACE.emit(
         EventType.EVAL_END,

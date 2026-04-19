@@ -111,8 +111,43 @@ class TestHelixResultParsing:
         assert result.scores["success"] == pytest.approx(0.5)
         # Per-example side_info captured in id order.
         assert result.per_example_side_info == side_infos
+        # No side_info["scores"] → empty objective harvest per example.
+        assert result.objective_scores == [{}, {}, {}]
         # Legacy batch-level side_info is not populated by this parser.
         assert result.side_info is None
+
+    @patch("helix.executor.subprocess.run")
+    def test_side_info_scores_harvested_into_objective_scores(
+        self, mock_run, tmp_path: Path
+    ):
+        """The reserved ``side_info["scores"]`` key is harvested
+        per-example into ``EvalResult.objective_scores`` — GEPA
+        ``EvaluationBatch.objective_scores`` parity.  No frontier
+        wiring this commit; just pass-through onto EvalResult."""
+        ids = ["task__0", "task__1"]
+        _write_batch(tmp_path, ids)
+        payload = [
+            [1.0, {"trajectory": "ok", "scores": {"latency_ms": 42.0, "cost": 0.01}}],
+            [0.5, {"trajectory": "slow", "scores": {"latency_ms": 120.0}}],
+        ]
+        helix_line = f"HELIX_RESULT={json.dumps(payload)}"
+        mock_run.return_value = _mock_subprocess_result(
+            helix_line + "\n", returncode=0,
+        )
+
+        result = run_evaluator(make_candidate(tmp_path), make_config(), split="val")
+
+        assert result.objective_scores == [
+            {"latency_ms": 42.0, "cost": 0.01},
+            {"latency_ms": 120.0},
+        ]
+        # Per-example side_info still carries the full raw dict —
+        # "scores" is harvested, not stripped.
+        assert result.per_example_side_info is not None
+        assert result.per_example_side_info[0]["trajectory"] == "ok"
+        assert result.per_example_side_info[0]["scores"] == {
+            "latency_ms": 42.0, "cost": 0.01,
+        }
 
     @patch("helix.executor.subprocess.run")
     def test_missing_helix_result_raises_evaluator_error(
@@ -287,21 +322,26 @@ class TestEvalResultSerialization:
         )
         d = er.to_dict()
         assert "side_info" not in d
-        # New per-example field is also omitted when None.
+        # New per-example fields are also omitted when None.
         assert "per_example_side_info" not in d
+        assert "objective_scores" not in d
         er2 = EvalResult.from_dict(d)
         assert er2.side_info is None
         assert er2.per_example_side_info is None
+        assert er2.objective_scores is None
 
-    def test_round_trip_with_per_example_side_info(self):
+    def test_round_trip_with_per_example_fields(self):
         er = EvalResult(
             candidate_id="c1",
             scores={"success": 0.5},
             asi={},
             instance_scores={"a": 1.0, "b": 0.0},
             per_example_side_info=[{"traj": "A"}, {"traj": "B"}],
+            objective_scores=[{"latency": 42.0}, {"latency": 99.0}],
         )
         d = er.to_dict()
         assert d["per_example_side_info"] == [{"traj": "A"}, {"traj": "B"}]
+        assert d["objective_scores"] == [{"latency": 42.0}, {"latency": 99.0}]
         er2 = EvalResult.from_dict(d)
         assert er2.per_example_side_info == [{"traj": "A"}, {"traj": "B"}]
+        assert er2.objective_scores == [{"latency": 42.0}, {"latency": 99.0}]

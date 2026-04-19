@@ -38,6 +38,19 @@ observability).  The executor stores the full list on
 reflection prompt (actual wiring into the mutation prompt is a
 follow-up PR).
 
+Reserved key: ``side_info_i["scores"]``
+---------------------------------------
+Mirrors GEPA's ``OptimizeAnythingAdapter._process_side_info``
+(``optimize_anything_adapter.py:260-272``).  When a per-example
+``side_info_i["scores"]`` is a dict of ``{objective_name: float}``,
+HELIX harvests it into the corresponding slot of
+:attr:`helix.population.EvalResult.objective_scores`
+(``list[dict[str, float]]`` positional to the ids).  That axis feeds
+the multi-axis Pareto frontier when ``evolution.frontier_type`` is
+``"objective"``, ``"hybrid"``, or ``"cartesian"`` (wired in a later
+commit).  No consumer in this commit; the harvest is strictly pass-
+through on :class:`EvalResult`.
+
 Aggregate
 ---------
 * ``instance_scores = dict(zip(ids, [p[0] for p in payload]))`` —
@@ -115,6 +128,34 @@ def _extract_helix_result_line(stdout: str) -> str | None:
     return None
 
 
+def _harvest_objective_scores(side_info: dict[str, Any]) -> dict[str, float]:
+    """Extract ``side_info["scores"]`` into a ``dict[str, float]``.
+
+    Mirrors GEPA's ``OptimizeAnythingAdapter._process_side_info``
+    (``optimize_anything_adapter.py:260-272``): the reserved
+    ``"scores"`` key carries a dict of ``{objective_name: float}`` that
+    becomes the per-example ``objective_scores`` slot feeding the
+    multi-axis Pareto frontier.  Non-dict values and non-numeric /
+    non-finite entries are silently dropped so evaluators can stuff
+    arbitrary diagnostics under ``"scores"`` without the parser
+    rejecting well-formed payloads elsewhere (the primary per-example
+    score is what the minibatch gate depends on; the objective axis
+    is best-effort).
+    """
+    raw = side_info.get("scores")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            continue
+        if isinstance(v, bool):
+            out[k] = 1.0 if v else 0.0
+        elif isinstance(v, (int, float)) and math.isfinite(float(v)):
+            out[k] = float(v)
+    return out
+
+
 def _coerce_score(
     raw_val: Any,
     eid: str,
@@ -156,6 +197,7 @@ def parse(
     dict[str, float],
     dict[str, float],
     list[dict[str, Any]],
+    list[dict[str, float]],
 ]:
     """Parse per-example ``[score, side_info]`` pairs from ``HELIX_RESULT=``.
 
@@ -175,7 +217,7 @@ def parse(
     Returns
     -------
     tuple
-        Three elements, positionally aligned to the id list from
+        Four elements, positionally aligned to the id list from
         ``helix_batch.json``:
 
         * ``scores: dict[str, float]`` — top-level aggregate
@@ -188,6 +230,13 @@ def parse(
           freeform side_info dict for each example, in id order.
           Stored on :class:`helix.population.EvalResult` for the
           reflection prompt.
+        * ``objective_scores: list[dict[str, float]]`` — the
+          ``side_info_i["scores"]`` harvest for each example, in id
+          order.  GEPA analogue:
+          :attr:`gepa.core.adapter.EvaluationBatch.objective_scores`
+          (``src/gepa/core/adapter.py:26``).  Feeds the multi-axis
+          Pareto frontier; stored on
+          :attr:`helix.population.EvalResult.objective_scores`.
 
     Raises
     ------
@@ -290,6 +339,7 @@ def parse(
 
     instance_scores: dict[str, float] = {}
     per_example_side_info: list[dict[str, Any]] = []
+    objective_scores: list[dict[str, float]] = []
 
     for eid, entry in zip(ids, payload):
         if not isinstance(entry, list) or len(entry) != 2:
@@ -322,6 +372,7 @@ def parse(
 
         instance_scores[eid] = score_val
         per_example_side_info.append(side_info)
+        objective_scores.append(_harvest_objective_scores(side_info))
 
     if returncode != 0 or not instance_scores:
         success = 0.0
@@ -329,4 +380,4 @@ def parse(
         success = sum(instance_scores.values()) / len(instance_scores)
 
     scores: dict[str, float] = {"success": success}
-    return scores, instance_scores, per_example_side_info
+    return scores, instance_scores, per_example_side_info, objective_scores
