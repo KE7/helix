@@ -20,15 +20,21 @@ See ``/tmp/gepa_audit_report.md`` for the full audit.
 Contract
 --------
 The evaluator (run with ``cwd=candidate.worktree_path``) emits exactly
-one line on stdout of the form::
+one line on stdout.  Each per-example entry matches GEPA O.A.'s
+``tuple[float, SideInfo] | float`` union — either the rich pair or a
+bare score::
 
-    HELIX_RESULT=[[s_0, side_info_0], [s_1, side_info_1], ..., [s_{N-1}, side_info_{N-1}]]
+    HELIX_RESULT=[s_0, s_1, ..., s_{N-1}]                         # all bare
+    HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ..., [s_{N-1}, si_{N-1}]]  # all rich
+    HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]                     # mixed — allowed
 
-where element ``i`` corresponds to the id at position ``i`` in the
+Element ``i`` corresponds to the id at position ``i`` in the
 ``helix_batch.json`` HELIX wrote pre-invocation (see
-:func:`helix.evolution._write_helix_batch`).  Each inner pair is
-``[score_i: float, side_info_i: dict]`` — matching GEPA O.A.'s
-per-example return.
+:func:`helix.evolution._write_helix_batch`).  A bare ``float`` is
+normalised to ``(score, {})`` — matching GEPA O.A.'s
+``EvaluatorWrapper`` at ``src/gepa/optimize_anything.py:971`` which
+auto-wraps a bare score to ``(score, None, {})``.  Rich entries are
+a 2-element ``[score: float, side_info: dict]`` list.
 
 ``len(payload) == len(ids)`` is required.
 
@@ -249,9 +255,10 @@ def parse(
     if result_line is None:
         raise EvaluatorError(
             "helix_result parser found no HELIX_RESULT= line on stdout. "
-            "Emit exactly one line of shape "
-            "HELIX_RESULT=[[score_0, side_info_0], [score_1, side_info_1], ...] "
-            "with one [score, side_info] pair per id in helix_batch.json.",
+            "Emit exactly one line of the per-example shape "
+            "HELIX_RESULT=[entry_0, entry_1, ...] where each entry is "
+            "either a bare score (int|float) or a 2-element "
+            "[score, side_info] list, positional to helix_batch.json.",
             operation="parse_helix_result",
             stdout=stdout,
             stderr=stderr,
@@ -327,10 +334,11 @@ def parse(
 
     if len(payload) != len(ids):
         raise EvaluatorError(
-            f"helix_result length mismatch: payload has {len(payload)} "
-            f"per-example entries but helix_batch.json has {len(ids)} ids. "
-            "The evaluator must emit exactly one [score, side_info] pair "
-            "per id, in the same order.",
+            f"helix_result length mismatch: per-example payload has "
+            f"{len(payload)} entries but helix_batch.json has {len(ids)} "
+            "ids.  The evaluator must emit exactly one entry per id, in "
+            "the same order.  Each entry is either a bare score "
+            "(int|float) or a 2-element [score, side_info] list.",
             operation="parse_helix_result",
             stdout=stdout,
             stderr=stderr,
@@ -342,11 +350,33 @@ def parse(
     objective_scores: list[dict[str, float]] = []
 
     for eid, entry in zip(ids, payload):
-        if not isinstance(entry, list) or len(entry) != 2:
+        # GEPA optimize_anything union parity: per-example entry is
+        # either a bare score or a ``[score, side_info]`` pair.  The
+        # O.A. ``EvaluatorWrapper`` at
+        # ``src/gepa/optimize_anything.py:971`` auto-normalizes a bare
+        # float to ``(score, None, {})`` — HELIX does the same here,
+        # materialising ``side_info = {}`` for bare entries so the
+        # downstream objective harvest is a no-op rather than a crash.
+        # Mixed bare / rich within one payload is allowed.
+        #
+        # Note on precedence: ``bool`` is a subclass of ``int`` but we
+        # only see it at this layer when an evaluator emits
+        # ``true`` / ``false`` as a bare score; route through the
+        # numeric branch below (``_coerce_score`` handles the bool
+        # ⇒ 1.0 / 0.0 coercion consistently).
+        raw_side_info: Any
+        if isinstance(entry, bool) or isinstance(entry, (int, float)):
+            # Bare score — empty per-example side_info.
+            raw_score = entry
+            raw_side_info = None
+        elif isinstance(entry, list) and len(entry) == 2:
+            # Rich [score, side_info] pair.
+            raw_score, raw_side_info = entry
+        else:
             raise EvaluatorError(
                 f"helix_result per-example entry for id {eid!r} must be "
-                f"a 2-element [score, side_info] list; got "
-                f"{type(entry).__name__}"
+                "either a bare score (int|float) or a 2-element "
+                f"[score, side_info] list; got {type(entry).__name__}"
                 + (f" (len={len(entry)})" if isinstance(entry, list) else "")
                 + ".",
                 operation="parse_helix_result",
@@ -354,7 +384,6 @@ def parse(
                 stderr=stderr,
                 exit_code=returncode,
             )
-        raw_score, raw_side_info = entry
         score_val = _coerce_score(raw_score, eid, stdout, stderr, returncode)
         if raw_side_info is None:
             side_info: dict[str, Any] = {}
