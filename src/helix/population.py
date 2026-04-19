@@ -10,7 +10,10 @@ import hashlib
 import json
 import random
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+
+FrontierType = Literal["instance", "objective", "hybrid", "cartesian"]
 
 
 @dataclass
@@ -134,18 +137,75 @@ class ParetoFrontier:
     4. **Parent selection** — ``select_program_candidate_from_pareto_front()``
        calls ``remove_dominated_programs()``, counts per-key frequency of
        surviving programs, builds a flat sampling list, picks uniformly.
+
+    Multi-axis frontier (GEPA ``FrontierType`` parity)
+    ---------------------------------------------------
+    The ``frontier_type`` constructor arg mirrors GEPA's literal at
+    ``src/gepa/core/state.py:22-23``:
+
+    - ``"instance"`` (default): per-example-id keyspace, built from
+      ``EvalResult.instance_scores``.  Matches HELIX's historical
+      behaviour and GEPA's ``frontier_type="instance"`` path.
+    - ``"objective"``: per-objective-name keyspace, values = mean of
+      that objective across the valset, built from
+      ``EvalResult.objective_scores``.  GEPA
+      ``_update_objective_pareto_front`` (``state.py:474-484``).
+    - ``"hybrid"``: union of the instance and objective keyspaces.
+      A candidate survives if it's non-dominated on the combined
+      keyset.  This is GEPA ``optimize_anything``'s default
+      (``optimize_anything.py:476``) and HELIX's default
+      (``evolution.frontier_type``).
+    - ``"cartesian"``: per ``(val_id, objective_name)`` keyspace.
+      GEPA ``_update_pareto_front_for_cartesian``
+      (``state.py:512-525``).
+
+    The **acceptance gate stays positional** on ``scores_list``
+    regardless of ``frontier_type`` (GEPA ``acceptance.py:39-48``);
+    only the Pareto retention / parent-selection decision is
+    multi-axis.
+
+    Implementation: each axis has its own ``_..._best`` /
+    ``_..._best_score`` dict, populated on ``add()``.
+    :meth:`_active_frontier` returns the merged keyspace for the
+    currently selected ``frontier_type``; dominance / selection run
+    against that merged dict via the existing
+    :func:`_remove_dominated_programs` helper.
     """
 
-    def __init__(self, rng: random.Random | None = None) -> None:
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        frontier_type: FrontierType = "instance",
+    ) -> None:
         # GEPA parity: seeded RNG for deterministic parent selection.
         self._rng = rng if rng is not None else random.Random(0)
+        self._frontier_type: FrontierType = frontier_type
         # Append-only storage (never pruned) — mirrors GEPA's program_candidates list
         self._candidates: dict[str, Candidate] = {}
         self._results: dict[str, EvalResult] = {}
-        # Mirrors GEPAState.program_at_pareto_front_valset: val_id → {candidate IDs with best score}
+        # ``"instance"`` axis — mirrors GEPAState.program_at_pareto_front_valset
+        # (val_id → {candidate IDs with best score}) and pareto_front_valset
+        # (val_id → best score).
         self._per_key_best: dict[str, set[str]] = {}
-        # Mirrors GEPAState.pareto_front_valset: val_id → best score
         self._per_key_best_score: dict[str, float] = {}
+        # ``"objective"`` axis — mirrors GEPAState.program_at_objective_pareto_front
+        # (objective_name → {candidates tied for best mean-across-valset})
+        # and ``objective_pareto_front`` (objective_name → best mean).
+        self._objective_best: dict[str, set[str]] = {}
+        self._objective_best_score: dict[str, float] = {}
+        # ``"cartesian"`` axis — mirrors
+        # GEPAState.program_at_pareto_front_cartesian / pareto_front_cartesian
+        # ((val_id, objective_name) → best).  Keys are encoded as
+        # ``f"{val_id}::{objective_name}"`` so the existing
+        # ``_remove_dominated_programs`` helper (which takes
+        # ``dict[str, set[str]]``) works unmodified.
+        self._cartesian_best: dict[str, set[str]] = {}
+        self._cartesian_best_score: dict[str, float] = {}
+
+    @property
+    def frontier_type(self) -> FrontierType:
+        """Selected Pareto dimensionality (GEPA parity)."""
+        return self._frontier_type
 
     # ------------------------------------------------------------------
     # Mutation helpers — mirrors GEPAState._update_pareto_front_for_val_id
@@ -156,6 +216,11 @@ class ParetoFrontier:
         self._candidates[candidate.id] = candidate
         self._results[candidate.id] = result
         self._update_per_key(candidate.id, result)
+        # Multi-axis updates are no-ops when the frontier_type doesn't
+        # use them, but always populating keeps diagnostics useful and
+        # lets a caller inspect any axis post-hoc.
+        self._update_objective(candidate.id, result)
+        self._update_cartesian(candidate.id, result)
 
     def _update_per_key(self, cid: str, result: EvalResult) -> None:
         """Incrementally update per-key best tracking for a single candidate.
@@ -171,17 +236,115 @@ class ParetoFrontier:
                 front = self._per_key_best.setdefault(key, set())
                 front.add(cid)
 
+    def _update_objective(self, cid: str, result: EvalResult) -> None:
+        """Update the per-objective frontier using mean-across-valset.
+
+        Mirrors GEPA's ``_update_objective_pareto_front``
+        (``state.py:474-484``) with its ``_per_prog_mean_objective_scores``
+        helper (``state.py:462-472``): for each objective name present
+        in any per-example slot, take the mean of that objective's
+        scores across the entire ``objective_scores`` list.
+        """
+        if result.objective_scores is None or not result.objective_scores:
+            return
+        aggregated: dict[str, list[float]] = {}
+        for slot in result.objective_scores:
+            for name, score in slot.items():
+                aggregated.setdefault(name, []).append(float(score))
+        for name, vals in aggregated.items():
+            if not vals:
+                continue
+            mean = sum(vals) / len(vals)
+            prev = self._objective_best_score.get(name, float("-inf"))
+            if mean > prev:
+                self._objective_best[name] = {cid}
+                self._objective_best_score[name] = mean
+            elif mean == prev:
+                self._objective_best.setdefault(name, set()).add(cid)
+
+    def _update_cartesian(self, cid: str, result: EvalResult) -> None:
+        """Update the (val_id, objective_name) frontier.
+
+        Mirrors GEPA's ``_update_pareto_front_for_cartesian``
+        (``state.py:512-525``): each per-example ``objective_scores[i]``
+        slot is combined with the corresponding ``val_id`` (from
+        ``instance_scores``' ordered keys) to form a tuple key.  We
+        encode the tuple as ``f"{val_id}::{objective_name}"`` so the
+        existing ``dict[str, set[str]]`` dominance helper works.
+        """
+        if result.objective_scores is None:
+            return
+        # ``instance_scores`` preserves helix_batch.json id order by
+        # construction in ``helix_result.parse``; ``objective_scores``
+        # is positional to the same id list.  Zip together.
+        val_ids = list(result.instance_scores.keys())
+        if len(val_ids) != len(result.objective_scores):
+            # Defensive: skip cartesian updates when lengths disagree
+            # (should not happen on the helix_result path but could on
+            # hand-constructed EvalResults in tests).
+            return
+        for val_id, slot in zip(val_ids, result.objective_scores):
+            for obj_name, score in slot.items():
+                key = f"{val_id}::{obj_name}"
+                prev = self._cartesian_best_score.get(key, float("-inf"))
+                if float(score) > prev:
+                    self._cartesian_best[key] = {cid}
+                    self._cartesian_best_score[key] = float(score)
+                elif float(score) == prev:
+                    self._cartesian_best.setdefault(key, set()).add(cid)
+
     def update_scores(self, result: EvalResult) -> None:
         """Update the evaluation result for an existing candidate and rebuild tracking."""
         self._results[result.candidate_id] = result
         self._rebuild_per_key()
 
     def _rebuild_per_key(self) -> None:
-        """Rebuild per-key best tracking from scratch (after score updates)."""
+        """Rebuild all per-axis best tracking from scratch.
+
+        Called after a score update rewrites one candidate's
+        ``EvalResult``.  Rebuilds every axis so a single consistent
+        snapshot is preserved.
+        """
         self._per_key_best.clear()
         self._per_key_best_score.clear()
+        self._objective_best.clear()
+        self._objective_best_score.clear()
+        self._cartesian_best.clear()
+        self._cartesian_best_score.clear()
         for cid, result in self._results.items():
             self._update_per_key(cid, result)
+            self._update_objective(cid, result)
+            self._update_cartesian(cid, result)
+
+    # ------------------------------------------------------------------
+    # Active frontier — merged keyspace per ``frontier_type``
+    # ------------------------------------------------------------------
+
+    def _active_frontier(self) -> dict[str, set[str]]:
+        """Return the merged per-key-best dict for the active axis.
+
+        Key collisions are avoided by prefixing per-axis keys when the
+        hybrid path unions multiple keyspaces.  Consumers treat the
+        returned dict opaquely via :func:`_remove_dominated_programs`,
+        so the prefix is internal implementation detail.
+        """
+        if self._frontier_type == "instance":
+            # Back-compat: return the raw instance dict so existing
+            # tests asserting on ``_per_key_best`` keys (``"i1"``,
+            # ``"i2"``, etc.) keep working through the same object.
+            return self._per_key_best
+        if self._frontier_type == "objective":
+            return self._objective_best
+        if self._frontier_type == "cartesian":
+            return self._cartesian_best
+        # "hybrid": union of instance ∪ objective keyspaces (GEPA O.A.
+        # default — see src/gepa/optimize_anything.py:476).
+        merged: dict[str, set[str]] = {}
+        for k, v in self._per_key_best.items():
+            merged[f"inst::{k}"] = v
+        for k, v in self._objective_best.items():
+            merged[f"obj::{k}"] = v
+        return merged
 
     # ------------------------------------------------------------------
     # GEPA coverage-based dominance
@@ -268,15 +431,19 @@ class ParetoFrontier:
     def get_non_dominated(self) -> set[str]:
         """Return the non-dominated set via GEPA's iterative fixed-point elimination.
 
-        Uses each candidate's ``sum_score()`` as the tiebreaker
-        (lower-scoring candidates are eliminated first, matching GEPA's
+        Dominance is computed against :meth:`_active_frontier`, which
+        dispatches on ``frontier_type``.  Uses each candidate's
+        ``sum_score()`` as the tiebreaker (lower-scoring candidates are
+        eliminated first, matching GEPA's
         ``train_val_weighted_agg_scores_for_all_programs``).
 
         GEPA parity (W1): use sum_score() to match GEPA semantics, which
         diverges from aggregate_score() when candidates have different instance counts.
         """
         scores = {cid: r.sum_score() for cid, r in self._results.items()}
-        dominators, _ = self._remove_dominated_programs(self._per_key_best, scores)
+        dominators, _ = self._remove_dominated_programs(
+            self._active_frontier(), scores,
+        )
         return dominators
 
     def is_dominated(self, candidate_id: str) -> bool:
@@ -296,10 +463,16 @@ class ParetoFrontier:
     # ------------------------------------------------------------------
 
     def _instance_wins(self) -> dict[str, set[str]]:
-        """Transpose of ``_per_key_best``: candidate → set of keys where it
-        appears in the best set."""
+        """Transpose of the active frontier: candidate → set of keys
+        where it appears in the best set.
+
+        Used by :meth:`select_complementary_pair` to find pairs with
+        minimal overlap in best-key coverage.  Name retained for
+        back-compat; now reflects the active frontier type.
+        """
+        active = self._active_frontier()
         wins: dict[str, set[str]] = {cid: set() for cid in self._candidates}
-        for key, front in self._per_key_best.items():
+        for key, front in active.items():
             for cid in front:
                 if cid in wins:
                     wins[cid].add(key)
@@ -308,7 +481,8 @@ class ParetoFrontier:
     def select_parent(self) -> Candidate:
         """GEPA ``select_program_candidate_from_pareto_front()``.
 
-        1. Run ``remove_dominated_programs()`` with sum scores (GEPA parity W1).
+        1. Run ``remove_dominated_programs()`` over :meth:`_active_frontier`
+           with sum scores (GEPA parity W1).
         2. Count per-key frequency of surviving programs in the *cleaned*
            frontier (dominated programs stripped from every front).
         3. Build a flat sampling list where each program appears *freq* times.
@@ -320,7 +494,7 @@ class ParetoFrontier:
         # GEPA parity (W1): use sum_score() to match GEPA semantics.
         scores = {cid: r.sum_score() for cid, r in self._results.items()}
         _, cleaned_per_key_best = self._remove_dominated_programs(
-            self._per_key_best, scores,
+            self._active_frontier(), scores,
         )
 
         # Count frequency in cleaned frontier (GEPA: program_frequency_in_validation_pareto_front)

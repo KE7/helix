@@ -827,7 +827,7 @@ def run_evolution(
     # In-memory candidate registry and frontier
     candidates: dict[str, Candidate] = {}
     rng = _random.Random(config.rng_seed)
-    frontier = ParetoFrontier(rng=rng)
+    frontier = ParetoFrontier(rng=rng, frontier_type=config.evolution.frontier_type)
 
     # GEPA parity (Fix 11): evaluation cache — skip re-evaluation of
     # identical (candidate_id, split) pairs.
