@@ -18,75 +18,39 @@ from helix.trace import TRACE, EventType
 logger = logging.getLogger(__name__)
 
 # Differential-testing hook: when set to a callable, ``run_evaluator`` bypasses
-# the allowlist/subprocess/env-scrub path entirely and delegates to the
-# override with ``(candidate, split, instance_ids) -> EvalResult``.  The
-# production path is untouched when this is ``None`` (default).
+# the subprocess/env-scrub path entirely and delegates to the override with
+# ``(candidate, split, instance_ids) -> EvalResult``.  The production path is
+# untouched when this is ``None`` (default).
 _EVALUATOR_OVERRIDE = None
-
-# Allow-list of permitted evaluator command prefixes.
-#
-# Intended commands and their rationale:
-#   python / python3  — run Python evaluation scripts
-#   pytest            — run test-based evaluators
-#   make              — invoke Makefile targets
-#   bash / sh         — run shell scripts; safe because subprocess is called
-#                       with shell=False, so the user cannot inject shell
-#                       metacharacters (pipes, redirects, command substitution)
-#                       regardless of what the helix.toml says
-#   node              — run JavaScript/TypeScript evaluators
-#   uv                — run commands via uv (uv run, uv pip, etc.)
-#   poetry            — run commands via Poetry
-#   cat               — read files as part of evaluation output
-#
-# To add a new entry safely:
-#   1. Verify the command cannot be used to escape its sandbox (prefer
-#      interpreters/runners over raw system utilities).
-#   2. Add the bare executable name (no path) to the set below.
-#   3. Update this comment with the intended use-case and rationale.
-_ALLOWED_COMMANDS = {
-    "python", "python3", "pytest", "make", "bash", "sh", "node", "uv", "poetry", "cat"
-}
 
 
 def _validate_and_split_command(cmd: str) -> list[str]:
-    """Validate command against allow-list and split safely.
+    """Tokenize a command string for subprocess.run with shell=False.
 
-    Args:
-        cmd: Shell command string to validate and split.
+    On the happy path, returns ``shlex.split(command)``.
 
-    Returns:
-        List of command tokens suitable for subprocess.run with shell=False.
-
-    Raises:
-        EvaluatorError: If the command is not in the allow-list.
+    The real safety boundary is ``shell=False``: shell metacharacters in the
+    command string are treated as literal arguments, so injection via
+    ``helix.toml`` is not possible regardless of the first token.  A
+    ``helix.toml`` author is already trusted to run arbitrary code (they
+    can simply write ``python -c "..."``), so we do not gate commands by
+    an allow-list.
     """
-    tokens = shlex.split(cmd)
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError as e:
+        raise EvaluatorError(
+            f"Failed to parse evaluator command: {e}",
+            operation="validate_command",
+            command=cmd,
+        ) from e
     if not tokens:
         raise EvaluatorError(
-            f"Empty command string",
+            "Empty command string",
             operation="validate_command",
             command=cmd,
         )
-
-    first_token = tokens[0]
-
-    # Check if it's in the allow-list
-    if first_token in _ALLOWED_COMMANDS:
-        return tokens
-
-    # Allow absolute and relative paths
-    if first_token.startswith(("./", "/usr/bin/", "/home/", "/opt/")):
-        return tokens
-
-    # Not allowed
-    allowed_list = ", ".join(sorted(_ALLOWED_COMMANDS))
-    raise EvaluatorError(
-        f'InvalidEvaluatorCommand: "{cmd}" not in allow-list. '
-        f"See helix.toml evaluator.command. Allowed: {allowed_list}, "
-        f"or absolute/relative paths.",
-        operation="validate_command",
-        command=cmd,
-    )
+    return tokens
 
 
 def _scrub_environment(

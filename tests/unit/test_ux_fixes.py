@@ -410,6 +410,63 @@ class TestEvaluatorScriptPreflightCheck:
             _check_evaluator_script_exists("", tmp_path)
         assert exc_info.value.code == 1
 
+    # ------------------------------------------------------------------
+    # Shell-wrapper exemption: `bash -c "..."` style commands wrap the
+    # real invocation inside an opaque body string that shlex cannot
+    # meaningfully tokenize for path validation. The exemption is narrow
+    # — it only applies to known shells + known -c-family flags.
+    # ------------------------------------------------------------------
+
+    def test_shell_wrapper_bash_c_passes_validation(self, tmp_path: Path) -> None:
+        """`bash -c "..."` should skip path-level validation."""
+        # No script file is created on disk; shell body is opaque.
+        _check_evaluator_script_exists(
+            'bash -c "cd /work/foo && python evaluate.py"', tmp_path
+        )
+
+    def test_shell_wrapper_bash_lc_passes_validation(self, tmp_path: Path) -> None:
+        """`bash -lc "..."` should skip path-level validation."""
+        _check_evaluator_script_exists(
+            'bash -lc "cd /work/foo && python evaluate.py"', tmp_path
+        )
+
+    def test_shell_wrapper_sh_c_passes_validation(self, tmp_path: Path) -> None:
+        """`sh -c "..."` should skip path-level validation."""
+        _check_evaluator_script_exists(
+            'sh -c "cd /work/foo && python evaluate.py"', tmp_path
+        )
+
+    def test_shell_wrapper_zsh_c_passes_validation(self, tmp_path: Path) -> None:
+        """`zsh -c "..."` should skip path-level validation."""
+        _check_evaluator_script_exists(
+            'zsh -c "cd /work/foo && python evaluate.py"', tmp_path
+        )
+
+    def test_shell_wrapper_bash_without_c_flag_still_validates(
+        self, tmp_path: Path
+    ) -> None:
+        """`bash foo.py` (no -c-family flag) should still validate foo.py.
+
+        The exemption is intentionally narrow: only `bash -c/-lc/...`
+        shell-wrappers are skipped. A bare `bash some_script.py` must
+        keep its existing path-checking behavior.
+        """
+        with pytest.raises(SystemExit) as exc_info:
+            _check_evaluator_script_exists("bash foo.py", tmp_path)
+        assert exc_info.value.code == 1
+
+    def test_shell_wrapper_bash_with_unknown_flag_still_validates(
+        self, tmp_path: Path
+    ) -> None:
+        """`bash -x script.py` (unknown flag) should NOT get the exemption.
+
+        Only the documented `-c`-family flags trigger the skip; anything
+        else falls through to the regular path validator.
+        """
+        with pytest.raises(SystemExit) as exc_info:
+            _check_evaluator_script_exists("bash -x script.py", tmp_path)
+        assert exc_info.value.code == 1
+
     def test_evolve_runs_preflight_check_before_worktree(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
