@@ -177,14 +177,19 @@ class TestHelixResultParsing:
     @patch("helix.executor.subprocess.run")
     def test_multiple_helix_result_lines_raises(self, mock_run, tmp_path: Path):
         """The executor guards against multiple ``HELIX_RESULT=`` lines
-        and raises before the parser runs."""
+        and raises ``EvaluatorError`` before the parser runs.  Using
+        ``EvaluatorError`` (not ``RuntimeError``) keeps this
+        evaluator-contract violation on the same error-handling path
+        as the parser's own contract violations (length mismatch,
+        missing helix_batch.json, etc.) — upstream ``HelixError``
+        handlers in ``evolution.py`` treat them uniformly."""
         _write_batch(tmp_path, ["task__0"])
         line1 = f"HELIX_RESULT={json.dumps(_pairs([0.9]))}"
         line2 = f"HELIX_RESULT={json.dumps(_pairs([0.1]))}"
         stdout = f"preamble\n{line1}\nmiddle\n{line2}\nend\n"
         mock_run.return_value = _mock_subprocess_result(stdout, returncode=0)
 
-        with pytest.raises(RuntimeError, match="Multiple HELIX_RESULT= lines found"):
+        with pytest.raises(EvaluatorError, match="Multiple HELIX_RESULT= lines found"):
             run_evaluator(make_candidate(tmp_path), make_config(), split="val")
 
     @patch("helix.executor.subprocess.run")

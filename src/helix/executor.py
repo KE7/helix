@@ -244,9 +244,12 @@ def run_evaluator(
     asi = _collect_asi(stdout, stderr, extra_outputs, config)
 
     # Guard: at most one HELIX_RESULT= line is expected.  Multiple is an
-    # evaluator bug (race or accidental double-emit).  The ``helix_result``
-    # parser does its own reverse-scan; this pre-check surfaces the
-    # "multiple lines" case as an explicit error across all parser paths
+    # evaluator-contract violation (race or accidental double-emit).
+    # Surface as ``EvaluatorError`` so upstream HelixError handlers in
+    # ``evolution.py`` can route it uniformly with the rest of the
+    # evaluator-contract failures the parser raises (length mismatch,
+    # missing batch file, etc.).  The ``helix_result`` parser does its
+    # own reverse-scan; this pre-check fires across all parser paths
     # before any parser runs.  Payload shape is parser-specific —
     # ``helix_result`` takes a list of per-example [score, side_info]
     # pairs; other parsers ignore this line entirely.
@@ -255,9 +258,15 @@ def run_evaluator(
         if line.startswith("HELIX_RESULT="):
             result_line_count += 1
             if result_line_count > 1:
-                raise RuntimeError(
+                raise EvaluatorError(
                     "Multiple HELIX_RESULT= lines found in evaluator output. "
-                    "Expected exactly one."
+                    "Expected exactly one.",
+                    operation="run_evaluator",
+                    command=evaluator.command,
+                    cwd=str(candidate.worktree_path),
+                    stdout=stdout,
+                    stderr=stderr,
+                    exit_code=returncode,
                 )
 
     # Parse scores.  ``helix_result`` returns a 4-tuple with per-example
