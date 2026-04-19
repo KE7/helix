@@ -1144,6 +1144,18 @@ def run_evolution(
         # previous acceptance).  If merge fires, skip mutation entirely
         # (``continue``).  This matches GEPA core/engine.py:664-737.
         # =============================================================
+        # GEPA parity (M2 fallthrough — audit-init-engine.md B3):
+        # merge_attempted tracks whether an actual merge eval happened this
+        # iteration.  GEPA engine.py:664-741 only ``continue``s past the
+        # reflective mutation block when a merge is accepted (line 719) or
+        # rejected (line 737) — i.e. after the merged candidate has been
+        # evaluated.  All earlier fail-fast paths (<2 non-dominated, no
+        # triplet, pair already attempted, missing/insufficient val overlap,
+        # merge operator failure, evaluator-tamper pre-eval reject) fall
+        # through to reflective mutation.  HELIX previously ``continue``d
+        # on every merge-gate entry regardless of attempt outcome, cutting
+        # the effective mutation count by the merge-gate failure rate.
+        merge_attempted = False
         if (
             config.evolution.merge_enabled
             and merges_due > 0
@@ -1171,15 +1183,11 @@ def run_evolution(
             non_dominated = frontier.get_non_dominated()
             merge_candidate_ids = [cid for cid in frontier._candidates if cid in non_dominated]
 
-            # GEPA parity (L3): need >= 2 non-dominated candidates for merge.
-            # Mirrors GEPA merge.py:128-131.
-            if len(merge_candidate_ids) < 2:
-                _save_state(state)
-                if not _hprog.is_active:
-                    render_budget(state.budget, config.evolution)
-                _hprog.update(gen, _frontier_best_score())
-                continue
-
+            # GEPA parity (L3): ``find_merge_triplet`` returns None when
+            # ``len(frontier_ids) < 2`` (lineage.py:145) without consuming
+            # rng, so the "< 2 non-dominated" fail-fast reduces to
+            # ``triplet is None`` — both paths now fall through to
+            # reflective mutation (GEPA engine.py:741-742).
             triplet = find_merge_triplet(
                 lineage,
                 merge_candidate_ids,
@@ -1189,37 +1197,45 @@ def run_evolution(
 
             if triplet is not None:
                 cid_i, cid_j, _ancestor_id = triplet
-
-                # GEPA parity (Fix 12): skip merge pairs already attempted.
                 pair_key = sorted([cid_i, cid_j])
+
+                # Resolve parent val results + overlap once; GEPA parity (L2)
+                # merge.py:199-201 requires >= merge_val_overlap_floor common
+                # val instance IDs.  Pre-compute so all early-reject paths
+                # (pair already attempted, missing parent eval, insufficient
+                # overlap) share the same fall-through semantics.
+                era = frontier._results.get(cid_i)
+                erb = frontier._results.get(cid_j)
+                common_val_ids: set[str] = set()
+                if era is not None and erb is not None:
+                    common_val_ids = (
+                        set(era.instance_scores.keys())
+                        & set(erb.instance_scores.keys())
+                    )
+
                 if pair_key in state.merge_attempted_pairs:
+                    # GEPA parity (Fix 12): already-attempted pair.
+                    # Fall through to reflective mutation (audit B3).
                     print_warning(
                         f"Merge pair ({cid_i}, {cid_j}) already attempted -- skipping."
                     )
+                elif era is None or erb is None:
+                    # Missing parent val eval → no way to pick subsample →
+                    # no attempt.  Fall through (audit B3).
+                    print_warning(
+                        f"Merge pair ({cid_i}, {cid_j}) missing parent val "
+                        f"eval result -- skipping."
+                    )
+                elif len(common_val_ids) < config.evolution.merge_val_overlap_floor:
+                    # GEPA parity (L2): overlap floor fails → no attempt.
+                    # Fall through (audit B3; GEPA merge.py:199-201 returns
+                    # None, engine.py falls through to reflective mutation).
+                    print_warning(
+                        f"Merge pair ({cid_i}, {cid_j}) has only "
+                        f"{len(common_val_ids)} common val IDs "
+                        f"(need {config.evolution.merge_val_overlap_floor}) -- skipping."
+                    )
                 else:
-                    # GEPA parity (L2): require merge candidates share
-                    # >= merge_val_overlap_floor common val instance IDs.
-                    # Mirrors GEPA merge.py:199-201.
-                    era = frontier._results.get(cid_i)
-                    erb = frontier._results.get(cid_j)
-                    common_val_ids: set[str] = set()
-                    if era is not None and erb is not None:
-                        common_val_ids = (
-                            set(era.instance_scores.keys())
-                            & set(erb.instance_scores.keys())
-                        )
-                        if len(common_val_ids) < config.evolution.merge_val_overlap_floor:
-                            print_warning(
-                                f"Merge pair ({cid_i}, {cid_j}) has only "
-                                f"{len(common_val_ids)} common val IDs "
-                                f"(need {config.evolution.merge_val_overlap_floor}) -- skipping."
-                            )
-                            _save_state(state)
-                            if not _hprog.is_active:
-                                render_budget(state.budget, config.evolution)
-                            _hprog.update(gen, _frontier_best_score())
-                            continue
-
                     state.merge_attempted_pairs.append(pair_key)
 
                     a = frontier._candidates[cid_i]
@@ -1239,11 +1255,23 @@ def run_evolution(
                         eval_result_b=erb,
                     )
 
-                    if merged is not None:
+                    if merged is None:
+                        # GEPA parity (M2/B3): merge operator failed before
+                        # any eval; no attempt, fall through to mutation.
+                        print_error(
+                            f"Merge {merge_id} failed "
+                            f"(candidates: {a.id} + {b.id}, gen {gen}). "
+                            f"Claude Code returned no output or the merge subprocess errored. "
+                            f"Check the HELIX ERROR panel above for full diagnostics."
+                        )
+                    else:
                         merge_tamper = _detect_evaluator_tamper(
                             merged, evaluator_manifest
                         )
                         if merge_tamper:
+                            # Evaluator-tamper reject happens PRE-eval — no
+                            # merge was attempted in the GEPA sense
+                            # (audit-init-engine.md B3).  Fall through.
                             print_warning(
                                 f"Merge {merge_id} touched protected evaluator files "
                                 f"({', '.join(merge_tamper)}) -- rejecting."
@@ -1282,30 +1310,6 @@ def run_evolution(
                             # default size 5 matches GEPA's hardcoded constant, overridable
                             # via evolution.merge_subsample_size. Required score is
                             # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
-                            if not common_val_ids:
-                                print_warning(
-                                    f"Merge {merge_id}: no common val coverage "
-                                    f"between parents -- rejecting."
-                                )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                    )
-                                if merged.id in candidates:
-                                    del candidates[merged.id]
-                                _save_state(state)
-                                if not _hprog.is_active:
-                                    render_budget(state.budget, config.evolution)
-                                _hprog.update(gen, _frontier_best_score())
-                                continue
-
-                            # common_val_ids is non-empty here, so it was
-                            # populated inside the `era is not None and
-                            # erb is not None` branch above -- assert to
-                            # narrow for mypy.
-                            assert era is not None and erb is not None
                             merge_subsample_ids = sorted(
                                 select_eval_subsample_for_merged_program(
                                     era.instance_scores,
@@ -1314,6 +1318,13 @@ def run_evolution(
                                     num_subsample_ids=config.evolution.merge_subsample_size,
                                 )
                             )
+                            # GEPA parity (M2/B3): from here on, the merged
+                            # candidate is evaluated, so this iteration is
+                            # consumed (GEPA engine.py:719 on accept,
+                            # engine.py:737 on reject).  merge_attempted=True
+                            # causes the end-of-branch guard below to
+                            # ``continue`` past reflective mutation.
+                            merge_attempted = True
                             merge_result, _merge_evals = _cached_evaluate_batch(
                                 merged, merge_subsample_ids, minibatch_cache, config, "val",
                             )
@@ -1329,37 +1340,30 @@ def run_evolution(
 
                             # Merged subsample sum must be >= max of parent
                             # subsample sums (GEPA merge.py:344-345, 394-395).
-                            # GEPA parity (W2): float("-inf") fallback for
-                            # missing era/erb, matching GEPA's behaviour.
-                            # merge_subsample_ids is sorted(common_val_ids) and
-                            # common_val_ids = era.instance_scores.keys() &
-                            # erb.instance_scores.keys(), so every id is
-                            # guaranteed present in both parents; assert keeps
-                            # the invariant loud (GEPA merge.py:342-343).
-                            if era:
-                                assert set(merge_subsample_ids).issubset(
-                                    era.instance_scores
-                                ), (
-                                    "merge_subsample_ids must be a subset of "
-                                    "era.instance_scores"
-                                )
-                                a_score = sum(
-                                    era.instance_scores[k] for k in merge_subsample_ids
-                                )
-                            else:
-                                a_score = float("-inf")
-                            if erb:
-                                assert set(merge_subsample_ids).issubset(
-                                    erb.instance_scores
-                                ), (
-                                    "merge_subsample_ids must be a subset of "
-                                    "erb.instance_scores"
-                                )
-                                b_score = sum(
-                                    erb.instance_scores[k] for k in merge_subsample_ids
-                                )
-                            else:
-                                b_score = float("-inf")
+                            # merge_subsample_ids is sorted(select_eval_subsample_for_merged_program(
+                            #   era.instance_scores, erb.instance_scores, ...))
+                            # — every sampled id is drawn from the intersection
+                            # of era.instance_scores and erb.instance_scores
+                            # (common_val_ids above).  The asserts keep the
+                            # invariant loud (GEPA merge.py:342-343).
+                            assert set(merge_subsample_ids).issubset(
+                                era.instance_scores
+                            ), (
+                                "merge_subsample_ids must be a subset of "
+                                "era.instance_scores"
+                            )
+                            a_score = sum(
+                                era.instance_scores[k] for k in merge_subsample_ids
+                            )
+                            assert set(merge_subsample_ids).issubset(
+                                erb.instance_scores
+                            ), (
+                                "merge_subsample_ids must be a subset of "
+                                "erb.instance_scores"
+                            )
+                            b_score = sum(
+                                erb.instance_scores[k] for k in merge_subsample_ids
+                            )
                             required_score = max(a_score, b_score)
 
                             # GEPA parity: iterate the subsample list (not the dict) so the
@@ -1401,16 +1405,12 @@ def run_evolution(
                                     )
                                 if merged.id in candidates:
                                     del candidates[merged.id]
-                    else:
-                        print_error(
-                            f"Merge {merge_id} failed "
-                            f"(candidates: {a.id} + {b.id}, gen {gen}). "
-                            f"Claude Code returned no output or the merge subprocess errored. "
-                            f"Check the HELIX ERROR panel above for full diagnostics."
-                        )
 
-                # GEPA parity (Fix 6): merge consumed this iteration,
-                # skip mutation entirely (``continue``).
+            # GEPA parity (M2/B3): only consume this iteration when a merge
+            # was actually evaluated (engine.py:719,737).  On any fall-through
+            # (triplet None, pair already attempted, overlap fail, merge op
+            # failure, tamper reject) we drop into reflective mutation below.
+            if merge_attempted:
                 _save_state(state)
                 if not _hprog.is_active:
                     render_budget(state.budget, config.evolution)
@@ -1564,19 +1564,30 @@ def run_evolution(
                 eval_for_mutate, _ = _cached_eval(parent, config, "train", eval_cache)
                 eval_for_mutate.candidate_id = parent.id
 
-            # Skip-if-perfect (GEPA reflective_mutation.py:308-312): check
-            # the eval used for the mutator, which is the minibatch score
-            # in GEPA-parity mode or the single-task train eval in legacy mode.
+            # Skip-if-perfect (GEPA reflective_mutation.py:308-327, audit
+            # finding M1 in audit-init-engine.md B1/B2):
+            #   * GEPA returns ProposalOutput(proposal=None) and the outer
+            #     iteration loop CONTINUES with a new parent — it does NOT
+            #     terminate the whole run.  Mirror that by ``continue``-ing
+            #     the per-proposal sampling loop (HELIX evolution.py).
+            #   * GEPA's condition is ``all(s >= perfect_score for s in
+            #     eval_curr.scores)`` (reflective_mutation.py:311) — every
+            #     per-example score must clear the bar.  HELIX previously
+            #     used the mean ``aggregate_score()``, which fires sooner
+            #     when a minibatch is [0.5, 1.0, 1.0] @ threshold=0.8.
             if (
                 config.evolution.perfect_score_threshold is not None
-                and eval_for_mutate.aggregate_score()
-                >= config.evolution.perfect_score_threshold
-            ):
-                print_success(
-                    f"Perfect score {eval_for_mutate.aggregate_score():.4f} -- stopping early."
+                and all(
+                    s >= config.evolution.perfect_score_threshold
+                    for s in eval_for_mutate.instance_scores.values()
                 )
-                _budget_break = True
-                break
+            ):
+                print_info(
+                    f"Iteration {gen}: all subsample scores perfect for "
+                    f"parent {parent.id}; skipping proposal "
+                    f"(GEPA reflective_mutation.py:308-327)."
+                )
+                continue
 
             proposal_contexts.append((parent, parent_frontier_result, eval_for_mutate, new_id))
             proposal_subsamples.append(subsample_ids)
@@ -1700,14 +1711,15 @@ def run_evolution(
             snapshot_candidate(child, f"helix: mutate {child.id}")
 
             # --- Gating evaluation ----------------------------------------
-            # Two paths here:
+            # Two paths here — both gate on GEPA's strict-sum acceptance
+            # (``acceptance.should_accept``), matching GEPA engine.py:303:
             #  (a) Minibatch gate (GEPA §5.1): when train_loader exists,
             #      run the child on the SAME subsample as the parent and
-            #      accept on strict/relaxed sum improvement over the
-            #      parent's minibatch scores.  No separate train re-eval.
-            #  (b) Legacy train-gating: no train_loader — preserve the
-            #      original behaviour (degrades() + strict improvement
-            #      on train instance scores).
+            #      accept on sum improvement over the parent's minibatch
+            #      scores.  No separate train re-eval.
+            #  (b) Legacy train-gating: no train_loader — run the child
+            #      on the full train split and apply the same acceptance
+            #      criterion (GEPA parity MODERATE D — audit-mutation.md C3).
             if use_minibatch_gate and _subsample_ids is not None and _parent_mb is not None:
                 set_phase(HelixPhase.MUTATION_GATING)
                 # GEPA parity: route child-on-minibatch through the
@@ -1794,31 +1806,34 @@ def run_evolution(
                     _budget_break = True
                     break
 
-                if degrades(
-                    gating_result, parent_acceptance_result, config.evolution.gating_threshold
-                ):
+                # GEPA parity (MODERATE D — audit-mutation.md C3):
+                # GEPA has a single acceptance path — sum-score strict
+                # improvement on the same minibatch (engine.py:287-303,
+                # reflective_mutation.py:420).  HELIX previously ran
+                # ``degrades()`` as a pre-check in this legacy (no-minibatch)
+                # path, applying a tolerance that GEPA does not have.  The
+                # pre-check is removed so both paths now gate on the SAME
+                # criterion (``acceptance.should_accept`` = strict sum by
+                # default).  Routing through the acceptance criterion
+                # instead of the inline ``child_sum <= parent_sum`` check
+                # mirrors GEPA engine.py:303 and lets callers swap in
+                # ``ImprovementOrEqualAcceptance`` uniformly across both
+                # paths.
+                from types import SimpleNamespace as _SN
+                _legacy_before = list(
+                    parent_acceptance_result.instance_scores.values()
+                )
+                _legacy_after = list(gating_result.instance_scores.values())
+                _legacy_proposal = _SN(
+                    subsample_scores_before=_legacy_before,
+                    subsample_scores_after=_legacy_after,
+                )
+                if not acceptance.should_accept(_legacy_proposal):
+                    parent_sum = sum(_legacy_before)
+                    child_sum = sum(_legacy_after)
                     print_warning(
-                        f"Gating: {child.id} regresses "
-                        f"({gating_result.aggregate_score():.4f} < "
-                        f"{parent_acceptance_result.aggregate_score():.4f}) -- removing."
-                    )
-                    try:
-                        remove_worktree(child)
-                    except Exception as _rm_exc:
-                        print_warning(
-                            f"Could not remove worktree for gated candidate {child.id}: {_rm_exc}"
-                        )
-                    del candidates[child.id]
-                    continue
-
-                # GEPA parity (Fix 3 / W3): Strict improvement acceptance on the
-                # same train split used for the child gating run.
-                parent_sum = sum(parent_acceptance_result.instance_scores.values())
-                child_sum = sum(gating_result.instance_scores.values())
-                if child_sum <= parent_sum:
-                    print_warning(
-                        f"Acceptance: {child.id} does not strictly improve "
-                        f"(child_sum={child_sum:.4f} <= parent_sum={parent_sum:.4f}) -- removing."
+                        f"Acceptance: {child.id} does not improve "
+                        f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
                     )
                     try:
                         remove_worktree(child)
