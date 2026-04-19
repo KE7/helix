@@ -351,9 +351,17 @@ def build_mutation_prompt(
     #   3. No diagnostics section otherwise.
     diagnostics_section = ""
     if eval_result.per_example_side_info is not None:
+        # Monotonic markdown hierarchy under the surrounding
+        # ``## Diagnostics`` (h2): each example is ``### Example <id>``
+        # (h3), each side_info key is ``#### {key}`` (h4), nested
+        # values bump further.  Before this the Example header was
+        # ``#`` (h1), which inverted the hierarchy and confused
+        # markdown-aware tooling / LLM markdown parsers.
         diagnostics_section = _render_per_example_diagnostics(
             example_ids=list(eval_result.instance_scores.keys()),
             per_example_side_info=eval_result.per_example_side_info,
+            example_header_level=3,
+            key_header_level=4,
         )
     elif eval_result.side_info is not None:
         diag_lines = "\n".join(
