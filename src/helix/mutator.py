@@ -383,6 +383,65 @@ def _looks_like_rate_limit(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rendered-mutation-prompt artifact
+# ---------------------------------------------------------------------------
+
+
+#: Filename of the post-hoc mutation-prompt artifact persisted in each
+#: candidate's worktree root alongside ``helix_batch.json``.  The leading
+#: dot + per-worktree ``.gitignore`` entry keep it out of the candidate
+#: git tree.
+MUTATION_PROMPT_ARTIFACT_NAME = ".helix_mutation_prompt.md"
+
+
+def _ignore_helix_artifacts(worktree_path: Path) -> None:
+    """Append HELIX artifact names to ``<worktree>/.gitignore``.
+
+    The candidate worktree is a real git tree; anything committed there
+    bakes into the candidate's evolutionary history.  HELIX writes
+    a handful of per-invocation metadata files (``helix_batch.json``,
+    ``.helix_mutation_prompt.md``) that must NOT flow into those
+    diffs — otherwise the next generation's mutator sees the prior
+    artifact as part of the codebase and the lineage grows a
+    meaningless file-rename trail.
+
+    Idempotent: only appends patterns that aren't already present.
+    Creates the ``.gitignore`` file if missing.
+    """
+    gitignore = worktree_path / ".gitignore"
+    patterns = [
+        "# HELIX per-invocation artifacts (never commit to candidate tree)",
+        MUTATION_PROMPT_ARTIFACT_NAME,
+        "helix_batch.json",
+    ]
+    existing = gitignore.read_text() if gitignore.exists() else ""
+    to_append = [p for p in patterns if p not in existing]
+    if not to_append:
+        return
+    sep = "" if existing.endswith("\n") or not existing else "\n"
+    gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
+
+
+def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> None:
+    """Persist the rendered mutation prompt to the worktree for post-hoc inspection.
+
+    Writes to ``<worktree>/.helix_mutation_prompt.md`` and ensures the
+    per-worktree ``.gitignore`` excludes the file.  Best-effort: any I/O
+    exception is logged at DEBUG and swallowed — a missing artifact is
+    not worth failing a mutation over.
+    """
+    try:
+        wt = Path(worktree_path)
+        _ignore_helix_artifacts(wt)
+        (wt / MUTATION_PROMPT_ARTIFACT_NAME).write_text(prompt)
+    except OSError as e:
+        logger.debug(
+            "failed to write mutation-prompt artifact to %s: %s",
+            worktree_path, e,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Claude Code invocation
 # ---------------------------------------------------------------------------
 
@@ -595,6 +654,15 @@ def mutate(
     prompt = build_mutation_prompt(
         config.objective, eval_result, background, config.claude.max_turns,
     )
+
+    # Persist the rendered prompt to the worktree for post-hoc inspection:
+    # what did the mutator actually see on this generation?  Sits next to
+    # ``helix_batch.json`` in the worktree root.  The leading dot and the
+    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
+    # keep it out of the candidate git tree — otherwise it'd leak into
+    # every subsequent mutation's diff and the mutator would see its own
+    # prior prompt file as part of the codebase.
+    _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
     try:
         invoke_claude_code(child.worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
