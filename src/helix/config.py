@@ -42,11 +42,15 @@ class DatasetConfig(BaseModel):
     HELIX evaluates candidates via shell commands (evaluator.command),
     not per-example function calls like GEPA.  This section therefore
     only carries the *cardinality* of the train and val splits; the
-    evaluator owns the actual dataset.  Architecture A (positional-index
-    handoff): HELIX samples integer indices into ``range(train_size)``
-    and writes them to ``{worktree}/helix_batch.json``; the evaluator
+    evaluator owns the actual dataset.  Architecture A (example-id
+    handoff): HELIX samples example ids — stringified indices into
+    ``range(train_size)`` by default, or opaque structured ids like
+    ``"cube_stack__3"`` when ``evolution.batch_sampler = "stratified"``
+    — and writes them to ``{worktree}/helix_batch.json``; the evaluator
     reads that file (from its cwd) and filters its own loaded dataset
-    by those indices.
+    by those ids.  Ids are opaque at the HELIX/evaluator boundary:
+    evaluators are responsible for any interpretation (e.g. casting
+    ``"7"`` back to ``int`` for positional indexing).
 
     Legacy prompt-grounding paths (``train_path`` / ``val_path``) now
     live on :class:`SeedlessConfig` — they only affect the seed-

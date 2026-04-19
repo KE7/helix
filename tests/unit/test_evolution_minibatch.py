@@ -686,7 +686,7 @@ class TestCachedEvaluateBatch:
         )
 
         seen_instance_ids: list[list[str] | None] = []
-        written_batches: list[list[int]] = []
+        written_batches: list[list[str]] = []
 
         def fake_run(
             candidate: Candidate,
@@ -700,8 +700,8 @@ class TestCachedEvaluateBatch:
                 candidate.id, {eid: 0.22 for eid in (instance_ids or [])}
             )
 
-        def fake_write(path: str, indices: list[int]) -> None:
-            written_batches.append(list(indices))
+        def fake_write(path: str, example_ids: list[str]) -> None:
+            written_batches.append(list(example_ids))
 
         mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
         mocker.patch(
@@ -717,9 +717,10 @@ class TestCachedEvaluateBatch:
             f"Expected evaluator to be called with only the uncached id, "
             f"got {seen_instance_ids}"
         )
-        # helix_batch.json was written with only the missing index.
-        assert written_batches == [[1]], (
-            f"Expected reduced helix_batch.json=[1], got {written_batches}"
+        # helix_batch.json was written with only the missing id —
+        # passed through verbatim as a string, no int coercion.
+        assert written_batches == [["1"]], (
+            f"Expected reduced helix_batch.json=['1'], got {written_batches}"
         )
         assert num_actual == 1
         # Merged scores cover ALL requested ids: cached 0/2 + fresh 1.
@@ -837,6 +838,54 @@ class TestCachedEvaluateBatch:
         assert seen_instance_ids == [["0", "1"]]
         assert num_actual == 2
         assert result.instance_scores == {"0": 0.4, "1": 0.4}
+
+
+# ---------------------------------------------------------------------------
+# String-id round-trip through helix_batch.json (BREAKING: list[int] → list[str])
+#
+# Prior to the fix, ``_write_helix_batch`` silently cast every element through
+# ``int()`` at the JSON serialization boundary.  That made
+# :class:`helix.batch_sampler.StratifiedBatchSampler` (which emits opaque ids
+# of shape ``"group__N"`` like ``"cube_stack__3"``) unusable on Architecture A:
+# ``int("cube_stack__3")`` raises ``ValueError``.  The fix passes ids through
+# opaquely as strings.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteHelixBatchStringIds:
+    def test_structured_string_ids_round_trip(self, tmp_path: Path) -> None:
+        """``_write_helix_batch`` must serialise opaque string ids verbatim —
+        including composite ``group__N`` ids emitted by the stratified
+        sampler — without attempting to cast them to int."""
+        from helix.evolution import _write_helix_batch
+
+        ids = ["cube_lifting__0", "cube_stack__3", "door_open__7"]
+        _write_helix_batch(tmp_path, ids)
+
+        written = json.loads((tmp_path / "helix_batch.json").read_text())
+        assert written == ids, (
+            "String ids must round-trip verbatim through helix_batch.json "
+            "(no int() coercion, no reordering)"
+        )
+        # Explicit: every element is a str (no silent numeric coercion).
+        assert all(isinstance(x, str) for x in written)
+
+    def test_stringified_int_ids_still_written_as_strings(
+        self, tmp_path: Path
+    ) -> None:
+        """The default ``_RangeDataLoader`` emits ``"0"``, ``"1"``, … — these
+        now round-trip as strings too, not ints.  Evaluators that previously
+        relied on reading ``list[int]`` must cast on their side."""
+        from helix.evolution import _write_helix_batch
+
+        _write_helix_batch(tmp_path, ["0", "1", "2"])
+
+        written = json.loads((tmp_path / "helix_batch.json").read_text())
+        assert written == ["0", "1", "2"]
+        assert all(isinstance(x, str) for x in written), (
+            "BREAKING: helix_batch.json payload is now list[str]; "
+            "integer values would indicate a regression."
+        )
 
 
 # ---------------------------------------------------------------------------
