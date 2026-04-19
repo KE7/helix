@@ -9,7 +9,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class EvaluatorConfig(BaseModel):
@@ -18,6 +18,8 @@ class EvaluatorConfig(BaseModel):
     Defines how candidates are evaluated via shell commands and how their
     results are parsed into scores.
     """
+    model_config = ConfigDict(extra="forbid")
+
     command: str
     score_parser: Literal[
         "pytest", "exitcode", "json_accuracy", "json_score", "helix_result"
@@ -40,16 +42,22 @@ class DatasetConfig(BaseModel):
     HELIX evaluates candidates via shell commands (evaluator.command),
     not per-example function calls like GEPA.  This section therefore
     only carries the *cardinality* of the train and val splits; the
-    evaluator owns the actual dataset.  Architecture A (positional-index
-    handoff): HELIX samples integer indices into ``range(train_size)``
-    and writes them to ``{worktree}/helix_batch.json``; the evaluator
+    evaluator owns the actual dataset.  Architecture A (example-id
+    handoff): HELIX samples example ids — stringified indices into
+    ``range(train_size)`` by default, or opaque structured ids like
+    ``"cube_stack__3"`` when ``evolution.batch_sampler = "stratified"``
+    — and writes them to ``{worktree}/helix_batch.json``; the evaluator
     reads that file (from its cwd) and filters its own loaded dataset
-    by those indices.
+    by those ids.  Ids are opaque at the HELIX/evaluator boundary:
+    evaluators are responsible for any interpretation (e.g. casting
+    ``"7"`` back to ``int`` for positional indexing).
 
     Legacy prompt-grounding paths (``train_path`` / ``val_path``) now
     live on :class:`SeedlessConfig` — they only affect the seed-
     generation prompt and are unrelated to runtime minibatch sampling.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     train_size: int | None = Field(
         default=None,
@@ -99,6 +107,8 @@ class SeedlessConfig(BaseModel):
       included in the ``## Sample Inputs`` section of the seed prompt — exactly
       mirroring GEPA's ``_build_seed_generation_prompt(dataset=dataset[:3])``.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=False,
@@ -201,6 +211,8 @@ class EvolutionConfig(BaseModel):
     Controls generation count, frontier management, termination caps,
     and parallel proposal settings.
     """
+    model_config = ConfigDict(extra="forbid")
+
     max_generations: int = 10
     perfect_score_threshold: float | None = None
     # Evaluation-budget cap. `-1` (default) disables — HELIX runs until
@@ -333,6 +345,8 @@ class ClaudeConfig(BaseModel):
     Specifies which Claude model to use, allowed tools, effort level,
     and optional background context for mutation sessions.
     """
+    model_config = ConfigDict(extra="forbid")
+
     model: str = "sonnet"
     effort: str | None = None
     max_turns: int | None = None
@@ -347,6 +361,8 @@ class WorktreeConfig(BaseModel):
 
     Defines where candidate worktrees are created during evolution.
     """
+    model_config = ConfigDict(extra="forbid")
+
     base_dir: str = ".helix/worktrees"
     # Deprecated: GEPA uses append-only population — dominated candidates are
     # filtered at selection time, never pruned from storage.  Kept for TOML
@@ -360,6 +376,8 @@ class HelixConfig(BaseModel):
     Combines all configuration sections (objective, evaluator, dataset,
     evolution, claude, worktree) and validates compatibility constraints.
     """
+    model_config = ConfigDict(extra="forbid")
+
     objective: str
     seed: str = "."
     rng_seed: int = 0  # GEPA parity: deterministic RNG for selection
@@ -424,6 +442,13 @@ def load_config(path: Path) -> HelixConfig:
             print(f"   Error: {msg}", file=sys.stderr)
             if error["type"] == "missing":
                 print(f"   Hint: Add '{error['loc'][-1]}' to your helix.toml", file=sys.stderr)
+            elif error["type"] == "extra_forbidden":
+                print(
+                    f"   Hint: '{error['loc'][-1]}' is not a recognised key on this "
+                    "section — check for typos or a misplaced sub-section "
+                    "(e.g. a key that belongs under [evolution] placed under [evaluator]).",
+                    file=sys.stderr,
+                )
             elif "type" in str(error["type"]):
                 print(f"   Hint: Check that the value is the correct type", file=sys.stderr)
             print(file=sys.stderr)

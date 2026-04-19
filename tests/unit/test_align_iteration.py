@@ -227,8 +227,8 @@ class TestMergeFallthroughToMutation:
         )
 
         def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
-            # Numeric instance ids so the merge-eval subsample path
-            # (positional helix_batch.json handoff) accepts them.
+            # Instance ids round-trip through helix_batch.json as opaque
+            # strings; these happen to be "1"/"2" for legibility.
             if candidate.id == "g0-s0":
                 scores = {"1": 0.5, "2": 0.8}
             elif candidate.id == "g1-s1":
