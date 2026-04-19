@@ -208,16 +208,20 @@ def init_base_dir(base_dir: Path, config: HelixConfig) -> None:
 
 
 def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
-    """Persist an EvalResult to evaluations/<candidate_id>.json."""
+    """Persist an EvalResult to evaluations/<candidate_id>.json.
+
+    Uses ``EvalResult.to_dict()`` so every field — including the newer
+    ``side_info`` / ``per_example_side_info`` / ``objective_scores``
+    optionals — round-trips through the on-disk JSON.  Optional fields
+    are omitted by ``to_dict`` when ``None`` so evaluations from
+    single-task / non-helix_result paths stay byte-identical to their
+    pre-multi-axis shape.
+    """
     eval_dir = base_dir / "evaluations"
     eval_dir.mkdir(parents=True, exist_ok=True)
-    data = {
-        "candidate_id": result.candidate_id,
-        "scores": result.scores,
-        "instance_scores": result.instance_scores,
-        "asi": result.asi,
-    }
-    (eval_dir / f"{result.candidate_id}.json").write_text(json.dumps(data, indent=2))
+    (eval_dir / f"{result.candidate_id}.json").write_text(
+        json.dumps(result.to_dict(), indent=2)
+    )
 
 
 def _load_evaluation(base_dir: Path, candidate_id: str) -> EvalResult | None:
