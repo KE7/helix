@@ -167,9 +167,13 @@ class TestPerExampleDiagnostics:
         # GEPA parity: the reserved "scores" key renders under a
         # friendly header.  Raw "scores:" label should not appear.
         assert "## Scores (Higher is Better)" in prompt
-        # Values are exposed with their axis names.
-        assert "success: 1.0" in prompt
-        assert "affordance: 0.8" in prompt
+        # Values render via GEPA's recursive format_samples — the
+        # objective-axis names become their own markdown sub-headers
+        # with the primitive scalar on the next line.
+        assert "### success" in prompt
+        assert "1.0" in prompt
+        assert "### affordance" in prompt
+        assert "0.8" in prompt
 
     def test_other_side_info_keys_render_verbatim(self):
         er = self._make(
@@ -225,6 +229,109 @@ class TestPerExampleDiagnostics:
         er = self._make(per_example_side_info=None, side_info=None)
         prompt = build_mutation_prompt("goal", er)
         assert "## Diagnostics" not in prompt
+
+    def test_nested_dict_renders_via_recursive_headers(self):
+        """GEPA ``render_value`` parity: a dict value inside side_info
+        renders its keys as bumped-level sub-headers, recursively."""
+        er = self._make(
+            per_example_side_info=[
+                {
+                    "trajectory": {
+                        "grasp": {"success": True, "pose": "top-down"},
+                        "place": "centered",
+                    },
+                },
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # Top-level key is at the current key-level (##).
+        assert "## trajectory" in prompt
+        # First-level nested keys bump by one.
+        assert "### grasp" in prompt
+        assert "### place" in prompt
+        # Second-level nested keys bump again.
+        assert "#### success" in prompt
+        assert "#### pose" in prompt
+        # Scalar leaves render as plain text (no further headers).
+        assert "top-down" in prompt
+        assert "centered" in prompt
+
+    def test_list_values_render_as_item_headers(self):
+        """GEPA ``render_value`` parity: a list value renders each
+        element under ``### Item N`` sub-headers."""
+        er = self._make(
+            per_example_side_info=[
+                {"attempts": ["first_try_failed", "retry_succeeded"]},
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## attempts" in prompt
+        assert "### Item 1" in prompt
+        assert "### Item 2" in prompt
+        assert "first_try_failed" in prompt
+        assert "retry_succeeded" in prompt
+
+    def test_mixed_nested_structure(self):
+        """List of dicts + dicts-of-lists render recursively, each
+        level bumping the header depth."""
+        er = self._make(
+            per_example_side_info=[
+                {
+                    "steps": [
+                        {"action": "grasp", "outcome": "ok"},
+                        {"action": "lift", "outcome": "dropped"},
+                    ],
+                },
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## steps" in prompt
+        assert "### Item 1" in prompt
+        assert "### Item 2" in prompt
+        # Dict keys inside each list element bump a further level.
+        assert "#### action" in prompt
+        assert "#### outcome" in prompt
+        assert "grasp" in prompt
+        assert "dropped" in prompt
+
+    def test_primitive_values_no_json_dumps(self):
+        """Port of GEPA's ``render_value`` scalar case: primitives
+        render as plain stripped ``str(value)``, NOT ``json.dumps``.
+        Check that a bare float doesn't get quoted or wrapped."""
+        er = self._make(
+            per_example_side_info=[{"loss": 0.42}],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## loss" in prompt
+        # The scalar should be rendered as just "0.42" on its own
+        # line, not '"0.42"' or "0.42\n" wrapped in JSON.
+        assert "0.42" in prompt
+        assert '"0.42"' not in prompt
+
+    def test_max_markdown_header_level_caps_at_six(self):
+        """GEPA caps nested header depth at ``######`` (h6) — deeper
+        nesting folds to the same level rather than emitting h7+
+        which is not valid markdown."""
+        deeply_nested: Any = "leaf"
+        # Build ~10 levels of nesting.
+        for i in range(10):
+            deeply_nested = {f"k{i}": deeply_nested}
+        er = self._make(
+            per_example_side_info=[{"root": deeply_nested}],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # No header with 7+ ``#``.
+        for line in prompt.splitlines():
+            stripped = line.lstrip("#")
+            prefix_len = len(line) - len(stripped)
+            assert prefix_len <= 6, (
+                f"Found a {prefix_len}-hash markdown header (>h6): {line!r}"
+            )
 
     def test_per_example_takes_precedence_over_legacy(self):
         """When both fields are populated (hybrid evaluator path),

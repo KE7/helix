@@ -193,23 +193,80 @@ def generate_seed(
     invoke_claude_code(worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
 
 
+_MAX_MARKDOWN_HEADER_LEVEL = 6
+
+
+def _render_side_info_value(value: Any, level: int) -> str:
+    """Render a single side_info value as markdown.
+
+    Line-for-line port of GEPA's ``render_value`` closure inside
+    ``format_samples`` at
+    ``src/gepa/strategies/instruction_proposal.py:63-85``:
+
+      * ``dict`` → ``{'#' * level} {key}`` for each item, recursing
+        at ``level + 1`` (capped at ``#_MAX_MARKDOWN_HEADER_LEVEL``
+        to stay inside valid markdown depth).
+      * ``list`` / ``tuple`` → ``{'#' * level} Item N`` headers,
+        recursing at ``level + 1``.
+      * primitive → ``str(value).strip() + "\n\n"``.
+
+    Empty containers still emit a trailing blank line so surrounding
+    headers don't collapse against the next block.
+    """
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for k, v in value.items():
+            parts.append(f"{'#' * level} {k}")
+            parts.append(
+                _render_side_info_value(
+                    v, min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
+                )
+            )
+        if not value:
+            parts.append("")
+        return "\n".join(parts)
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for i, item in enumerate(value):
+            parts.append(f"{'#' * level} Item {i + 1}")
+            parts.append(
+                _render_side_info_value(
+                    item, min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
+                )
+            )
+        if not value:
+            parts.append("")
+        return "\n".join(parts)
+    # Primitive — GEPA renders with ``str(...).strip() + "\n\n"``.
+    return str(value).strip() + "\n\n"
+
+
 def _render_per_example_diagnostics(
     example_ids: list[str],
     per_example_side_info: list[dict[str, Any]],
+    example_header_level: int = 1,
+    key_header_level: int = 2,
 ) -> str:
     """Render per-example side_info as the mutation-prompt Diagnostics section.
 
-    Mirrors GEPA's ``format_samples`` at
-    ``src/gepa/strategies/instruction_proposal.py:54-95``:
+    Mirrors GEPA's ``OptimizeAnythingAdapter.make_reflective_dataset`` +
+    ``format_samples`` at
+    ``src/gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py:524-553``
+    and ``src/gepa/strategies/instruction_proposal.py:54-95``:
 
-      * each example gets a ``# Example <id>`` header (id from
-        ``helix_batch.json`` via ``eval_result.instance_scores.keys()``);
-      * the reserved ``scores`` key is renamed to
-        ``## Scores (Higher is Better)`` and its per-objective values
-        are listed as ``<name>: <value>`` (same rename GEPA does at
-        ``optimize_anything_adapter.py:524-553``);
-      * any other side_info key is rendered as ``## <key>`` with its
-        value verbatim (``json.dumps`` for non-scalars).
+      * each example gets an ``{'#' * example_header_level} Example <id>``
+        header (id recovered from ``helix_batch.json`` via
+        ``eval_result.instance_scores.keys()``);
+      * the reserved ``scores`` key renames to
+        ``Scores (Higher is Better)`` at ``key_header_level``;
+      * any other side_info key renders as a ``{'#' * key_header_level}``
+        header with a recursive :func:`_render_side_info_value` body
+        (nested dicts bump to ``key_header_level + 1``, lists become
+        ``### Item N`` sub-headers, primitives render as plain text).
+
+    ``example_header_level`` / ``key_header_level`` are parameterised
+    so the surrounding Diagnostics section's own level (``## Diagnostics``)
+    can drive a monotonic hierarchy from the outside.
 
     Length mismatch between ``example_ids`` and ``per_example_side_info``
     is tolerated by iterating over ``zip`` — the parser enforces
@@ -224,31 +281,28 @@ def _render_per_example_diagnostics(
     if not per_example_side_info:
         return ""
 
+    example_hashes = "#" * example_header_level
+    key_hashes = "#" * key_header_level
+    nested_level = min(key_header_level + 1, _MAX_MARKDOWN_HEADER_LEVEL)
+
     lines: list[str] = ["## Diagnostics"]
     for eid, side_info in zip(example_ids, per_example_side_info):
         lines.append("")
-        lines.append(f"# Example {eid}")
+        lines.append(f"{example_hashes} Example {eid}")
         if not side_info:
             lines.append("(no per-example side_info)")
             continue
         for key, value in sorted(side_info.items()):
             if key == "scores":
-                # GEPA parity: the reserved ``scores`` sub-dict renders
-                # under a friendly header.
-                lines.append("## Scores (Higher is Better)")
-                if isinstance(value, dict):
-                    for k in sorted(value.keys()):
-                        lines.append(f"  {k}: {value[k]}")
-                else:
-                    lines.append(f"  {value}")
+                # GEPA parity: the reserved ``scores`` sub-dict renames
+                # to "Scores (Higher is Better)" and still renders
+                # recursively underneath.
+                lines.append(f"{key_hashes} Scores (Higher is Better)")
             else:
-                lines.append(f"## {key}")
-                if isinstance(value, (dict, list)):
-                    # Keep structured values legible as JSON rather
-                    # than Python repr.
-                    lines.append(json.dumps(value, ensure_ascii=False))
-                else:
-                    lines.append(str(value))
+                lines.append(f"{key_hashes} {key}")
+            body = _render_side_info_value(value, nested_level).rstrip("\n")
+            if body:
+                lines.append(body)
     lines.append("")  # trailing blank line before the next section
     return "\n".join(lines) + "\n"
 
