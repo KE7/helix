@@ -97,7 +97,10 @@ class TestEvolutionConfigNewFields:
     def test_defaults(self):
         cfg = EvolutionConfig()
         assert cfg.minibatch_size == 3
-        assert cfg.max_workers == 1
+        # GEPA parity: max_workers defaults to os.cpu_count() or 32
+        # (optimize_anything.py:485).
+        import os
+        assert cfg.max_workers == (os.cpu_count() or 32)
         assert cfg.num_parallel_proposals == 1
         assert cfg.cache_evaluation is True
         assert cfg.acceptance_criterion == "strict_improvement"
@@ -130,6 +133,30 @@ class TestEvolutionConfigNewFields:
         assert cfg.cache_evaluation is True
         assert cfg.acceptance_criterion == "improvement_or_equal"
         assert cfg.val_stage_size == 50
+
+    def test_num_parallel_proposals_auto_resolves(self):
+        """GEPA parity: ``num_parallel_proposals="auto"`` resolves to
+        ``max(1, max_workers // minibatch_size)`` in model_post_init.
+
+        Mirrors GEPA ``_resolve_num_parallel_proposals``
+        (/tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116).
+        """
+        cfg = EvolutionConfig(
+            num_parallel_proposals="auto",
+            max_workers=10,
+            minibatch_size=3,
+        )
+        assert cfg.num_parallel_proposals == 3  # 10 // 3
+
+    def test_num_parallel_proposals_auto_clamps_to_one(self):
+        """When ``max_workers < minibatch_size``, ``"auto"`` clamps to 1
+        (GEPA: ``max(1, max_workers // minibatch_size)``)."""
+        cfg = EvolutionConfig(
+            num_parallel_proposals="auto",
+            max_workers=2,
+            minibatch_size=5,
+        )
+        assert cfg.num_parallel_proposals == 1
 
 
 # ---------------------------------------------------------------------------

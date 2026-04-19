@@ -7,7 +7,6 @@ import logging
 import os
 import shlex
 import subprocess
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig, EvaluatorConfig
@@ -311,53 +310,3 @@ def run_evaluator(
     return _result
 
 
-def run_evaluators_parallel(
-    candidates: list[Candidate],
-    config: HelixConfig,
-    split: str = "val",
-) -> list[EvalResult]:
-    """Run evaluators for multiple candidates in parallel.
-
-    Args:
-        candidates: List of candidates to evaluate.
-        config: HelixConfig with evaluator settings.
-        split: Dataset split to use (default "val").
-
-    Returns:
-        List of EvalResult in the same order as input candidates.
-    """
-    if not candidates:
-        return []
-
-    max_workers = min(len(candidates), os.cpu_count() or 1)
-    results: dict[int, EvalResult] = {}
-
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {
-            executor.submit(run_evaluator, candidate, config, split): i
-            for i, candidate in enumerate(candidates)
-        }
-        for future in as_completed(future_to_index):
-            idx = future_to_index[future]
-            candidate = candidates[idx]
-            try:
-                results[idx] = future.result()
-            except Exception as exc:
-                error_ctx = format_error_context(
-                    operation=f"parallel evaluate {candidate.id} (split={split})",
-                    phase="ProcessPoolExecutor future",
-                    cwd=str(candidate.worktree_path),
-                    suggestion="Check that the evaluator command is valid and the worktree exists.",
-                )
-                logger.exception(
-                    "Evaluator failed for candidate %s:\n%s\nFull exception chain:",
-                    candidate.id, error_ctx,
-                )
-                results[idx] = EvalResult(
-                    candidate_id=candidate.id,
-                    scores={"success": 0.0},
-                    asi={"error": f"evaluator_exception: {exc}"},
-                    instance_scores={},
-                )
-
-    return [results[i] for i in range(len(candidates))]

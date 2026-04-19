@@ -6,7 +6,7 @@
 
 *DNA evolves. So does your codebase.*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml) [![mypy](https://img.shields.io/badge/mypy-strict-blue.svg)](https://mypy.readthedocs.io/)
+[![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml) [![mypy](https://img.shields.io/badge/mypy-strict-blue.svg)](https://mypy.readthedocs.io/)
 
 <br>
 
@@ -40,6 +40,22 @@ Instead of treating one file or one patch as the candidate, HELIX treats the **e
 
 The result is a new kind of evolutionary optimizer: one that preserves the reflective Pareto-evolutionary core while making it practical for whole repositories and realistic software engineering tasks.
 
+### Coding agent as the mutation engine
+
+The difference between HELIX and `/chat/completions`-style evolvers (GEPA, DSPy-Refine, ShinkaEvolve) is that HELIX's mutation is driven by a **coding agent**, not a single LLM call. A GEPA-style mutation is one prompt → one completion → apply the diff. HELIX's mutation is a full agentic session bounded only by `max_turns`:
+
+| | GEPA / chat-completion evolvers | HELIX |
+|---|---|---|
+| Mutation shape | Single request/response | Multi-step agentic session |
+| Working surface | A single prompt / predictor string | The entire repository in a git worktree |
+| Mid-mutation introspection | None | Read any file, grep, glob, `find`, follow imports |
+| Mid-mutation verification | None | Run the test suite, type-checker, linter; read failures and react |
+| External information | None | Fetch the web, hit GitHub API, query package indexes live |
+| Self-correction | None per proposal (retries are separate generations) | Inside one mutation: diagnose a test failure, edit another file, re-run, commit only if green |
+| Cost accounting | 1 LLM call = 1 proposal | 1 proposal = N turns, gated by `max_turns` + whatever the agent decides is enough |
+
+This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-OSS behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
+
 ---
 
 ## ✨ Key Features
@@ -52,11 +68,10 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
 | 🔧 | **Tool access during mutation** | Claude Code can read, grep, run tests, inspect the codebase, and use the web mid-mutation |
 | ✅ | **Self-verification** | Mutations verify themselves by running commands before committing |
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
-| ⚡ | **Parallel evaluation** | Worktrees are isolated → embarrassingly parallel via `ProcessPoolExecutor` |
+| ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (GEPA parity, bounded by `evolution.max_workers`) |
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
-| 🎯 | **Convergence detection** | Auto-stop when the frontier stagnates for N generations |
 | 💾 | **State persistence & resume** | Crash-safe — resume from any generation with `helix resume` |
-| 🚦 | **Gated mutations** | Dev-set gating rejects regressions before Pareto evaluation |
+| 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
 | 📋 | **Semantic mutation log** | Full trajectory with root-cause analysis, changes made, and parent lineage |
 
 ---
@@ -93,7 +108,7 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
                            │                               │
                            ▼                               │
                     ┌──────────────┐     ┌──────────┐      │
-                    │  Gate on Dev │────▶│  Reject  │      │
+                    │Gate on Train │────▶│  Reject  │      │
                     │  (regress?)  │ yes └──────────┘      │
                     └──────┬───────┘                       │
                        no  │                               │
@@ -120,7 +135,7 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
 2. **Evaluate** — Run your evaluator command; parse scores per test/instance
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
 4. **Mutate** — Spawn Claude Code in an isolated worktree with full tool access. It reads files, diagnoses failures, makes surgical multi-file edits, and runs commands to verify
-5. **Gate** — Re-evaluate on the dev set. Reject if the mutation caused regressions
+5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
 7. **Merge** — Periodically combine two complementary frontier candidates via Claude Code
 8. **Cleanup** — Remove dominated worktrees; persist state; repeat
@@ -253,16 +268,15 @@ enabled = false
 
 [evolution]
 max_generations = 20
-gating_threshold = 0.0           # minimum improvement to accept mutation
-perfect_score_threshold = 1.0    # stop early if score reaches this
-convergence_patience = 5         # stop if no improvement for N generations
-max_metric_calls = 200
+perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this
+max_evaluations = -1             # evaluation budget cap (-1 = no cap)
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates
-mutation_rate = 1.0              # probability of mutation (1.0 = always)
-max_workers = 1                  # evaluator worker pool size
-num_parallel_proposals = 1       # parallel mutations per generation
+merge_subsample_size = 5         # stratified val subsample size for merge acceptance (GEPA parity)
+max_workers = 8                  # thread-pool cap for parent-eval + mutation pools
+                                 # (default: os.cpu_count(), or 32 if that returns None)
+num_parallel_proposals = 1       # parallel mutations per generation; "auto" resolves to max_workers // minibatch_size
 minibatch_size = 3               # train-set minibatch gate size
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
@@ -294,9 +308,10 @@ HELIX splits dataset concerns across two TOML sections:
 | **Positional-index handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples integer indices into `range(train_size)`; the evaluator reads `helix_batch.json` from cwd and filters its own dataset. |
 | **Seedless multi-task** | `seedless.enabled = true`, `seedless.train_path` set | Seed generation prompt includes the first 3 training examples for grounding. |
 
-HELIX does not own separate dataset files for train/dev/val; your evaluator remains
-the source of truth. During evolution HELIX sets `HELIX_SPLIT` (`train`, `dev`, or
-`val`) so evaluator-owned datasets can switch behavior by phase.
+HELIX does not own separate dataset files for train/val; your evaluator remains
+the source of truth. During evolution HELIX sets `HELIX_SPLIT` (`train` or `val`)
+so evaluator-owned datasets can switch behavior by phase, mirroring GEPA's
+`trainset` / `valset` duality.
 
 When `evolution.val_stage_size` is set to a positive value and `dataset.val_size` is also set, accepted mutation proposals run a deterministic first-N validation stage before the full validation sweep. Stage-only results are never added to the frontier; HELIX still persists only full-val results for Pareto ranking and resume stability.
 
@@ -320,6 +335,32 @@ At run start, HELIX hashes the evaluator command target plus any
 `evaluator.protected_files` entries and writes the manifest to
 `.helix/evaluator_manifest.json`. Candidates that modify any protected file are
 rejected before evaluation.
+
+### Per-example Parallelism Inside the Evaluator
+
+HELIX parallelises across proposals (`num_parallel_proposals`) and across
+worktrees, but each evaluator invocation sees one candidate and a batch of
+instance ids as a single subprocess. Per-example parallelism — evaluating
+multiple ids of one candidate concurrently — lives **inside the evaluator**,
+not inside HELIX's engine.
+
+This is a deliberate architectural split: GEPA's reference adapter fans out
+per-example in-process, which is essentially free; HELIX's subprocess model
+would pay full subprocess-startup cost for each example. If you want N-way
+parallelism per batch, your `evaluate.py` should do it directly:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+instance_ids = load_batch_from_helix()   # or argv / HELIX_SPLIT path
+with ThreadPoolExecutor(max_workers=4) as pool:
+    results = dict(zip(instance_ids, pool.map(evaluate_one, instance_ids)))
+print(json.dumps({"accuracy": mean(results.values()), "instance_scores": results}))
+```
+
+Pick the worker count however you like (constant, CLI arg, derived from
+`os.cpu_count()`). HELIX remains agnostic — it just consumes the per-instance
+scores the evaluator returns.
 
 ### Score Parsers
 
@@ -416,10 +457,10 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 |---|---|
 | `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log |
 | `config.py` | TOML config parsing via Pydantic v2 |
-| `evolution.py` | Main generation loop with gating, merge, convergence |
+| `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
 | `worktree.py` | Git worktree lifecycle (create, clone, snapshot, remove) |
-| `executor.py` | Run evaluator commands, parallel evaluation |
+| `executor.py` | Run evaluator commands |
 | `mutator.py` | Claude Code mutation invocation with autonomous system prompt |
 | `merger.py` | Claude Code merge/crossover between complementary candidates |
 | `lineage.py` | Ancestry graph tracking |
@@ -443,7 +484,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 
 ## 📄 License
 
-MIT License. See [LICENSE](LICENSE) for details.
+BSD 3-Clause License. See [LICENSE](LICENSE) for details.
 
 ---
 
