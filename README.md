@@ -252,15 +252,14 @@ enabled = false
 
 [evolution]
 max_generations = 20
-gating_threshold = 0.0           # minimum improvement to accept mutation
-perfect_score_threshold = 1.0    # stop early if score reaches this
-max_evaluations = -1              # evaluation budget cap (-1 = no cap)
+perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this
+max_evaluations = -1             # evaluation budget cap (-1 = no cap)
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates
-mutation_rate = 1.0              # probability of mutation (1.0 = always)
-max_workers = 1                  # evaluator worker pool size
-num_parallel_proposals = 1       # parallel mutations per generation
+merge_subsample_size = 5         # stratified val subsample size for merge acceptance (GEPA parity)
+max_workers = 8                  # thread-pool cap for parent-eval + mutation pools (default: os.cpu_count() or 32)
+num_parallel_proposals = 1       # parallel mutations per generation; "auto" resolves to max_workers // minibatch_size
 minibatch_size = 3               # train-set minibatch gate size
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
@@ -444,7 +443,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 | `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
 | `worktree.py` | Git worktree lifecycle (create, clone, snapshot, remove) |
-| `executor.py` | Run evaluator commands, parallel evaluation |
+| `executor.py` | Run evaluator commands |
 | `mutator.py` | Claude Code mutation invocation with autonomous system prompt |
 | `merger.py` | Claude Code merge/crossover between complementary candidates |
 | `lineage.py` | Ancestry graph tracking |

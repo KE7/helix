@@ -198,11 +198,10 @@ def load_dataset_examples(train_path: Path, max_examples: int = 3) -> list[str]:
 class EvolutionConfig(BaseModel):
     """Configuration for the evolution process.
 
-    Controls generation count, frontier management, gating thresholds,
-    mutation rates, and parallel proposal settings.
+    Controls generation count, frontier management, termination caps,
+    and parallel proposal settings.
     """
     max_generations: int = 10
-    gating_threshold: float = 0.0
     perfect_score_threshold: float | None = None
     # Evaluation-budget cap. `-1` (default) disables — HELIX runs until
     # `max_generations` alone. Set to a positive int to match GEPA's
@@ -219,8 +218,6 @@ class EvolutionConfig(BaseModel):
     # Number of val ids sampled for merge acceptance. Default 5 matches
     # GEPA (merge.py:262 num_subsample_ids=5). Must be >= 1.
     merge_subsample_size: int = 5
-    # Probability that a selected parent undergoes mutation (1.0 = always).
-    mutation_rate: float = 1.0
     # GEPA parity: number of parallel proposals per generation. When > 1,
     # sample N parents, run N mutations in parallel via ThreadPoolExecutor,
     # then accept sequentially. See GEPA core/engine.py

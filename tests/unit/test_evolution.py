@@ -65,7 +65,6 @@ def make_config(
     max_generations: int = 5,
     max_evaluations: int = 1000,
     perfect_score_threshold: float | None = 1.0,
-    gating_threshold: float = 0.0,
     merge_enabled: bool = False,
     cleanup_dominated: bool = False,
     max_merge_invocations: int = 5,
@@ -80,7 +79,6 @@ def make_config(
             max_generations=max_generations,
             max_evaluations=max_evaluations,
             perfect_score_threshold=perfect_score_threshold,
-            gating_threshold=gating_threshold,
             merge_enabled=merge_enabled,
             max_merge_invocations=max_merge_invocations,
             merge_val_overlap_floor=merge_val_overlap_floor,
@@ -391,7 +389,6 @@ class TestGatingInEvolutionLoop:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=0.0,
             max_evaluations=10000,
 
         )
@@ -444,7 +441,6 @@ class TestGatingInEvolutionLoop:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=0.0,
             max_evaluations=10000,
 
         )
@@ -1406,7 +1402,6 @@ class TestTrainValSplitRouting:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=0.0,
             max_evaluations=10000,
 
         )
@@ -1475,7 +1470,6 @@ class TestAppendOnlyPopulation:
         config = make_config(
             max_generations=1,
             cleanup_dominated=True,  # flag is ignored — no pruning regardless
-            gating_threshold=0.0,
             max_evaluations=10000,
 
         )
@@ -1571,7 +1565,6 @@ class TestMutationCountersTracked:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=0.0,
             max_evaluations=10000,
 
         )
@@ -1610,7 +1603,6 @@ class TestMutationCountersTracked:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=0.0,
             max_evaluations=10000,
 
         )
