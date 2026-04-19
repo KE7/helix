@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+
+logger = logging.getLogger(__name__)
 
 
 FrontierType = Literal["instance", "objective", "hybrid", "cartesian"]
@@ -50,8 +54,11 @@ class EvalResult:
     - ``per_example_side_info`` is positional to ``instance_scores``
       by id order (same order as ``helix_batch.json``).  GEPA analogue:
       ``EvaluationBatch.trajectories`` (``src/gepa/core/adapter.py:25``).
-      Carries freeform per-example diagnostics for the reflection
-      prompt (prompt wiring lands in a follow-up PR).
+      Carries freeform per-example diagnostics; rendered into the
+      mutation prompt's Diagnostics section by
+      :func:`helix.mutator._render_per_example_diagnostics` (GEPA
+      ``format_samples`` parity at
+      ``src/gepa/strategies/instruction_proposal.py:54-95``).
     """
     candidate_id: str
     scores: dict[str, float]          # aggregate/summary scores
@@ -64,8 +71,9 @@ class EvalResult:
     side_info: dict[str, Any] | None = None
     # Per-example freeform side_info (GEPA O.A. evaluator contract:
     # ``(score, side_info)`` per example).  Positional to
-    # ``instance_scores`` by helix_batch.json id order.  Consumed by
-    # the reflection prompt in a follow-up PR.
+    # ``instance_scores`` by helix_batch.json id order.  Rendered into
+    # the mutation prompt's Diagnostics section by
+    # :func:`helix.mutator._render_per_example_diagnostics`.
     per_example_side_info: list[dict[str, Any]] | None = None
     # Per-example objective-axis harvest: each slot is
     # ``side_info_i.get("scores", {})`` filtered down to
@@ -281,7 +289,14 @@ class ParetoFrontier:
         if len(val_ids) != len(result.objective_scores):
             # Defensive: skip cartesian updates when lengths disagree
             # (should not happen on the helix_result path but could on
-            # hand-constructed EvalResults in tests).
+            # hand-constructed EvalResults in tests).  Log at DEBUG so
+            # the skip is traceable without polluting the default log.
+            logger.debug(
+                "ParetoFrontier._update_cartesian: skipping cid=%r — "
+                "objective_scores length %d does not match "
+                "instance_scores length %d",
+                cid, len(result.objective_scores), len(val_ids),
+            )
             return
         for val_id, slot in zip(val_ids, result.objective_scores):
             for obj_name, score in slot.items():
@@ -296,14 +311,16 @@ class ParetoFrontier:
     def update_scores(self, result: EvalResult) -> None:
         """Update the evaluation result for an existing candidate and rebuild tracking."""
         self._results[result.candidate_id] = result
-        self._rebuild_per_key()
+        self._rebuild_axes()
 
-    def _rebuild_per_key(self) -> None:
+    def _rebuild_axes(self) -> None:
         """Rebuild all per-axis best tracking from scratch.
 
         Called after a score update rewrites one candidate's
-        ``EvalResult``.  Rebuilds every axis so a single consistent
-        snapshot is preserved.
+        ``EvalResult``.  Rebuilds every axis (instance, objective,
+        cartesian) so a single consistent snapshot is preserved —
+        hence the name; the original ``_rebuild_per_key`` pre-dated
+        the multi-axis frontier and only touched ``_per_key_best``.
         """
         self._per_key_best.clear()
         self._per_key_best_score.clear()
