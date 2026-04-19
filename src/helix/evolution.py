@@ -51,7 +51,7 @@ from helix.display import (
 from helix.exceptions import HelixError, RateLimitError, print_helix_error
 from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
-from helix.merger import merge
+from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.population import Candidate, EvalResult, ParetoFrontier
 from helix.state import BudgetState, EvaluationCache, EvolutionState, load_state, save_state
@@ -1207,13 +1207,13 @@ def run_evolution(
                                 merged,
                                 f"helix: merge {merge_id} ({cid_i}+{cid_j})",
                             )
-                            # GEPA parity (M5): merge acceptance uses subsample
-                            # evaluation on VALSET, not full val, and compares
-                            # merged sum against parent sums restricted to the
-                            # same subsample.  Mirrors GEPA merge.py:332-400
-                            # (subsample_ids drawn from common val coverage;
-                            # `self.valset.fetch(subsample_ids)` at line 348;
-                            # required_score = max(sum(id1_sub), sum(id2_sub))).
+                            # GEPA parity (M5): merge acceptance evaluates merged on a
+                            # size-bounded stratified subsample of ids both parents have
+                            # val-scored. Subsample selection ported from GEPA
+                            # merge.py:258-288 (select_eval_subsample_for_merged_program);
+                            # default size 5 matches GEPA's hardcoded constant, overridable
+                            # via evolution.merge_subsample_size. Required score is
+                            # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
                             if not common_val_ids:
                                 print_warning(
                                     f"Merge {merge_id}: no common val coverage "
@@ -1233,7 +1233,19 @@ def run_evolution(
                                 _hprog.update(gen, _frontier_best_score())
                                 continue
 
-                            merge_subsample_ids = sorted(common_val_ids)
+                            # common_val_ids is non-empty here, so it was
+                            # populated inside the `era is not None and
+                            # erb is not None` branch above -- assert to
+                            # narrow for mypy.
+                            assert era is not None and erb is not None
+                            merge_subsample_ids = sorted(
+                                select_eval_subsample_for_merged_program(
+                                    era.instance_scores,
+                                    erb.instance_scores,
+                                    rng,
+                                    num_subsample_ids=config.evolution.merge_subsample_size,
+                                )
+                            )
                             merge_result, _merge_evals = _cached_evaluate_batch(
                                 merged, merge_subsample_ids, minibatch_cache, config, "val",
                             )
@@ -1251,31 +1263,60 @@ def run_evolution(
                             # subsample sums (GEPA merge.py:344-345, 394-395).
                             # GEPA parity (W2): float("-inf") fallback for
                             # missing era/erb, matching GEPA's behaviour.
-                            a_score = (
-                                sum(era.instance_scores.get(k, 0.0) for k in merge_subsample_ids)
-                                if era else float("-inf")
-                            )
-                            b_score = (
-                                sum(erb.instance_scores.get(k, 0.0) for k in merge_subsample_ids)
-                                if erb else float("-inf")
-                            )
+                            # merge_subsample_ids is sorted(common_val_ids) and
+                            # common_val_ids = era.instance_scores.keys() &
+                            # erb.instance_scores.keys(), so every id is
+                            # guaranteed present in both parents; assert keeps
+                            # the invariant loud (GEPA merge.py:342-343).
+                            if era:
+                                assert set(merge_subsample_ids).issubset(
+                                    era.instance_scores
+                                ), (
+                                    "merge_subsample_ids must be a subset of "
+                                    "era.instance_scores"
+                                )
+                                a_score = sum(
+                                    era.instance_scores[k] for k in merge_subsample_ids
+                                )
+                            else:
+                                a_score = float("-inf")
+                            if erb:
+                                assert set(merge_subsample_ids).issubset(
+                                    erb.instance_scores
+                                ), (
+                                    "merge_subsample_ids must be a subset of "
+                                    "erb.instance_scores"
+                                )
+                                b_score = sum(
+                                    erb.instance_scores[k] for k in merge_subsample_ids
+                                )
+                            else:
+                                b_score = float("-inf")
                             required_score = max(a_score, b_score)
 
-                            if merge_result.sum_score() >= required_score:
+                            # GEPA parity: iterate the subsample list (not the dict) so the
+                            # rng.choices fallback path (duplicate ids when |common| < size)
+                            # counts duplicates equally on both sides.  Intentional divergence
+                            # from HELIX's usual dict-based aggregation; flagged for a future
+                            # ablation study (unique-count vs duplicate-count would be an
+                            # interesting knob to vary once we have an evolution baseline).
+                            assert set(merge_subsample_ids).issubset(merge_result.instance_scores), (
+                                "merge_subsample_ids must be a subset of merge_result.instance_scores"
+                            )
+                            merge_score = sum(
+                                merge_result.instance_scores[k] for k in merge_subsample_ids
+                            )
+
+                            if merge_score >= required_score:
                                 merges_due -= 1
                                 state.total_merge_invocations += 1
                                 frontier.add(merged, merge_result)
                                 state.frontier = list(frontier._candidates.keys())
                                 state.instance_scores[merged.id] = merge_result.instance_scores
                             else:
-                                # GEPA parity (L4): sum_score here is the sum
-                                # over the subsample (merge_result.instance_scores
-                                # covers only subsample_ids), so it is directly
-                                # comparable to required_score.
                                 print_warning(
-                                    f"Merge {merge_id} subsample score "
-                                    f"{merge_result.sum_score():.4f} < "
-                                    f"max parent subsample {required_score:.4f} -- rejecting."
+                                    f"Merge {merge_id} score {merge_score:.4f} < "
+                                    f"max parent {required_score:.4f} -- rejecting."
                                 )
                                 try:
                                     remove_worktree(merged)

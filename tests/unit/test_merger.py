@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ from helix.merger import (
     MERGE_PROMPT_TEMPLATE,
     build_merge_prompt,
     merge,
+    select_eval_subsample_for_merged_program,
 )
 
 
@@ -266,3 +268,78 @@ class TestMerge:
         import helix.merger as merger_mod
         import helix.mutator as mutator_mod
         assert merger_mod.invoke_claude_code is mutator_mod.invoke_claude_code
+
+
+# ---------------------------------------------------------------------------
+# Tests: select_eval_subsample_for_merged_program (GEPA parity)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectEvalSubsample:
+    """Pure-function tests for the GEPA-parity subsample helper.
+
+    Mirrors gepa/src/gepa/proposer/merge.py:258-288 — stratifies across
+    p1_wins / p2_wins / ties buckets, tops up from unused common ids, and
+    falls back to rng.choices (with replacement) when common ids are
+    exhausted.
+    """
+
+    def test_subsample_stratifies_buckets(self):
+        # 6 common ids, 2 per bucket: p1={a,b}, p2={c,d}, ties={e,f}.
+        scores1 = {"a": 1.0, "b": 1.0, "c": 0.0, "d": 0.0, "e": 0.5, "f": 0.5}
+        scores2 = {"a": 0.0, "b": 0.0, "c": 1.0, "d": 1.0, "e": 0.5, "f": 0.5}
+        rng = random.Random(0)
+        result = select_eval_subsample_for_merged_program(
+            scores1, scores2, rng, num_subsample_ids=3
+        )
+        assert len(result) == 3
+        p1_bucket = {"a", "b"}
+        p2_bucket = {"c", "d"}
+        tie_bucket = {"e", "f"}
+        assert any(r in p1_bucket for r in result), f"no p1 pick in {result}"
+        assert any(r in p2_bucket for r in result), f"no p2 pick in {result}"
+        assert any(r in tie_bucket for r in result), f"no tie pick in {result}"
+
+    def test_subsample_respects_size_cap(self):
+        # 20 common ids split across buckets, size cap 5 → distinct set of 5.
+        scores1 = {str(i): float(i) for i in range(20)}
+        scores2 = {str(i): float(20 - i) for i in range(20)}
+        rng = random.Random(0)
+        result = select_eval_subsample_for_merged_program(
+            scores1, scores2, rng, num_subsample_ids=5
+        )
+        assert len(result) == 5
+        assert len(set(result)) == 5, f"ids must be distinct, got {result}"
+        assert all(r in scores1 for r in result)
+
+    def test_subsample_with_replacement_fallback(self):
+        # 2 common ids, size 5 → must fall back to rng.choices (duplicates ok).
+        scores1 = {"a": 1.0, "b": 1.0}
+        scores2 = {"a": 0.0, "b": 0.0}
+        rng = random.Random(0)
+        result = select_eval_subsample_for_merged_program(
+            scores1, scores2, rng, num_subsample_ids=5
+        )
+        assert len(result) == 5
+        assert set(result).issubset({"a", "b"})
+
+    def test_subsample_fewer_than_size(self):
+        # 2 common ids, all in p1 bucket, size 5 → returns 5 entries via the
+        # rng.choices top-up (GEPA merge.py:285-286) drawn from the 2 ids.
+        scores1 = {"a": 1.0, "b": 1.0}
+        scores2 = {"a": 0.0, "b": 0.0}
+        rng = random.Random(0)
+        result = select_eval_subsample_for_merged_program(
+            scores1, scores2, rng, num_subsample_ids=5
+        )
+        assert len(result) == 5
+        assert set(result).issubset({"a", "b"})
+
+    def test_subsample_empty_common_returns_empty(self):
+        # No common ids → selected stays empty, fallback elif common_ids
+        # branch is skipped, returns [].
+        rng = random.Random(0)
+        result = select_eval_subsample_for_merged_program(
+            {"a": 1.0}, {"b": 1.0}, rng, num_subsample_ids=5
+        )
+        assert result == []
