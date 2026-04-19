@@ -152,9 +152,12 @@ class TestPerExampleDiagnostics:
             instance_scores={"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
         )
         prompt = build_mutation_prompt("goal", er)
-        # Per-example ids from instance_scores become "# Example <id>" headers.
-        assert "# Example cube_lifting__0" in prompt
-        assert "# Example cube_lifting__1" in prompt
+        # Per-example ids render as ``### Example <id>`` (h3 under the
+        # surrounding ``## Diagnostics`` h2).  Line-anchored check —
+        # a substring match would also accept ``# Example`` or
+        # ``#### Example`` and miss the header-level change.
+        assert "\n### Example cube_lifting__0\n" in prompt
+        assert "\n### Example cube_lifting__1\n" in prompt
 
     def test_reserved_scores_key_renamed_for_mutator(self):
         er = self._make(
@@ -165,14 +168,14 @@ class TestPerExampleDiagnostics:
         )
         prompt = build_mutation_prompt("goal", er)
         # GEPA parity: the reserved "scores" key renders under a
-        # friendly header.  Raw "scores:" label should not appear.
-        assert "## Scores (Higher is Better)" in prompt
+        # friendly header at h4 (one level below the example).
+        assert "\n#### Scores (Higher is Better)\n" in prompt
         # Values render via GEPA's recursive format_samples — the
-        # objective-axis names become their own markdown sub-headers
+        # objective-axis names become their own h5 markdown sub-headers
         # with the primitive scalar on the next line.
-        assert "### success" in prompt
+        assert "\n##### success\n" in prompt
         assert "1.0" in prompt
-        assert "### affordance" in prompt
+        assert "\n##### affordance\n" in prompt
         assert "0.8" in prompt
 
     def test_other_side_info_keys_render_verbatim(self):
@@ -183,9 +186,10 @@ class TestPerExampleDiagnostics:
             instance_scores={"ex_0": 1.0},
         )
         prompt = build_mutation_prompt("goal", er)
-        assert "## trajectory" in prompt
+        # ``### Example`` (h3) → ``#### {key}`` (h4) → scalar body.
+        assert "\n#### trajectory\n" in prompt
         assert "unique_traj_marker" in prompt
-        assert "## loss" in prompt
+        assert "\n#### loss\n" in prompt
         assert "0.42" in prompt
 
     def test_diagnostics_section_header_present(self):
@@ -232,7 +236,12 @@ class TestPerExampleDiagnostics:
 
     def test_nested_dict_renders_via_recursive_headers(self):
         """GEPA ``render_value`` parity: a dict value inside side_info
-        renders its keys as bumped-level sub-headers, recursively."""
+        renders its keys as bumped-level sub-headers, recursively.
+
+        Header depths under the monotonic hierarchy:
+          ## Diagnostics (h2) → ### Example (h3) → #### key (h4)
+          → ##### subkey (h5) → ###### subsubkey (h6, capped).
+        """
         er = self._make(
             per_example_side_info=[
                 {
@@ -245,21 +254,22 @@ class TestPerExampleDiagnostics:
             instance_scores={"ex_0": 1.0},
         )
         prompt = build_mutation_prompt("goal", er)
-        # Top-level key is at the current key-level (##).
-        assert "## trajectory" in prompt
-        # First-level nested keys bump by one.
-        assert "### grasp" in prompt
-        assert "### place" in prompt
-        # Second-level nested keys bump again.
-        assert "#### success" in prompt
-        assert "#### pose" in prompt
+        # Top-level key at h4 (one below ### Example).
+        assert "\n#### trajectory\n" in prompt
+        # First-level nested keys at h5.
+        assert "\n##### grasp\n" in prompt
+        assert "\n##### place\n" in prompt
+        # Second-level nested keys at h6 (cap).
+        assert "\n###### success\n" in prompt
+        assert "\n###### pose\n" in prompt
         # Scalar leaves render as plain text (no further headers).
         assert "top-down" in prompt
         assert "centered" in prompt
 
     def test_list_values_render_as_item_headers(self):
         """GEPA ``render_value`` parity: a list value renders each
-        element under ``### Item N`` sub-headers."""
+        element under ``##### Item N`` sub-headers (h5 under the h4
+        key header)."""
         er = self._make(
             per_example_side_info=[
                 {"attempts": ["first_try_failed", "retry_succeeded"]},
@@ -267,9 +277,9 @@ class TestPerExampleDiagnostics:
             instance_scores={"ex_0": 1.0},
         )
         prompt = build_mutation_prompt("goal", er)
-        assert "## attempts" in prompt
-        assert "### Item 1" in prompt
-        assert "### Item 2" in prompt
+        assert "\n#### attempts\n" in prompt
+        assert "\n##### Item 1\n" in prompt
+        assert "\n##### Item 2\n" in prompt
         assert "first_try_failed" in prompt
         assert "retry_succeeded" in prompt
 
@@ -288,12 +298,12 @@ class TestPerExampleDiagnostics:
             instance_scores={"ex_0": 1.0},
         )
         prompt = build_mutation_prompt("goal", er)
-        assert "## steps" in prompt
-        assert "### Item 1" in prompt
-        assert "### Item 2" in prompt
-        # Dict keys inside each list element bump a further level.
-        assert "#### action" in prompt
-        assert "#### outcome" in prompt
+        assert "\n#### steps\n" in prompt
+        assert "\n##### Item 1\n" in prompt
+        assert "\n##### Item 2\n" in prompt
+        # Dict keys inside each list element bump to h6 (capped).
+        assert "\n###### action\n" in prompt
+        assert "\n###### outcome\n" in prompt
         assert "grasp" in prompt
         assert "dropped" in prompt
 
@@ -306,11 +316,57 @@ class TestPerExampleDiagnostics:
             instance_scores={"ex_0": 1.0},
         )
         prompt = build_mutation_prompt("goal", er)
-        assert "## loss" in prompt
+        assert "\n#### loss\n" in prompt
         # The scalar should be rendered as just "0.42" on its own
         # line, not '"0.42"' or "0.42\n" wrapped in JSON.
         assert "0.42" in prompt
         assert '"0.42"' not in prompt
+
+    def test_diagnostics_header_hierarchy_is_monotonic(self):
+        """The Diagnostics block's header levels never jump backwards
+        as the reader descends the tree.  Concretely: under
+        ``## Diagnostics`` (h2) the next header is at h3 or deeper, the
+        next is h3-or-deeper again, etc.  Bumps of +1 and decreases
+        (coming back up from a sub-branch) are fine; a jump from h2
+        straight to h1 would inverted the hierarchy and confuse
+        markdown tooling / the LLM's markdown parser."""
+        er = self._make(
+            per_example_side_info=[
+                {"trajectory": {"grasp": "ok"}, "scores": {"success": 1.0}},
+                {"trajectory": {"grasp": "dropped"}, "scores": {"success": 0.0}},
+            ],
+            instance_scores={"ex_0": 1.0, "ex_1": 0.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+
+        # Find the Diagnostics block.
+        diag_idx = prompt.index("## Diagnostics")
+        diag = prompt[diag_idx:]
+        # Next section (## ...) ends the block — slice up to there.
+        next_h2 = diag.find("\n## ", 1)
+        if next_h2 != -1:
+            diag = diag[:next_h2]
+
+        # Extract header lines + depths.
+        headers = []
+        for line in diag.splitlines():
+            s = line.lstrip("#")
+            depth = len(line) - len(s)
+            if depth >= 1 and s.startswith(" "):
+                headers.append((depth, line))
+        assert headers, "Diagnostics block has no headers at all"
+
+        # The first header must be ``## Diagnostics`` itself (h2).
+        assert headers[0][0] == 2
+
+        # No header is at depth 1 (h1) — they'd visually outrank the
+        # surrounding ``## Diagnostics``.
+        h1s = [h for d, h in headers if d == 1]
+        assert not h1s, f"Unexpected h1 headers inside Diagnostics: {h1s}"
+
+        # Every depth is <= 6 (markdown cap).
+        for d, h in headers:
+            assert d <= 6, f"{d}-hash header exceeds markdown h6 cap: {h!r}"
 
     def test_max_markdown_header_level_caps_at_six(self):
         """GEPA caps nested header depth at ``######`` (h6) — deeper
