@@ -331,7 +331,7 @@ def init() -> None:
 @click.option("--model", default=None,
               help="Override the Claude model (e.g. claude-haiku-4-5-20250514).")
 @click.option("--effort", default=None,
-              help="Override Claude effort level (e.g. low, medium, high).")
+              help="Override Claude effort level (e.g. low, medium, high, xhigh, max).")
 def evolve(
     config_path: str,
     project_dir: Path | None,
