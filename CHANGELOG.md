@@ -20,6 +20,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation errors, pointing users at likely typos or misplaced keys.
 
 ### Changed
+- **BREAKING**: `score_parser = "helix_result"` now takes a **per-example**
+  `HELIX_RESULT=[[score_0, side_info_0], [score_1, side_info_1], ...]`
+  payload — one `[score, side_info]` pair per id in `helix_batch.json`.
+  HELIX zips it into `instance_scores` and stores `side_info_i` on
+  `EvalResult.per_example_side_info` for the reflection prompt.  GEPA
+  `optimize_anything` parity (`src/gepa/optimize_anything.py:387-438`).
+  The previous scalar-plus-id-keyed-dict contract is removed — it
+  silently failed the minibatch gate whenever the evaluator keyed its
+  dict by aggregate metric names (`task__metric`) instead of per-example
+  ids (`task__trialN`).  Migration: replace
+  `HELIX_RESULT=[mean, {"scores": {id_i: v_i, ...}, ...}]` with
+  `HELIX_RESULT=[[v_0, {"info": "..."}], [v_1, {...}], ...]`.
+- `helix.executor.run_evaluator` now emits a `WARNING` log line when the
+  post-filter zero-fills any requested id (naming the count and a sample
+  of up to five).  Non-breaking — behaviour is unchanged, only
+  observability improves.  Catches parser / id-keying mismatches on
+  parsers other than `helix_result` (e.g. `exitcode` plus `instance_ids`).
 - **BREAKING**: `seedless` is now a section (`[seedless]` with `enabled = …`),
   not a top-level boolean.
 - **BREAKING**: `dataset.train_path` / `dataset.val_path` have moved to
