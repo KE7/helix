@@ -26,11 +26,21 @@ class EvaluatorConfig(BaseModel):
     ``helix_batch.json`` pre-invocation.  Pick ``"helix_result"`` to
     hand HELIX a list of per-example ``[score, side_info]`` pairs
     (GEPA ``optimize_anything`` evaluator parity) — HELIX owns the
-    id-keying so the evaluator never types a HELIX-internal id.  The
-    other parsers (``"pytest"``, ``"exitcode"``, ``"json_accuracy"``,
+    id-keying so the evaluator never types a HELIX-internal id.
+
+    ``helix_result`` is the only parser that populates the new
+    :attr:`helix.population.EvalResult.per_example_side_info` and
+    :attr:`~helix.population.EvalResult.objective_scores` fields: the
+    former from ``side_info_i`` verbatim (reflection), the latter from
+    the reserved ``side_info_i["scores"]`` sub-dict (multi-axis Pareto
+    frontier — see :attr:`EvolutionConfig.frontier_type`).
+
+    The other parsers (``"pytest"``, ``"exitcode"``, ``"json_accuracy"``,
     ``"json_score"``) aggregate to a single score and do NOT produce
     id-keyed per-instance scores; combining them with ``instance_ids``
-    triggers the zero-fill warning in :mod:`helix.executor`.
+    triggers the zero-fill warning in :mod:`helix.executor`.  They also
+    leave ``objective_scores`` empty, so the multi-axis frontier
+    degenerates to the instance path when they're selected.
     """
     model_config = ConfigDict(extra="forbid")
 

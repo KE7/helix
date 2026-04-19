@@ -288,6 +288,11 @@ minibatch_size = 3               # train-set minibatch gate size
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate before full val
+frontier_type = "hybrid"         # Pareto dimensionality (GEPA FrontierType parity):
+                                 # "instance" | "objective" | "hybrid" | "cartesian".
+                                 # Default "hybrid" matches GEPA optimize_anything.
+                                 # Non-instance axes require score_parser="helix_result"
+                                 # emitting per-example side_info["scores"] dicts.
 
 [claude]
 model = "sonnet"                 # or "opus", "haiku", full model name

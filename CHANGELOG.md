@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Multi-axis Pareto frontier (GEPA `FrontierType` parity,
+  `src/gepa/core/state.py:22-23`).  New
+  `evolution.frontier_type: Literal["instance", "objective", "hybrid",
+  "cartesian"]` with default `"hybrid"` — matches GEPA's own
+  `optimize_anything` default (`src/gepa/optimize_anything.py:476`).
+  `ParetoFrontier` now tracks per-objective-name and per-`(val_id,
+  objective_name)` best sets alongside the existing per-example-id
+  tracking, and `get_non_dominated()` / `select_parent()` dispatch on
+  `frontier_type`.  The acceptance gate stays positional on
+  `scores_list` unchanged.
+- `EvalResult.per_example_side_info: list[dict[str, Any]] | None` —
+  per-example diagnostic dicts from the new `helix_result` contract,
+  positional to `instance_scores` by `helix_batch.json` id order.
+  GEPA analogue: `EvaluationBatch.trajectories`
+  (`src/gepa/core/adapter.py:25`).
+- `EvalResult.objective_scores: list[dict[str, float]] | None` —
+  per-example objective-axis harvest from `side_info["scores"]`.  GEPA
+  analogue: `EvaluationBatch.objective_scores`
+  (`src/gepa/core/adapter.py:26`).  Feeds `frontier_type ∈ {"objective",
+  "hybrid", "cartesian"}`; harmless on the `"instance"` path.
 - `DatasetConfig.train_size` / `val_size` — cardinality-only fields that drive
   the minibatch sampler when the evaluator owns the dataset (Architecture A
   example-id handoff).  HELIX writes sampled example ids to
