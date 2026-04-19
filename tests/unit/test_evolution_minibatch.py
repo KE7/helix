@@ -744,6 +744,101 @@ class TestCachedEvaluateBatch:
         # Merged scores cover ALL requested ids: cached 0/2 + fresh 1.
         assert result.instance_scores == {"0": 0.11, "1": 0.22, "2": 0.33}
 
+    def test_partial_cache_hit_per_example_fields_merge(self, mocker: Any) -> None:
+        """Partial-cache-hit merge of ``per_example_side_info`` and
+        ``objective_scores``.  Pins the closure side-channel design
+        from commit H (``_cached_evaluate_batch``):
+
+          * cache-hit positions get ``{}`` for per_example_side_info
+            (the cache has no slot for freeform side_info so the merge
+            can't round-trip it — their prior side_info was consumed
+            by the reflection prompt at their original eval time);
+          * fresh miss positions get the per_example_side_info dict
+            from the fresh EvalResult, zipped by id;
+          * ``objective_scores`` IS round-tripped through the cache
+            (it has a dedicated slot — see
+            ``eval_cache.CachedEvaluation.objective_scores``), so
+            cache-hit positions get back the previously-stored dict
+            and miss positions get the freshly-harvested dict.
+        """
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cand = self._make_cand("cand-pcfm")
+        cand_dict = {"id": cand.id, "split": "train"}
+        # Pre-populate ids "0" and "2" with both score AND
+        # objective_scores (the cache stores these natively).
+        cache.put_batch(
+            cand_dict,
+            ["0", "2"],
+            [None, None],
+            [0.11, 0.33],
+            objective_scores_list=[
+                {"obj_alpha": 0.11, "obj_beta": 0.8},
+                {"obj_alpha": 0.33, "obj_beta": 0.1},
+            ],
+        )
+        # "1" is uncached — the evaluator is invoked with it only, and
+        # must return an ``EvalResult`` that carries per_example_side_info
+        # + objective_scores for the merge path to thread through.
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            # Produce one fresh entry for each requested uncached id.
+            ids = list(instance_ids or [])
+            return EvalResult(
+                candidate_id=candidate.id,
+                scores={},
+                asi={},
+                instance_scores={eid: 0.22 for eid in ids},
+                per_example_side_info=[
+                    {"trajectory": f"fresh_trace_{eid}", "rollout_id": f"fresh__{eid}"}
+                    for eid in ids
+                ],
+                objective_scores=[
+                    {"obj_alpha": 0.22, "obj_beta": 0.5}
+                    for _ in ids
+                ],
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
+        )
+
+        # instance_scores merge: cached 0/2 + fresh 1 (established
+        # earlier by ``test_partial_cache_hit``).
+        assert result.instance_scores == {"0": 0.11, "1": 0.22, "2": 0.33}
+        assert num_actual == 1
+
+        # objective_scores round-trip fully through the cache (dedicated
+        # slot in ``CachedEvaluation``).  Each slot positional to
+        # ``example_ids``:
+        assert result.objective_scores is not None
+        assert result.objective_scores == [
+            {"obj_alpha": 0.11, "obj_beta": 0.8},     # cached id "0"
+            {"obj_alpha": 0.22, "obj_beta": 0.5},     # fresh id "1"
+            {"obj_alpha": 0.33, "obj_beta": 0.1},     # cached id "2"
+        ]
+
+        # per_example_side_info: cache has no slot, so cache-hit
+        # positions get ``{}`` placeholder; the fresh miss position
+        # gets the dict we returned from fake_run.
+        assert result.per_example_side_info is not None
+        assert result.per_example_side_info == [
+            {},                                                               # cached "0" → {}
+            {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},         # fresh "1"
+            {},                                                               # cached "2" → {}
+        ]
+
     def test_cache_populates_after_fresh_eval(self, mocker: Any) -> None:
         """After a fresh eval, a second call with the same ids is a full hit."""
         from helix.eval_cache import EvaluationCache as MBCache
