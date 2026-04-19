@@ -54,7 +54,6 @@ The result is a new kind of evolutionary optimizer: one that preserves the refle
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
 | ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (GEPA parity, bounded by `evolution.max_workers`) |
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
-| 🎯 | **Convergence detection** | Auto-stop when the frontier stagnates for N generations |
 | 💾 | **State persistence & resume** | Crash-safe — resume from any generation with `helix resume` |
 | 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
 | 📋 | **Semantic mutation log** | Full trajectory with root-cause analysis, changes made, and parent lineage |
@@ -442,7 +441,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 |---|---|
 | `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log |
 | `config.py` | TOML config parsing via Pydantic v2 |
-| `evolution.py` | Main generation loop with gating, merge, convergence |
+| `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
 | `worktree.py` | Git worktree lifecycle (create, clone, snapshot, remove) |
 | `executor.py` | Run evaluator commands, parallel evaluation |
