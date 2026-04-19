@@ -308,7 +308,6 @@ class TestLegacyGatingUsesSumOnly:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=0.0,
             max_evaluations=100_000,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -317,19 +316,17 @@ class TestLegacyGatingUsesSumOnly:
             "Legacy gating path called degrades() — MODERATE D fix failed."
         )
 
-    def test_legacy_accepts_strict_improvement_that_degrades_would_reject(
+    def test_legacy_accepts_strict_improvement(
         self, mocker, tmp_path, all_mocks
     ):
-        """With a negative ``gating_threshold``, the pre-fix ``degrades()``
-        pre-check demands improvement beyond ``|threshold|``; the GEPA
-        sum-score criterion only requires strict improvement.  A child
-        that improves by < |threshold| would be rejected pre-fix but
-        accepted post-fix.
+        """GEPA sum-score acceptance requires strict improvement only.
+        A child with parent_sum=0.5 child_sum=0.55 must be accepted.
 
-        Concretely with ``gating_threshold=-0.1``, parent_sum=0.5,
-        child_sum=0.55:
-          * pre-fix ``degrades(child, parent, -0.1)`` = ``(0.55 < 0.6)`` = True → REJECT
-          * post-fix strict-sum = ``(0.55 > 0.5)`` → ACCEPT
+        Historical note: the pre-fix legacy path called ``degrades()``
+        with a ``gating_threshold`` config knob (now removed); if that
+        threshold was negative, the pre-fix path would have rejected
+        this same child.  Post-fix the sum-score criterion is uniform
+        and gating_threshold is gone.
         """
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
@@ -345,15 +342,12 @@ class TestLegacyGatingUsesSumOnly:
 
         config = make_config(
             max_generations=1,
-            gating_threshold=-0.1,  # degrades would require strict > +0.1
             max_evaluations=100_000,
         )
         best = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # Strict sum-score acceptance: 0.55 > 0.5 → child becomes best.
-        # Pre-fix degrades() would have rejected and best would be seed.
         assert best.id == "g1-s1", (
             f"Expected child to be accepted under GEPA strict-sum "
-            f"acceptance; got best={best.id}.  Pre-fix degrades() "
-            f"rejected because 0.55 < 0.5 - (-0.1) = 0.6."
+            f"acceptance; got best={best.id}."
         )
