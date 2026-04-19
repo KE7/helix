@@ -723,7 +723,16 @@ def _cached_evaluate_batch(
         # per slot (the cache's ``RolloutOutput`` type parameter is
         # ``object`` precisely for this reason — see evolution.py:536).
         outputs: list[object] = [None] * len(batch)
-        scores = [float(fresh.instance_scores.get(eid, 0.0)) for eid in batch]
+        # GEPA parity (adapter.py:154 — ``len(outputs) == len(scores) ==
+        # len(batch)``): a missing instance id is an evaluator bug, not a
+        # benign zero.  Mirrors the minibatch-acceptance and merge-gate
+        # asserts (evolution.py:1394-1411, :1838-1862).
+        missing = set(batch) - set(fresh.instance_scores)
+        assert not missing, (
+            f"Evaluator did not return scores for requested ids: "
+            f"{sorted(missing)}"
+        )
+        scores = [float(fresh.instance_scores[eid]) for eid in batch]
         return outputs, scores, None
 
     _, scores_by_id, _, num_actual_evals = cache.evaluate_with_cache_full(
