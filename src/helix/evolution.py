@@ -54,7 +54,15 @@ from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.population import Candidate, EvalResult, ParetoFrontier
-from helix.state import BudgetState, EvaluationCache, EvolutionState, load_state, save_state
+from helix.state import (
+    BudgetState,
+    EvaluationCache,
+    EvolutionState,
+    load_eval_cache,
+    load_state,
+    save_eval_cache,
+    save_state,
+)
 from helix.trace import TRACE, EventType
 from helix.worktree import create_seed_worktree, create_empty_seed_worktree, remove_worktree, snapshot_candidate
 
@@ -850,11 +858,25 @@ def run_evolution(
     # (candidate_id, split) and used for merge / non-minibatch paths.
     # Use ``object`` for the output type parameter: HELIX only stores
     # per-(candidate, example) scores here, not rollout outputs.
+    #
+    # GEPA parity (audit-rng-state-persist C1): on resume, restore the
+    # cache contents from .helix/eval_cache.pkl when caching is enabled.
+    # Mirrors GEPA's behaviour at gepa/core/state.py:683-687
+    # (initialize_gepa_state) — when ``cache_evaluation`` is off we drop any
+    # persisted cache, when it is on we merge the on-disk dict into the
+    # fresh cache instance.  The actual persistence happens via the
+    # ``_save_state`` helper defined below, called at every existing
+    # ``save_state`` site so the cache survives crash/resume the same way
+    # GEPA's pickled state does.
     minibatch_cache: MinibatchEvalCache[object, str] | None = (
         MinibatchEvalCache[object, str]()
         if config.evolution.cache_evaluation
         else None
     )
+    if minibatch_cache is not None:
+        _persisted_cache = load_eval_cache(project_root)
+        if _persisted_cache is not None:
+            minibatch_cache._cache.update(_persisted_cache)
 
     # Acceptance criterion (GEPA §5.1).
     acceptance = (
@@ -875,6 +897,16 @@ def run_evolution(
     state = load_state(project_root)
     cfg_hash = _config_hash(config)
     evaluator_manifest = _load_evaluator_integrity_manifest(base_dir)
+
+    # GEPA parity (audit-rng-state-persist C1): bundle eval-cache persistence
+    # with state.json writes.  GEPA's single ``GEPAState.save`` call pickles
+    # the cache atomically alongside everything else (state.py:306-340); HELIX
+    # routes the (candidate_id, example_id)-keyed companion pickle through
+    # this helper so every save site stays consistent without rewriting them.
+    def _save_state(s: EvolutionState) -> None:
+        save_state(s, project_root)
+        if minibatch_cache is not None:
+            save_eval_cache(minibatch_cache._cache, project_root)
 
     if state is None:
         state = EvolutionState(
@@ -986,7 +1018,13 @@ def run_evolution(
         frontier.add(seed, seed_result)
         state.frontier = list(frontier._candidates.keys())
         state.instance_scores[seed.id] = seed_result.instance_scores
-        save_state(state, project_root)
+        # GEPA parity (audit-rng-state-persist C/§3): record per-program
+        # discovery budget at the moment the program enters the frontier.
+        # Mirrors GEPA core/state.py:537 (``num_metric_calls_by_discovery
+        # .append(num_metric_calls_by_discovery_of_new_program)`` inside
+        # ``update_state_with_new_program``).
+        state.num_metric_calls_by_discovery[seed.id] = state.budget.evaluations
+        _save_state(state)
 
         record_entry(
             lineage_path,
@@ -1106,7 +1144,7 @@ def run_evolution(
             # GEPA parity (L3): need >= 2 non-dominated candidates for merge.
             # Mirrors GEPA merge.py:128-131.
             if len(merge_candidate_ids) < 2:
-                save_state(state, project_root)
+                _save_state(state)
                 if not _hprog.is_active:
                     render_budget(state.budget, config.evolution)
                 _hprog.update(gen, _frontier_best_score())
@@ -1146,7 +1184,7 @@ def run_evolution(
                                 f"{len(common_val_ids)} common val IDs "
                                 f"(need {config.evolution.merge_val_overlap_floor}) -- skipping."
                             )
-                            save_state(state, project_root)
+                            _save_state(state)
                             if not _hprog.is_active:
                                 render_budget(state.budget, config.evolution)
                             _hprog.update(gen, _frontier_best_score())
@@ -1202,7 +1240,7 @@ def run_evolution(
                             # Save state BEFORE snapshot so that if the commit
                             # crashes (e.g. empty-commit), state is already
                             # persisted and resume can skip re-doing this merge.
-                            save_state(state, project_root)
+                            _save_state(state)
                             snapshot_candidate(
                                 merged,
                                 f"helix: merge {merge_id} ({cid_i}+{cid_j})",
@@ -1227,7 +1265,7 @@ def run_evolution(
                                     )
                                 if merged.id in candidates:
                                     del candidates[merged.id]
-                                save_state(state, project_root)
+                                _save_state(state)
                                 if not _hprog.is_active:
                                     render_budget(state.budget, config.evolution)
                                 _hprog.update(gen, _frontier_best_score())
@@ -1256,7 +1294,7 @@ def run_evolution(
                             # GEPA parity (Fix 13): mid-generation budget check.
                             if budget_exhausted(state, config):
                                 print_warning("Budget exhausted mid-generation -- stopping.")
-                                save_state(state, project_root)
+                                _save_state(state)
                                 break
 
                             # Merged subsample sum must be >= max of parent
@@ -1313,6 +1351,13 @@ def run_evolution(
                                 frontier.add(merged, merge_result)
                                 state.frontier = list(frontier._candidates.keys())
                                 state.instance_scores[merged.id] = merge_result.instance_scores
+                                # GEPA parity (audit-rng-state-persist C/§3):
+                                # record per-program discovery budget at the
+                                # moment the merged program enters the
+                                # frontier.  GEPA core/state.py:537.
+                                state.num_metric_calls_by_discovery[merged.id] = (
+                                    state.budget.evaluations
+                                )
                             else:
                                 print_warning(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
@@ -1336,7 +1381,7 @@ def run_evolution(
 
                 # GEPA parity (Fix 6): merge consumed this iteration,
                 # skip mutation entirely (``continue``).
-                save_state(state, project_root)
+                _save_state(state)
                 if not _hprog.is_active:
                     render_budget(state.budget, config.evolution)
                 _hprog.update(gen, _frontier_best_score())
@@ -1454,7 +1499,7 @@ def run_evolution(
 
         if _budget_break and not proposal_contexts:
             print_warning("Budget exhausted mid-generation -- stopping.")
-            save_state(state, project_root)
+            _save_state(state)
             break
 
         # ---- Step 2: Execute mutations (parallel if N > 1) ----
@@ -1566,7 +1611,7 @@ def run_evolution(
             # Save state BEFORE snapshot so that if the commit crashes
             # (e.g. empty-commit), state is already persisted and resume
             # can skip re-doing this mutation.
-            save_state(state, project_root)
+            _save_state(state)
             snapshot_candidate(child, f"helix: mutate {child.id}")
 
             # --- Gating evaluation ----------------------------------------
@@ -1598,7 +1643,7 @@ def run_evolution(
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
-                    save_state(state, project_root)
+                    _save_state(state)
                     _budget_break = True
                     break
 
@@ -1660,7 +1705,7 @@ def run_evolution(
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
-                    save_state(state, project_root)
+                    _save_state(state)
                     _budget_break = True
                     break
 
@@ -1718,7 +1763,7 @@ def run_evolution(
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
-                    save_state(state, project_root)
+                    _save_state(state)
                     _budget_break = True
                     break
 
@@ -1799,7 +1844,7 @@ def run_evolution(
 
             if budget_exhausted(state, config):
                 print_warning("Budget exhausted mid-generation -- stopping.")
-                save_state(state, project_root)
+                _save_state(state)
                 _budget_break = True
                 break
 
@@ -1809,6 +1854,10 @@ def run_evolution(
             frontier.add(child, val_result)
             state.frontier = list(frontier._candidates.keys())
             state.instance_scores[child.id] = val_result.instance_scores
+            # GEPA parity (audit-rng-state-persist C/§3): record per-program
+            # discovery budget at the moment the child enters the frontier.
+            # GEPA core/state.py:537.
+            state.num_metric_calls_by_discovery[child.id] = state.budget.evaluations
             TRACE.emit(
                 EventType.FRONTIER_UPDATE,
                 candidate_id=child.id,
@@ -1843,7 +1892,7 @@ def run_evolution(
         # every acceptance — the old block bypassed _cached_eval() and burned
         # budget quadratically with growing frontier size.
 
-        save_state(state, project_root)
+        _save_state(state)
         if not _hprog.is_active:
             render_budget(state.budget, config.evolution)
         _hprog.update(gen, _frontier_best_score())
