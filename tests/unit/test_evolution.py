@@ -587,9 +587,11 @@ class TestMergeBehavior:
         GEPA parity (M2/L3): candidates need complementary instance scores
         so both are non-dominated and merge candidate pool has >= 2 entries.
 
-        Uses numeric instance ids ("1"/"2") because the merge-eval path
-        (M5 subsample) runs through ``_cached_evaluate_batch`` → positional
-        helix_batch.json handoff, which requires int-convertible ids.
+        Uses stringified-numeric instance ids ("1"/"2") — the merge-eval
+        path (M5 subsample) runs through ``_cached_evaluate_batch`` →
+        helix_batch.json handoff.  Ids pass through verbatim as strings
+        now; any opaque id works here, these happen to be "1"/"2" for
+        legibility.
         """
         seed = make_candidate("g0-s0")
         merged_cand = make_candidate("g1-m1", generation=1)
