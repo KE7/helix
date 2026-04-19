@@ -119,6 +119,129 @@ class TestBuildMutationPrompt:
         assert "no scores recorded" in prompt
 
 
+class TestPerExampleDiagnostics:
+    """``build_mutation_prompt`` renders ``eval_result.per_example_side_info``
+    as the Diagnostics section under the new GEPA O.A. contract
+    (``optimize_anything_adapter.py:524-553`` + ``format_samples``
+    at ``gepa/strategies/instruction_proposal.py:54-95``).  The legacy
+    batch-level ``side_info`` rendering is used only when
+    ``per_example_side_info`` is absent.
+    """
+
+    def _make(
+        self,
+        per_example_side_info: list[dict] | None,
+        side_info: dict | None = None,
+        instance_scores: dict | None = None,
+    ) -> EvalResult:
+        return EvalResult(
+            candidate_id="g0-s0",
+            scores={"pass_rate": 0.5},
+            asi={"stdout": "", "stderr": ""},
+            instance_scores=instance_scores or {"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+            side_info=side_info,
+            per_example_side_info=per_example_side_info,
+        )
+
+    def test_renders_per_example_headers_from_instance_scores(self):
+        er = self._make(
+            per_example_side_info=[
+                {"trajectory": "fell over", "scores": {"success": 1.0, "affordance": 0.8}},
+                {"trajectory": "stuck", "scores": {"success": 0.0, "affordance": 0.2}},
+            ],
+            instance_scores={"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # Per-example ids from instance_scores become "# Example <id>" headers.
+        assert "# Example cube_lifting__0" in prompt
+        assert "# Example cube_lifting__1" in prompt
+
+    def test_reserved_scores_key_renamed_for_mutator(self):
+        er = self._make(
+            per_example_side_info=[
+                {"scores": {"success": 1.0, "affordance": 0.8}},
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # GEPA parity: the reserved "scores" key renders under a
+        # friendly header.  Raw "scores:" label should not appear.
+        assert "## Scores (Higher is Better)" in prompt
+        # Values are exposed with their axis names.
+        assert "success: 1.0" in prompt
+        assert "affordance: 0.8" in prompt
+
+    def test_other_side_info_keys_render_verbatim(self):
+        er = self._make(
+            per_example_side_info=[
+                {"trajectory": "unique_traj_marker", "loss": 0.42},
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## trajectory" in prompt
+        assert "unique_traj_marker" in prompt
+        assert "## loss" in prompt
+        assert "0.42" in prompt
+
+    def test_diagnostics_section_header_present(self):
+        er = self._make(
+            per_example_side_info=[{"scores": {"s": 1.0}}],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Diagnostics" in prompt
+
+    def test_empty_per_example_slots_still_render_headers(self):
+        """When every per-example side_info is ``{}`` (bare-score
+        evaluator), the section still shows per-example headers so the
+        mutator knows the data was present but empty — rather than
+        silently dropping the section."""
+        er = self._make(
+            per_example_side_info=[{}, {}],
+            instance_scores={"ex_0": 1.0, "ex_1": 0.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "# Example ex_0" in prompt
+        assert "# Example ex_1" in prompt
+        assert "no per-example side_info" in prompt
+
+    def test_legacy_side_info_used_when_per_example_absent(self):
+        """Fallback: ``per_example_side_info=None`` + batch-level
+        ``side_info={...}`` keeps the legacy rendering (non-helix_result
+        paths that still populate the batch-level field)."""
+        er = self._make(
+            per_example_side_info=None,
+            side_info={"legacy_key": "legacy_val"},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Diagnostics" in prompt
+        assert "legacy_key" in prompt
+        assert "legacy_val" in prompt
+        # Per-example markers must NOT appear on the legacy path.
+        assert "# Example" not in prompt
+
+    def test_no_diagnostics_when_both_absent(self):
+        er = self._make(per_example_side_info=None, side_info=None)
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Diagnostics" not in prompt
+
+    def test_per_example_takes_precedence_over_legacy(self):
+        """When both fields are populated (hybrid evaluator path),
+        per-example wins — the legacy batch-level dict is dropped
+        from the rendered prompt."""
+        er = self._make(
+            per_example_side_info=[{"per_example_marker": "YES"}],
+            side_info={"legacy_marker": "NO"},
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "per_example_marker" in prompt
+        assert "YES" in prompt
+        assert "legacy_marker" not in prompt
+        assert "NO" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # Tests: invoke_claude_code
 # ---------------------------------------------------------------------------
