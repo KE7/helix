@@ -160,6 +160,79 @@ class TestEvolutionConfigNewFields:
 
 
 # ---------------------------------------------------------------------------
+# evolution.frontier_type — GEPA multi-axis Pareto dimensionality
+# ---------------------------------------------------------------------------
+
+
+class TestEvolutionFrontierType:
+    """``evolution.frontier_type`` mirrors GEPA's ``FrontierType``
+    literal (``src/gepa/core/state.py:22-23``).  HELIX's default is
+    ``"hybrid"`` because O.A. is the right parent for HELIX — GEPA's
+    O.A. defaults to ``"hybrid"`` at
+    ``src/gepa/optimize_anything.py:476``.  The base ``api.py`` default
+    is ``"instance"`` but that's not the right baseline for HELIX.
+    """
+
+    def test_default_is_hybrid(self):
+        cfg = EvolutionConfig()
+        assert cfg.frontier_type == "hybrid"
+
+    @pytest.mark.parametrize(
+        "variant", ["instance", "objective", "hybrid", "cartesian"],
+    )
+    def test_all_literal_variants_accepted(self, variant):
+        cfg = EvolutionConfig(frontier_type=variant)
+        assert cfg.frontier_type == variant
+
+    def test_invalid_variant_rejected(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(frontier_type="instance_plus_one")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "variant", ["instance", "objective", "hybrid", "cartesian"],
+    )
+    def test_toml_round_trip_variant(self, tmp_path, variant):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(textwrap.dedent(f"""
+            objective = "Test"
+
+            [evaluator]
+            command = "pytest"
+
+            [evolution]
+            frontier_type = "{variant}"
+        """))
+        cfg = load_config(toml)
+        assert cfg.evolution.frontier_type == variant
+
+    def test_toml_default_when_omitted(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "pytest"
+        """))
+        cfg = load_config(toml)
+        assert cfg.evolution.frontier_type == "hybrid"
+
+    def test_toml_invalid_literal_rejected_at_load(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "pytest"
+
+            [evolution]
+            frontier_type = "not-a-real-type"
+        """))
+        with pytest.raises(SystemExit):
+            # load_config prints + sys.exit(1) on validation errors.
+            load_config(toml)
+
+
+# ---------------------------------------------------------------------------
 # Round-trip TOML loading
 # ---------------------------------------------------------------------------
 

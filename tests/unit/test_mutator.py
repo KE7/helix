@@ -119,6 +119,393 @@ class TestBuildMutationPrompt:
         assert "no scores recorded" in prompt
 
 
+class TestPerExampleDiagnostics:
+    """``build_mutation_prompt`` renders ``eval_result.per_example_side_info``
+    as the Diagnostics section under the new GEPA O.A. contract
+    (``optimize_anything_adapter.py:524-553`` + ``format_samples``
+    at ``gepa/strategies/instruction_proposal.py:54-95``).  The legacy
+    batch-level ``side_info`` rendering is used only when
+    ``per_example_side_info`` is absent.
+    """
+
+    def _make(
+        self,
+        per_example_side_info: list[dict] | None,
+        side_info: dict | None = None,
+        instance_scores: dict | None = None,
+    ) -> EvalResult:
+        return EvalResult(
+            candidate_id="g0-s0",
+            scores={"pass_rate": 0.5},
+            asi={"stdout": "", "stderr": ""},
+            instance_scores=instance_scores or {"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+            side_info=side_info,
+            per_example_side_info=per_example_side_info,
+        )
+
+    def test_renders_per_example_headers_from_instance_scores(self):
+        er = self._make(
+            per_example_side_info=[
+                {"trajectory": "fell over", "scores": {"success": 1.0, "affordance": 0.8}},
+                {"trajectory": "stuck", "scores": {"success": 0.0, "affordance": 0.2}},
+            ],
+            instance_scores={"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # Per-example ids render as ``### Example <id>`` (h3 under the
+        # surrounding ``## Diagnostics`` h2).  Line-anchored check —
+        # a substring match would also accept ``# Example`` or
+        # ``#### Example`` and miss the header-level change.
+        assert "\n### Example cube_lifting__0\n" in prompt
+        assert "\n### Example cube_lifting__1\n" in prompt
+
+    def test_reserved_scores_key_renamed_for_mutator(self):
+        er = self._make(
+            per_example_side_info=[
+                {"scores": {"success": 1.0, "affordance": 0.8}},
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # GEPA parity: the reserved "scores" key renders under a
+        # friendly header at h4 (one level below the example).
+        assert "\n#### Scores (Higher is Better)\n" in prompt
+        # Values render via GEPA's recursive format_samples — the
+        # objective-axis names become their own h5 markdown sub-headers
+        # with the primitive scalar on the next line.
+        assert "\n##### success\n" in prompt
+        assert "1.0" in prompt
+        assert "\n##### affordance\n" in prompt
+        assert "0.8" in prompt
+
+    def test_other_side_info_keys_render_verbatim(self):
+        er = self._make(
+            per_example_side_info=[
+                {"trajectory": "unique_traj_marker", "loss": 0.42},
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # ``### Example`` (h3) → ``#### {key}`` (h4) → scalar body.
+        assert "\n#### trajectory\n" in prompt
+        assert "unique_traj_marker" in prompt
+        assert "\n#### loss\n" in prompt
+        assert "0.42" in prompt
+
+    def test_diagnostics_section_header_present(self):
+        er = self._make(
+            per_example_side_info=[{"scores": {"s": 1.0}}],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Diagnostics" in prompt
+
+    def test_empty_per_example_slots_still_render_headers(self):
+        """When every per-example side_info is ``{}`` (bare-score
+        evaluator), the section still shows per-example headers so the
+        mutator knows the data was present but empty — rather than
+        silently dropping the section."""
+        er = self._make(
+            per_example_side_info=[{}, {}],
+            instance_scores={"ex_0": 1.0, "ex_1": 0.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "# Example ex_0" in prompt
+        assert "# Example ex_1" in prompt
+        assert "no per-example side_info" in prompt
+
+    def test_legacy_side_info_used_when_per_example_absent(self):
+        """Fallback: ``per_example_side_info=None`` + batch-level
+        ``side_info={...}`` keeps the legacy rendering (non-helix_result
+        paths that still populate the batch-level field)."""
+        er = self._make(
+            per_example_side_info=None,
+            side_info={"legacy_key": "legacy_val"},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Diagnostics" in prompt
+        assert "legacy_key" in prompt
+        assert "legacy_val" in prompt
+        # Per-example markers must NOT appear on the legacy path.
+        assert "# Example" not in prompt
+
+    def test_no_diagnostics_when_both_absent(self):
+        er = self._make(per_example_side_info=None, side_info=None)
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Diagnostics" not in prompt
+
+    def test_nested_dict_renders_via_recursive_headers(self):
+        """GEPA ``render_value`` parity: a dict value inside side_info
+        renders its keys as bumped-level sub-headers, recursively.
+
+        Header depths under the monotonic hierarchy:
+          ## Diagnostics (h2) → ### Example (h3) → #### key (h4)
+          → ##### subkey (h5) → ###### subsubkey (h6, capped).
+        """
+        er = self._make(
+            per_example_side_info=[
+                {
+                    "trajectory": {
+                        "grasp": {"success": True, "pose": "top-down"},
+                        "place": "centered",
+                    },
+                },
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # Top-level key at h4 (one below ### Example).
+        assert "\n#### trajectory\n" in prompt
+        # First-level nested keys at h5.
+        assert "\n##### grasp\n" in prompt
+        assert "\n##### place\n" in prompt
+        # Second-level nested keys at h6 (cap).
+        assert "\n###### success\n" in prompt
+        assert "\n###### pose\n" in prompt
+        # Scalar leaves render as plain text (no further headers).
+        assert "top-down" in prompt
+        assert "centered" in prompt
+
+    def test_list_values_render_as_item_headers(self):
+        """GEPA ``render_value`` parity: a list value renders each
+        element under ``##### Item N`` sub-headers (h5 under the h4
+        key header)."""
+        er = self._make(
+            per_example_side_info=[
+                {"attempts": ["first_try_failed", "retry_succeeded"]},
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "\n#### attempts\n" in prompt
+        assert "\n##### Item 1\n" in prompt
+        assert "\n##### Item 2\n" in prompt
+        assert "first_try_failed" in prompt
+        assert "retry_succeeded" in prompt
+
+    def test_mixed_nested_structure(self):
+        """List of dicts + dicts-of-lists render recursively, each
+        level bumping the header depth."""
+        er = self._make(
+            per_example_side_info=[
+                {
+                    "steps": [
+                        {"action": "grasp", "outcome": "ok"},
+                        {"action": "lift", "outcome": "dropped"},
+                    ],
+                },
+            ],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "\n#### steps\n" in prompt
+        assert "\n##### Item 1\n" in prompt
+        assert "\n##### Item 2\n" in prompt
+        # Dict keys inside each list element bump to h6 (capped).
+        assert "\n###### action\n" in prompt
+        assert "\n###### outcome\n" in prompt
+        assert "grasp" in prompt
+        assert "dropped" in prompt
+
+    def test_primitive_values_no_json_dumps(self):
+        """Port of GEPA's ``render_value`` scalar case: primitives
+        render as plain stripped ``str(value)``, NOT ``json.dumps``.
+        Check that a bare float doesn't get quoted or wrapped."""
+        er = self._make(
+            per_example_side_info=[{"loss": 0.42}],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "\n#### loss\n" in prompt
+        # The scalar should be rendered as just "0.42" on its own
+        # line, not '"0.42"' or "0.42\n" wrapped in JSON.
+        assert "0.42" in prompt
+        assert '"0.42"' not in prompt
+
+    def test_diagnostics_header_hierarchy_is_monotonic(self):
+        """The Diagnostics block's header levels never jump backwards
+        as the reader descends the tree.  Concretely: under
+        ``## Diagnostics`` (h2) the next header is at h3 or deeper, the
+        next is h3-or-deeper again, etc.  Bumps of +1 and decreases
+        (coming back up from a sub-branch) are fine; a jump from h2
+        straight to h1 would inverted the hierarchy and confuse
+        markdown tooling / the LLM's markdown parser."""
+        er = self._make(
+            per_example_side_info=[
+                {"trajectory": {"grasp": "ok"}, "scores": {"success": 1.0}},
+                {"trajectory": {"grasp": "dropped"}, "scores": {"success": 0.0}},
+            ],
+            instance_scores={"ex_0": 1.0, "ex_1": 0.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+
+        # Find the Diagnostics block.
+        diag_idx = prompt.index("## Diagnostics")
+        diag = prompt[diag_idx:]
+        # Next section (## ...) ends the block — slice up to there.
+        next_h2 = diag.find("\n## ", 1)
+        if next_h2 != -1:
+            diag = diag[:next_h2]
+
+        # Extract header lines + depths.
+        headers = []
+        for line in diag.splitlines():
+            s = line.lstrip("#")
+            depth = len(line) - len(s)
+            if depth >= 1 and s.startswith(" "):
+                headers.append((depth, line))
+        assert headers, "Diagnostics block has no headers at all"
+
+        # The first header must be ``## Diagnostics`` itself (h2).
+        assert headers[0][0] == 2
+
+        # No header is at depth 1 (h1) — they'd visually outrank the
+        # surrounding ``## Diagnostics``.
+        h1s = [h for d, h in headers if d == 1]
+        assert not h1s, f"Unexpected h1 headers inside Diagnostics: {h1s}"
+
+        # Every depth is <= 6 (markdown cap).
+        for d, h in headers:
+            assert d <= 6, f"{d}-hash header exceeds markdown h6 cap: {h!r}"
+
+    def test_max_markdown_header_level_caps_at_six(self):
+        """GEPA caps nested header depth at ``######`` (h6) — deeper
+        nesting folds to the same level rather than emitting h7+
+        which is not valid markdown."""
+        deeply_nested: Any = "leaf"
+        # Build ~10 levels of nesting.
+        for i in range(10):
+            deeply_nested = {f"k{i}": deeply_nested}
+        er = self._make(
+            per_example_side_info=[{"root": deeply_nested}],
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        # No header with 7+ ``#``.
+        for line in prompt.splitlines():
+            stripped = line.lstrip("#")
+            prefix_len = len(line) - len(stripped)
+            assert prefix_len <= 6, (
+                f"Found a {prefix_len}-hash markdown header (>h6): {line!r}"
+            )
+
+    def test_per_example_takes_precedence_over_legacy(self):
+        """When both fields are populated (hybrid evaluator path),
+        per-example wins — the legacy batch-level dict is dropped
+        from the rendered prompt."""
+        er = self._make(
+            per_example_side_info=[{"per_example_marker": "YES"}],
+            side_info={"legacy_marker": "NO"},
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "per_example_marker" in prompt
+        assert "YES" in prompt
+        assert "legacy_marker" not in prompt
+        assert "NO" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Tests: mutation-prompt artifact persistence
+# ---------------------------------------------------------------------------
+
+
+class TestMutationPromptArtifact:
+    """``mutate()`` writes the rendered prompt to
+    ``<worktree>/.helix_mutation_prompt.md`` before invoking Claude Code
+    and adds the artifact + ``helix_batch.json`` to the worktree's
+    ``.gitignore`` so neither leaks into the candidate git tree."""
+
+    def _build(self, tmp_path, mocker):
+        parent = make_candidate("g0-s0", str(tmp_path / "parent"))
+        er = make_eval_result("g0-s0")
+        config = make_config()
+        wt = tmp_path / "g1-s0"
+        wt.mkdir()
+        child = make_candidate("g1-s0", str(wt))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch("helix.mutator.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
+        mocker.patch("helix.mutator.remove_worktree")
+        return parent, er, config, wt
+
+    def test_artifact_written_before_claude_invocation(
+        self, tmp_path: Path, mocker
+    ):
+        """The prompt file must exist at the time ``invoke_claude_code``
+        is called so Claude can in principle read it during the session
+        and so post-hoc inspection works even on a crashed mutation."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+
+        # Capture whether the artifact exists at the moment
+        # invoke_claude_code is entered.
+        artifact_path = wt / ".helix_mutation_prompt.md"
+        exists_at_invoke: list[bool] = []
+
+        def fake_invoke(*_a, **_kw):
+            exists_at_invoke.append(artifact_path.exists())
+            return {"result": "ok"}
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        mutate(parent, er, "g1-s0", config, tmp_path)
+        assert exists_at_invoke == [True]
+
+    def test_artifact_contains_rendered_prompt(
+        self, tmp_path: Path, mocker
+    ):
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        content = (wt / ".helix_mutation_prompt.md").read_text()
+        # Objective + autonomous-rules block are both in the rendered
+        # prompt via build_mutation_prompt.
+        assert config.objective in content
+        assert "[MUTATION COMPLETE]" in content
+
+    def test_gitignore_excludes_helix_artifacts(
+        self, tmp_path: Path, mocker
+    ):
+        """``.gitignore`` in the worktree gains entries for the prompt
+        file AND ``helix_batch.json`` so neither file enters the
+        candidate diff on the next generation."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        gi = (wt / ".gitignore").read_text()
+        assert ".helix_mutation_prompt.md" in gi
+        assert "helix_batch.json" in gi
+
+    def test_gitignore_append_is_idempotent(
+        self, tmp_path: Path, mocker
+    ):
+        """A pre-existing ``.gitignore`` with HELIX patterns already
+        present must not grow duplicate entries on subsequent mutate()
+        calls — otherwise long runs balloon the gitignore."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        # Seed a gitignore with the patterns already present + other lines.
+        (wt / ".gitignore").write_text(
+            "*.pyc\n"
+            "# HELIX per-invocation artifacts (never commit to candidate tree)\n"
+            ".helix_mutation_prompt.md\n"
+            "helix_batch.json\n"
+        )
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        gi = (wt / ".gitignore").read_text()
+        assert gi.count(".helix_mutation_prompt.md") == 1
+        assert gi.count("helix_batch.json") == 1
+        assert "*.pyc" in gi  # existing content preserved
+
+    def test_gitignore_created_when_absent(
+        self, tmp_path: Path, mocker
+    ):
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        # Ensure no pre-existing gitignore.
+        assert not (wt / ".gitignore").exists()
+        mutate(parent, er, "g1-s0", config, tmp_path)
+        assert (wt / ".gitignore").exists()
+
+
 # ---------------------------------------------------------------------------
 # Tests: invoke_claude_code
 # ---------------------------------------------------------------------------

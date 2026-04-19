@@ -193,6 +193,120 @@ def generate_seed(
     invoke_claude_code(worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
 
 
+_MAX_MARKDOWN_HEADER_LEVEL = 6
+
+
+def _render_side_info_value(value: Any, level: int) -> str:
+    """Render a single side_info value as markdown.
+
+    Line-for-line port of GEPA's ``render_value`` closure inside
+    ``format_samples`` at
+    ``src/gepa/strategies/instruction_proposal.py:63-85``:
+
+      * ``dict`` → ``{'#' * level} {key}`` for each item, recursing
+        at ``level + 1`` (capped at ``#_MAX_MARKDOWN_HEADER_LEVEL``
+        to stay inside valid markdown depth).
+      * ``list`` / ``tuple`` → ``{'#' * level} Item N`` headers,
+        recursing at ``level + 1``.
+      * primitive → ``str(value).strip() + "\n\n"``.
+
+    Empty containers still emit a trailing blank line so surrounding
+    headers don't collapse against the next block.
+    """
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for k, v in value.items():
+            parts.append(f"{'#' * level} {k}")
+            parts.append(
+                _render_side_info_value(
+                    v, min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
+                )
+            )
+        if not value:
+            parts.append("")
+        return "\n".join(parts)
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for i, item in enumerate(value):
+            parts.append(f"{'#' * level} Item {i + 1}")
+            parts.append(
+                _render_side_info_value(
+                    item, min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
+                )
+            )
+        if not value:
+            parts.append("")
+        return "\n".join(parts)
+    # Primitive — GEPA renders with ``str(...).strip() + "\n\n"``.
+    return str(value).strip() + "\n\n"
+
+
+def _render_per_example_diagnostics(
+    example_ids: list[str],
+    per_example_side_info: list[dict[str, Any]],
+    example_header_level: int = 1,
+    key_header_level: int = 2,
+) -> str:
+    """Render per-example side_info as the mutation-prompt Diagnostics section.
+
+    Mirrors GEPA's ``OptimizeAnythingAdapter.make_reflective_dataset`` +
+    ``format_samples`` at
+    ``src/gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py:524-553``
+    and ``src/gepa/strategies/instruction_proposal.py:54-95``:
+
+      * each example gets an ``{'#' * example_header_level} Example <id>``
+        header (id recovered from ``helix_batch.json`` via
+        ``eval_result.instance_scores.keys()``);
+      * the reserved ``scores`` key renames to
+        ``Scores (Higher is Better)`` at ``key_header_level``;
+      * any other side_info key renders as a ``{'#' * key_header_level}``
+        header with a recursive :func:`_render_side_info_value` body
+        (nested dicts bump to ``key_header_level + 1``, lists become
+        ``### Item N`` sub-headers, primitives render as plain text).
+
+    ``example_header_level`` / ``key_header_level`` are parameterised
+    so the surrounding Diagnostics section's own level (``## Diagnostics``)
+    can drive a monotonic hierarchy from the outside.
+
+    Length mismatch between ``example_ids`` and ``per_example_side_info``
+    is tolerated by iterating over ``zip`` — the parser enforces
+    equality on the helix_result path; other paths should never hit
+    this function.
+
+    Empty per-example side_info (every slot is ``{}``) still produces
+    the section header + per-example headers, so the mutator can see
+    that the evaluator had no reflection data rather than silently
+    dropping the section.
+    """
+    if not per_example_side_info:
+        return ""
+
+    example_hashes = "#" * example_header_level
+    key_hashes = "#" * key_header_level
+    nested_level = min(key_header_level + 1, _MAX_MARKDOWN_HEADER_LEVEL)
+
+    lines: list[str] = ["## Diagnostics"]
+    for eid, side_info in zip(example_ids, per_example_side_info):
+        lines.append("")
+        lines.append(f"{example_hashes} Example {eid}")
+        if not side_info:
+            lines.append("(no per-example side_info)")
+            continue
+        for key, value in sorted(side_info.items()):
+            if key == "scores":
+                # GEPA parity: the reserved ``scores`` sub-dict renames
+                # to "Scores (Higher is Better)" and still renders
+                # recursively underneath.
+                lines.append(f"{key_hashes} Scores (Higher is Better)")
+            else:
+                lines.append(f"{key_hashes} {key}")
+            body = _render_side_info_value(value, nested_level).rstrip("\n")
+            if body:
+                lines.append(body)
+    lines.append("")  # trailing blank line before the next section
+    return "\n".join(lines) + "\n"
+
+
 def build_mutation_prompt(
     objective: str,
     eval_result: EvalResult,
@@ -222,9 +336,34 @@ def build_mutation_prompt(
     else:
         extra_asi_section = ""
 
-    # Render side_info diagnostics section (GEPA OA contract)
+    # Render side_info diagnostics.  Precedence:
+    #   1. ``eval_result.per_example_side_info`` (new per-example GEPA
+    #      O.A. contract — list of dicts positional to instance_scores
+    #      ids) when populated; mirrors GEPA's
+    #      ``OptimizeAnythingAdapter.make_reflective_dataset`` at
+    #      ``optimize_anything_adapter.py:524-553`` combined with
+    #      ``format_samples`` at
+    #      ``gepa/strategies/instruction_proposal.py:54-95``.
+    #   2. ``eval_result.side_info`` (legacy batch-level dict) when
+    #      ``per_example_side_info`` is absent — unchanged rendering
+    #      for non-``helix_result`` paths that still populate the
+    #      legacy field.
+    #   3. No diagnostics section otherwise.
     diagnostics_section = ""
-    if eval_result.side_info is not None:
+    if eval_result.per_example_side_info is not None:
+        # Monotonic markdown hierarchy under the surrounding
+        # ``## Diagnostics`` (h2): each example is ``### Example <id>``
+        # (h3), each side_info key is ``#### {key}`` (h4), nested
+        # values bump further.  Before this the Example header was
+        # ``#`` (h1), which inverted the hierarchy and confused
+        # markdown-aware tooling / LLM markdown parsers.
+        diagnostics_section = _render_per_example_diagnostics(
+            example_ids=list(eval_result.instance_scores.keys()),
+            per_example_side_info=eval_result.per_example_side_info,
+            example_header_level=3,
+            key_header_level=4,
+        )
+    elif eval_result.side_info is not None:
         diag_lines = "\n".join(
             f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
         )
@@ -303,6 +442,65 @@ def _looks_like_rate_limit(text: str) -> bool:
     """Return True if *text* contains a rate-limit / overload keyword."""
     lower = text.lower()
     return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Rendered-mutation-prompt artifact
+# ---------------------------------------------------------------------------
+
+
+#: Filename of the post-hoc mutation-prompt artifact persisted in each
+#: candidate's worktree root alongside ``helix_batch.json``.  The leading
+#: dot + per-worktree ``.gitignore`` entry keep it out of the candidate
+#: git tree.
+MUTATION_PROMPT_ARTIFACT_NAME = ".helix_mutation_prompt.md"
+
+
+def _ignore_helix_artifacts(worktree_path: Path) -> None:
+    """Append HELIX artifact names to ``<worktree>/.gitignore``.
+
+    The candidate worktree is a real git tree; anything committed there
+    bakes into the candidate's evolutionary history.  HELIX writes
+    a handful of per-invocation metadata files (``helix_batch.json``,
+    ``.helix_mutation_prompt.md``) that must NOT flow into those
+    diffs — otherwise the next generation's mutator sees the prior
+    artifact as part of the codebase and the lineage grows a
+    meaningless file-rename trail.
+
+    Idempotent: only appends patterns that aren't already present.
+    Creates the ``.gitignore`` file if missing.
+    """
+    gitignore = worktree_path / ".gitignore"
+    patterns = [
+        "# HELIX per-invocation artifacts (never commit to candidate tree)",
+        MUTATION_PROMPT_ARTIFACT_NAME,
+        "helix_batch.json",
+    ]
+    existing = gitignore.read_text() if gitignore.exists() else ""
+    to_append = [p for p in patterns if p not in existing]
+    if not to_append:
+        return
+    sep = "" if existing.endswith("\n") or not existing else "\n"
+    gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
+
+
+def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> None:
+    """Persist the rendered mutation prompt to the worktree for post-hoc inspection.
+
+    Writes to ``<worktree>/.helix_mutation_prompt.md`` and ensures the
+    per-worktree ``.gitignore`` excludes the file.  Best-effort: any I/O
+    exception is logged at DEBUG and swallowed — a missing artifact is
+    not worth failing a mutation over.
+    """
+    try:
+        wt = Path(worktree_path)
+        _ignore_helix_artifacts(wt)
+        (wt / MUTATION_PROMPT_ARTIFACT_NAME).write_text(prompt)
+    except OSError as e:
+        logger.debug(
+            "failed to write mutation-prompt artifact to %s: %s",
+            worktree_path, e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +716,15 @@ def mutate(
     prompt = build_mutation_prompt(
         config.objective, eval_result, background, config.claude.max_turns,
     )
+
+    # Persist the rendered prompt to the worktree for post-hoc inspection:
+    # what did the mutator actually see on this generation?  Sits next to
+    # ``helix_batch.json`` in the worktree root.  The leading dot and the
+    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
+    # keep it out of the candidate git tree — otherwise it'd leak into
+    # every subsequent mutation's diff and the mutator would see its own
+    # prior prompt file as part of the codebase.
+    _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
     try:
         invoke_claude_code(child.worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)

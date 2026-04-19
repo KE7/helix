@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Multi-axis Pareto frontier (GEPA `FrontierType` parity,
+  `src/gepa/core/state.py:22-23`).  New
+  `evolution.frontier_type: Literal["instance", "objective", "hybrid",
+  "cartesian"]` with default `"hybrid"` — matches GEPA's own
+  `optimize_anything` default (`src/gepa/optimize_anything.py:476`).
+  `ParetoFrontier` now tracks per-objective-name and per-`(val_id,
+  objective_name)` best sets alongside the existing per-example-id
+  tracking, and `get_non_dominated()` / `select_parent()` dispatch on
+  `frontier_type`.  The acceptance gate stays positional on
+  `scores_list` unchanged.
+- `EvalResult.per_example_side_info: list[dict[str, Any]] | None` —
+  per-example diagnostic dicts from the new `helix_result` contract,
+  positional to `instance_scores` by `helix_batch.json` id order.
+  GEPA analogue: `EvaluationBatch.trajectories`
+  (`src/gepa/core/adapter.py:25`).
+- `EvalResult.objective_scores: list[dict[str, float]] | None` —
+  per-example objective-axis harvest from `side_info["scores"]`.  GEPA
+  analogue: `EvaluationBatch.objective_scores`
+  (`src/gepa/core/adapter.py:26`).  Feeds `frontier_type ∈ {"objective",
+  "hybrid", "cartesian"}`; harmless on the `"instance"` path.
 - `DatasetConfig.train_size` / `val_size` — cardinality-only fields that drive
   the minibatch sampler when the evaluator owns the dataset (Architecture A
   example-id handoff).  HELIX writes sampled example ids to
@@ -20,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation errors, pointing users at likely typos or misplaced keys.
 
 ### Changed
+- **BREAKING**: `score_parser = "helix_result"` now takes a **per-example**
+  `HELIX_RESULT=[[score_0, side_info_0], [score_1, side_info_1], ...]`
+  payload — one `[score, side_info]` pair per id in `helix_batch.json`.
+  HELIX zips it into `instance_scores` and stores `side_info_i` on
+  `EvalResult.per_example_side_info` for the reflection prompt.  GEPA
+  `optimize_anything` parity (`src/gepa/optimize_anything.py:387-438`).
+  The previous scalar-plus-id-keyed-dict contract is removed — it
+  silently failed the minibatch gate whenever the evaluator keyed its
+  dict by aggregate metric names (`task__metric`) instead of per-example
+  ids (`task__trialN`).  Migration: replace
+  `HELIX_RESULT=[mean, {"scores": {id_i: v_i, ...}, ...}]` with
+  `HELIX_RESULT=[[v_0, {"info": "..."}], [v_1, {...}], ...]`.
+- `helix.executor.run_evaluator` now emits a `WARNING` log line when the
+  post-filter zero-fills any requested id (naming the count and a sample
+  of up to five).  Non-breaking — behaviour is unchanged, only
+  observability improves.  Catches parser / id-keying mismatches on
+  parsers other than `helix_result` (e.g. `exitcode` plus `instance_ids`).
 - **BREAKING**: `seedless` is now a section (`[seedless]` with `enabled = …`),
   not a top-level boolean.
 - **BREAKING**: `dataset.train_path` / `dataset.val_path` have moved to
