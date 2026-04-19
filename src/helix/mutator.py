@@ -193,6 +193,66 @@ def generate_seed(
     invoke_claude_code(worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
 
 
+def _render_per_example_diagnostics(
+    example_ids: list[str],
+    per_example_side_info: list[dict[str, Any]],
+) -> str:
+    """Render per-example side_info as the mutation-prompt Diagnostics section.
+
+    Mirrors GEPA's ``format_samples`` at
+    ``src/gepa/strategies/instruction_proposal.py:54-95``:
+
+      * each example gets a ``# Example <id>`` header (id from
+        ``helix_batch.json`` via ``eval_result.instance_scores.keys()``);
+      * the reserved ``scores`` key is renamed to
+        ``## Scores (Higher is Better)`` and its per-objective values
+        are listed as ``<name>: <value>`` (same rename GEPA does at
+        ``optimize_anything_adapter.py:524-553``);
+      * any other side_info key is rendered as ``## <key>`` with its
+        value verbatim (``json.dumps`` for non-scalars).
+
+    Length mismatch between ``example_ids`` and ``per_example_side_info``
+    is tolerated by iterating over ``zip`` — the parser enforces
+    equality on the helix_result path; other paths should never hit
+    this function.
+
+    Empty per-example side_info (every slot is ``{}``) still produces
+    the section header + per-example headers, so the mutator can see
+    that the evaluator had no reflection data rather than silently
+    dropping the section.
+    """
+    if not per_example_side_info:
+        return ""
+
+    lines: list[str] = ["## Diagnostics"]
+    for eid, side_info in zip(example_ids, per_example_side_info):
+        lines.append("")
+        lines.append(f"# Example {eid}")
+        if not side_info:
+            lines.append("(no per-example side_info)")
+            continue
+        for key, value in sorted(side_info.items()):
+            if key == "scores":
+                # GEPA parity: the reserved ``scores`` sub-dict renders
+                # under a friendly header.
+                lines.append("## Scores (Higher is Better)")
+                if isinstance(value, dict):
+                    for k in sorted(value.keys()):
+                        lines.append(f"  {k}: {value[k]}")
+                else:
+                    lines.append(f"  {value}")
+            else:
+                lines.append(f"## {key}")
+                if isinstance(value, (dict, list)):
+                    # Keep structured values legible as JSON rather
+                    # than Python repr.
+                    lines.append(json.dumps(value, ensure_ascii=False))
+                else:
+                    lines.append(str(value))
+    lines.append("")  # trailing blank line before the next section
+    return "\n".join(lines) + "\n"
+
+
 def build_mutation_prompt(
     objective: str,
     eval_result: EvalResult,
@@ -222,9 +282,26 @@ def build_mutation_prompt(
     else:
         extra_asi_section = ""
 
-    # Render side_info diagnostics section (GEPA OA contract)
+    # Render side_info diagnostics.  Precedence:
+    #   1. ``eval_result.per_example_side_info`` (new per-example GEPA
+    #      O.A. contract — list of dicts positional to instance_scores
+    #      ids) when populated; mirrors GEPA's
+    #      ``OptimizeAnythingAdapter.make_reflective_dataset`` at
+    #      ``optimize_anything_adapter.py:524-553`` combined with
+    #      ``format_samples`` at
+    #      ``gepa/strategies/instruction_proposal.py:54-95``.
+    #   2. ``eval_result.side_info`` (legacy batch-level dict) when
+    #      ``per_example_side_info`` is absent — unchanged rendering
+    #      for non-``helix_result`` paths that still populate the
+    #      legacy field.
+    #   3. No diagnostics section otherwise.
     diagnostics_section = ""
-    if eval_result.side_info is not None:
+    if eval_result.per_example_side_info is not None:
+        diagnostics_section = _render_per_example_diagnostics(
+            example_ids=list(eval_result.instance_scores.keys()),
+            per_example_side_info=eval_result.per_example_side_info,
+        )
+    elif eval_result.side_info is not None:
         diag_lines = "\n".join(
             f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
         )
