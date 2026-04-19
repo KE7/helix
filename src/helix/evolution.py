@@ -760,12 +760,33 @@ def _cached_evaluate_batch(
     return merged, num_actual_evals
 
 
-def _full_val_example_ids(config: HelixConfig) -> list[str]:
-    """Return deterministic full validation ids for the cardinality-only dataset."""
+def _full_val_example_ids(
+    config: HelixConfig,
+    val_loader: "HelixDataLoader | _RangeDataLoader | None" = None,
+) -> list[str]:
+    """Return deterministic full validation ids.
+
+    Priority (first non-empty wins):
+
+    1. ``dataset.val_size`` — stringified range ids ``"0".."N-1"``
+       (Architecture A cardinality-only path).
+    2. ``val_loader.all_ids()`` — ids from the configured
+       :class:`HelixDataLoader` over ``seedless.val_path`` (or
+       ``seedless.train_path`` when val_path is unset).  File-stem
+       ids for a directory layout, stringified indices otherwise.
+       This is what lets the seed-eval and full-val paths write
+       ``helix_batch.json`` for evaluators (like capx-solver) that
+       use ``helix_result`` and need the positional id handoff — the
+       strict ``helix_result`` parser requires the batch file to be
+       present on every evaluator invocation.
+    3. Empty list — legacy single-task path (no example-id handoff).
+    """
     val_size = config.dataset.val_size
-    if val_size is None or val_size <= 0:
-        return []
-    return [str(i) for i in range(val_size)]
+    if val_size is not None and val_size > 0:
+        return [str(i) for i in range(val_size)]
+    if val_loader is not None and len(val_loader) > 0:
+        return list(val_loader.all_ids())
+    return []
 
 
 def _stage_val_example_ids(config: HelixConfig, full_example_ids: list[str]) -> list[str]:
@@ -934,7 +955,7 @@ def run_evolution(
     # Full-eval policy (GEPA §4.2) — kept for parity and future policy-based
     # val scheduling refactors.
     _full_eval_policy = FullEvaluationPolicy()
-    full_val_example_ids = _full_val_example_ids(config)
+    full_val_example_ids = _full_val_example_ids(config, val_loader)
     stage_val_example_ids = _stage_val_example_ids(config, full_val_example_ids)
 
     # ------------------------------------------------------------------

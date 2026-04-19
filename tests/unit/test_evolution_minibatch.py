@@ -185,8 +185,10 @@ class TestMinibatchGateIntegration:
         mutated = _make_candidate("g1-s1")
         all_mocks["mutate"].return_value = mutated
 
-        # instance_ids should be set on parent/child gating calls
-        seen_instance_ids: list[list[str] | None] = []
+        # Filter to minibatch (train-split) calls only — seed-eval and
+        # child full-val are both on "val" split with explicit ids now
+        # (helix_result requires helix_batch.json on every invocation).
+        train_minibatch_calls: list[list[str]] = []
 
         def run_eval(
             candidate: Candidate,
@@ -195,13 +197,14 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            seen_instance_ids.append(instance_ids)
+            if split == "train" and instance_ids is not None:
+                train_minibatch_calls.append(list(instance_ids))
             if instance_ids is not None:
-                # minibatch eval: return small per-id scores
+                # minibatch / explicit-id eval: return small per-id scores
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
-            # full val eval: moderate scores
+            # full val eval (legacy path, single-task mode): moderate scores
             return _make_result(candidate.id, {"v1": 0.5, "v2": 0.5})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -212,14 +215,14 @@ class TestMinibatchGateIntegration:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # Parent minibatch call + child minibatch call both carry instance_ids.
-        minibatch_calls = [x for x in seen_instance_ids if x is not None]
-        assert len(minibatch_calls) >= 2, (
-            f"Expected at least parent+child minibatch eval calls, got {seen_instance_ids}"
+        assert len(train_minibatch_calls) >= 2, (
+            "Expected at least parent+child minibatch eval calls on train split, "
+            f"got {train_minibatch_calls}"
         )
         # Parent and child minibatches should be the SAME subsample.
-        assert minibatch_calls[0] == minibatch_calls[1]
+        assert train_minibatch_calls[0] == train_minibatch_calls[1]
         # minibatch_size=2 → two ids.
-        assert len(minibatch_calls[0]) == 2
+        assert len(train_minibatch_calls[0]) == 2
 
     def test_rejected_proposal_skips_full_val_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]
@@ -273,7 +276,10 @@ class TestMinibatchGateIntegration:
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = _make_candidate("g1-s1")
 
-        child_val_calls: list[list[str] | None] = []
+        # Full-val evals now always carry explicit instance_ids when a
+        # loader is configured (helix_result requires helix_batch.json).
+        # Distinguish child full-val from child minibatch by split="val".
+        child_val_calls: list[list[str]] = []
 
         def run_eval(
             candidate: Candidate,
@@ -282,8 +288,12 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == "g1-s1" and instance_ids is None:
-                child_val_calls.append(instance_ids)
+            if (
+                candidate.id == "g1-s1"
+                and split == "val"
+                and instance_ids is not None
+            ):
+                child_val_calls.append(list(instance_ids))
             if instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
@@ -467,7 +477,15 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == seed.id and instance_ids is not None:
+            # Parent minibatch evals run on split="train"; the seed
+            # full-val eval runs on split="val" with explicit ids too
+            # (helix_result requires helix_batch.json on every
+            # invocation), so gate on split to avoid counting it.
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
                 parent_minibatches.append(list(instance_ids))
             if instance_ids is not None:
                 # Child scores slightly worse so all get rejected -- keeps
@@ -938,15 +956,23 @@ class TestParentMinibatchParallelism:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == seed.id and instance_ids is not None:
-                # Parent-minibatch eval site.  Small sleep guarantees the
-                # first eval is still in flight when the second submit
-                # fires, so the ThreadPoolExecutor spawns a second worker
-                # thread (rather than reusing W1 after an instant task).
-                # The per-worktree lock (see ``_worktree_lock``) serialises
-                # the subsequent lock acquisition, but both tasks still
-                # execute on DIFFERENT worker threads — our concurrency
-                # signal.
+            # Parent-minibatch eval site — gated on split="train" to
+            # exclude the seed full-val eval (which now also runs with
+            # explicit ids on split="val" because helix_result needs
+            # helix_batch.json on every invocation).
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
+                # Small sleep guarantees the first eval is still in
+                # flight when the second submit fires, so the
+                # ThreadPoolExecutor spawns a second worker thread
+                # (rather than reusing W1 after an instant task).
+                # The per-worktree lock (see ``_worktree_lock``)
+                # serialises the subsequent lock acquisition, but both
+                # tasks still execute on DIFFERENT worker threads —
+                # our concurrency signal.
                 parent_eval_threads.add(threading.get_ident())
                 parent_minibatches.append(list(instance_ids))
                 time.sleep(0.05)
@@ -1071,7 +1097,16 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if candidate.id == seed.id and instance_ids is not None:
+            # Parent-minibatch eval — gated on split="train" so the seed
+            # full-val eval (now also explicit-ids on "val" because
+            # helix_result needs helix_batch.json) doesn't inflate the
+            # count.  Without this filter the seed eval would be
+            # indistinguishable from a parent minibatch eval.
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
                 parent_eval_attempts.append(True)
                 # Raise on the second parent-eval only (stable because
                 # ``parent_eval_attempts`` is append-ordered).
