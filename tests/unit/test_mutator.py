@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from helix.population import Candidate, EvalResult
-from helix.config import ClaudeConfig, HelixConfig, EvaluatorConfig
+from helix.config import AgentConfig, HelixConfig, EvaluatorConfig
 from helix.mutator import (
     MutationError,
-    AUTONOMOUS_SYSTEM_PROMPT,
-    MUTATION_PROMPT_TEMPLATE,
+    BACKEND_RESULT_ARTIFACT_NAME,
+    BACKEND_STDERR_ARTIFACT_NAME,
+    BACKEND_STDOUT_ARTIFACT_NAME,
     build_mutation_prompt,
     invoke_claude_code,
     mutate,
@@ -520,7 +522,7 @@ class TestInvokeClaudeCode:
             stderr="",
             returncode=0,
         )
-        config = ClaudeConfig()
+        config = AgentConfig()
         result = invoke_claude_code("/tmp/wt", "do something", config)
         assert result == payload
 
@@ -531,7 +533,7 @@ class TestInvokeClaudeCode:
             stderr="fatal error",
             returncode=1,
         )
-        config = ClaudeConfig()
+        config = AgentConfig()
         with pytest.raises(MutationError, match="exited with code 1"):
             invoke_claude_code("/tmp/wt", "do something", config)
 
@@ -542,14 +544,14 @@ class TestInvokeClaudeCode:
             stderr="",
             returncode=0,
         )
-        config = ClaudeConfig()
+        config = AgentConfig()
         with pytest.raises(MutationError, match="Failed to parse"):
             invoke_claude_code("/tmp/wt", "do something", config)
 
     def test_cli_args_include_required_flags(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-        config = ClaudeConfig(allowed_tools=["Read", "Edit"])
+        config = AgentConfig(allowed_tools=["Read", "Edit"])
         invoke_claude_code("/tmp/wt", "the prompt", config)
 
         call_args = mock_run.call_args
@@ -569,7 +571,7 @@ class TestInvokeClaudeCode:
     def test_uses_correct_cwd(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-        config = ClaudeConfig()
+        config = AgentConfig()
         invoke_claude_code("/specific/path", "prompt", config)
         assert mock_run.call_args[1]["cwd"] == "/specific/path"
 
@@ -577,9 +579,137 @@ class TestInvokeClaudeCode:
         """subprocess.run should not have a timeout — let Claude run forever."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-        config = ClaudeConfig()
+        config = AgentConfig()
         invoke_claude_code("/tmp/wt", "prompt", config)
         assert "timeout" not in mock_run.call_args[1]
+
+    def test_codex_cli_args_include_required_flags(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"thread.started","thread_id":"thr_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+        config = AgentConfig(backend="codex", model="gpt-5")
+
+        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+
+        args_list = mock_run.call_args[0][0]
+        assert args_list[:2] == ["codex", "exec"]
+        assert "--json" in args_list
+        assert "--dangerously-bypass-approvals-and-sandbox" in args_list
+        assert "--model" in args_list
+        assert "gpt-5" in args_list
+        assert args_list[-1] == "the prompt"
+        assert result["events"][0]["thread_id"] == "thr_123"
+
+    def test_cursor_cli_args_use_stream_json(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+        config = AgentConfig(backend="cursor", model="gpt-5")
+
+        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+
+        args_list = mock_run.call_args[0][0]
+        assert args_list[:2] == ["cursor", "agent"]
+        assert "--print" in args_list
+        assert "--output-format" in args_list
+        assert "stream-json" in args_list
+        assert "--yolo" in args_list
+        assert "--workspace" in args_list
+        assert "/tmp/wt" in args_list
+        assert args_list[-1] == "the prompt"
+        assert result["events"][0]["session_id"] == "sess_123"
+
+    def test_backend_artifacts_written_for_structured_backends(self, tmp_path: Path, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout=(
+                '{"type":"system","subtype":"init","session_id":"sess_123"}\n'
+                '{"type":"tool.call","name":"read_file"}\n'
+            ),
+            stderr="warning text",
+            returncode=0,
+        )
+        config = AgentConfig(backend="cursor")
+
+        invoke_claude_code(str(tmp_path), "prompt", config)
+
+        assert (tmp_path / BACKEND_STDOUT_ARTIFACT_NAME).read_text().startswith('{"type":"system"')
+        assert (tmp_path / BACKEND_STDERR_ARTIFACT_NAME).read_text() == "warning text"
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["backend"] == "cursor"
+        assert payload["usage"]["session_id"] == "sess_123"
+        assert payload["usage"]["tool_event_count"] == 1
+
+    def test_gemini_tolerates_text_preamble_before_json_stream(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout=(
+                "MCP issues detected. Run /mcp list for status.\n"
+                '{"type":"init","session_id":"sess_123"}\n'
+                '{"type":"result","status":"success","stats":{"input_tokens":10,"output_tokens":2}}\n'
+            ),
+            stderr="",
+            returncode=0,
+        )
+        config = AgentConfig(backend="gemini")
+
+        result = invoke_claude_code("/tmp/wt", "prompt", config)
+
+        assert result["events"][0]["type"] == "init"
+        assert result["unparsable_lines"] == ["MCP issues detected. Run /mcp list for status."]
+
+    @pytest.mark.parametrize(
+        ("backend", "expected_prefix", "expected_flags"),
+        [
+            ("gemini", ["gemini"], ["--yolo", "--prompt", "--output-format", "stream-json"]),
+            (
+                "opencode",
+                ["opencode", "run"],
+                ["--format", "json", "--dangerously-skip-permissions", "--dir", "/tmp/wt"],
+            ),
+        ],
+    )
+    def test_gemini_and_opencode_cli_args(self, mocker, backend, expected_prefix, expected_flags):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"system","session_id":"sess_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+        config = AgentConfig(backend=backend, model="test-model")
+
+        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+
+        args_list = mock_run.call_args[0][0]
+        assert args_list[: len(expected_prefix)] == expected_prefix
+        for flag in expected_flags:
+            assert flag in args_list
+        assert "test-model" in args_list
+        assert result["events"][0]["session_id"] == "sess_123"
+
+    def test_opencode_usage_normalization_captures_session_id_and_cost(self, tmp_path: Path, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout=(
+                '{"type":"step_start","sessionID":"ses_123"}\n'
+                '{"type":"step_finish","part":{"tokens":{"input":10,"output":2},"cost":0.25}}\n'
+            ),
+            stderr="",
+            returncode=0,
+        )
+        config = AgentConfig(backend="opencode")
+
+        invoke_claude_code(str(tmp_path), "prompt", config)
+
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["usage"]["session_id"] == "ses_123"
+        assert payload["usage"]["cost_usd"] == 0.25
 
 
 # ---------------------------------------------------------------------------

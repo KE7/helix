@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import shlex
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from helix.population import Candidate, EvalResult
-from helix.config import ClaudeConfig, HelixConfig
+from helix.config import AgentConfig, HelixConfig
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
 from helix.executor import _scrub_environment
-from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree
+from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def build_seed_generation_prompt(
     evaluator_cmd: str | None = None,
     dataset_examples: list[str] | None = None,
 ) -> str:
-    """Construct the seed generation prompt for Claude Code.
+    """Construct the seed generation prompt for the configured backend.
 
     Mirrors GEPA's ``_build_seed_generation_prompt`` — a single structured
     prompt that gives the LLM everything it needs to write a first candidate
@@ -179,18 +179,18 @@ def generate_seed(
     Parameters
     ----------
     worktree_path:
-        Path to the (empty) seed worktree where Claude will write files.
+        Path to the (empty) seed worktree where the backend will write files.
     prompt:
         The seed-generation prompt built by :func:`build_seed_generation_prompt`.
     config:
-        Full HELIX config (``config.claude`` is used for the LLM invocation).
+        Full HELIX config (``config.agent`` is used for the backend invocation).
 
     Raises
     ------
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
-    invoke_claude_code(worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
+    invoke_claude_code(worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
 
 
 _MAX_MARKDOWN_HEADER_LEVEL = 6
@@ -454,6 +454,9 @@ def _looks_like_rate_limit(text: str) -> bool:
 #: dot + per-worktree ``.gitignore`` entry keep it out of the candidate
 #: git tree.
 MUTATION_PROMPT_ARTIFACT_NAME = ".helix_mutation_prompt.md"
+BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
+BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
+BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
 
 
 def _ignore_helix_artifacts(worktree_path: Path) -> None:
@@ -474,6 +477,9 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     patterns = [
         "# HELIX per-invocation artifacts (never commit to candidate tree)",
         MUTATION_PROMPT_ARTIFACT_NAME,
+        BACKEND_RESULT_ARTIFACT_NAME,
+        BACKEND_STDOUT_ARTIFACT_NAME,
+        BACKEND_STDERR_ARTIFACT_NAME,
         "helix_batch.json",
     ]
     existing = gitignore.read_text() if gitignore.exists() else ""
@@ -504,26 +510,342 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code invocation
+# Backend invocation
 # ---------------------------------------------------------------------------
+
+
+def _backend_display_name(backend: str) -> str:
+    return {
+        "claude": "Claude Code",
+        "codex": "Codex CLI",
+        "cursor": "Cursor Agent",
+        "gemini": "Gemini CLI",
+        "opencode": "OpenCode",
+    }.get(backend, backend)
+
+
+def _build_backend_args(
+    worktree_path: str,
+    prompt: str,
+    config: AgentConfig,
+) -> list[str]:
+    backend = config.backend
+    if backend == "claude":
+        tools_str = ",".join(config.allowed_tools)
+        args = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format", "json",
+            "--allowedTools", tools_str,
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["--effort", config.effort])
+        if config.max_turns is not None:
+            args.extend(["--max-turns", str(config.max_turns)])
+        args.extend(["-p", prompt])
+        return args
+
+    if backend == "codex":
+        args = [
+            "codex",
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        args.append(prompt)
+        return args
+
+    if backend == "cursor":
+        args = [
+            "cursor",
+            "agent",
+            "--print",
+            "--output-format", "stream-json",
+            "--yolo",
+            "--approve-mcps",
+            "--trust",
+            "--workspace", worktree_path,
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        args.append(prompt)
+        return args
+
+    if backend == "gemini":
+        args = [
+            "gemini",
+            "--yolo",
+            "--prompt", prompt,
+            "--output-format", "stream-json",
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        return args
+
+    if backend == "opencode":
+        args = [
+            "opencode",
+            "run",
+            "--format", "json",
+            "--dangerously-skip-permissions",
+            "--dir", worktree_path,
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["--variant", config.effort])
+        args.append(prompt)
+        return args
+
+    raise ValueError(f"Unsupported backend: {backend}")
+
+
+def _parse_json_object_output(
+    stdout: str,
+    *,
+    backend: str,
+    cmd_str: str,
+    worktree_path: str,
+    stderr: str,
+    exit_code: int,
+) -> dict[str, Any]:
+    if not stdout.strip():
+        return {}
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise MutationError(
+            f"Failed to parse {_backend_display_name(backend)} JSON output: {exc}",
+            operation=f"{_backend_display_name(backend)} invocation",
+            phase="JSON parsing",
+            command=cmd_str,
+            cwd=str(worktree_path),
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            suggestion=(
+                f"{_backend_display_name(backend)} returned non-JSON output. "
+                "Check stdout above for details."
+            ),
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise MutationError(
+            f"{_backend_display_name(backend)} returned non-object JSON "
+            f"(got {type(parsed).__name__})",
+            operation=f"{_backend_display_name(backend)} invocation",
+            phase="JSON parsing",
+            command=cmd_str,
+            cwd=str(worktree_path),
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=exit_code,
+            suggestion=(
+                f"{_backend_display_name(backend)} returned a non-object JSON "
+                "value. Expected a JSON object."
+            ),
+        )
+    return parsed
+
+
+def _parse_jsonl_output(
+    stdout: str,
+    *,
+    backend: str,
+    cmd_str: str,
+    worktree_path: str,
+    stderr: str,
+    exit_code: int,
+    strict: bool,
+) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    unparsable: list[str] = []
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                # Gemini CLI may prepend advisory text such as MCP-health
+                # warnings before the JSON stream even when
+                # `--output-format stream-json` is requested.
+                if backend == "gemini":
+                    unparsable.append(line)
+                    continue
+                raise MutationError(
+                    f"Failed to parse {_backend_display_name(backend)} JSONL output line",
+                    operation=f"{_backend_display_name(backend)} invocation",
+                    phase="JSON parsing",
+                    command=cmd_str,
+                    cwd=str(worktree_path),
+                    stdout=stdout,
+                    stderr=stderr,
+                    exit_code=exit_code,
+                    suggestion=(
+                        f"{_backend_display_name(backend)} emitted a non-JSON line "
+                        "in structured output mode. Check stdout above for details."
+                    ),
+                )
+            unparsable.append(line)
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
+    return {
+        "events": events,
+        "unparsable_lines": unparsable,
+    }
+
+
+def _parse_backend_output(
+    backend: str,
+    result: subprocess.CompletedProcess[str],
+    *,
+    cmd_str: str,
+    worktree_path: str,
+) -> dict[str, Any]:
+    if backend == "claude":
+        return _parse_json_object_output(
+            result.stdout,
+            backend=backend,
+            cmd_str=cmd_str,
+            worktree_path=worktree_path,
+            stderr=result.stderr,
+            exit_code=result.returncode,
+        )
+    if backend in {"codex", "cursor", "gemini", "opencode"}:
+        return _parse_jsonl_output(
+            result.stdout,
+            backend=backend,
+            cmd_str=cmd_str,
+            worktree_path=worktree_path,
+            stderr=result.stderr,
+            exit_code=result.returncode,
+            strict=result.returncode == 0,
+        )
+    raise ValueError(f"Unsupported backend: {backend}")
+
+
+def _walk_json(obj: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(obj, dict):
+        found.append(obj)
+        for value in obj.values():
+            found.extend(_walk_json(value))
+    elif isinstance(obj, list):
+        for item in obj:
+            found.extend(_walk_json(item))
+    return found
+
+
+def _coerce_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
+    usage: dict[str, Any] = {}
+    tool_event_count = 0
+    for node in _walk_json(parsed):
+        node_type = str(node.get("type", "")).lower()
+        if "tool" in node_type:
+            tool_event_count += 1
+        for key, aliases in (
+            ("input_tokens", ("input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input")),
+            ("output_tokens", ("output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output")),
+            ("cached_input_tokens", ("cached_input_tokens", "cachedTokens", "cacheReadInputTokens", "cacheRead", "cached")),
+            ("reasoning_tokens", ("reasoning_tokens", "reasoningTokens", "thoughts")),
+            ("cost_usd", ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total")),
+        ):
+            if key in usage:
+                continue
+            for alias in aliases:
+                if alias in node:
+                    value = _coerce_number(node[alias])
+                    if value is not None:
+                        usage[key] = value
+                        break
+        if "session_id" not in usage:
+            for alias in ("session_id", "sessionId", "chat_id", "chatId", "thread_id", "threadId"):
+                value = node.get(alias)
+                if isinstance(value, str) and value:
+                    usage["session_id"] = value
+                    break
+            if "session_id" not in usage:
+                value = node.get("sessionID")
+                if isinstance(value, str) and value:
+                    usage["session_id"] = value
+        if "cost_usd" not in usage:
+            value = node.get("cost")
+            coerced = _coerce_number(value)
+            if coerced is not None:
+                usage["cost_usd"] = coerced
+    if tool_event_count:
+        usage["tool_event_count"] = tool_event_count
+    return usage
+
+
+def _write_backend_artifacts(
+    worktree_path: str,
+    *,
+    backend: str,
+    command: str,
+    result: subprocess.CompletedProcess[str],
+    parsed: dict[str, Any] | None,
+) -> None:
+    try:
+        wt = Path(worktree_path)
+        _ignore_helix_artifacts(wt)
+        (wt / BACKEND_STDOUT_ARTIFACT_NAME).write_text(result.stdout or "")
+        (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
+        payload = {
+            "backend": backend,
+            "backend_display_name": _backend_display_name(backend),
+            "command": command,
+            "cwd": worktree_path,
+            "returncode": result.returncode,
+            "stdout_artifact": BACKEND_STDOUT_ARTIFACT_NAME,
+            "stderr_artifact": BACKEND_STDERR_ARTIFACT_NAME,
+            "usage": _normalise_usage_stats(parsed or {}),
+            "parsed": parsed,
+        }
+        (wt / BACKEND_RESULT_ARTIFACT_NAME).write_text(json.dumps(payload, indent=2))
+    except OSError as e:
+        logger.debug(
+            "failed to write backend artifacts to %s: %s",
+            worktree_path, e,
+        )
 
 
 def invoke_claude_code(
     worktree_path: str,
     prompt: str,
-    config: ClaudeConfig,
+    config: AgentConfig,
     passthrough_env: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Invoke Claude Code CLI in *worktree_path* and return the parsed JSON output.
+    """Invoke the configured backend CLI in *worktree_path*.
 
     Parameters
     ----------
     worktree_path:
-        Working directory for the Claude Code subprocess.
+        Working directory for the backend subprocess.
     prompt:
-        The prompt to pass via ``-p``.
+        Prompt / task instructions for the backend.
     config:
-        Claude configuration (model, effort, allowed_tools).
+        Backend configuration (backend selector, model, effort, tool policy).
     passthrough_env:
         Optional list of extra env var names to preserve from the parent
         process through the env scrub (e.g. CUDA_VISIBLE_DEVICES).
@@ -531,7 +853,7 @@ def invoke_claude_code(
     Returns
     -------
     dict
-        Parsed JSON from Claude Code's stdout.
+        Parsed structured output from the backend.
 
     Raises
     ------
@@ -542,47 +864,60 @@ def invoke_claude_code(
     """
     if _MUTATOR_OVERRIDE is not None:
         return _MUTATOR_OVERRIDE(worktree_path, prompt, config)
+    backend = config.backend
+    backend_name = _backend_display_name(backend)
+    args = _build_backend_args(worktree_path, prompt, config)
+    cmd_str = shlex.join(args)
 
-    tools_str = ",".join(config.allowed_tools)
-    args = [
-        "claude",
-        "--dangerously-skip-permissions",
-        "--print",
-        "--output-format", "json",
-        "--allowedTools", tools_str,
-    ]
-    if config.model:
-        args.extend(["--model", config.model])
-    if config.effort:
-        args.extend(["--effort", config.effort])
-    if config.max_turns is not None:
-        args.extend(["--max-turns", str(config.max_turns)])
-    args.extend(["-p", prompt])
-
-    cmd_str = " ".join(args)
-
-    # Reuse the shared scrub helper (no split/instance_ids for CC sessions).
-    cc_env = _scrub_environment(passthrough_env=passthrough_env)
-
+    backend_env = _scrub_environment(passthrough_env=passthrough_env)
     result = subprocess.run(
         args,
         cwd=worktree_path,
         capture_output=True,
         text=True,
-        env=cc_env,
+        env=backend_env,
     )
 
-    if result.returncode != 0:
-        # Check for rate-limit / overload before raising generic MutationError
-        if _looks_like_rate_limit(result.stderr) or _looks_like_rate_limit(result.stdout):
+    parsed: dict[str, Any] | None = None
+    try:
+        if result.returncode == 0:
+            parsed = _parse_backend_output(
+                backend,
+                result,
+                cmd_str=cmd_str,
+                worktree_path=worktree_path,
+            )
+            if backend == "claude":
+                error_text = str(parsed.get("error", ""))
+                if _looks_like_rate_limit(error_text):
+                    logger.error("Rate limit detected in JSON response: %s", error_text[:200])
+                    raise RateLimitError(
+                        f"{backend_name} returned a rate/usage limit error in JSON response",
+                        operation=f"{backend_name} invocation",
+                        phase="JSON parsing",
+                        command=cmd_str,
+                        cwd=str(worktree_path),
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        exit_code=result.returncode,
+                        suggestion=(
+                            f"{backend_name} reported a rate limit. "
+                            "Retry after backoff or check your API quota."
+                        ),
+                    )
+            return parsed
+
+        rate_limit_source = result.stderr or result.stdout
+        if _looks_like_rate_limit(rate_limit_source):
             logger.error(
-                "Rate limit detected in subprocess exit (code %d): %s",
+                "Rate limit detected in subprocess exit for %s (code %d): %s",
+                backend_name,
                 result.returncode,
-                (result.stderr or result.stdout)[:200],
+                rate_limit_source[:200],
             )
             raise RateLimitError(
-                f"Claude Code hit a rate/usage limit (exit code {result.returncode})",
-                operation="Claude Code invocation",
+                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
+                operation=f"{backend_name} invocation",
                 phase="subprocess exit",
                 command=cmd_str,
                 cwd=str(worktree_path),
@@ -590,27 +925,40 @@ def invoke_claude_code(
                 stderr=result.stderr,
                 exit_code=result.returncode,
                 suggestion=(
-                    "Claude Code reported a rate limit. "
-                    "Retry after backoff or check your API quota."
+                    f"{backend_name} reported a rate limit. "
+                    "Retry after backoff or check your quota."
                 ),
             )
 
-        # error_max_turns: Claude hit the turn limit but may have made useful changes.
-        # Parse stdout as JSON and return it as a partial success rather than discarding.
-        try:
-            parsed = json.loads(result.stdout)
-            if isinstance(parsed, dict) and parsed.get("subtype") == "error_max_turns":
-                logger.warning(
-                    "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
-                    parsed.get("num_turns", "?"),
+        # Claude's max-turns exhaustion is intentionally treated as partial
+        # success because the subprocess may have already produced useful edits.
+        if backend == "claude":
+            try:
+                parsed = _parse_backend_output(
+                    backend,
+                    result,
+                    cmd_str=cmd_str,
+                    worktree_path=worktree_path,
                 )
-                return parsed
-        except json.JSONDecodeError:
-            pass
+                if parsed.get("subtype") == "error_max_turns":
+                    logger.warning(
+                        "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
+                        parsed.get("num_turns", "?"),
+                    )
+                    return parsed
+            except MutationError:
+                parsed = None
+
+        parsed = _parse_backend_output(
+            backend,
+            result,
+            cmd_str=cmd_str,
+            worktree_path=worktree_path,
+        )
 
         raise MutationError(
-            f"Claude Code exited with code {result.returncode}",
-            operation="Claude Code invocation",
+            f"{backend_name} exited with code {result.returncode}",
+            operation=f"{backend_name} invocation",
             phase="subprocess exit",
             command=cmd_str,
             cwd=str(worktree_path),
@@ -619,57 +967,14 @@ def invoke_claude_code(
             exit_code=result.returncode,
             suggestion="Check stderr for rate limits, permission errors, or model availability.",
         )
-
-    try:
-        parsed = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise MutationError(
-            f"Failed to parse Claude Code JSON output: {exc}",
-            operation="Claude Code invocation",
-            phase="JSON parsing",
+    finally:
+        _write_backend_artifacts(
+            worktree_path,
+            backend=backend,
             command=cmd_str,
-            cwd=str(worktree_path),
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
-            suggestion="Claude Code returned non-JSON output. Check stdout above for details.",
-        ) from exc
-
-    # Check for rate-limit indicators in successful JSON responses
-    if not isinstance(parsed, dict):
-        raise MutationError(
-            f"Claude Code returned non-object JSON (got {type(parsed).__name__})",
-            operation="Claude Code invocation",
-            phase="JSON parsing",
-            command=cmd_str,
-            cwd=str(worktree_path),
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
-            suggestion="Claude Code returned a non-object JSON value. Expected a JSON object.",
+            result=result,
+            parsed=parsed,
         )
-    error_text = str(parsed.get("error", ""))
-    if _looks_like_rate_limit(error_text):
-        logger.error(
-            "Rate limit detected in JSON response: %s",
-            error_text[:200],
-        )
-        raise RateLimitError(
-            "Claude Code returned a rate/usage limit error in JSON response",
-            operation="Claude Code invocation",
-            phase="JSON parsing",
-            command=cmd_str,
-            cwd=str(worktree_path),
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
-            suggestion=(
-                "Claude Code reported a rate limit. "
-                "Retry after backoff or check your API quota."
-            ),
-        )
-
-    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -685,9 +990,9 @@ def mutate(
     base_dir: Path,
     background: str | None = None,
 ) -> Candidate | None:
-    """Mutate *parent* using Claude Code and return the new candidate.
+    """Mutate *parent* using the configured backend and return the new candidate.
 
-    Clones the parent worktree, builds a mutation prompt, invokes Claude Code,
+    Clones the parent worktree, builds a mutation prompt, invokes the backend,
     then snapshots on success.  Returns ``None`` on any :class:`MutationError`.
 
     Parameters
@@ -699,7 +1004,7 @@ def mutate(
     new_id:
         Identifier for the mutated candidate.
     config:
-        Full HELIX config (``config.claude`` and ``config.objective`` are used).
+        Full HELIX config (``config.agent`` and ``config.objective`` are used).
     base_dir:
         Base directory for worktrees.
     background:
@@ -714,7 +1019,7 @@ def mutate(
     child.operation = "mutate"
 
     prompt = build_mutation_prompt(
-        config.objective, eval_result, background, config.claude.max_turns,
+        config.objective, eval_result, background, config.agent.max_turns,
     )
 
     # Persist the rendered prompt to the worktree for post-hoc inspection:
@@ -727,7 +1032,7 @@ def mutate(
     _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
     try:
-        invoke_claude_code(child.worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
+        invoke_claude_code(child.worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)

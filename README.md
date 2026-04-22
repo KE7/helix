@@ -12,7 +12,7 @@
 
 **Evolutionary optimization for full codebases using agentic coding tools as the mutation engine and git worktrees as the population pool.**
 
-HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage. Currently supports Claude Code, with support for OpenCode, Codex CLI, and Cursor CLI coming in the next release.
+HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage. Supported mutation backends include Claude Code, Codex CLI, Cursor Agent, Gemini CLI, and OpenCode.
 
 <br>
 
@@ -65,7 +65,7 @@ This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-
 | 🧬 | **Whole-codebase evolution** | The candidate is your repository, not a single file, prompt, or patch |
 | 📂 | **Multi-file editing** | Mutate entire directory trees — edit `auth.py:42` and `routes.py:18` in one coherent session |
 | 🔁 | **Multi-turn mutations** | A single mutation can inspect, edit, test, revise, and continue before being evaluated |
-| 🔧 | **Tool access during mutation** | Claude Code can read, grep, run tests, inspect the codebase, and use the web mid-mutation |
+| 🔧 | **Tool access during mutation** | The configured backend can read, grep, run tests, inspect the codebase, and use the web mid-mutation |
 | ✅ | **Self-verification** | Mutations verify themselves by running commands before committing |
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
 | ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (GEPA parity, bounded by `evolution.max_workers`) |
@@ -97,8 +97,8 @@ This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-
                            │                               │
                            ▼                               │
                ┌───────────────────────┐                   │
-               │  Mutate via Claude    │                   │
-               │  Code in Worktree     │                   │
+               │  Mutate via Agent     │                   │
+               │  Backend in Worktree  │                   │
                │                       │                   │
                │  • Read files         │                   │
                │  • Edit multi-file    │                   │
@@ -134,10 +134,10 @@ This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-
 1. **Seed** — Your starting code is copied into a git worktree and evaluated
 2. **Evaluate** — Run your evaluator command; parse scores per test/instance
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
-4. **Mutate** — Spawn Claude Code in an isolated worktree with full tool access. It reads files, diagnoses failures, makes surgical multi-file edits, and runs commands to verify
+4. **Mutate** — Spawn the configured agent backend in an isolated worktree with full tool access. It reads files, diagnoses failures, makes surgical multi-file edits, and runs commands to verify
 5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
-7. **Merge** — Periodically combine two complementary frontier candidates via Claude Code
+7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend
 8. **Cleanup** — Remove dominated worktrees; persist state; repeat
 
 ---
@@ -167,20 +167,21 @@ This creates a `helix.toml` config file and a `.helix/` directory. Edit `helix.t
 
 ### Whole-repo-as-candidate Model
 
-HELIX treats your **entire working tree** as the candidate. There is no `target_file` — Claude Code may read, edit, create, or delete any file in the project tree during each mutation. A minimal project layout looks like:
+HELIX treats your **entire working tree** as the candidate. There is no `target_file` — the configured backend may read, edit, create, or delete any file in the project tree during each mutation. A minimal project layout looks like:
 
 ```
 my-project/
 ├── helix.toml       # HELIX config (run `helix init` to generate)
 ├── evaluate.py      # Your evaluator script (must output JSON with a "score" key)
-├── solve.py         # File(s) you want to evolve (Claude Code will find them)
+├── solve.py         # File(s) you want to evolve (the backend will find them)
 └── ...              # Any other files; HELIX will consider them too
 ```
 
-To restrict what Claude Code touches, set `claude.background` in `helix.toml`:
+To restrict what the backend touches, set `agent.background` in `helix.toml`:
 
 ```toml
-[claude]
+[agent]
+backend = "claude"
 background = "Only modify files under src/. Do not edit tests/ or config/."
 ```
 
@@ -298,8 +299,9 @@ frontier_type = "hybrid"         # Pareto dimensionality (GEPA FrontierType pari
                                  # Non-instance axes require score_parser="helix_result"
                                  # emitting per-example side_info["scores"] dicts.
 
-[claude]
-model = "sonnet"                 # or "opus", "haiku", full model name
+[agent]
+backend = "claude"               # "claude" | "codex" | "cursor" | "gemini" | "opencode"
+model = "sonnet"                 # backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
 allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
@@ -477,8 +479,8 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
 | `worktree.py` | Git worktree lifecycle (create, clone, snapshot, remove) |
 | `executor.py` | Run evaluator commands |
-| `mutator.py` | Claude Code mutation invocation with autonomous system prompt |
-| `merger.py` | Claude Code merge/crossover between complementary candidates |
+| `mutator.py` | Backend mutation invocation with autonomous system prompt and HELIX usage artifacts |
+| `merger.py` | Backend merge/crossover between complementary candidates |
 | `lineage.py` | Ancestry graph tracking |
 | `state.py` | Atomic state persistence and resume |
 | `display.py` | Rich terminal UI with phase tracking |
@@ -509,7 +511,11 @@ BSD 3-Clause License. See [LICENSE](LICENSE) for details.
 HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Agrawal, Lee, Ma, Elmaaroufi, Tan, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis, and Zaharia. Their work on applying reflective Pareto evolution to any text made HELIX possible — we extended their algorithm to full codebases and agentic mutation but the foundation is theirs.
 
 - **[GEPA optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)** — The algorithmic foundation: minibatch-gated Pareto evolution with reflective LLM mutation
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — The agentic coding tool powering HELIX's mutation and merge engine
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Supported HELIX mutation backend
+- **[Codex CLI](https://developers.openai.com/codex/cli)** — Supported HELIX mutation backend
+- **[Cursor CLI](https://cursor.com/cli/)** — Supported HELIX mutation backend
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Supported HELIX mutation backend
+- **[OpenCode](https://opencode.ai/docs/cli/)** — Supported HELIX mutation backend
 - **[OMAR](http://omar.tech/)** — The multi-agent orchestration system used to build HELIX
 
 ```bibtex

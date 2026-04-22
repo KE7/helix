@@ -300,7 +300,7 @@ class TestValidTOMLStillWorks:
             [evolution]
             max_generations = 20
 
-            [claude]
+            [agent]
             model = "sonnet"
         """)
 
