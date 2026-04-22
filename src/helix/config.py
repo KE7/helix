@@ -398,7 +398,7 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: Literal["claude", "codex", "cursor", "gemini", "opencode"] = "claude"
-    model: str = "sonnet"
+    model: str | None = None
     effort: str | None = None
     max_turns: int | None = None
     allowed_tools: list[str] = Field(

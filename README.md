@@ -182,6 +182,7 @@ To restrict what the backend touches, set `agent.background` in `helix.toml`:
 ```toml
 [agent]
 backend = "claude"
+# model = "sonnet"  # optional backend-specific model
 background = "Only modify files under src/. Do not edit tests/ or config/."
 ```
 
@@ -301,7 +302,7 @@ frontier_type = "hybrid"         # Pareto dimensionality (GEPA FrontierType pari
 
 [agent]
 backend = "claude"               # "claude" | "codex" | "cursor" | "gemini" | "opencode"
-model = "sonnet"                 # backend-specific model name
+# model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
 allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]

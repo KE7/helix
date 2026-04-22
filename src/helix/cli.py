@@ -68,7 +68,7 @@ merge_enabled = false
 
 [agent]
 backend = "claude"
-model = "sonnet"
+# model = "sonnet"  # optional backend-specific model
 max_turns = 20
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 """
