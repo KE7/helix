@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
 
 from helix.population import Candidate, EvalResult
-from helix.config import ClaudeConfig, HelixConfig, EvaluatorConfig
+from helix.config import HelixConfig, EvaluatorConfig
 from helix.mutator import MutationError
 from helix.merger import (
-    MERGE_PROMPT_TEMPLATE,
     build_merge_prompt,
     merge,
     select_eval_subsample_for_merged_program,

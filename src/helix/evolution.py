@@ -1100,7 +1100,7 @@ def run_evolution(
                 _dataset_examples = load_dataset_examples(config.seedless.train_path)
             seed_prompt = build_seed_generation_prompt(
                 objective=config.objective,
-                background=config.claude.background,
+                background=config.agent.background,
                 evaluator_cmd=config.evaluator.command,
                 dataset_examples=_dataset_examples,
             )
@@ -1365,7 +1365,7 @@ def run_evolution(
                     new_id=merge_id,
                     config=config,
                     base_dir=worktrees_dir,
-                    background=config.claude.background,
+                    background=config.agent.background,
                     eval_result_a=era,
                     eval_result_b=erb,
                 )
@@ -1859,7 +1859,7 @@ def run_evolution(
                 new_id=_new_id,
                 config=config,
                 base_dir=worktrees_dir,
-                background=config.claude.background,
+                background=config.agent.background,
             )
 
         mutation_results: list[Candidate | None]

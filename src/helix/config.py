@@ -392,14 +392,12 @@ class EvolutionConfig(BaseModel):
             )
 
 
-class ClaudeConfig(BaseModel):
-    """Configuration for Claude Code integration.
-
-    Specifies which Claude model to use, allowed tools, effort level,
-    and optional background context for mutation sessions.
+class AgentConfig(BaseModel):
+    """Configuration for the mutation backend integration.
     """
     model_config = ConfigDict(extra="forbid")
 
+    backend: Literal["claude", "codex", "cursor", "gemini", "opencode"] = "claude"
     model: str = "sonnet"
     effort: str | None = None
     max_turns: int | None = None
@@ -427,7 +425,7 @@ class HelixConfig(BaseModel):
     """Top-level HELIX configuration.
 
     Combines all configuration sections (objective, evaluator, dataset,
-    evolution, claude, worktree) and validates compatibility constraints.
+    evolution, agent, worktree) and validates compatibility constraints.
     """
     model_config = ConfigDict(extra="forbid")
 
@@ -438,7 +436,7 @@ class HelixConfig(BaseModel):
         default_factory=list,
         description=(
             "Environment variable names to pass through the env scrub into "
-            "evaluator and Claude Code subprocesses (e.g. "
+            "evaluator and agent subprocesses (e.g. "
             '["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]).'
         ),
     )
@@ -446,7 +444,7 @@ class HelixConfig(BaseModel):
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     seedless: SeedlessConfig = Field(default_factory=SeedlessConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
-    claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
 
     def model_post_init(self, __context: object) -> None:
@@ -503,6 +501,6 @@ def load_config(path: Path) -> HelixConfig:
                     file=sys.stderr,
                 )
             elif "type" in str(error["type"]):
-                print(f"   Hint: Check that the value is the correct type", file=sys.stderr)
+                print("   Hint: Check that the value is the correct type", file=sys.stderr)
             print(file=sys.stderr)
         sys.exit(1)

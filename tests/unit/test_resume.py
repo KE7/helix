@@ -45,7 +45,7 @@ def make_state(
 def test_state_saved_before_crash(tmp_path: Path) -> None:
     """State.json must be written before an exception propagates out of run_evolution."""
     from helix.config import (
-        ClaudeConfig,
+        AgentConfig,
         DatasetConfig,
         EvolutionConfig,
         EvaluatorConfig,
@@ -64,7 +64,7 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         objective="test",
         evaluator=EvaluatorConfig(command="echo 1"),
         evolution=EvolutionConfig(max_generations=3),
-        claude=ClaudeConfig(),
+        agent=AgentConfig(),
         dataset=DatasetConfig(),
         worktree=WorktreeConfig(),
     )
@@ -138,9 +138,9 @@ def test_looks_like_rate_limit_keywords() -> None:
 
 def test_rate_limit_raises_rate_limit_error(tmp_path: Path) -> None:
     """invoke_claude_code raises RateLimitError when subprocess returns rate-limit stderr."""
-    from helix.config import ClaudeConfig
+    from helix.config import AgentConfig
 
-    config = ClaudeConfig()
+    config = AgentConfig()
 
     fake_result = MagicMock()
     fake_result.returncode = 1
@@ -154,9 +154,9 @@ def test_rate_limit_raises_rate_limit_error(tmp_path: Path) -> None:
 
 def test_rate_limit_not_raised_for_normal_errors(tmp_path: Path) -> None:
     """invoke_claude_code raises MutationError (not RateLimitError) for ordinary failures."""
-    from helix.config import ClaudeConfig
+    from helix.config import AgentConfig
 
-    config = ClaudeConfig()
+    config = AgentConfig()
 
     fake_result = MagicMock()
     fake_result.returncode = 1
@@ -170,9 +170,9 @@ def test_rate_limit_not_raised_for_normal_errors(tmp_path: Path) -> None:
 
 def test_rate_limit_in_json_result(tmp_path: Path) -> None:
     """invoke_claude_code raises RateLimitError when JSON result contains overload error."""
-    from helix.config import ClaudeConfig
+    from helix.config import AgentConfig
 
-    config = ClaudeConfig()
+    config = AgentConfig()
 
     json_payload = json.dumps({
         "is_error": True,
@@ -221,7 +221,7 @@ def test_resume_skips_missing_worktrees(tmp_path: Path, capsys) -> None:
 
     # Patch run_evolution so we don't actually try to evolve
     # (imported locally in the resume() function, so patch it at the source module)
-    with patch("helix.evolution.run_evolution") as mock_evolve:
+    with patch("helix.evolution.run_evolution"):
         runner = CliRunner()
         result = runner.invoke(cli, ["resume", "--dir", str(project_root)])
 

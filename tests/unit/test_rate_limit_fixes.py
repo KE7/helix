@@ -17,7 +17,7 @@ import pytest
 from click.testing import CliRunner
 
 from helix.cli import cli
-from helix.config import ClaudeConfig
+from helix.config import AgentConfig
 from helix.exceptions import HelixError, MutationError, RateLimitError, print_helix_error
 from helix.logging_config import setup_file_logging
 from helix.mutator import invoke_claude_code
@@ -117,7 +117,7 @@ class TestFix2RateLimitDiagnostics:
         mock_result.stderr = "Error: 529 overloaded please retry"
         mocker.patch("helix.mutator.subprocess.run", return_value=mock_result)
 
-        config = ClaudeConfig()
+        config = AgentConfig()
         with pytest.raises(RateLimitError) as exc_info:
             invoke_claude_code("/tmp/wt", "test prompt", config)
 
@@ -142,7 +142,7 @@ class TestFix2RateLimitDiagnostics:
         mock_result.stderr = ""
         mocker.patch("helix.mutator.subprocess.run", return_value=mock_result)
 
-        config = ClaudeConfig()
+        config = AgentConfig()
         with pytest.raises(RateLimitError) as exc_info:
             invoke_claude_code("/tmp/wt", "test prompt", config)
 

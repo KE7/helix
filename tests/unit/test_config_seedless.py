@@ -11,7 +11,6 @@ from pydantic import ValidationError
 import json
 
 from helix.config import (
-    DatasetConfig,
     EvaluatorConfig,
     HelixConfig,
     SeedlessConfig,
@@ -336,7 +335,7 @@ class TestBuildSeedGenerationPromptDatasetExamples:
             _dataset_examples = load_dataset_examples(config.seedless.train_path)
         prompt = build_seed_generation_prompt(
             objective=config.objective,
-            background=config.claude.background,
+            background=config.agent.background,
             evaluator_cmd=config.evaluator.command,
             dataset_examples=_dataset_examples,
         )
@@ -355,7 +354,7 @@ class TestBuildSeedGenerationPromptDatasetExamples:
             _dataset_examples = load_dataset_examples(config.seedless.train_path)
         prompt = build_seed_generation_prompt(
             objective=config.objective,
-            background=config.claude.background,
+            background=config.agent.background,
             evaluator_cmd=config.evaluator.command,
             dataset_examples=_dataset_examples,
         )

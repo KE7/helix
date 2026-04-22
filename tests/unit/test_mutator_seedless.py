@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch
 
 import pytest
 
-from helix.config import ClaudeConfig, EvaluatorConfig, HelixConfig, SeedlessConfig
+from helix.config import EvaluatorConfig, HelixConfig, SeedlessConfig
 from helix.exceptions import MutationError
-from helix.mutator import (
-    SEEDLESS_INIT_PROMPT_TEMPLATE,
-    build_seed_generation_prompt,
-    generate_seed,
-)
+from helix.mutator import build_seed_generation_prompt, generate_seed
 
 
 # ---------------------------------------------------------------------------
@@ -123,15 +119,15 @@ class TestGenerateSeed:
         args, kwargs = mock_invoke.call_args
         assert args[1] == prompt
 
-    def test_passes_claude_config_to_invoke(self):
-        """generate_seed must pass config.claude as third arg to invoke_claude_code."""
+    def test_passes_agent_config_to_invoke(self):
+        """generate_seed must pass config.agent as third arg to invoke_claude_code."""
         config = make_config()
 
         with patch("helix.mutator.invoke_claude_code", return_value={}) as mock_invoke:
             generate_seed("/tmp/wt", "prompt", config)
 
         args, kwargs = mock_invoke.call_args
-        assert args[2] is config.claude
+        assert args[2] is config.agent
 
     def test_raises_on_failure_immediately(self):
         """If invoke_claude_code raises MutationError, generate_seed propagates it immediately."""
