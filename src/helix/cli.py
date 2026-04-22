@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.tree import Tree
 
 from helix import __version__
-from helix.config import load_config, HelixConfig
+from helix.config import load_config
 from helix.logging_config import setup_file_logging
 from helix.display import (
     console,
@@ -44,7 +44,8 @@ _HELIX_TOML_TEMPLATE = """\
 # HELIX evolves your whole repo. Each mutation may read, edit, create, or delete
 # any file in the project tree. There is no target_file setting.
 #
-# To restrict what Claude Code touches, describe constraints in claude.background.
+# To restrict what the mutation backend touches, describe constraints in
+# agent.background.
 
 # Describe what you want the code to do better.
 objective = "Describe the optimisation objective"
@@ -65,8 +66,9 @@ command = "uv run python evaluate.py"
 max_generations = 20
 merge_enabled = false
 
-[claude]
-model = "sonnet"
+[agent]
+backend = "claude"
+# model = "sonnet"  # optional backend-specific model
 max_turns = 20
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 """
@@ -328,7 +330,7 @@ def init() -> None:
 @cli.command(
     help=(
         "Run the HELIX evolutionary loop on the current project. "
-        "HELIX evolves your WHOLE REPO — Claude Code may read, edit, create, or delete "
+        "HELIX evolves your WHOLE REPO — the configured agent backend may read, edit, create, or delete "
         "any file in the project tree in each mutation. "
         "There is no target_file; the candidate is your entire working tree at HEAD.\n\n"
         "Requires a helix.toml file in the project directory. "
@@ -346,10 +348,13 @@ def init() -> None:
               help="Override max_generations.")
 @click.option("--no-merge", "no_merge", is_flag=True, default=False,
               help="Disable merge operations.")
+@click.option("--backend", default=None,
+              type=click.Choice(["claude", "codex", "cursor", "gemini", "opencode"]),
+              help="Override the mutation backend.")
 @click.option("--model", default=None,
-              help="Override the Claude model (e.g. claude-haiku-4-5-20250514).")
+              help="Override the backend model.")
 @click.option("--effort", default=None,
-              help="Override Claude effort level (e.g. low, medium, high, xhigh, max).")
+              help="Override backend effort / reasoning level when supported.")
 def evolve(
     config_path: str,
     project_dir: Path | None,
@@ -357,6 +362,7 @@ def evolve(
     evaluator: str | None,
     generations: int | None,
     no_merge: bool,
+    backend: str | None,
     model: str | None,
     effort: str | None,
 ) -> None:
@@ -403,14 +409,16 @@ def evolve(
                 "evolution": config.evolution.model_copy(update={"merge_enabled": False})
             }
         )
-    if model is not None or effort is not None:
-        claude_updates: dict[str, Any] = {}
+    if backend is not None or model is not None or effort is not None:
+        agent_updates: dict[str, Any] = {}
+        if backend is not None:
+            agent_updates["backend"] = backend
         if model is not None:
-            claude_updates["model"] = model
+            agent_updates["model"] = model
         if effort is not None:
-            claude_updates["effort"] = effort
+            agent_updates["effort"] = effort
         config = config.model_copy(
-            update={"claude": config.claude.model_copy(update=claude_updates)}
+            update={"agent": config.agent.model_copy(update=agent_updates)}
         )
 
     base_dir = _helix_dir(project_root)

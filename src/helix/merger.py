@@ -9,7 +9,7 @@ from typing import Mapping
 
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
-from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff
+from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff  # noqa: F401
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
 from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
 
@@ -197,11 +197,11 @@ def merge(
         eval_result_b,
         diff,
         background,
-        config.claude.max_turns,
+        config.agent.max_turns,
     )
 
     try:
-        invoke_claude_code(child.worktree_path, prompt, config.claude, passthrough_env=config.passthrough_env)
+        invoke_claude_code(child.worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
     except MutationError as exc:
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         print_helix_error(exc)
