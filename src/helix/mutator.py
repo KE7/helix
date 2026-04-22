@@ -593,7 +593,6 @@ def _build_backend_args(
             "run",
             "--format", "json",
             "--dangerously-skip-permissions",
-            "--dir", worktree_path,
         ]
         if config.model:
             args.extend(["--model", config.model])

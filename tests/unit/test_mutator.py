@@ -564,6 +564,7 @@ class TestInvokeClaudeCode:
         assert "json" in args_list
         assert "--allowedTools" in args_list
         assert "Read,Edit" in args_list
+        assert "--model" not in args_list
         assert "--max-turns" not in args_list
         assert "-p" in args_list
         assert "the prompt" in args_list
@@ -671,7 +672,7 @@ class TestInvokeClaudeCode:
             (
                 "opencode",
                 ["opencode", "run"],
-                ["--format", "json", "--dangerously-skip-permissions", "--dir", "/tmp/wt"],
+                ["--format", "json", "--dangerously-skip-permissions"],
             ),
         ],
     )

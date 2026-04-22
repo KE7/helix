@@ -145,7 +145,7 @@ class TestLoadConfig:
 
         # AgentConfig defaults
         assert cfg.agent.backend == "claude"
-        assert cfg.agent.model == "sonnet"
+        assert cfg.agent.model is None
         assert "Read" in cfg.agent.allowed_tools
         assert cfg.agent.background is None
 
