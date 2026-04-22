@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from helix.config import (
-    ClaudeConfig,
+    AgentConfig,
     DatasetConfig,
     EvaluatorConfig,
     EvolutionConfig,
@@ -74,7 +74,7 @@ class TestLoadConfig:
             merge_enabled = false
             max_merge_invocations = 2
 
-            [claude]
+            [agent]
             model = "claude-opus-4-5-20250514"
             allowed_tools = ["Read", "Write"]
             background = "You are a coding expert."
@@ -98,12 +98,29 @@ class TestLoadConfig:
         assert cfg.evolution.max_generations == 20
         assert cfg.evolution.merge_enabled is False
         assert cfg.evolution.max_merge_invocations == 2
-        assert cfg.claude.model == "claude-opus-4-5-20250514"
-        assert cfg.claude.allowed_tools == ["Read", "Write"]
-        assert cfg.claude.background == "You are a coding expert."
+        assert cfg.agent.model == "claude-opus-4-5-20250514"
+        assert cfg.agent.allowed_tools == ["Read", "Write"]
+        assert cfg.agent.background == "You are a coding expert."
 
         assert cfg.worktree.base_dir == "/tmp/worktrees"
         assert cfg.worktree.cleanup_dominated is False
+
+    def test_agent_section_loads(self, tmp_path):
+        toml = write_toml(tmp_path, """
+            objective = "Use a different backend"
+
+            [evaluator]
+            command = "pytest"
+
+            [agent]
+            backend = "codex"
+            model = "gpt-5"
+        """)
+
+        cfg = load_config(toml)
+
+        assert cfg.agent.backend == "codex"
+        assert cfg.agent.model == "gpt-5"
 
     def test_defaults_applied_for_nested_sections(self, tmp_path):
         """Omitted nested sections should use their default values."""
@@ -126,10 +143,11 @@ class TestLoadConfig:
         assert cfg.evolution.merge_enabled is False  # GEPA parity: off by default
         assert cfg.evolution.max_merge_invocations == 5
 
-        # ClaudeConfig defaults
-        assert cfg.claude.model == "sonnet"
-        assert "Read" in cfg.claude.allowed_tools
-        assert cfg.claude.background is None
+        # AgentConfig defaults
+        assert cfg.agent.backend == "claude"
+        assert cfg.agent.model is None
+        assert "Read" in cfg.agent.allowed_tools
+        assert cfg.agent.background is None
 
         # WorktreeConfig defaults
         assert cfg.worktree.base_dir == ".helix/worktrees"
@@ -224,7 +242,7 @@ class TestDirectModelConstruction:
         )
 
     def test_claude_config_default_tools(self):
-        cfg = ClaudeConfig()
+        cfg = AgentConfig()
         assert "Read" in cfg.allowed_tools
         assert "Edit" in cfg.allowed_tools
         assert "Bash" in cfg.allowed_tools
