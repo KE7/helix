@@ -139,7 +139,7 @@ def render_frontier_table(
 
 
 def render_budget(budget: "BudgetState", config_evolution: "EvolutionConfig") -> None:
-    """Render Rich Progress bars for evaluation and Claude call budgets."""
+    """Render Rich Progress bars for evaluation budget usage."""
     with Progress(
         TextColumn("[bold blue]{task.description:<20}"),
         BarColumn(bar_width=40),
@@ -149,7 +149,7 @@ def render_budget(budget: "BudgetState", config_evolution: "EvolutionConfig") ->
     ) as progress:
         cap = config_evolution.max_evaluations
         progress.add_task(
-            "Candidate evals",
+            "Evaluations",
             total=cap if cap > 0 else None,
             completed=budget.evaluations,
         )

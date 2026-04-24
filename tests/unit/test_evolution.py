@@ -13,8 +13,6 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from helix.config import (
@@ -24,7 +22,13 @@ from helix.config import (
     HelixConfig,
     WorktreeConfig,
 )
-from helix.evolution import HelixProgress, budget_exhausted, degrades, run_evolution
+from helix.evolution import (
+    HelixProgress,
+    _evaluation_budget_units,
+    budget_exhausted,
+    degrades,
+    run_evolution,
+)
 from helix.lineage import LineageEntry
 from helix.population import Candidate, EvalResult
 from helix.state import BudgetState, EvolutionState
@@ -207,7 +211,7 @@ class TestDegrades:
 
 
 class TestBudgetExhausted:
-    """Budget exhaustion uses the whole-candidate evaluations counter."""
+    """Budget exhaustion uses the evaluations counter."""
 
     def test_not_exhausted_below_limit(self):
         state = make_budget_state(evaluations=10)
@@ -256,8 +260,8 @@ class TestBudgetExhaustionStopsLoop:
         # Gen loop should never reach mutate
         all_mocks["mutate"].assert_not_called()
 
-    def test_budget_counts_whole_seed_candidate(self, mocker, tmp_path, all_mocks):
-        """Seed evaluation counts once even when it returns multiple instances."""
+    def test_legacy_single_task_seed_counts_one(self, mocker, tmp_path, all_mocks):
+        """Legacy seed evaluation counts once without dataset example ids."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -267,7 +271,8 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # Seed has 3 instances but consumes one whole-candidate budget unit.
+        # No dataset ids are configured, so this is the legacy single-task path:
+        # it consumes one evaluation budget unit regardless of returned shape.
         config = make_config(
             max_generations=10,
             max_evaluations=3,
@@ -277,8 +282,10 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["mutate"].assert_called()
 
-    def test_evaluations_count_whole_candidate(self, mocker, tmp_path, all_mocks):
-        """Seed evaluation counts once regardless of returned instance count."""
+    def test_legacy_single_task_evaluation_counts_one(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """Legacy seed evaluation counts once regardless of returned instance count."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -302,9 +309,23 @@ class TestBudgetExhaustionStopsLoop:
         config = make_config(max_generations=0, max_evaluations=10000)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # After seed with 2 instances: evaluations == 1 (whole-candidate counting)
+        # After legacy seed with no dataset ids: evaluations == 1.
         assert saved_budgets, "save_state should have been called"
         assert saved_budgets[0].evaluations == 1
+
+
+class TestEvaluationBudgetUnits:
+    def test_batch_uncached_examples_charge_per_example(self):
+        assert _evaluation_budget_units(num_actual_examples=5) == 5
+
+    def test_batch_full_cache_hit_charges_zero(self):
+        assert _evaluation_budget_units(num_actual_examples=0) == 0
+
+    def test_legacy_cache_hit_charges_zero(self):
+        assert _evaluation_budget_units(was_cached=True) == 0
+
+    def test_legacy_uncached_call_charges_one(self):
+        assert _evaluation_budget_units() == 1
 
 
 # ---------------------------------------------------------------------------
