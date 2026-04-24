@@ -207,7 +207,7 @@ class TestDegrades:
 
 
 class TestBudgetExhausted:
-    """GEPA parity (C1): budget uses only the evaluations counter."""
+    """Budget exhaustion uses the whole-candidate evaluations counter."""
 
     def test_not_exhausted_below_limit(self):
         state = make_budget_state(evaluations=10)
@@ -222,7 +222,7 @@ class TestBudgetExhausted:
         assert budget_exhausted(state, make_config(max_evaluations=200)) is True
 
     def test_budget_exhausted_only_checks_evaluations(self):
-        """Budget only uses evaluations counter (GEPA parity C1)."""
+        """Budget only uses evaluations counter."""
         state = make_budget_state(evaluations=10)
         assert budget_exhausted(state, make_config(max_evaluations=1000)) is False
         state = make_budget_state(evaluations=1000)
@@ -256,17 +256,18 @@ class TestBudgetExhaustionStopsLoop:
         # Gen loop should never reach mutate
         all_mocks["mutate"].assert_not_called()
 
-    def test_budget_per_instance_counting_stops_loop(self, mocker, tmp_path, all_mocks):
-        """Budget counts per-instance (GEPA parity): 3 instances = +3 evaluations."""
+    def test_budget_counts_whole_seed_candidate(self, mocker, tmp_path, all_mocks):
+        """Seed evaluation counts once even when it returns multiple instances."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
             return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.6, "i3": 0.7})
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # Seed has 3 instances → +3 evaluations; set limit to 3
+        # Seed has 3 instances but consumes one whole-candidate budget unit.
         config = make_config(
             max_generations=10,
             max_evaluations=3,
@@ -274,10 +275,10 @@ class TestBudgetExhaustionStopsLoop:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        all_mocks["mutate"].assert_not_called()
+        all_mocks["mutate"].assert_called()
 
-    def test_evaluations_count_per_instance(self, mocker, tmp_path, all_mocks):
-        """Seed evaluation counts per-instance: 2 instances = +2 evaluations (GEPA parity)."""
+    def test_evaluations_count_whole_candidate(self, mocker, tmp_path, all_mocks):
+        """Seed evaluation counts once regardless of returned instance count."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -301,9 +302,9 @@ class TestBudgetExhaustionStopsLoop:
         config = make_config(max_generations=0, max_evaluations=10000)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # After seed with 2 instances: evaluations == 2 (per-instance counting)
+        # After seed with 2 instances: evaluations == 1 (whole-candidate counting)
         assert saved_budgets, "save_state should have been called"
-        assert saved_budgets[0].evaluations == 2
+        assert saved_budgets[0].evaluations == 1
 
 
 # ---------------------------------------------------------------------------

@@ -239,10 +239,9 @@ class EvolutionConfig(BaseModel):
 
     max_generations: int = 10
     perfect_score_threshold: float | None = None
-    # Evaluation-budget cap. `-1` (default) disables — HELIX runs until
-    # `max_generations` alone. Set to a positive int to match GEPA's
-    # budget-exhaustion termination (see GEPA core/engine.py, which uses
-    # the same evaluator-call budget the same way).
+    # Whole-candidate evaluation budget cap. `-1` (default) disables — HELIX
+    # runs until `max_generations` alone. A candidate scored over many examples
+    # consumes one budget unit unless served entirely from cache.
     max_evaluations: int = -1
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False

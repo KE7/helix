@@ -149,7 +149,7 @@ def render_budget(budget: "BudgetState", config_evolution: "EvolutionConfig") ->
     ) as progress:
         cap = config_evolution.max_evaluations
         progress.add_task(
-            "Evaluations",
+            "Candidate evals",
             total=cap if cap > 0 else None,
             completed=budget.evaluations,
         )

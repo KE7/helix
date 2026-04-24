@@ -282,7 +282,7 @@ enabled = false
 [evolution]
 max_generations = 20
 perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this
-max_evaluations = -1             # evaluation budget cap (-1 = no cap)
+max_evaluations = -1             # whole-candidate evaluation budget cap (-1 = no cap)
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates

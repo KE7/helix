@@ -171,13 +171,25 @@ class HelixProgress:
 def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
     """Return True if evaluation budget is exhausted.
 
-    Uses only the ``evaluations`` counter (GEPA parity C1 — matches
-    GEPA's ``total_num_evals`` budget).  When ``max_evaluations`` is the
-    sentinel ``-1`` (the default), the cap is disabled and this always
-    returns False; HELIX then runs until ``max_generations`` alone.
+    Uses only the ``evaluations`` counter.  HELIX counts completed
+    whole-candidate evaluator runs, not the number of examples inside each
+    run.  When ``max_evaluations`` is the sentinel ``-1`` (the default), the
+    cap is disabled and this always returns False; HELIX then runs until
+    ``max_generations`` alone.
     """
     cap = config.evolution.max_evaluations
     return cap > 0 and state.budget.evaluations >= cap
+
+
+def _evaluation_budget_units(
+    *, num_actual_examples: int | None = None, was_cached: bool = False
+) -> int:
+    """Return budget units for one whole-candidate evaluation attempt."""
+    if was_cached:
+        return 0
+    if num_actual_examples is not None:
+        return 1 if num_actual_examples > 0 else 0
+    return 1
 
 
 def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> bool:
@@ -1144,15 +1156,13 @@ def run_evolution(
                 seed, _seed_example_ids, minibatch_cache, config, "val",
             )
             seed_result.candidate_id = seed.id
-            state.budget.evaluations += _seed_num_actual
+            state.budget.evaluations += _evaluation_budget_units(
+                num_actual_examples=_seed_num_actual
+            )
         else:
             seed_result = run_evaluator(seed, config)
             seed_result.candidate_id = seed.id
-            # GEPA parity: charge the actual number of per-instance evals,
-            # never clamp to 1.  When the evaluator returns an empty
-            # ``instance_scores`` dict GEPA charges 0 (engine.py:167 via
-            # ``state.increment_evals(num_actual_evals)``).
-            state.budget.evaluations += len(seed_result.instance_scores)
+            state.budget.evaluations += _evaluation_budget_units()
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
@@ -1473,7 +1483,9 @@ def run_evolution(
                             merged, merge_subsample_ids, minibatch_cache, config, "val",
                         )
                         merge_result.candidate_id = merged.id
-                        state.budget.evaluations += _merge_evals
+                        state.budget.evaluations += _evaluation_budget_units(
+                            num_actual_examples=_merge_evals
+                        )
                         _save_evaluation(base_dir, merge_result)
 
                         # GEPA parity (Fix 13): mid-generation budget check.
@@ -1537,28 +1549,26 @@ def run_evolution(
                             # subsample coverage and Pareto dominance /
                             # ``sum_score`` comparisons skew against the
                             # merged candidate once it is picked as a parent.
-                            # Budget accounting is via ``_cached_evaluate_batch``'s
-                            # ``num_actual_evals`` (uncached-only), mirroring
-                            # GEPA ``state.increment_evals(num_actual_evals)``
-                            # at ``engine.py:167``.
+                            # Budget accounting charges one whole-candidate
+                            # evaluation if the full-val run was not served
+                            # entirely from cache.
                             if full_val_example_ids:
                                 _full_val_ids = list(full_val_example_ids)
                                 full_val_result, _full_n = _cached_evaluate_batch(
                                     merged, _full_val_ids, minibatch_cache, config, "val",
                                 )
                                 full_val_result.candidate_id = merged.id
-                                state.budget.evaluations += _full_n
+                                state.budget.evaluations += _evaluation_budget_units(
+                                    num_actual_examples=_full_n
+                                )
                             else:
                                 full_val_result, _full_val_cached = _cached_eval(
                                     merged, config, "val", eval_cache,
                                 )
                                 full_val_result.candidate_id = merged.id
-                                if not _full_val_cached:
-                                    # GEPA parity: charge the actual count
-                                    # of per-instance evals (never clamp to 1).
-                                    state.budget.evaluations += len(
-                                        full_val_result.instance_scores
-                                    )
+                                state.budget.evaluations += _evaluation_budget_units(
+                                    was_cached=_full_val_cached
+                                )
                             _save_evaluation(base_dir, full_val_result)
 
                             if budget_exhausted(state, config):
@@ -1749,11 +1759,9 @@ def run_evolution(
 
         # ---- Step 1c: Charge budget + skip-perfect (SEQUENTIAL) ----
         # GEPA core/engine.py:361 applies deferred updates sequentially via
-        # ``apply_proposal_output``.  Here we (a) charge the minibatch size to
-        # the budget unconditionally per audit-budget-caching §C1 MODERATE H,
-        # mirroring reflective_mutation.py:269 (``total_evals +=
-        # eval_curr.num_metric_calls if not None else len(ctx.subsample_ids)``),
-        # and (b) apply the skip-perfect gate (reflective_mutation.py:308-312).
+        # ``apply_proposal_output``.  Here we charge one whole-candidate
+        # evaluation for a completed parent minibatch evaluator run, then
+        # apply the skip-perfect gate (reflective_mutation.py:308-312).
         proposal_contexts: list[tuple[Candidate, EvalResult | None, EvalResult, str]] = []
         proposal_subsamples: list[list[str] | None] = []
         proposal_parent_mb_results: list[EvalResult | None] = []
@@ -1781,16 +1789,9 @@ def run_evolution(
                 continue
 
             if subsample_ids is not None:
-                # MODERATE H (audit-budget-caching §C1): GEPA charges the
-                # full minibatch size regardless of cache hit status
-                # (reflective_mutation.py:269 charges
-                # ``eval_curr.num_metric_calls if not None else
-                # len(ctx.subsample_ids)`` — the adapter.evaluate call at
-                # :268 bypasses the cache, so cache hits never reduce the
-                # charge).  HELIX formerly charged ``len(uncached_ids)``
-                # which let overlapping minibatches burn budget more slowly
-                # than GEPA; now charge the full minibatch width.
-                state.budget.evaluations += len(subsample_ids)
+                state.budget.evaluations += _evaluation_budget_units(
+                    num_actual_examples=_n_uncached
+                )
 
             if budget_exhausted(state, config):
                 _budget_break = True
@@ -1989,7 +1990,9 @@ def run_evolution(
                 )
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
-                state.budget.evaluations += _n
+                state.budget.evaluations += _evaluation_budget_units(
+                    num_actual_examples=_n
+                )
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
@@ -2065,9 +2068,9 @@ def run_evolution(
                 # must come from the same train eval that was passed into the mutator,
                 # not the parent's stored val frontier result.
                 parent_acceptance_result = _eval_for_mutate
-                if not _gating_cached:
-                    # GEPA parity: charge actual count, never clamp to 1.
-                    state.budget.evaluations += len(gating_result.instance_scores)
+                state.budget.evaluations += _evaluation_budget_units(
+                    was_cached=_gating_cached
+                )
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
@@ -2128,7 +2131,9 @@ def run_evolution(
                 )
                 stage_result.candidate_id = child.id
                 _last_eval_result = stage_result
-                state.budget.evaluations += _n
+                state.budget.evaluations += _evaluation_budget_units(
+                    num_actual_examples=_n
+                )
 
                 if budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
@@ -2202,14 +2207,16 @@ def run_evolution(
                 )
                 val_result.candidate_id = child.id
                 _last_eval_result = val_result
-                state.budget.evaluations += _n
+                state.budget.evaluations += _evaluation_budget_units(
+                    num_actual_examples=_n
+                )
             else:
                 val_result, _val_cached = _cached_eval(child, config, "val", eval_cache)
                 val_result.candidate_id = child.id
                 _last_eval_result = val_result
-                if not _val_cached:
-                    # GEPA parity: charge actual count, never clamp to 1.
-                    state.budget.evaluations += len(val_result.instance_scores)
+                state.budget.evaluations += _evaluation_budget_units(
+                    was_cached=_val_cached
+                )
 
             if budget_exhausted(state, config):
                 print_warning("Budget exhausted mid-generation -- stopping.")
