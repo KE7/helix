@@ -25,7 +25,7 @@ SCHEMA_VERSION: int = 1
 class BudgetState:
     """Tracks resource consumption during evolution.
 
-    Counts the total number of candidate evaluations performed.
+    Counts completed whole-candidate evaluator runs, not per-example scores.
     """
     evaluations: int = 0
 
