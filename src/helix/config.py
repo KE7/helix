@@ -239,9 +239,9 @@ class EvolutionConfig(BaseModel):
 
     max_generations: int = 10
     perfect_score_threshold: float | None = None
-    # Whole-candidate evaluation budget cap. `-1` (default) disables — HELIX
-    # runs until `max_generations` alone. A candidate scored over many examples
-    # consumes one budget unit unless served entirely from cache.
+    # Evaluation budget cap. `-1` (default) disables the cap, so HELIX runs until
+    # `max_generations` alone. Dataset/minibatch evaluations consume one unit
+    # per uncached example; legacy single-task evaluations consume 0/1.
     max_evaluations: int = -1
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False

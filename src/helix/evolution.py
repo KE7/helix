@@ -12,9 +12,7 @@ import shlex
 import threading
 import traceback
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
-
-logger = logging.getLogger(__name__)
+from typing import Any
 
 from rich.progress import (
     BarColumn,
@@ -66,6 +64,8 @@ from helix.state import (
 )
 from helix.trace import TRACE, EventType
 from helix.worktree import create_seed_worktree, create_empty_seed_worktree, remove_worktree, snapshot_candidate
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -171,10 +171,13 @@ class HelixProgress:
 def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
     """Return True if evaluation budget is exhausted.
 
-    Uses only the ``evaluations`` counter.  HELIX counts completed
-    whole-candidate evaluator runs, not the number of examples inside each
-    run.  When ``max_evaluations`` is the sentinel ``-1`` (the default), the
-    cap is disabled and this always returns False; HELIX then runs until
+    Uses only the ``evaluations`` counter.  In dataset/minibatch mode HELIX
+    counts per-example evaluations, i.e. the number of examples actually sent
+    to the evaluator after per-example cache hits are removed.  Legacy
+    single-task evaluator calls still count as one evaluation unless served
+    from cache.
+    When ``max_evaluations`` is the sentinel ``-1`` (the default), the cap is
+    disabled and this always returns False; HELIX then runs until
     ``max_generations`` alone.
     """
     cap = config.evolution.max_evaluations
@@ -184,11 +187,11 @@ def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
 def _evaluation_budget_units(
     *, num_actual_examples: int | None = None, was_cached: bool = False
 ) -> int:
-    """Return budget units for one whole-candidate evaluation attempt."""
+    """Return evaluation budget units for an evaluation attempt."""
     if was_cached:
         return 0
     if num_actual_examples is not None:
-        return 1 if num_actual_examples > 0 else 0
+        return max(0, int(num_actual_examples))
     return 1
 
 
@@ -1549,9 +1552,9 @@ def run_evolution(
                             # subsample coverage and Pareto dominance /
                             # ``sum_score`` comparisons skew against the
                             # merged candidate once it is picked as a parent.
-                            # Budget accounting charges one whole-candidate
-                            # evaluation if the full-val run was not served
-                            # entirely from cache.
+                            # Budget accounting charges the uncached
+                            # full-val example count; legacy single-task
+                            # evals still charge 0/1 via _cached_eval.
                             if full_val_example_ids:
                                 _full_val_ids = list(full_val_example_ids)
                                 full_val_result, _full_n = _cached_evaluate_batch(
@@ -1759,9 +1762,9 @@ def run_evolution(
 
         # ---- Step 1c: Charge budget + skip-perfect (SEQUENTIAL) ----
         # GEPA core/engine.py:361 applies deferred updates sequentially via
-        # ``apply_proposal_output``.  Here we charge one whole-candidate
-        # evaluation for a completed parent minibatch evaluator run, then
-        # apply the skip-perfect gate (reflective_mutation.py:308-312).
+        # ``apply_proposal_output``.  Here we charge the uncached example
+        # count for a completed parent minibatch evaluator run, then apply
+        # the skip-perfect gate (reflective_mutation.py:308-312).
         proposal_contexts: list[tuple[Candidate, EvalResult | None, EvalResult, str]] = []
         proposal_subsamples: list[list[str] | None] = []
         proposal_parent_mb_results: list[EvalResult | None] = []
@@ -1919,7 +1922,6 @@ def run_evolution(
         # ---- Step 3: Process acceptances SEQUENTIALLY ----
         # Each accepted mutation's full val eval updates state before
         # the next is processed (GEPA engine.py:444-452).
-        any_accepted_this_gen = False
         _last_eval_result: EvalResult | None = None
 
         for _p_idx, (ctx, child) in enumerate(zip(proposal_contexts, mutation_results)):
@@ -2247,8 +2249,6 @@ def run_evolution(
                 merges_due += 1
             # GEPA parity (M1): flag that this iteration found a new program.
             last_iter_found_new_program = True
-            any_accepted_this_gen = True
-
             mutations_accepted += 1
 
         # If budget was exhausted during sequential acceptance, break outer loop.

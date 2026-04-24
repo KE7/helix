@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from helix.batch_sampler import EpochShuffledBatchSampler
 from helix.config import (
     DatasetConfig,
     EvaluatorConfig,
@@ -1007,8 +1006,8 @@ class TestWriteHelixBatchStringIds:
 # ``execute_proposal`` (reflective_mutation.py:239-285) — including
 # ``adapter.evaluate`` at :268 — to a ``ThreadPoolExecutor``.
 #
-# Parent minibatch accounting counts whole-candidate evaluator runs rather
-# than the number of examples in each minibatch.
+# Parent minibatch accounting counts evaluations: one budget unit per uncached
+# example, and zero for pure cache hits.
 # ---------------------------------------------------------------------------
 
 
@@ -1240,11 +1239,11 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
 
 
 class TestParentMinibatchBudgetCharge:
-    def test_budget_charge_counts_whole_parent_eval_and_skips_cache_hit(
+    def test_budget_charge_counts_parent_minibatch_examples_and_skips_cache_hit(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """Two back-to-back iterations on the same parent/minibatch overlap
-        charge one unit for the fresh parent evaluator run and zero for the
+        charge N units for the fresh parent evaluator run and zero for the
         later pure cache hit.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)  # 2 ids → minibatch always [0,1]
@@ -1306,18 +1305,19 @@ class TestParentMinibatchBudgetCharge:
         )
 
         assert len(budget_snapshots) >= 2, "expected multiple save_state calls"
-        # The snapshots capture the fresh parent eval (+1) and the first
-        # rejected child eval (+1); the second parent cache hit adds nothing.
-        assert budget_snapshots[-1] - budget_snapshots[0] >= 2, (
+        # The snapshots capture the fresh 2-example parent eval (+2), the
+        # rejected child evals (+2 each), and no charge for the second parent
+        # cache hit.
+        assert budget_snapshots[-1] - budget_snapshots[0] >= 6, (
             f"Budget delta {budget_snapshots[-1] - budget_snapshots[0]} "
-            f"< 2 — whole-candidate minibatch evaluations were not charged"
+            f"< 6 - per-example minibatch evaluations were not charged"
         )
 
     def test_budget_charge_exact_count_single_proposal(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """A single minibatch iteration charges one unit for the parent
-        evaluator run and one for the rejected child evaluator run.
+        """A single minibatch iteration charges two units for the parent
+        evaluator run and two for the rejected child evaluator run.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)
         seed = _make_candidate("g0-s0")
@@ -1356,7 +1356,46 @@ class TestParentMinibatchBudgetCharge:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert budget_snapshots, "save_state should be called"
-        assert budget_snapshots[-1] >= 2
+        assert budget_snapshots[0] == 2
+        assert budget_snapshots[-1] == 6
+
+    def test_seed_full_validation_charges_uncached_val_examples(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Full-validation dataset eval charges one unit per uncached val id."""
+        train_path = _write_train_jsonl(tmp_path, n=3)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            assert split == "val"
+            assert instance_ids == ["0", "1", "2"]
+            return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        budget_snapshots: list[int] = []
+
+        def capture(state: Any, path: Any) -> None:
+            budget_snapshots.append(state.budget.evaluations)
+
+        all_mocks["save_state"].side_effect = capture
+
+        config = _make_minibatch_config(
+            train_path,
+            val_size=3,
+            max_generations=0,
+            max_evaluations=10_000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert budget_snapshots
+        assert budget_snapshots[0] == 3
 
 
 # ---------------------------------------------------------------------------
