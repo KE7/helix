@@ -122,9 +122,10 @@ class SeedlessConfig(BaseModel):
     paths used *only* during seed generation (and, historically, the
     legacy payload-based minibatch path):
 
-    - **single-task mode** (default): ``train_path`` absent / ``None`` — no
-      ``## Sample Inputs`` section is added to the seed prompt.  Matches GEPA
-      ``optimize_anything(dataset=None)``.
+    - **single-task / no-example mode** (default): ``train_path`` absent /
+      ``None`` — no ``## Sample Inputs`` section is added to the seed prompt.
+      Matches GEPA O.A. Single-Task Search
+      ``optimize_anything(dataset=None, valset=None)``.
     - **multi-task / generalization mode**: ``train_path`` points to a training
       dataset file (JSON array or JSONL) or a directory of JSON files.  The
       first 3 items are read and serialised as string representations, then
@@ -146,7 +147,7 @@ class SeedlessConfig(BaseModel):
         description=(
             "Optional prompt-grounding training dataset for seedless seed "
             "generation.  Accepts a JSON array file, a JSONL file, or a "
-            "directory of JSON files.  None → single-task mode (no Sample "
+            "directory of JSON files.  None → single-task/no-example mode (no Sample "
             "Inputs section)."
         ),
     )
@@ -241,7 +242,8 @@ class EvolutionConfig(BaseModel):
     perfect_score_threshold: float | None = None
     # Evaluation budget cap. `-1` (default) disables the cap, so HELIX runs until
     # `max_generations` alone. Dataset/minibatch evaluations consume one unit
-    # per uncached example; legacy single-task evaluations consume 0/1.
+    # per uncached example; single-task/no-example evaluator calls consume 0/1
+    # metric calls (cached=0, uncached=1 because no per-example ids exist).
     max_evaluations: int = -1
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False

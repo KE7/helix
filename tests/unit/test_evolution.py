@@ -260,8 +260,8 @@ class TestBudgetExhaustionStopsLoop:
         # Gen loop should never reach mutate
         all_mocks["mutate"].assert_not_called()
 
-    def test_legacy_single_task_seed_counts_one(self, mocker, tmp_path, all_mocks):
-        """Legacy seed evaluation counts once without dataset example ids."""
+    def test_single_task_no_example_seed_counts_one(self, mocker, tmp_path, all_mocks):
+        """Single-task/no-example seed eval counts one uncached metric call."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -271,8 +271,9 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # No dataset ids are configured, so this is the legacy single-task path:
-        # it consumes one evaluation budget unit regardless of returned shape.
+        # No dataset ids are configured, so this is GEPA O.A. Single-Task
+        # Search (`dataset=None`, `valset=None`): one uncached evaluator call
+        # consumes one metric-call budget unit regardless of returned shape.
         config = make_config(
             max_generations=10,
             max_evaluations=3,
@@ -282,10 +283,10 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["mutate"].assert_called()
 
-    def test_legacy_single_task_evaluation_counts_one(
+    def test_single_task_no_example_evaluation_counts_one(
         self, mocker, tmp_path, all_mocks
     ):
-        """Legacy seed evaluation counts once regardless of returned instance count."""
+        """Single-task/no-example seed eval counts one uncached metric call."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -309,7 +310,7 @@ class TestBudgetExhaustionStopsLoop:
         config = make_config(max_generations=0, max_evaluations=10000)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # After legacy seed with no dataset ids: evaluations == 1.
+        # After single-task/no-example seed with no dataset ids: evaluations == 1.
         assert saved_budgets, "save_state should have been called"
         assert saved_budgets[0].evaluations == 1
 
@@ -321,10 +322,10 @@ class TestEvaluationBudgetUnits:
     def test_batch_full_cache_hit_charges_zero(self):
         assert _evaluation_budget_units(num_actual_examples=0) == 0
 
-    def test_legacy_cache_hit_charges_zero(self):
+    def test_single_task_no_example_cache_hit_charges_zero(self):
         assert _evaluation_budget_units(was_cached=True) == 0
 
-    def test_legacy_uncached_call_charges_one(self):
+    def test_single_task_no_example_uncached_call_charges_one(self):
         assert _evaluation_budget_units() == 1
 
 
@@ -792,7 +793,7 @@ class TestMergeBehavior:
         # after the subsample gate passes, HELIX now runs a SECOND (full-val)
         # eval on the merged candidate mirroring GEPA ``engine.py:690`` →
         # ``_run_full_eval_and_add`` → ``_evaluate_on_valset``.  With
-        # val_size=None (single-task mode) the full-val path falls through
+        # val_size=None (single-task/no-example mode) the full-val path falls through
         # to ``_cached_eval`` which calls ``run_evaluator`` *without*
         # instance_ids.  Assert the *first* call is the subsample
         # (["1","2"]), and the full-val call is either the explicit
