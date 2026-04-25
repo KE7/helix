@@ -77,7 +77,7 @@ frontier_type = "hybrid"
 
 [agent]
 backend = "codex"
-model = "gpt-5"
+model = "gpt-5.5"
 max_turns = 20
 background = """
 Only modify the mutable candidate implementation files.
@@ -98,7 +98,7 @@ For Codex-backed HELIX runs:
 ```toml
 [agent]
 backend = "codex"
-model = "gpt-5"      # Passed verbatim to `codex exec --model ...`; choose a model your Codex CLI supports.
+model = "gpt-5.5"    # Passed verbatim to `codex exec --model ...`; choose a model your Codex CLI supports.
 max_turns = 20       # Rendered into the mutation prompt as a turn budget.
 background = "Concrete mutation constraints and domain guidance."
 ```
@@ -109,7 +109,7 @@ HELIX invokes Codex as:
 codex exec --json --dangerously-bypass-approvals-and-sandbox --model <model> <prompt>
 ```
 
-`agent.effort` and `agent.allowed_tools` are part of the shared agent schema, but the current Codex invocation only passes `model` plus the prompt. Put operational constraints in `agent.background`.
+`agent.effort` and `agent.allowed_tools` are part of the shared agent schema, but the current Codex invocation only passes `model` plus the prompt. GPT-5.5 defaults to medium reasoning effort when the host does not override it, so do not add effort settings to HELIX configs unless you have eval evidence for a different tradeoff. Put operational constraints in `agent.background`.
 
 ## Dataset Handoff
 
