@@ -8,7 +8,7 @@
 
 Circle packing is a classic computational geometry problem and an ideal benchmark for evolutionary code optimization — the search space is continuous, evaluation is fast and deterministic, and the global optimum is well-studied.
 
-This experiment uses HELIX in **single-task mode**: one evaluator, no dataset split. The Pareto frontier tracks score metrics directly.
+This experiment uses HELIX in **single-task / no-example mode** (GEPA O.A. **Single-Task Search**, `dataset=None`, `valset=None`): one evaluator call, no example-id handoff, and no dataset split. The Pareto frontier tracks score metrics directly.
 
 | | Value |
 |---|---|

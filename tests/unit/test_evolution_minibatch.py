@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from helix.batch_sampler import EpochShuffledBatchSampler
 from helix.config import (
     DatasetConfig,
     EvaluatorConfig,
@@ -204,7 +203,7 @@ class TestMinibatchGateIntegration:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
-            # full val eval (legacy path, single-task mode): moderate scores
+            # full val eval (single-task/no-example path): moderate scores
             return _make_result(candidate.id, {"v1": 0.5, "v2": 0.5})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -526,7 +525,7 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            # instance_ids MUST be None in single-task mode
+            # instance_ids MUST be None in single-task/no-example mode
             assert instance_ids is None
             return _make_result(candidate.id, {"t": 0.9798})
 
@@ -682,7 +681,7 @@ class TestCachedEvaluateBatch:
         )
 
         assert seen_instance_ids == [["0", "1", "2"]], (
-            f"Expected single full-batch eval call, got {seen_instance_ids}"
+            f"Expected single no-example eval call, got {seen_instance_ids}"
         )
         assert num_actual == 3
         assert result.instance_scores == {"0": 0.5, "1": 0.5, "2": 0.5}
@@ -1007,11 +1006,8 @@ class TestWriteHelixBatchStringIds:
 # ``execute_proposal`` (reflective_mutation.py:239-285) — including
 # ``adapter.evaluate`` at :268 — to a ``ThreadPoolExecutor``.
 #
-# MODERATE H (audit-budget-caching §C1) — parent minibatch charge is always
-# ``len(subsample_ids)`` regardless of cache hits, matching GEPA
-# reflective_mutation.py:269 (``total_evals += eval_curr.num_metric_calls if
-# not None else len(ctx.subsample_ids)`` — ``adapter.evaluate`` at :268
-# bypasses the cache, so cache hits never reduce the charge).
+# Parent minibatch accounting counts evaluations: one budget unit per uncached
+# example, and zero for pure cache hits.
 # ---------------------------------------------------------------------------
 
 
@@ -1243,13 +1239,12 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
 
 
 class TestParentMinibatchBudgetCharge:
-    def test_budget_charge_counts_full_minibatch_regardless_of_cache(
+    def test_budget_charge_counts_parent_minibatch_examples_and_skips_cache_hit(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """Two back-to-back iterations on the same parent/minibatch overlap
-        must each charge ``len(subsample_ids)`` to the budget, matching GEPA
-        reflective_mutation.py:269.  Pre-fix, HELIX charged only
-        ``len(uncached_ids)`` on the 2nd iteration (cache hit → 0 charge).
+        charge N units for the fresh parent evaluator run and zero for the
+        later pure cache hit.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)  # 2 ids → minibatch always [0,1]
         seed = _make_candidate("g0-s0")
@@ -1285,7 +1280,7 @@ class TestParentMinibatchBudgetCharge:
 
         # max_generations=2 so the parent (seed) is evaluated on [0,1] twice.
         # On iter 2 the cache already contains seed's scores for ids 0 and 1,
-        # so the OLD code would charge 0 on iter 2.  The fix charges 2 both times.
+        # so no evaluator subprocess runs and no budget unit is charged.
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
@@ -1294,12 +1289,8 @@ class TestParentMinibatchBudgetCharge:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # Seed eval contributes 0 to the minibatch charge (no train seed eval)
-        # and the val seed eval contributes its own counts.  The invariant we
-        # assert is the DELTA across iterations 1 and 2 attributable to the
-        # parent minibatch: it must be +2 both times (no 0-charge on a hit).
-        # We find the per-iter train minibatch charges by observing that
-        # run_evaluator for the PARENT is called on its minibatch EACH iter:
+        # The parent evaluator is invoked once: iter 1 is fresh, iter 2 is a
+        # full cache hit.
         parent_call_count = sum(
             1
             for call in all_mocks["run_evaluator"].call_args_list
@@ -1308,45 +1299,25 @@ class TestParentMinibatchBudgetCharge:
             and (call.args[0] if call.args else call.kwargs.get("candidate")).id
             == seed.id
         )
-        # Parent is evaluated on its minibatch ONCE per iteration via the
-        # cache consumer — iter 1 fresh, iter 2 full cache hit.  The file
-        # helix_batch is never rewritten on full hit, but the budget charge
-        # below is what we actually care about.
         assert parent_call_count == 1, (
             f"Expected parent minibatch evaluator invoked exactly once "
             f"(iter 1 only, iter 2 full cache hit), got {parent_call_count}"
         )
 
-        # Budget charges for the PARENT minibatch: 2 both iterations → +4 total
-        # attributable to parent-minibatch charges.  Other charges (child
-        # minibatch, val eval) also sum in, so we assert a lower bound that
-        # would fail if the cache-hit charge had been skipped:
-        #   - seed val eval: +2 (ids 0..N from val_size=None → single-task
-        #     mode? Actually val_size is unused in the minibatch path; the
-        #     seed eval goes through _cached_evaluate_batch with
-        #     full_val_example_ids=[]; single-task seed eval contributes its
-        #     own count).  We accept the loose bound and check the DELTA
-        #     between the final budget snapshot and the seed-eval snapshot.
         assert len(budget_snapshots) >= 2, "expected multiple save_state calls"
-        # Fresh-iter charges (parent+child): 2+2=4.  Cached-iter charges
-        # (parent=2 always, child fresh mb=2 each iter since child id is new):
-        # 2+2=4 more.  Pre-fix would give 0+2=2 for iter 2 (parent cached).
-        # Delta from first snapshot to last must be >= 4+4=8 (allowing
-        # some slack for other charges like the seed val eval).
-        assert budget_snapshots[-1] - budget_snapshots[0] >= 8, (
+        # The snapshots capture the fresh 2-example parent eval (+2), the
+        # rejected child evals (+2 each), and no charge for the second parent
+        # cache hit.
+        assert budget_snapshots[-1] - budget_snapshots[0] >= 6, (
             f"Budget delta {budget_snapshots[-1] - budget_snapshots[0]} "
-            f"< 8 — cache hit on parent minibatch is not being charged "
-            f"(MODERATE H regression)"
+            f"< 6 - per-example minibatch evaluations were not charged"
         )
 
     def test_budget_charge_exact_count_single_proposal(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """GEPA-parity invariant (val_stage_size=None, num_parallel_proposals=1):
-        a single iteration charges exactly ``parent_mb + child_mb`` evals for
-        the minibatch portion, i.e. ``2*minibatch_size`` — matching GEPA
-        reflective_mutation.py:269 (parent) + :423 (child).  This is the
-        line-by-line GEPA invariant required by the user directive.
+        """A single minibatch iteration charges two units for the parent
+        evaluator run and two for the rejected child evaluator run.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)
         seed = _make_candidate("g0-s0")
@@ -1384,12 +1355,47 @@ class TestParentMinibatchBudgetCharge:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # GEPA parity line-by-line (val_stage_size=None): per iteration
-        # the parent minibatch charges +2, the child minibatch charges +2 →
-        # delta >= 4 (plus any seed eval charges that preceded).  Child is
-        # rejected (0.1 < 0.9), so no val charges.
         assert budget_snapshots, "save_state should be called"
-        assert budget_snapshots[-1] >= 4
+        assert budget_snapshots[0] == 2
+        assert budget_snapshots[-1] == 6
+
+    def test_seed_full_validation_charges_uncached_val_examples(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Full-validation dataset eval charges one unit per uncached val id."""
+        train_path = _write_train_jsonl(tmp_path, n=3)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            assert split == "val"
+            assert instance_ids == ["0", "1", "2"]
+            return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        budget_snapshots: list[int] = []
+
+        def capture(state: Any, path: Any) -> None:
+            budget_snapshots.append(state.budget.evaluations)
+
+        all_mocks["save_state"].side_effect = capture
+
+        config = _make_minibatch_config(
+            train_path,
+            val_size=3,
+            max_generations=0,
+            max_evaluations=10_000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert budget_snapshots
+        assert budget_snapshots[0] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1575,18 +1581,15 @@ class TestStrictInstanceScoresAccess:
             run_evolution(config, tmp_path, tmp_path / ".helix")
 
 
-class TestBudgetClampRemoved:
-    """GEPA parity: empty ``instance_scores`` must charge 0 (not 1).
-    GEPA core/engine.py:167 increments by ``num_actual_evals`` returned
-    from the adapter, with no clamp.
-    """
+class TestWholeCandidateBudget:
+    """Whole-candidate accounting charges completed evaluator runs."""
 
-    def test_empty_instance_scores_charges_zero(
+    def test_empty_instance_scores_still_charges_one_candidate_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """Single-task / no-train_path mode: evaluator returns an empty
-        ``instance_scores`` dict on the seed eval.  Budget must charge 0
-        (not the legacy clamp-to-1)."""
+        ``instance_scores`` dict on the seed eval.  The completed candidate
+        eval still consumes one budget unit."""
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -1622,9 +1625,7 @@ class TestBudgetClampRemoved:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # First snapshot is taken right after seed eval; with empty
-        # instance_scores GEPA charges 0, not the legacy clamp-to-1.
         assert budget_snapshots, "save_state should be called"
-        assert budget_snapshots[0] == 0, (
-            f"empty instance_scores must charge 0, got {budget_snapshots[0]}"
+        assert budget_snapshots[0] == 1, (
+            f"empty instance_scores must still charge 1, got {budget_snapshots[0]}"
         )

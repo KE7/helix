@@ -13,8 +13,6 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from helix.config import (
@@ -24,7 +22,13 @@ from helix.config import (
     HelixConfig,
     WorktreeConfig,
 )
-from helix.evolution import HelixProgress, budget_exhausted, degrades, run_evolution
+from helix.evolution import (
+    HelixProgress,
+    _evaluation_budget_units,
+    budget_exhausted,
+    degrades,
+    run_evolution,
+)
 from helix.lineage import LineageEntry
 from helix.population import Candidate, EvalResult
 from helix.state import BudgetState, EvolutionState
@@ -207,7 +211,7 @@ class TestDegrades:
 
 
 class TestBudgetExhausted:
-    """GEPA parity (C1): budget uses only the evaluations counter."""
+    """Budget exhaustion uses the evaluations counter."""
 
     def test_not_exhausted_below_limit(self):
         state = make_budget_state(evaluations=10)
@@ -222,7 +226,7 @@ class TestBudgetExhausted:
         assert budget_exhausted(state, make_config(max_evaluations=200)) is True
 
     def test_budget_exhausted_only_checks_evaluations(self):
-        """Budget only uses evaluations counter (GEPA parity C1)."""
+        """Budget only uses evaluations counter."""
         state = make_budget_state(evaluations=10)
         assert budget_exhausted(state, make_config(max_evaluations=1000)) is False
         state = make_budget_state(evaluations=1000)
@@ -256,17 +260,20 @@ class TestBudgetExhaustionStopsLoop:
         # Gen loop should never reach mutate
         all_mocks["mutate"].assert_not_called()
 
-    def test_budget_per_instance_counting_stops_loop(self, mocker, tmp_path, all_mocks):
-        """Budget counts per-instance (GEPA parity): 3 instances = +3 evaluations."""
+    def test_single_task_no_example_seed_counts_one(self, mocker, tmp_path, all_mocks):
+        """Single-task/no-example seed eval counts one uncached metric call."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
             return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.6, "i3": 0.7})
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # Seed has 3 instances → +3 evaluations; set limit to 3
+        # No dataset ids are configured, so this is GEPA O.A. Single-Task
+        # Search (`dataset=None`, `valset=None`): one uncached evaluator call
+        # consumes one metric-call budget unit regardless of returned shape.
         config = make_config(
             max_generations=10,
             max_evaluations=3,
@@ -274,10 +281,12 @@ class TestBudgetExhaustionStopsLoop:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        all_mocks["mutate"].assert_not_called()
+        all_mocks["mutate"].assert_called()
 
-    def test_evaluations_count_per_instance(self, mocker, tmp_path, all_mocks):
-        """Seed evaluation counts per-instance: 2 instances = +2 evaluations (GEPA parity)."""
+    def test_single_task_no_example_evaluation_counts_one(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """Single-task/no-example seed eval counts one uncached metric call."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = None
@@ -301,9 +310,23 @@ class TestBudgetExhaustionStopsLoop:
         config = make_config(max_generations=0, max_evaluations=10000)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # After seed with 2 instances: evaluations == 2 (per-instance counting)
+        # After single-task/no-example seed with no dataset ids: evaluations == 1.
         assert saved_budgets, "save_state should have been called"
-        assert saved_budgets[0].evaluations == 2
+        assert saved_budgets[0].evaluations == 1
+
+
+class TestEvaluationBudgetUnits:
+    def test_batch_uncached_examples_charge_per_example(self):
+        assert _evaluation_budget_units(num_actual_examples=5) == 5
+
+    def test_batch_full_cache_hit_charges_zero(self):
+        assert _evaluation_budget_units(num_actual_examples=0) == 0
+
+    def test_single_task_no_example_cache_hit_charges_zero(self):
+        assert _evaluation_budget_units(was_cached=True) == 0
+
+    def test_single_task_no_example_uncached_call_charges_one(self):
+        assert _evaluation_budget_units() == 1
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +793,7 @@ class TestMergeBehavior:
         # after the subsample gate passes, HELIX now runs a SECOND (full-val)
         # eval on the merged candidate mirroring GEPA ``engine.py:690`` →
         # ``_run_full_eval_and_add`` → ``_evaluate_on_valset``.  With
-        # val_size=None (single-task mode) the full-val path falls through
+        # val_size=None (single-task/no-example mode) the full-val path falls through
         # to ``_cached_eval`` which calls ``run_evaluator`` *without*
         # instance_ids.  Assert the *first* call is the subsample
         # (["1","2"]), and the full-val call is either the explicit

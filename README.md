@@ -265,7 +265,7 @@ protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutab
 # opaque "group__N" ids when evolution.batch_sampler = "stratified")
 # that the evaluator (running in the worktree) filters against its own
 # dataset via helix_batch.json — written as an opaque JSON list[str].
-# Leave both unset for single-task mode (legacy full-batch path).
+# Leave both unset for GEPA O.A. Single-Task Search / HELIX single-task-no-example mode (dataset=None, valset=None).
 # train_size = 200
 # val_size  = 200
 
@@ -323,7 +323,7 @@ HELIX splits dataset concerns across two TOML sections:
 
 | Mode | Config | Description |
 |---|---|---|
-| **Single-task** | neither set | Optimize for a single task. Legacy full-batch evaluator path. |
+| **Single-task / no-example** | neither set | GEPA O.A. Single-Task Search (`dataset=None`, `valset=None`): evaluator runs without example-id handoff; uncached eval calls count as 1 metric call. |
 | **Example-id handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples example ids — stringified indices into `range(train_size)` by default, or opaque task-prefixed ids like `"cube_stack__3"` under `evolution.batch_sampler = "stratified"`; the evaluator reads them from `helix_batch.json` (a JSON `list[str]`) in cwd and filters its own dataset. |
 | **Seedless multi-task** | `seedless.enabled = true`, `seedless.train_path` set | Seed generation prompt includes the first 3 training examples for grounding. |
 
