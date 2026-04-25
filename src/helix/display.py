@@ -139,7 +139,7 @@ def render_frontier_table(
 
 
 def render_budget(budget: "BudgetState", config_evolution: "EvolutionConfig") -> None:
-    """Render Rich Progress bars for evaluation and Claude call budgets."""
+    """Render Rich Progress bars for evaluation budget usage."""
     with Progress(
         TextColumn("[bold blue]{task.description:<20}"),
         BarColumn(bar_width=40),

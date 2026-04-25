@@ -25,7 +25,9 @@ SCHEMA_VERSION: int = 1
 class BudgetState:
     """Tracks resource consumption during evolution.
 
-    Counts the total number of candidate evaluations performed.
+    Counts metric calls. Dataset/minibatch paths add the number of uncached
+    examples evaluated; single-task/no-example paths add 0/1
+    (cached=0, uncached evaluator call=1 because no per-example ids exist).
     """
     evaluations: int = 0
 
