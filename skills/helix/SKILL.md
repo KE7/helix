@@ -66,7 +66,7 @@ val_size = 50
 
 [evolution]
 max_generations = 20
-max_evaluations = 500  # evaluation budget: uncached example scores
+max_evaluations = 500  # metric-call budget: uncached examples, or 1 per uncached single-task/no-example eval call
 minibatch_size = 3
 max_workers = 32
 num_parallel_proposals = 1

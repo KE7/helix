@@ -203,7 +203,7 @@ class TestMinibatchGateIntegration:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
-            # full val eval (legacy path, single-task mode): moderate scores
+            # full val eval (single-task/no-example path): moderate scores
             return _make_result(candidate.id, {"v1": 0.5, "v2": 0.5})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -525,7 +525,7 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            # instance_ids MUST be None in single-task mode
+            # instance_ids MUST be None in single-task/no-example mode
             assert instance_ids is None
             return _make_result(candidate.id, {"t": 0.9798})
 
@@ -681,7 +681,7 @@ class TestCachedEvaluateBatch:
         )
 
         assert seen_instance_ids == [["0", "1", "2"]], (
-            f"Expected single full-batch eval call, got {seen_instance_ids}"
+            f"Expected single no-example eval call, got {seen_instance_ids}"
         )
         assert num_actual == 3
         assert result.instance_scores == {"0": 0.5, "1": 0.5, "2": 0.5}

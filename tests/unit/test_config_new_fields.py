@@ -55,7 +55,7 @@ class TestDatasetConfigSizes:
         assert cfg.val_size == 200
 
     def test_zero_sizes_allowed(self):
-        # train_size=0 is the single-task mode marker.
+        # train_size=0 is a single-task/no-example marker (no sampled ids).
         cfg = DatasetConfig(train_size=0, val_size=0)
         assert cfg.train_size == 0
         assert cfg.val_size == 0

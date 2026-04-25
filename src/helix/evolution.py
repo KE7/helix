@@ -174,8 +174,8 @@ def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
     Uses only the ``evaluations`` counter.  In dataset/minibatch mode HELIX
     counts per-example evaluations, i.e. the number of examples actually sent
     to the evaluator after per-example cache hits are removed.  Legacy
-    single-task evaluator calls still count as one evaluation unless served
-    from cache.
+    single-task/no-example evaluator calls still count as one metric call
+    unless served from cache (no per-example ids exist in this path).
     When ``max_evaluations`` is the sentinel ``-1`` (the default), the cap is
     disabled and this always returns False; HELIX then runs until
     ``max_generations`` alone.
@@ -852,7 +852,7 @@ def _full_val_example_ids(
        use ``helix_result`` and need the positional id handoff — the
        strict ``helix_result`` parser requires the batch file to be
        present on every evaluator invocation.
-    3. Empty list — legacy single-task path (no example-id handoff).
+    3. Empty list — single-task/no-example path (no example-id handoff).
     """
     val_size = config.dataset.val_size
     if val_size is not None and val_size > 0:
@@ -1150,9 +1150,9 @@ def run_evolution(
         # GEPA parity: when val_size is set we route through
         # ``_cached_evaluate_batch`` — the per-example cache consumer mirrors
         # ``cached_evaluate_full`` at gepa/core/state.py:618.  When val_size
-        # is None (single-task mode, e.g. circle_packing) we cannot key the
-        # cache by example id, so we fall back to the legacy single-shot
-        # evaluator call.
+        # is None (single-task/no-example mode, e.g. circle_packing) we
+        # cannot key the cache by example id, so we fall back to one evaluator
+        # call (counted as one uncached metric call).
         if full_val_example_ids:
             _seed_example_ids = list(full_val_example_ids)
             seed_result, _seed_num_actual = _cached_evaluate_batch(
@@ -1553,8 +1553,8 @@ def run_evolution(
                             # ``sum_score`` comparisons skew against the
                             # merged candidate once it is picked as a parent.
                             # Budget accounting charges the uncached
-                            # full-val example count; legacy single-task
-                            # evals still charge 0/1 via _cached_eval.
+                            # full-val example count; single-task/no-example
+                            # evals still charge 0/1 metric calls via _cached_eval.
                             if full_val_example_ids:
                                 _full_val_ids = list(full_val_example_ids)
                                 full_val_result, _full_n = _cached_evaluate_batch(
@@ -1782,7 +1782,7 @@ def run_evolution(
             # there is no corresponding ``num_metric_calls`` to account for
             # (mirrors GEPA's ``total_evals`` being added inside
             # ``execute_proposal`` only on successful evaluation).  Legacy
-            # single-task mode (``subsample_ids is None``) intentionally
+            # single-task/no-example mode (``subsample_ids is None``) intentionally
             # allows _mb_result=None and falls through to a train re-eval.
             if subsample_ids is not None and parent_mb_result is None:
                 print_warning(
@@ -1805,7 +1805,7 @@ def run_evolution(
             # a full-train re-eval. HELIX previously ran a redundant
             # _cached_eval(parent, 'train') here, which forced evaluator-owned
             # datasets to rescore the entire training split just to provide
-            # prompt context. Legacy (no-minibatch) single-task mode keeps a
+            # prompt context. No-minibatch single-task/no-example mode keeps a
             # train eval because there is no minibatch to use.
             eval_for_mutate: EvalResult
             if parent_mb_result is not None:
@@ -2066,7 +2066,7 @@ def run_evolution(
                 gating_result, _gating_cached = _cached_eval(child, config, "train", eval_cache)
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
-                # Legacy single-task mode still gates on train, but the parent baseline
+                # Single-task/no-example mode still gates on train, but the parent baseline
                 # must come from the same train eval that was passed into the mutator,
                 # not the parent's stored val frontier result.
                 parent_acceptance_result = _eval_for_mutate
@@ -2200,7 +2200,7 @@ def run_evolution(
             # val indices across candidates (or re-evals of the same
             # candidate) are not recomputed.  When val_size is unset we
             # fall back to the legacy ``_cached_eval`` path keyed by
-            # ``(candidate_id, split)`` — single-task mode has no example
+            # ``(candidate_id, split)`` — single-task/no-example mode has no example
             # ids to key on.
             if full_val_example_ids:
                 _val_example_ids = list(full_val_example_ids)
