@@ -14,8 +14,10 @@ from rich.table import Table
 from rich.tree import Tree
 
 from helix import __version__
+from helix.backends import BACKENDS
 from helix.config import load_config
 from helix.logging_config import setup_file_logging
+from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
 from helix.display import (
     console,
     print_error,
@@ -71,6 +73,17 @@ backend = "claude"
 # model = "sonnet"  # optional backend-specific model
 max_turns = 20
 # background = "Only modify files under src/. Do not touch tests/ or config/."
+
+[sandbox]
+# Set enabled=true to run agent/evaluator subprocesses in Docker using a
+# temporary copy of each candidate worktree. Agent changes sync back; evaluator
+# changes are discarded.
+enabled = false
+# image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
+# network = "bridge"
+# skip_special_files = true  # skip FIFOs/sockets/devices during workspace sync
+# Agent containers mount a persistent Docker auth volume named
+# helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
 """
 
 _HELIX_DIR = ".helix"
@@ -320,6 +333,113 @@ def init() -> None:
         "     to be on PATH).\n"
         "  2. Run [cyan]helix evolve[/cyan] to start evolution.\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# sandbox
+# ---------------------------------------------------------------------------
+
+
+@cli.group(name="sandbox")
+def sandbox_cli() -> None:
+    """Manage HELIX Docker sandbox helpers."""
+
+
+@sandbox_cli.command(name="login")
+@click.argument("backend", type=click.Choice(BACKENDS))
+@click.option("--image", default=None, help="Override the backend runner image.")
+@click.option("--network", default="bridge", show_default=True, help="Docker network mode.")
+@click.option("--add-host-gateway", is_flag=True, default=False,
+              help="Add host.docker.internal for Linux Docker hosts.")
+def sandbox_login(
+    backend: str,
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+) -> None:
+    """Log into a backend inside its persistent sandbox auth volume."""
+    volume = sandbox_auth_volume_name(backend)
+    print_info(f"Using Docker auth volume [cyan]{volume}[/cyan].")
+    if backend == "gemini":
+        print_warning(
+            "Gemini CLI does not expose a dedicated login subcommand; HELIX "
+            "starts the interactive Gemini CLI so you can complete its auth flow."
+        )
+    result = run_sandbox_auth_command(
+        backend,
+        action="login",
+        image=image,
+        network=network,
+        add_host_gateway=add_host_gateway,
+        interactive=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+
+@sandbox_cli.command(name="status")
+@click.argument("backend", required=False, type=click.Choice(BACKENDS))
+@click.option("--image", default=None, help="Override the backend runner image.")
+@click.option("--network", default="bridge", show_default=True, help="Docker network mode.")
+@click.option("--add-host-gateway", is_flag=True, default=False,
+              help="Add host.docker.internal for Linux Docker hosts.")
+def sandbox_status(
+    backend: str | None,
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+) -> None:
+    """Show login status for one backend or all backends."""
+    backends = [backend] if backend is not None else BACKENDS
+    exit_code = 0
+    for item in backends:
+        console.print(f"[bold]{item}[/bold] ({sandbox_auth_volume_name(item)})")
+        result = run_sandbox_auth_command(
+            item,
+            action="status",
+            image=image,
+            network=network,
+            add_host_gateway=add_host_gateway,
+        )
+        output = (result.stdout or "").strip()
+        error = (result.stderr or "").strip()
+        if output:
+            console.print(output)
+        if error:
+            console.print(error, style="red")
+        if result.returncode != 0:
+            exit_code = result.returncode
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
+@sandbox_cli.command(name="logout")
+@click.argument("backend", type=click.Choice(BACKENDS))
+@click.option("--image", default=None, help="Override the backend runner image.")
+@click.option("--network", default="bridge", show_default=True, help="Docker network mode.")
+@click.option("--add-host-gateway", is_flag=True, default=False,
+              help="Add host.docker.internal for Linux Docker hosts.")
+def sandbox_logout(
+    backend: str,
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+) -> None:
+    """Log out a backend from its persistent sandbox auth volume."""
+    result = run_sandbox_auth_command(
+        backend,
+        action="logout",
+        image=image,
+        network=network,
+        add_host_gateway=add_host_gateway,
+    )
+    if result.stdout:
+        console.print(result.stdout.strip())
+    if result.stderr:
+        console.print(result.stderr.strip(), style="red")
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+    print_success(f"Logged out sandbox backend {backend!r}.")
 
 
 # ---------------------------------------------------------------------------

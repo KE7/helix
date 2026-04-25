@@ -848,8 +848,8 @@ def _full_val_example_ids(
        ``seedless.train_path`` when val_path is unset).  File-stem
        ids for a directory layout, stringified indices otherwise.
        This is what lets the seed-eval and full-val paths write
-       ``helix_batch.json`` for evaluators (like capx-solver) that
-       use ``helix_result`` and need the positional id handoff — the
+       ``helix_batch.json`` for evaluators that use ``helix_result``
+       and need the positional id handoff — the
        strict ``helix_result`` parser requires the batch file to be
        present on every evaluator invocation.
     3. Empty list — single-task/no-example path (no example-id handoff).

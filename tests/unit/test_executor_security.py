@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.population import Candidate
-from helix.config import HelixConfig, EvaluatorConfig
+from helix.config import HelixConfig, EvaluatorConfig, SandboxConfig
 from helix.executor import (
     run_evaluator,
     _validate_and_split_command,
@@ -270,3 +270,34 @@ class TestRunEvaluator:
         assert isinstance(call_args[0], list)
         assert call_args[0][0] == "python"
         assert "test.py" in call_args[0]
+
+    def test_run_evaluator_uses_sandbox_when_enabled(self, mocker):
+        mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mock_run.return_value = [MagicMock(stdout="", stderr="", returncode=0)]
+
+        candidate = make_candidate()
+        config = make_config(command="python test.py")
+        config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
+
+        run_evaluator(candidate, config)
+
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["scope"] == "evaluator"
+        assert mock_run.call_args.kwargs["sync_back"] is False
+        assert mock_run.call_args.kwargs["image"] == "ghcr.io/ke7/helix-evo-runner-claude:latest"
+
+    def test_sandboxed_evaluator_runs_extra_commands_in_same_sequence(self, mocker):
+        mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mock_run.return_value = [
+            MagicMock(stdout="main", stderr="", returncode=0),
+            MagicMock(stdout="extra", stderr="", returncode=0),
+        ]
+
+        candidate = make_candidate()
+        config = make_config(command="python test.py")
+        config.evaluator.extra_commands = ["python extra.py"]
+        config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
+
+        run_evaluator(candidate, config)
+
+        assert mock_run.call_args.args[0] == [["python", "test.py"], ["python", "extra.py"]]

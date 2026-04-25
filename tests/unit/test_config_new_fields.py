@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from helix.config import (
     DatasetConfig,
     EvolutionConfig,
     HelixConfig,
+    SandboxConfig,
     SeedlessConfig,
     load_config,
 )
@@ -230,6 +232,67 @@ class TestEvolutionFrontierType:
         with pytest.raises(SystemExit):
             # load_config prints + sys.exit(1) on validation errors.
             load_config(toml)
+
+
+class TestSandboxConfig:
+    def test_defaults_disabled_for_backwards_compatibility(self):
+        cfg = SandboxConfig()
+        assert cfg.enabled is False
+        assert cfg.backend == "docker"
+        assert cfg.image is None
+        assert cfg.network == "bridge"
+        assert cfg.skip_special_files is True
+
+    def test_toml_loads_sandbox_config(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "pytest"
+
+            [sandbox]
+            enabled = true
+            image = "custom-helix:latest"
+            network = "none"
+            cpus = 2.0
+            memory = "4g"
+            timeout_seconds = 300
+            add_host_gateway = true
+            skip_special_files = false
+        """))
+        cfg = load_config(toml)
+        assert cfg.sandbox.enabled is True
+        assert cfg.sandbox.image == "custom-helix:latest"
+        assert cfg.sandbox.network == "none"
+        assert cfg.sandbox.cpus == 2.0
+        assert cfg.sandbox.memory == "4g"
+        assert cfg.sandbox.timeout_seconds == 300
+        assert cfg.sandbox.add_host_gateway is True
+        assert cfg.sandbox.skip_special_files is False
+
+    def test_load_config_loads_adjacent_dotenv_without_overriding(self, tmp_path, monkeypatch):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "pytest"
+        """))
+        (tmp_path / ".env").write_text(
+            "ANTHROPIC_API_KEY=dotenv-key\n"
+            "CURSOR_API_KEY='cursor dotenv key'\n"
+            "EXISTING=from-dotenv\n"
+        )
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+        monkeypatch.setenv("EXISTING", "from-shell")
+
+        load_config(toml)
+
+        assert os.environ["ANTHROPIC_API_KEY"] == "dotenv-key"
+        assert os.environ["CURSOR_API_KEY"] == "cursor dotenv key"
+        assert os.environ["EXISTING"] == "from-shell"
 
 
 # ---------------------------------------------------------------------------

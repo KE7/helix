@@ -9,9 +9,10 @@ import subprocess
 from typing import Any
 
 from helix.population import Candidate, EvalResult
-from helix.config import HelixConfig, EvaluatorConfig
-from helix.exceptions import EvaluatorError, print_helix_error, format_error_context
+from helix.config import HelixConfig
+from helix.exceptions import EvaluatorError, format_error_context
 from helix.parsers import get_parser
+from helix.sandbox import resolve_sandbox_image, run_sandboxed_commands
 from helix.trace import TRACE, EventType
 
 logger = logging.getLogger(__name__)
@@ -193,18 +194,49 @@ def run_evaluator(
         return _override_result
 
     evaluator = config.evaluator
+    sandbox_image = (
+        resolve_sandbox_image(config.sandbox, config.agent.backend)
+        if config.sandbox.enabled
+        else None
+    )
 
     # Run main evaluation command
     env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)
     cmd_tokens = _validate_and_split_command(evaluator.command)
-    result = subprocess.run(
-        cmd_tokens,
-        shell=False,
-        cwd=candidate.worktree_path,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    if config.sandbox.enabled:
+        command_results = run_sandboxed_commands(
+            [cmd_tokens, *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands]],
+            cwd=candidate.worktree_path,
+            env=env,
+            sandbox=config.sandbox,
+            scope="evaluator",
+            sync_back=False,
+            image=sandbox_image,
+            agent_backend=config.agent.backend,
+        )
+        result = command_results[0]
+        extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:]]
+    else:
+        result = subprocess.run(
+            cmd_tokens,
+            shell=False,
+            cwd=candidate.worktree_path,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        extra_outputs = []
+        for extra_cmd in evaluator.extra_commands:
+            extra_cmd_tokens = _validate_and_split_command(extra_cmd)
+            extra_result = subprocess.run(
+                extra_cmd_tokens,
+                shell=False,
+                cwd=candidate.worktree_path,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            extra_outputs.append((extra_result.stdout, extra_result.stderr))
 
     stdout = result.stdout
     stderr = result.stderr
@@ -225,20 +257,6 @@ def run_evaluator(
             "Evaluator exited with code %d for candidate %s (split=%s):\n%s",
             returncode, candidate.id, split, error_ctx,
         )
-
-    # Run extra commands and collect output
-    extra_outputs: list[tuple[str, str]] = []
-    for extra_cmd in evaluator.extra_commands:
-        extra_cmd_tokens = _validate_and_split_command(extra_cmd)
-        extra_result = subprocess.run(
-            extra_cmd_tokens,
-            shell=False,
-            cwd=candidate.worktree_path,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        extra_outputs.append((extra_result.stdout, extra_result.stderr))
 
     # Collect ASI
     asi = _collect_asi(stdout, stderr, extra_outputs, config)
@@ -360,5 +378,3 @@ def run_evaluator(
         score=_result.aggregate_score(),
     )
     return _result
-
-

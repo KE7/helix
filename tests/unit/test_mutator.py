@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.population import Candidate, EvalResult
-from helix.config import AgentConfig, HelixConfig, EvaluatorConfig
+from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
 from helix.mutator import (
     MutationError,
     BACKEND_RESULT_ARTIFACT_NAME,
@@ -711,6 +711,36 @@ class TestInvokeClaudeCode:
         payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
         assert payload["usage"]["session_id"] == "ses_123"
         assert payload["usage"]["cost_usd"] == 0.25
+
+    def test_uses_sandbox_when_enabled(self, tmp_path: Path, mocker):
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+
+        result = invoke_claude_code(
+            str(tmp_path),
+            "prompt",
+            AgentConfig(),
+            sandbox=SandboxConfig(enabled=True),
+        )
+
+        assert result == {}
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["scope"] == "agent"
+        assert mock_run.call_args.kwargs["sync_back"] is True
+        assert mock_run.call_args.kwargs["image"] == "ghcr.io/ke7/helix-evo-runner-claude:latest"
+
+    def test_backend_auth_env_is_passed_automatically(self, mocker, monkeypatch):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+        monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
+
+        invoke_claude_code("/tmp/wt", "prompt", AgentConfig(backend="cursor"))
+
+        assert mock_run.call_args.kwargs["env"]["CURSOR_API_KEY"] == "cursor-key"
 
 
 # ---------------------------------------------------------------------------

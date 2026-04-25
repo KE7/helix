@@ -201,7 +201,13 @@ def merge(
     )
 
     try:
-        invoke_claude_code(child.worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
+        invoke_claude_code(
+            child.worktree_path,
+            prompt,
+            config.agent,
+            passthrough_env=config.passthrough_env,
+            sandbox=config.sandbox,
+        )
     except MutationError as exc:
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         print_helix_error(exc)

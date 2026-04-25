@@ -1,0 +1,69 @@
+"""Shared metadata for supported HELIX agent backends."""
+
+from __future__ import annotations
+
+from typing import Literal, TypeAlias
+
+
+BackendName: TypeAlias = Literal["claude", "codex", "cursor", "gemini", "opencode"]
+
+BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "opencode")
+
+BACKEND_DISPLAY_NAMES: dict[str, str] = {
+    "claude": "Claude Code",
+    "codex": "Codex CLI",
+    "cursor": "Cursor Agent",
+    "gemini": "Gemini CLI",
+    "opencode": "OpenCode",
+}
+
+DEFAULT_BACKEND_IMAGES: dict[str, str] = {
+    "claude": "ghcr.io/ke7/helix-evo-runner-claude:latest",
+    "codex": "ghcr.io/ke7/helix-evo-runner-codex:latest",
+    "cursor": "ghcr.io/ke7/helix-evo-runner-cursor:latest",
+    "gemini": "ghcr.io/ke7/helix-evo-runner-gemini:latest",
+    "opencode": "ghcr.io/ke7/helix-evo-runner-opencode:latest",
+}
+
+BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
+    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "cursor": ("CURSOR_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+}
+
+BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
+    "claude": {
+        "login": ["claude", "setup-token"],
+        "status": ["claude", "auth", "status", "--text"],
+        "logout": ["claude", "auth", "logout"],
+    },
+    "codex": {
+        "login": ["codex", "login", "--device-auth"],
+        "status": ["codex", "login", "status"],
+        "logout": ["codex", "logout"],
+    },
+    "cursor": {
+        "login": ["cursor-agent", "login"],
+        "status": ["cursor-agent", "status"],
+        "logout": ["cursor-agent", "logout"],
+    },
+    "gemini": {
+        "login": ["gemini", "--skip-trust"],
+        "status": ["gemini", "--version"],
+        "logout": [
+            "sh",
+            "-lc",
+            "rm -rf /home/node/.gemini/oauth_creds.json /home/node/.gemini/.oauth_creds.json",
+        ],
+    },
+    "opencode": {
+        "login": ["opencode"],
+        "status": ["opencode", "providers", "list"],
+        "logout": ["opencode", "providers", "logout"],
+    },
+}
+
+
+def backend_display_name(backend: str) -> str:
+    return BACKEND_DISPLAY_NAMES.get(backend, backend)

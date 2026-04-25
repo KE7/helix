@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from helix.backends import BACKEND_AUTH_ENV, backend_display_name
 from helix.population import Candidate, EvalResult
-from helix.config import AgentConfig, HelixConfig
+from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
 from helix.executor import _scrub_environment
+from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -190,7 +193,13 @@ def generate_seed(
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
-    invoke_claude_code(worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
+    invoke_claude_code(
+        worktree_path,
+        prompt,
+        config.agent,
+        passthrough_env=config.passthrough_env,
+        sandbox=config.sandbox,
+    )
 
 
 _MAX_MARKDOWN_HEADER_LEVEL = 6
@@ -514,14 +523,11 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _backend_display_name(backend: str) -> str:
-    return {
-        "claude": "Claude Code",
-        "codex": "Codex CLI",
-        "cursor": "Cursor Agent",
-        "gemini": "Gemini CLI",
-        "opencode": "OpenCode",
-    }.get(backend, backend)
+def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
+    """Pass official headless auth env vars without requiring TOML config."""
+    for key in BACKEND_AUTH_ENV.get(backend, ()):
+        if key in os.environ:
+            env[key] = os.environ[key]
 
 
 def _build_backend_args(
@@ -619,8 +625,8 @@ def _parse_json_object_output(
         parsed = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise MutationError(
-            f"Failed to parse {_backend_display_name(backend)} JSON output: {exc}",
-            operation=f"{_backend_display_name(backend)} invocation",
+            f"Failed to parse {backend_display_name(backend)} JSON output: {exc}",
+            operation=f"{backend_display_name(backend)} invocation",
             phase="JSON parsing",
             command=cmd_str,
             cwd=str(worktree_path),
@@ -628,15 +634,15 @@ def _parse_json_object_output(
             stderr=stderr,
             exit_code=exit_code,
             suggestion=(
-                f"{_backend_display_name(backend)} returned non-JSON output. "
+                f"{backend_display_name(backend)} returned non-JSON output. "
                 "Check stdout above for details."
             ),
         ) from exc
     if not isinstance(parsed, dict):
         raise MutationError(
-            f"{_backend_display_name(backend)} returned non-object JSON "
+            f"{backend_display_name(backend)} returned non-object JSON "
             f"(got {type(parsed).__name__})",
-            operation=f"{_backend_display_name(backend)} invocation",
+            operation=f"{backend_display_name(backend)} invocation",
             phase="JSON parsing",
             command=cmd_str,
             cwd=str(worktree_path),
@@ -644,7 +650,7 @@ def _parse_json_object_output(
             stderr=stderr,
             exit_code=exit_code,
             suggestion=(
-                f"{_backend_display_name(backend)} returned a non-object JSON "
+                f"{backend_display_name(backend)} returned a non-object JSON "
                 "value. Expected a JSON object."
             ),
         )
@@ -678,8 +684,8 @@ def _parse_jsonl_output(
                     unparsable.append(line)
                     continue
                 raise MutationError(
-                    f"Failed to parse {_backend_display_name(backend)} JSONL output line",
-                    operation=f"{_backend_display_name(backend)} invocation",
+                    f"Failed to parse {backend_display_name(backend)} JSONL output line",
+                    operation=f"{backend_display_name(backend)} invocation",
                     phase="JSON parsing",
                     command=cmd_str,
                     cwd=str(worktree_path),
@@ -687,7 +693,7 @@ def _parse_jsonl_output(
                     stderr=stderr,
                     exit_code=exit_code,
                     suggestion=(
-                        f"{_backend_display_name(backend)} emitted a non-JSON line "
+                        f"{backend_display_name(backend)} emitted a non-JSON line "
                         "in structured output mode. Check stdout above for details."
                     ),
                 )
@@ -812,7 +818,7 @@ def _write_backend_artifacts(
         (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
         payload = {
             "backend": backend,
-            "backend_display_name": _backend_display_name(backend),
+            "backend_display_name": backend_display_name(backend),
             "command": command,
             "cwd": worktree_path,
             "returncode": result.returncode,
@@ -834,6 +840,7 @@ def invoke_claude_code(
     prompt: str,
     config: AgentConfig,
     passthrough_env: list[str] | None = None,
+    sandbox: SandboxConfig | None = None,
 ) -> dict[str, Any]:
     """Invoke the configured backend CLI in *worktree_path*.
 
@@ -864,18 +871,35 @@ def invoke_claude_code(
     if _MUTATOR_OVERRIDE is not None:
         return _MUTATOR_OVERRIDE(worktree_path, prompt, config)
     backend = config.backend
-    backend_name = _backend_display_name(backend)
-    args = _build_backend_args(worktree_path, prompt, config)
+    backend_name = backend_display_name(backend)
+    backend_worktree_path = "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
+    args = _build_backend_args(backend_worktree_path, prompt, config)
     cmd_str = shlex.join(args)
 
     backend_env = _scrub_environment(passthrough_env=passthrough_env)
-    result = subprocess.run(
-        args,
-        cwd=worktree_path,
-        capture_output=True,
-        text=True,
-        env=backend_env,
-    )
+    _add_backend_auth_env(backend_env, backend)
+    if backend == "gemini":
+        backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+    if sandbox is not None and sandbox.enabled:
+        sandbox_image = resolve_sandbox_image(sandbox, backend)
+        result = run_sandboxed_command(
+            args,
+            cwd=worktree_path,
+            env=backend_env,
+            sandbox=sandbox,
+            scope="agent",
+            sync_back=True,
+            image=sandbox_image,
+            agent_backend=backend,
+        )
+    else:
+        result = subprocess.run(
+            args,
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            env=backend_env,
+        )
 
     parsed: dict[str, Any] | None = None
     try:
@@ -1031,7 +1055,13 @@ def mutate(
     _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
     try:
-        invoke_claude_code(child.worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
+        invoke_claude_code(
+            child.worktree_path,
+            prompt,
+            config.agent,
+            passthrough_env=config.passthrough_env,
+            sandbox=config.sandbox,
+        )
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)

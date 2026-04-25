@@ -54,7 +54,7 @@ The difference between HELIX and `/chat/completions`-style evolvers (GEPA, DSPy-
 | Self-correction | None per proposal (retries are separate generations) | Inside one mutation: diagnose a test failure, edit another file, re-run, commit only if green |
 | Cost accounting | 1 LLM call = 1 proposal | 1 proposal = N turns, gated by `max_turns` + whatever the agent decides is enough |
 
-This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-OSS behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
+This is why a full solver module or a shrinkwrap of an ML kernel behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
 
 ---
 
@@ -308,9 +308,71 @@ max_turns = 20
 allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 
+[sandbox]
+enabled = false                  # true = run agent/evaluator subprocesses in Docker
+# image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
+network = "bridge"               # "bridge" | "none" | "host"
+skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
+# Agent containers mount a persistent Docker auth volume named
+# helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
+
 [worktree]
 base_dir = ".helix/worktrees"
 ```
+
+### Docker Sandboxing
+
+When `[sandbox].enabled = true`, HELIX copies each candidate worktree into a
+temporary Docker workspace and runs agent/evaluator commands there. Agent
+changes are synced back to the real candidate worktree after the backend exits;
+evaluator-side file changes are discarded. HELIX never mounts the host project
+root, parent directories, or home directory by default.
+During copy and sync, HELIX skips unsupported special files such as FIFOs,
+sockets, and device nodes by default. Set `skip_special_files = false` only if
+you want unsupported workspace file types to raise instead of being ignored.
+
+Agent containers mount a persistent Docker auth volume at `/home/node`;
+evaluator containers never receive it. Run `helix sandbox login <backend>` once
+per backend to complete that CLI's normal login flow inside the same Linux
+container environment HELIX will use later:
+
+```bash
+helix sandbox login claude
+helix sandbox status claude
+```
+
+For Claude, HELIX uses `claude setup-token` for sandbox login because that is
+the flow that works cleanly in browserless Docker/SSH-style environments; it
+prints a URL and then accepts the code from the browser in the terminal.
+Codex similarly uses `codex login --device-auth` so the callback does not depend
+on a localhost server inside the container. Gemini starts its normal
+interactive CLI with `--skip-trust` so its authentication picker is not blocked
+by the temporary sandbox workspace trust prompt. OpenCode starts the normal TUI
+so you can choose the provider/model and complete provider login in one setup
+session.
+
+The volume names are `helix-auth-claude`, `helix-auth-codex`,
+`helix-auth-cursor`, `helix-auth-gemini`, and `helix-auth-opencode`.
+This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
+browser-login tokens may live in Keychain; on Linux they may live in
+Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
+Those stores are session- and OS-specific, so copying their databases into a
+Linux Docker image is not a reliable authentication mechanism. If your
+evaluator uses a local proxy, keep that endpoint in your evaluator code as
+usual. Docker Desktop supports `host.docker.internal`; Linux users can set
+`add_host_gateway = true`.
+
+By default HELIX chooses a published backend-specific image from
+`agent.backend`: `ghcr.io/ke7/helix-evo-runner-claude`,
+`ghcr.io/ke7/helix-evo-runner-codex`,
+`ghcr.io/ke7/helix-evo-runner-cursor`,
+`ghcr.io/ke7/helix-evo-runner-gemini`, or
+`ghcr.io/ke7/helix-evo-runner-opencode`. To build locally instead, build the
+shared base first with
+`docker build -t helix-runner-base:latest -f docker/base.Dockerfile .`, then
+build the backend image you need, for example
+`docker build -t helix-runner-codex:latest -f docker/codex.Dockerfile .`, and
+set `[sandbox].image` to that local tag.
 
 ### Dataset Modes
 
