@@ -4,12 +4,43 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from helix.backends import BackendName
+
+
+def _load_dotenv_file(path: Path) -> None:
+    """Load simple KEY=VALUE dotenv entries into os.environ if unset."""
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        try:
+            parsed = shlex.split(value, comments=True, posix=True)
+        except ValueError:
+            parsed = [value]
+        os.environ[key] = parsed[0] if parsed else ""
 
 
 class EvaluatorConfig(BaseModel):
@@ -398,7 +429,7 @@ class AgentConfig(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["claude", "codex", "cursor", "gemini", "opencode"] = "claude"
+    backend: BackendName = "claude"
     model: str | None = None
     effort: str | None = None
     max_turns: int | None = None
@@ -406,6 +437,28 @@ class AgentConfig(BaseModel):
         default_factory=lambda: ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
     )
     background: str | None = None
+
+
+class SandboxConfig(BaseModel):
+    """Configuration for OS-level subprocess isolation.
+
+    When enabled, HELIX runs untrusted agent/evaluator commands in a Docker
+    container whose only project mount is a temporary copy of the candidate
+    worktree.  Agent-side filesystem changes are synced back explicitly after
+    the backend exits; evaluator-side changes are discarded.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    backend: Literal["docker"] = "docker"
+    image: str | None = None
+    network: Literal["bridge", "none", "host"] = "bridge"
+    cpus: float | None = None
+    memory: str | None = None
+    timeout_seconds: int | None = None
+    pids_limit: int | None = 512
+    add_host_gateway: bool = False
+    skip_special_files: bool = True
 
 
 class WorktreeConfig(BaseModel):
@@ -446,6 +499,7 @@ class HelixConfig(BaseModel):
     seedless: SeedlessConfig = Field(default_factory=SeedlessConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
 
     def model_post_init(self, __context: object) -> None:
@@ -462,6 +516,7 @@ def load_config(path: Path) -> HelixConfig:
     Supports both flat format (``objective = "..."`` at root) and the
     ``[project]`` section format (fields are merged into the root).
     """
+    _load_dotenv_file(path.parent / ".env")
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
