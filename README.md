@@ -165,6 +165,32 @@ helix init
 
 This creates a `helix.toml` config file and a `.helix/` directory. Edit `helix.toml` to set your objective and evaluator.
 
+### Recommended: Enable Docker Sandboxing
+
+For a first HELIX run, use Docker sandboxing. It keeps mutation agents and
+evaluators inside copied workspaces instead of giving them direct access to your
+project checkout or home directory.
+
+Install and start Docker, then log in to your selected backend inside its
+persistent sandbox auth volume:
+
+```bash
+helix sandbox login claude      # or codex, cursor, gemini, opencode
+helix sandbox status claude
+```
+
+Then enable the sandbox in `helix.toml`:
+
+```toml
+[sandbox]
+enabled = true
+network = "bridge"
+skip_special_files = true
+```
+
+HELIX keeps this setting opt-in so existing local workflows and machines without
+Docker continue to work, but sandboxing is the recommended mode for new projects.
+
 ### Whole-repo-as-candidate Model
 
 HELIX treats your **entire working tree** as the candidate. There is no `target_file` — the configured backend may read, edit, create, or delete any file in the project tree during each mutation. A minimal project layout looks like:
@@ -474,6 +500,9 @@ print(json.dumps({
 | Command | Description |
 |---|---|
 | `helix init` | Initialize HELIX in the current directory — creates `helix.toml` and `.helix/` |
+| `helix sandbox login BACKEND` | Log into an agent backend inside its persistent Docker auth volume |
+| `helix sandbox status [BACKEND]` | Show sandbox login status for one backend or all supported backends |
+| `helix sandbox logout BACKEND` | Log out a backend from its persistent Docker auth volume |
 | `helix evolve` | Run the evolutionary loop |
 | `helix frontier` | Display the current Pareto frontier as a table |
 | `helix best` | Show the best candidate; `--export PATH` to copy it out |
