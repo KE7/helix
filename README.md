@@ -79,62 +79,67 @@ This is why a full solver module or a shrinkwrap of an ML kernel behave qualitat
 ## 🔄 How It Works
 
 ```
-                    ┌──────────────┐
-                    │   Seed Code  │
-                    └──────┬───────┘
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │   Evaluate   │◄──────────────────────┐
-                    │  (parallel)  │                       │
-                    └──────┬───────┘                       │
-                           │                               │
-                           ▼                               │
-                    ┌──────────────┐                       │
-                    │ Select Parent│                       │
-                    │  (Pareto)    │                       │
-                    └──────┬───────┘                       │
-                           │                               │
-                           ▼                               │
-               ┌───────────────────────┐                   │
-               │  Mutate via Agent     │                   │
-               │  Backend in Worktree  │                   │
-               │                       │                   │
-               │  • Read files         │                   │
-               │  • Edit multi-file    │                   │
-               │  • Run tests          │                   │
-               │  • Self-correct       │                   │
-               └───────────┬───────────┘                   │
-                           │                               │
-                           ▼                               │
-                    ┌──────────────┐     ┌──────────┐      │
-                    │Gate on Train │────▶│  Reject  │      │
-                    │  (regress?)  │ yes └──────────┘      │
-                    └──────┬───────┘                       │
-                       no  │                               │
-                           ▼                               │
-                    ┌──────────────┐                       │
-                    │Pareto Update │                       │
-                    │ (val scores) │                       │
-                    └──────┬───────┘                       │
-                           │                               │
-                      ┌────┴────┐                          │
-                      │ Merge?  │ every N gens             │
-                      └────┬────┘                          │
-                           │                               │
-                           ▼                               │
-                    ┌──────────────┐                       │
-                    │   Cleanup    │                       │
-                    │  dominated   │───────────────────────┘
-                    └──────────────┘
+                              ┌──────────────────────┐
+                              │   Host HELIX Engine  │
+                              │  state, frontier,    │
+                              │  worktree copies     │
+                              └──────────┬───────────┘
+                                         │
+                    starts once per run  │
+                                         ▼
+                 ┌────────────────────────────────────────┐
+                 │ Private Evaluator Sidecar              │
+                 │ Docker network: helix-eval-*           │
+                 │ • benchmark code/data stay here        │
+                 │ • no published host ports              │
+                 │ • no agent auth volume                 │
+                 └───────────────────▲────────────────────┘
+                                     │ HTTP/RPC only
+                                     │
+          ┌──────────────────────────┴──────────────────────────┐
+          │                                                     │
+          ▼                                                     ▼
+ ┌──────────────────────┐                              ┌──────────────────────┐
+ │ Evaluator Runner     │                              │ Evaluator Runner     │
+ │ short-lived Docker   │            ...               │ short-lived Docker   │
+ │ • copied /workspace  │                              │ • copied /workspace  │
+ │ • private eval net   │                              │ • private eval net   │
+ │ • prints HELIX_RESULT│                              │ • prints HELIX_RESULT│
+ └──────────┬───────────┘                              └──────────┬───────────┘
+            │                                                     │
+            └────────────── scores / ASI / stderr ────────────────┘
+                                         │
+                                         ▼
+                              ┌──────────────────────┐
+                              │ Select Parent        │
+                              │ Pareto + train gate  │
+                              └──────────┬───────────┘
+                                         │
+                                         ▼
+                 ┌────────────────────────────────────────┐
+                 │ Mutator Agent Container                │
+                 │ Docker network: normal agent egress    │
+                 │ • copied /workspace                    │
+                 │ • backend auth volume                  │
+                 │ • no evaluator network or endpoint     │
+                 │ • edits sync back after exit           │
+                 └───────────────────┬────────────────────┘
+                                     │
+                                     ▼
+                              ┌──────────────────────┐
+                              │ Gate / Pareto Update │
+                              │ Merge / Cleanup      │
+                              └──────────┬───────────┘
+                                         │
+                                         └── repeat generations
 ```
 
 **The loop in detail:**
 
 1. **Seed** — Your starting code is copied into a git worktree and evaluated
-2. **Evaluate** — Run your evaluator command; parse scores per test/instance
+2. **Evaluate** — Start the private evaluator sidecar once, then run short-lived evaluator-runner containers that call it and print `HELIX_RESULT`
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
-4. **Mutate** — Spawn the configured agent backend in an isolated worktree with full tool access. It reads files, diagnoses failures, makes surgical multi-file edits, and runs commands to verify
+4. **Mutate** — Spawn the configured agent backend in an isolated Docker workspace. It can edit candidate files and use its backend auth, but it does not join the evaluator network
 5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
 7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend
