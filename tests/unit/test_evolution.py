@@ -13,13 +13,18 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import MagicMock
+
 import pytest
 
 from helix.config import (
     DatasetConfig,
     EvolutionConfig,
     EvaluatorConfig,
+    EvaluatorSidecarConfig,
     HelixConfig,
+    SandboxConfig,
     WorktreeConfig,
 )
 from helix.evolution import (
@@ -157,6 +162,7 @@ def all_mocks(mocker):
         # _cached_evaluate_batch.  Stub it out so tests can use non-numeric
         # or synthetic instance ids without hitting the filesystem.
         "_write_helix_batch": mocker.patch("helix.evolution._write_helix_batch"),
+        "start_evaluator_sidecar": mocker.patch("helix.evolution.start_evaluator_sidecar"),
     }
 
 
@@ -1711,3 +1717,34 @@ class TestHelixProgressLifecycle:
         assert prog.is_active is False  # disabled → never active
         prog.__exit__(None, None, None)
         assert prog.is_active is False
+
+
+def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
+    """Docker sandbox runs keep the evaluator service alive around evolution."""
+    all_mocks["start_evaluator_sidecar"].return_value.__enter__.return_value = MagicMock()
+    all_mocks["start_evaluator_sidecar"].return_value.__exit__.return_value = False
+    seed = make_candidate()
+    all_mocks["create_seed_worktree"].return_value = seed
+    all_mocks["run_evaluator"].return_value = make_eval_result(seed.id, {"0": 1.0})
+
+    config = HelixConfig(
+        objective="Improve",
+        evaluator=EvaluatorConfig(
+            command="python /runner/evaluate.py",
+            score_parser="helix_result",
+            sidecar=EvaluatorSidecarConfig(
+                image="eval:latest",
+                command="python -m server",
+                endpoint="http://helix-evaluator:8080/evaluate",
+            ),
+        ),
+        sandbox=SandboxConfig(enabled=True),
+        evolution=EvolutionConfig(max_generations=0),
+    )
+
+    run_evolution(config, tmp_path, tmp_path / ".helix")
+
+    all_mocks["start_evaluator_sidecar"].assert_called_once_with(
+        config.evaluator.sidecar,
+        passthrough_env=config.passthrough_env,
+    )

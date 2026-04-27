@@ -273,10 +273,19 @@ class TestRunEvaluator:
 
     def test_run_evaluator_uses_sandbox_when_enabled(self, mocker):
         mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
         mock_run.return_value = [MagicMock(stdout="", stderr="", returncode=0)]
 
         candidate = make_candidate()
-        config = make_config(command="python test.py")
+        config = make_config(command="python /runner/evaluate.py")
+        config.evaluator.sidecar = {
+            "image": "eval:latest",
+            "command": "python -m server",
+            "endpoint": "http://helix-evaluator:8080/evaluate",
+        }
         config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
 
         run_evaluator(candidate, config)
@@ -288,16 +297,25 @@ class TestRunEvaluator:
 
     def test_sandboxed_evaluator_runs_extra_commands_in_same_sequence(self, mocker):
         mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
         mock_run.return_value = [
             MagicMock(stdout="main", stderr="", returncode=0),
             MagicMock(stdout="extra", stderr="", returncode=0),
         ]
 
         candidate = make_candidate()
-        config = make_config(command="python test.py")
+        config = make_config(command="python /runner/evaluate.py")
         config.evaluator.extra_commands = ["python extra.py"]
+        config.evaluator.sidecar = {
+            "image": "eval:latest",
+            "command": "python -m server",
+            "endpoint": "http://helix-evaluator:8080/evaluate",
+        }
         config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
 
         run_evaluator(candidate, config)
 
-        assert mock_run.call_args.args[0] == [["python", "test.py"], ["python", "extra.py"]]
+        assert mock_run.call_args.args[0] == [["python", "/runner/evaluate.py"], ["python", "extra.py"]]

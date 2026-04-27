@@ -12,7 +12,11 @@ from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.exceptions import EvaluatorError, format_error_context
 from helix.parsers import get_parser
-from helix.sandbox import resolve_sandbox_image, run_sandboxed_commands
+from helix.sandbox import (
+    current_evaluator_sidecar_runtime,
+    resolve_sandbox_image,
+    run_sandboxed_commands,
+)
 from helix.trace import TRACE, EventType
 
 logger = logging.getLogger(__name__)
@@ -204,6 +208,11 @@ def run_evaluator(
     env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)
     cmd_tokens = _validate_and_split_command(evaluator.command)
     if config.sandbox.enabled:
+        if current_evaluator_sidecar_runtime() is None:
+            raise ValueError(
+                "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
+                "Run evaluations through helix.evolution.run_evolution."
+            )
         command_results = run_sandboxed_commands(
             [cmd_tokens, *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands]],
             cwd=candidate.worktree_path,

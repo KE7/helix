@@ -38,8 +38,8 @@ Migration usually means:
 
 1. Put the candidate artifact into repo files, e.g. `solve.py`, prompts,
    config, model wrapper, or policy code.
-2. Write `evaluate.py` that loads the current repo candidate and evaluates
-   selected examples.
+2. Put evaluator code and benchmark data in a private sidecar image; keep them
+   out of the candidate workspace.
 3. Configure `helix.toml` so HELIX owns evolution and calls the evaluator.
 
 ## Basic Mapping
@@ -47,7 +47,7 @@ Migration usually means:
 | GEPA optimize_anything | HELIX |
 |---|---|
 | `candidate` initial value | initial repo contents, or `[seedless]` |
-| `evaluate(candidate)` | `[evaluator].command` running `evaluate.py` |
+| `evaluate(candidate)` | evaluator-runner command calling the sidecar |
 | `dataset` | `[dataset].train_size`, `[dataset].val_size`; evaluator owns actual data |
 | per-example score | `HELIX_RESULT` entry score |
 | `side_info` / trajectory | per-example `side_info` in `HELIX_RESULT` |
@@ -70,26 +70,27 @@ def evaluate(candidate, example):
     return score, {"trace": output, "scores": {"accuracy": score}}
 ```
 
-HELIX evaluator:
+HELIX sidecar-backed evaluator runner:
 
 ```python
 import json
 from pathlib import Path
-from solve import solve
+import os
+import requests
 
-DATA = load_dataset()
+ENDPOINT = os.environ["HELIX_EVALUATOR_ENDPOINT"]
 
 ids = json.loads(Path("helix_batch.json").read_text())
-payload = []
-for eid in ids:
-    example = DATA[int(eid)]  # or use opaque ids directly
-    output = solve(example["input"])
-    score = grade(output, example)
-    payload.append([score, {
-        "output": output,
-        "expected": example.get("expected"),
-        "scores": {"accuracy": score},
-    }])
+response = requests.post(
+    ENDPOINT,
+    json={
+        "ids": ids,
+        "candidate": Path("solve.py").read_text(),
+    },
+    timeout=300,
+)
+response.raise_for_status()
+payload = response.json()["results"]
 
 print("HELIX_RESULT=" + json.dumps(payload))
 ```
@@ -98,9 +99,13 @@ Configure:
 
 ```toml
 [evaluator]
-command = "uv run python evaluate.py"
+command = "python /runner/evaluate_client.py"
 score_parser = "helix_result"
-protected_files = ["evaluate.py", "data/train.json", "data/val.json"]
+
+[evaluator.sidecar]
+image = "my-private-evaluator:latest"
+command = "python -m benchmark_server"
+endpoint = "http://helix-evaluator:8080/evaluate"
 
 [dataset]
 train_size = 100
@@ -120,8 +125,13 @@ print(json.dumps({"score": score}))
 
 ```toml
 [evaluator]
-command = "uv run python evaluate.py"
+command = "python /runner/evaluate_client.py"
 score_parser = "json_score"
+
+[evaluator.sidecar]
+image = "my-private-evaluator:latest"
+command = "python -m benchmark_server"
+endpoint = "http://helix-evaluator:8080/evaluate"
 ```
 
 Use `helix_result` anyway when you want side info in reflection prompts or
@@ -204,7 +214,6 @@ Give the agent a precise `[agent].background`:
 [agent]
 background = """
 The candidate is solve.py and prompts/system.md.
-Do not edit evaluate.py, data/, or expected outputs.
 Improve correctness on the benchmark while preserving the public API.
 """
 ```
@@ -254,15 +263,18 @@ helix sandbox login claude
 
 If the old GEPA evaluator depended on local packages, either:
 
-- make `[evaluator].command` set up/run the environment reproducibly, or
-- build a custom sandbox image with those dependencies and set `[sandbox].image`.
+- build them into the sidecar image if they are evaluator/benchmark
+  dependencies, or
+- build them into the sandbox image if they are evaluator-runner dependencies.
 
 ## Migration Checklist
 
 1. Identify the candidate artifact and put it in repo files.
-2. Write `evaluate.py` that reads `helix_batch.json`.
+2. Build a private evaluator sidecar image with evaluator code and data.
+3. Write an evaluator-runner command that reads `helix_batch.json`, calls
+   `HELIX_EVALUATOR_ENDPOINT`, and prints `HELIX_RESULT=...`.
 3. Emit `HELIX_RESULT=` with one entry per requested id.
-4. Add `protected_files` for evaluator and benchmark data.
+4. Add `[evaluator.sidecar]` with image, command, and endpoint.
 5. Add `[dataset]` cardinalities.
 6. Map GEPA engine/reflection/merge config into `[evolution]`.
 7. Configure `[agent]` with backend, model, max turns, and background.

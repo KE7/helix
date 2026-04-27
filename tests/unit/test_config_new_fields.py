@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from helix.config import (
     DatasetConfig,
+    EvaluatorSidecarConfig,
     EvolutionConfig,
     HelixConfig,
     SandboxConfig,
@@ -243,13 +244,58 @@ class TestSandboxConfig:
         assert cfg.network == "bridge"
         assert cfg.skip_special_files is True
 
+    def test_sandbox_requires_sidecar_evaluator(self):
+        with pytest.raises(ValueError, match=r"\[evaluator.sidecar\]"):
+            HelixConfig(
+                objective="Test",
+                evaluator={"command": "pytest"},
+                sandbox=SandboxConfig(enabled=True),
+            )
+
+    def test_sidecar_requires_sandbox(self):
+        with pytest.raises(ValueError, match="requires sandbox.enabled"):
+            HelixConfig(
+                objective="Test",
+                evaluator={
+                    "command": "python /runner/evaluate.py",
+                    "sidecar": {
+                        "image": "eval:latest",
+                        "command": "python -m server",
+                        "endpoint": "http://helix-evaluator:8080/evaluate",
+                    },
+                },
+            )
+
+    def test_sandbox_sidecar_config_is_valid(self):
+        cfg = HelixConfig(
+            objective="Test",
+            evaluator={
+                "command": "python /runner/evaluate.py",
+                "score_parser": "helix_result",
+                "sidecar": EvaluatorSidecarConfig(
+                    image="eval:latest",
+                    command="python -m server",
+                    endpoint="http://helix-evaluator:8080/evaluate",
+                ),
+            },
+            sandbox=SandboxConfig(enabled=True),
+        )
+        assert cfg.evaluator.sidecar is not None
+        assert cfg.evaluator.sidecar.image == "eval:latest"
+
     def test_toml_loads_sandbox_config(self, tmp_path):
         toml = tmp_path / "helix.toml"
         toml.write_text(textwrap.dedent("""
             objective = "Test"
 
             [evaluator]
-            command = "pytest"
+            command = "python /runner/evaluate.py"
+            score_parser = "helix_result"
+
+            [evaluator.sidecar]
+            image = "eval:latest"
+            command = "python -m server"
+            endpoint = "http://helix-evaluator:8080/evaluate"
 
             [sandbox]
             enabled = true
@@ -263,6 +309,8 @@ class TestSandboxConfig:
         """))
         cfg = load_config(toml)
         assert cfg.sandbox.enabled is True
+        assert cfg.evaluator.sidecar is not None
+        assert cfg.evaluator.sidecar.endpoint == "http://helix-evaluator:8080/evaluate"
         assert cfg.sandbox.image == "custom-helix:latest"
         assert cfg.sandbox.network == "none"
         assert cfg.sandbox.cpus == 2.0

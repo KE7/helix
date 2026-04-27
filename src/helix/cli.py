@@ -54,7 +54,8 @@ objective = "Describe the optimisation objective"
 
 [evaluator]
 # Command to evaluate a candidate (run from worktree root).
-# Use the SAME environment your evaluator dependencies live in, e.g.
+# Without Docker sandboxing, use the SAME environment your evaluator
+# dependencies live in, e.g.
 #   command = "uv run python evaluate.py"
 # or
 #   command = "bash run_eval.sh"
@@ -63,6 +64,16 @@ objective = "Describe the optimisation objective"
 command = "uv run python evaluate.py"
 # score_parser = "pytest"   # or "exitcode", "json_accuracy", "json_score"
 # protected_files = ["evaluate.py"]  # optional extra evaluator-immutable files
+#
+# With [sandbox].enabled = true, configure [evaluator.sidecar] and make
+# command an evaluator-runner command such as:
+#   command = "python /runner/evaluate_client.py"
+#   score_parser = "helix_result"
+#
+# [evaluator.sidecar]
+# image = "my-private-evaluator:latest"
+# command = "python -m benchmark_server"
+# endpoint = "http://helix-evaluator:8080/evaluate"
 
 [evolution]
 max_generations = 20
@@ -331,6 +342,8 @@ def init() -> None:
         "     evaluator dependencies (for example [cyan]uv run python evaluate.py[/cyan]\n"
         "     or [cyan]bash run_eval.sh[/cyan], not whichever [cyan]python3[/cyan] happens\n"
         "     to be on PATH).\n"
+        "     If you enable Docker sandboxing, add [cyan][evaluator.sidecar][/cyan]\n"
+        "     and use an evaluator-runner command instead.\n"
         "  2. Run [cyan]helix evolve[/cyan] to start evolution.\n"
     )
 

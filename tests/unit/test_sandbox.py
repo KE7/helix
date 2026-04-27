@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,6 +10,9 @@ import pytest
 
 from helix.config import SandboxConfig
 from helix.sandbox import (
+    EvaluatorSidecarRuntime,
+    current_evaluator_sidecar_runtime,
+    evaluator_sidecar_runtime,
     resolve_sandbox_image,
     run_sandboxed_command,
     run_sandboxed_commands,
@@ -18,7 +22,10 @@ from helix.sandbox import (
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
-    return args[:2] == ["docker", "run"] and "chown" in args and args[-1] == "/workspace"
+    return (
+        args[:2] == ["docker", "run"]
+        and any("find /workspace -path /workspace/.git -prune" in item for item in args)
+    )
 
 
 def test_resolve_sandbox_image_defaults_from_backend():
@@ -109,6 +116,61 @@ def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):
 
     docker_call = next(call.args[0] for call in mock_run.call_args_list if call.args[0][:2] == ["docker", "run"])
     assert "helix-auth-codex:/home/node:rw" not in docker_call
+
+
+def test_sidecar_runtime_switches_evaluator_to_private_network(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("print('hi')\n")
+
+    seen_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        seen_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    runtime = EvaluatorSidecarRuntime(
+        network="helix-eval-private",
+        container_name="helix-evaluator-test",
+        endpoint="http://helix-evaluator:8080/evaluate",
+    )
+    with evaluator_sidecar_runtime(runtime):
+        run_sandboxed_command(
+            ["python", "/runner/evaluate.py"],
+            cwd=source,
+            env={},
+            sandbox=SandboxConfig(enabled=True),
+            scope="evaluator",
+            sync_back=False,
+            image="helix-test:latest",
+        )
+
+    docker_call = next(
+        call
+        for call in seen_calls
+        if call[:2] == ["docker", "run"] and not _is_workspace_chown(call)
+    )
+    assert docker_call[docker_call.index("--network") + 1] == "helix-eval-private"
+    assert "HELIX_EVALUATOR_ENDPOINT=http://helix-evaluator:8080/evaluate" in docker_call
+    assert "helix-auth-codex:/home/node:rw" not in docker_call
+
+
+def test_sidecar_runtime_is_visible_to_worker_threads():
+    runtime = EvaluatorSidecarRuntime(
+        network="helix-eval-private",
+        container_name="helix-evaluator-test",
+        endpoint="http://helix-evaluator:8080/evaluate",
+    )
+    seen: list[EvaluatorSidecarRuntime | None] = []
+
+    with evaluator_sidecar_runtime(runtime):
+        thread = threading.Thread(target=lambda: seen.append(current_evaluator_sidecar_runtime()))
+        thread.start()
+        thread.join()
+
+    assert seen == [runtime]
 
 
 def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path, mocker):

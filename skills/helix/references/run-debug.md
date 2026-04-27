@@ -22,21 +22,27 @@ debug failures.
    pwd
    test -f helix.toml
    ```
-2. Validate evaluator directly:
+2. Validate evaluator runner and sidecar wiring:
    ```bash
-   uv run python evaluate.py
+   docker run --rm my-private-evaluator:latest python -m benchmark_server
    ```
-   Or run the exact `[evaluator].command`.
+   Then verify the `[evaluator].command` runner can read `helix_batch.json`,
+   call `HELIX_EVALUATOR_ENDPOINT`, and print `HELIX_RESULT=...`.
 3. If sandboxed, verify Docker and auth:
    ```bash
    docker ps
    helix sandbox status
    helix sandbox login <backend>
    ```
-4. Check protected files:
+4. If sandboxed, check sidecar config:
    ```toml
    [evaluator]
-   protected_files = ["evaluate.py", "data/gold.json"]
+   command = "python /runner/evaluate_client.py"
+
+   [evaluator.sidecar]
+   image = "my-private-evaluator:latest"
+   command = "python -m benchmark_server"
+   endpoint = "http://helix-evaluator:8080/evaluate"
    ```
 
 ## Running
@@ -123,8 +129,8 @@ Symptoms and checks:
 - All zero minibatch scores: evaluator probably ignored `helix_batch.json` ids
   or keyed results by metric names instead of example ids.
 - Hangs: add evaluator-level timeouts or configure `[sandbox].timeout_seconds`.
-- Missing dependencies in sandbox: build a custom sandbox image or use
-  `evaluator.command = "uv run ..."` if deps are in the repo.
+- Missing dependencies in sandbox: build them into the sidecar image or the
+  runner image selected by `[sandbox].image`.
 
 Good `helix_result` smoke evaluator pattern:
 
@@ -174,6 +180,8 @@ Backend login behavior:
 Network:
 
 - Default `bridge` is needed for agent model endpoints.
+- Evaluator sidecars use a private internal Docker network created by HELIX.
+  Mutator containers are not attached to it.
 - For host proxy access on Docker Desktop, use `host.docker.internal`.
 - On Linux, set `[sandbox].add_host_gateway = true`.
 
@@ -198,9 +206,11 @@ venvs directly unless the user accepts portability and sandbox tradeoffs.
 ## Common Repair Actions
 
 - Add or fix `[sandbox]` and run `helix sandbox login <backend>`.
-- Add evaluator dependencies to the Docker image or evaluator command.
+- Add `[evaluator.sidecar]` when `[sandbox].enabled = true`.
+- Add evaluator service dependencies to the sidecar image and runner
+  dependencies to the sandbox image.
 - Add `passthrough_env` for non-secret runtime vars such as CUDA/HF caches.
-- Add `protected_files` for evaluator scripts and data.
+- Use `protected_files` only for non-sandboxed local prototypes.
 - Switch to `score_parser = "helix_result"` for per-example datasets.
 - Lower `num_parallel_proposals` if backend rate limits or resource contention
   dominate.
