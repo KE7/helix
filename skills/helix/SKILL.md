@@ -15,15 +15,17 @@ context to a mutation agent.
 
 1. Locate the project root: find `helix.toml`, `.helix/`, or ask for the target
    directory if neither exists.
-2. Inspect `helix.toml`, evaluator entrypoints, and the current git status.
+2. Inspect `helix.toml`, evaluator sidecar settings, and the current git status.
 3. Inspect local source before assuming schema or CLI behavior:
    `src/helix/config.py`, `src/helix/sandbox.py`, `src/helix/executor.py`,
    `src/helix/parsers/helix_result.py`, `src/helix/mutator.py`, `README.md`,
    and `examples/*/helix.toml`.
 4. Prefer Docker sandboxing for new setups:
    `helix sandbox login <backend>`, then `[sandbox].enabled = true`.
-5. Keep evaluator code and benchmark assets outside the mutable workspace. The
-   mutation agent should see only the candidate workspace and evaluator feedback.
+5. Use `uv run helix ...` inside this repo, or `helix ...` for installed
+   user projects.
+6. For Docker sandboxing, require an evaluator sidecar. The evaluator must not
+   live in the candidate workspace or be visible to mutation agents.
 
 ## Reference Routing
 
@@ -42,9 +44,13 @@ the run is done.
 
 With Docker sandboxing enabled, HELIX copies each candidate into a temporary
 agent container workspace. Agent changes sync back to the candidate worktree;
-evaluator-side changes are discarded. Agent containers get a persistent backend
-auth volume such as `helix-auth-claude`. Candidate workspaces are temporary and
-do not persist between mutations except through HELIX's accepted worktree sync.
+evaluator-side changes are discarded. HELIX also starts a warm evaluator
+sidecar once per `helix evolve` on a private Docker network. Mutation agents
+run on the normal agent network and cannot reach the sidecar. Evaluator-runner
+containers run only during evaluation, join the private network, call the
+sidecar, print `HELIX_RESULT`, and exit. Agent containers get a persistent
+backend auth volume such as `helix-auth-claude`; candidate workspaces do not
+persist between mutations except through HELIX's accepted worktree sync.
 
 ## Security Boundary
 
@@ -165,8 +171,9 @@ parser uses that same file to zip positional results back to ids.
 
 ## Evaluator Contract
 
-For `score_parser = "helix_result"`, the evaluator command must emit exactly
-one `HELIX_RESULT=` line on stdout:
+For `score_parser = "helix_result"`, HELIX writes `helix_batch.json` in the
+candidate workspace before evaluation. The evaluator-runner reads it, calls the
+sidecar endpoint from `HELIX_EVALUATOR_ENDPOINT`, and must print one line:
 
 ```text
 HELIX_RESULT=[[0.8, {"example_id": "0", "feedback": "..."}], [1.0, {"example_id": "1"}]]

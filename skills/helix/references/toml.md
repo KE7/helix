@@ -29,25 +29,44 @@ over raw API keys in evaluator code.
 
 ## Evaluator
 
+Without Docker sandboxing, `[evaluator].command` runs directly in the candidate
+workspace. With `[sandbox].enabled = true`, `[evaluator.sidecar]` is required:
+HELIX starts that evaluator service once per `helix evolve`, then runs
+short-lived evaluator-runner containers that can reach it.
+
 ```toml
 [evaluator]
-command = "uv run python evaluate.py"
+command = "python /runner/evaluate_client.py"
 score_parser = "helix_result"
 include_stdout = true
 include_stderr = true
 extra_commands = []
-protected_files = ["evaluate.py", "data/gold.json"]
+
+[evaluator.sidecar]
+image = "my-private-evaluator:latest"
+command = "python -m benchmark_server"
+endpoint = "http://helix-evaluator:8080/evaluate"
+startup_timeout_seconds = 60
 ```
 
 Rules:
 
 - `command` is split with `shlex.split()` and run with `shell=false`.
-- Prefer `uv run python evaluate.py`, `python -m package.eval`, or
-  `bash run_eval.sh`; avoid bare `python3` unless dependencies are guaranteed.
-- `extra_commands` run after the main command; in sandbox mode they share the
-  same temporary evaluator workspace as the main command.
+- In sandbox mode, `command` is the evaluator-runner command. The runner sees a
+  copied `/workspace`, receives `HELIX_EVALUATOR_ENDPOINT`, calls the sidecar,
+  prints `HELIX_RESULT`, and exits.
+- The long-lived sidecar does not mount `/workspace`; the runner must stream
+  the needed candidate files/data over RPC, or execute candidate code itself and
+  call the sidecar only for private judging/simulation.
+- The sidecar container stays warm for the full HELIX run, has no published
+  host ports, and is attached only to the private evaluator Docker network.
+- Mutation agent containers do not join the evaluator network and do not
+  receive the sidecar endpoint.
+- `extra_commands` run after the main command in the same evaluator-runner
+  workspace.
 - `protected_files` are hashed at run start and checked after mutations/merges.
-  Add evaluator scripts, benchmark data, goldens, and scoring helpers.
+  They are only for non-sandboxed local prototypes; do not use repo-local
+  evaluator files as the Docker sandbox security boundary.
 
 Score parsers:
 
@@ -134,11 +153,12 @@ model = "sonnet"
 effort = "medium"
 max_turns = 20
 allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
-background = "Only modify src/solver.py. Do not edit evaluate.py."
+background = "Only modify src/solver.py and supporting implementation files."
 ```
 
 Use `background` as the agent's project-specific guardrail. It is not a
-security boundary; use `protected_files` and sandboxing for stronger controls.
+security boundary. In sandboxed runs, evaluator secrecy comes from the sidecar
+network boundary, not from telling the agent not to edit evaluator files.
 
 Backend notes:
 
@@ -173,10 +193,14 @@ If `image` is unset, HELIX chooses the image from `agent.backend`.
 Sandbox behavior:
 
 - Agent runs in a copied `/workspace`; agent changes sync back.
-- Evaluator runs in a fresh copied `/workspace`; evaluator changes are
-  discarded.
+- Evaluator sidecar starts once per `helix evolve` on a private internal Docker
+  network.
+- Evaluator-runner containers run in fresh copied `/workspace` directories,
+  join the private evaluator network, call the sidecar, and exit.
+- The sidecar sees only what the runner sends over the endpoint.
+- Evaluator-runner changes are discarded.
 - Agent auth volume mounts at `/home/node`.
-- Evaluator containers do not get auth volumes.
+- Evaluator containers do not get agent auth volumes.
 - `.env`, `.env.*`, `.git`, and HELIX artifacts do not sync back.
 - Special files are skipped by default; set `skip_special_files = false` to
   raise on unsupported file types instead.

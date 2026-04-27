@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 import os
+import shlex
 import shutil
 import subprocess
-import tempfile
 import stat
+import tempfile
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Literal
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
-from helix.config import SandboxConfig
+from helix.config import EvaluatorSidecarConfig, SandboxConfig
 
 
 HELIX_ARTIFACT_NAMES = {
@@ -21,6 +28,37 @@ HELIX_ARTIFACT_NAMES = {
     ".helix_backend_stderr.txt",
     "helix_batch.json",
 }
+
+
+@dataclass(frozen=True)
+class EvaluatorSidecarRuntime:
+    network: str
+    container_name: str
+    endpoint: str
+
+
+_EVALUATOR_SIDECAR_RUNTIME: EvaluatorSidecarRuntime | None = None
+_EVALUATOR_SIDECAR_RUNTIME_LOCK = threading.RLock()
+
+
+def current_evaluator_sidecar_runtime() -> EvaluatorSidecarRuntime | None:
+    with _EVALUATOR_SIDECAR_RUNTIME_LOCK:
+        return _EVALUATOR_SIDECAR_RUNTIME
+
+
+@contextmanager
+def evaluator_sidecar_runtime(
+    runtime: EvaluatorSidecarRuntime,
+) -> Iterator[EvaluatorSidecarRuntime]:
+    global _EVALUATOR_SIDECAR_RUNTIME
+    with _EVALUATOR_SIDECAR_RUNTIME_LOCK:
+        previous = _EVALUATOR_SIDECAR_RUNTIME
+        _EVALUATOR_SIDECAR_RUNTIME = runtime
+    try:
+        yield runtime
+    finally:
+        with _EVALUATOR_SIDECAR_RUNTIME_LOCK:
+            _EVALUATOR_SIDECAR_RUNTIME = previous
 
 
 def _is_supported_workspace_file(path: Path) -> bool:
@@ -153,11 +191,10 @@ def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
             "-v",
             f"{workspace}:/workspace:rw",
             image,
-            "chown",
-            "-R",
-            "-h",
+            "sh",
+            "-c",
+            'find /workspace -path /workspace/.git -prune -o -exec chown -h "$0" {} +',
             owner,
-            "/workspace",
         ],
         check=True,
         capture_output=True,
@@ -170,6 +207,99 @@ def _host_owner() -> str | None:
     if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
         return None
     return f"{os.getuid()}:{os.getgid()}"
+
+
+def _docker_host_env() -> dict[str, str]:
+    return {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+
+
+def _run_docker(
+    args: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        check=check,
+        capture_output=True,
+        text=True,
+        env=_docker_host_env(),
+    )
+
+
+def _wait_for_container_running(container_name: str, timeout_seconds: int) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_stderr = ""
+    while time.monotonic() < deadline:
+        result = _run_docker(
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "{{.State.Running}} {{.State.Status}}",
+                container_name,
+            ],
+            check=False,
+        )
+        if result.returncode == 0:
+            status = result.stdout.strip().split()
+            if status[:1] == ["true"]:
+                return
+            if len(status) > 1 and status[1] in {"exited", "dead"}:
+                logs = _run_docker(["docker", "logs", container_name], check=False)
+                raise RuntimeError(
+                    "Evaluator sidecar exited before it became ready.\n"
+                    f"stdout:\n{logs.stdout}\nstderr:\n{logs.stderr}"
+                )
+        last_stderr = result.stderr
+        time.sleep(0.25)
+    raise TimeoutError(
+        f"Evaluator sidecar did not become running within {timeout_seconds}s. "
+        f"{last_stderr}".strip()
+    )
+
+
+@contextmanager
+def start_evaluator_sidecar(
+    sidecar: EvaluatorSidecarConfig,
+    *,
+    passthrough_env: list[str] | None = None,
+) -> Iterator[EvaluatorSidecarRuntime]:
+    suffix = uuid.uuid4().hex[:12]
+    network = f"helix-eval-{suffix}"
+    container_name = f"helix-evaluator-{suffix}"
+    _run_docker(["docker", "network", "create", "--internal", network])
+    try:
+        args = [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container_name,
+            "--network",
+            network,
+            "--network-alias",
+            "helix-evaluator",
+            "--security-opt",
+            "no-new-privileges",
+        ]
+        for key in passthrough_env or []:
+            if key in os.environ:
+                args.extend(["-e", f"{key}={os.environ[key]}"])
+        args.append(sidecar.image)
+        args.extend(shlex.split(sidecar.command))
+        _run_docker(args)
+        _wait_for_container_running(container_name, sidecar.startup_timeout_seconds)
+        runtime = EvaluatorSidecarRuntime(
+            network=network,
+            container_name=container_name,
+            endpoint=sidecar.endpoint,
+        )
+        with evaluator_sidecar_runtime(runtime):
+            yield runtime
+    finally:
+        _run_docker(["docker", "rm", "-f", container_name], check=False)
+        _run_docker(["docker", "network", "rm", network], check=False)
 
 
 def sandbox_auth_volume_name(agent_backend: str) -> str:
@@ -186,6 +316,7 @@ def _docker_args(
     scope: Literal["agent", "evaluator"],
     image: str,
     agent_backend: str | None,
+    network: str | None = None,
 ) -> list[str]:
     args = [
         "docker",
@@ -196,7 +327,7 @@ def _docker_args(
         "--user",
         "node",
         "--network",
-        sandbox.network,
+        network or sandbox.network,
         "--security-opt",
         "no-new-privileges",
         "-v",
@@ -255,17 +386,22 @@ def run_sandboxed_commands(
         _copy_tree_contents(source, workspace, skip_special_files=sandbox.skip_special_files)
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
+        sidecar_runtime = current_evaluator_sidecar_runtime() if scope == "evaluator" else None
+        command_env = dict(env)
+        if sidecar_runtime is not None:
+            command_env["HELIX_EVALUATOR_ENDPOINT"] = sidecar_runtime.endpoint
         results = []
         try:
             for command in commands:
                 docker_cmd = _docker_args(
                     command,
-                    env,
+                    command_env,
                     workspace,
                     sandbox,
                     scope,
                     docker_image,
                     agent_backend,
+                    sidecar_runtime.network if sidecar_runtime is not None else None,
                 )
                 results.append(
                     subprocess.run(

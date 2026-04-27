@@ -53,6 +53,7 @@ from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.population import Candidate, EvalResult, ParetoFrontier
+from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
     EvaluationCache,
@@ -493,6 +494,11 @@ def _check_evaluator_script_exists(
         # Not a script file pattern - allow it
         return
 
+    # Sidecar runner scripts often live inside the sandbox image rather than
+    # the candidate repo, e.g. /runner/evaluate_client.py.
+    if Path(script_path).is_absolute():
+        return
+
     # Resolve the script path relative to project_root
     script_file = project_root / script_path
     if not script_file.exists():
@@ -888,6 +894,27 @@ def _has_example_scores(result: EvalResult | None, example_ids: list[str]) -> bo
 
 
 def run_evolution(
+    config: HelixConfig,
+    project_root: Path,
+    base_dir: Path,
+) -> Candidate:
+    """Run the HELIX evolutionary loop."""
+    if config.sandbox.enabled:
+        if config.evaluator.sidecar is None:
+            raise HelixError(
+                "Docker sandboxing requires [evaluator.sidecar].",
+                operation="start evaluator sidecar",
+                suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
+            )
+        with start_evaluator_sidecar(
+            config.evaluator.sidecar,
+            passthrough_env=config.passthrough_env,
+        ):
+            return _run_evolution_impl(config, project_root, base_dir)
+    return _run_evolution_impl(config, project_root, base_dir)
+
+
+def _run_evolution_impl(
     config: HelixConfig,
     project_root: Path,
     base_dir: Path,
@@ -2247,8 +2274,8 @@ def run_evolution(
                 and state.total_merge_invocations < config.evolution.max_merge_invocations
             ):
                 merges_due += 1
-            # GEPA parity (M1): flag that this iteration found a new program.
             last_iter_found_new_program = True
+
             mutations_accepted += 1
 
         # If budget was exhausted during sequential acceptance, break outer loop.

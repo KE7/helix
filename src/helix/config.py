@@ -43,6 +43,17 @@ def _load_dotenv_file(path: Path) -> None:
         os.environ[key] = parsed[0] if parsed else ""
 
 
+class EvaluatorSidecarConfig(BaseModel):
+    """Warm private evaluator service for Docker-sandboxed runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str
+    command: str
+    endpoint: str
+    startup_timeout_seconds: int = 60
+
+
 class EvaluatorConfig(BaseModel):
     """Configuration for candidate evaluation.
 
@@ -82,6 +93,7 @@ class EvaluatorConfig(BaseModel):
     include_stdout: bool = True
     include_stderr: bool = True
     extra_commands: list[str] = Field(default_factory=list)
+    sidecar: EvaluatorSidecarConfig | None = None
     protected_files: list[str] = Field(
         default_factory=list,
         description=(
@@ -508,6 +520,14 @@ class HelixConfig(BaseModel):
                 "'objective' must be non-empty when seedless.enabled=True. "
                 "The LLM needs the objective to generate an initial candidate."
             )
+        if self.sandbox.enabled:
+            if self.evaluator.sidecar is None:
+                raise ValueError(
+                    "Docker sandboxing requires [evaluator.sidecar] with image, "
+                    "command, and endpoint."
+                )
+        elif self.evaluator.sidecar is not None:
+            raise ValueError("[evaluator.sidecar] requires sandbox.enabled = true.")
 
 
 def load_config(path: Path) -> HelixConfig:

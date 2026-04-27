@@ -167,9 +167,9 @@ This creates a `helix.toml` config file and a `.helix/` directory. Edit `helix.t
 
 ### Recommended: Enable Docker Sandboxing
 
-For a first HELIX run, use Docker sandboxing. It keeps mutation agents and
-evaluators inside copied workspaces instead of giving them direct access to your
-project checkout or home directory.
+For a first HELIX run, use Docker sandboxing. It keeps mutation agents in
+copied workspaces and requires a private evaluator sidecar, so agents never see
+the evaluator source, benchmark data, or evaluator endpoint.
 
 Install and start Docker, then log in to your selected backend inside its
 persistent sandbox auth volume:
@@ -179,9 +179,18 @@ helix sandbox login claude      # or codex, cursor, gemini, opencode
 helix sandbox status claude
 ```
 
-Then enable the sandbox in `helix.toml`:
+Then enable the sandbox and configure the evaluator sidecar in `helix.toml`:
 
 ```toml
+[evaluator]
+command = "python /runner/evaluate_client.py"
+score_parser = "helix_result"
+
+[evaluator.sidecar]
+image = "my-private-evaluator:latest"
+command = "python -m benchmark_server"
+endpoint = "http://helix-evaluator:8080/evaluate"
+
 [sandbox]
 enabled = true
 network = "bridge"
@@ -378,19 +387,26 @@ base_dir = ".helix/worktrees"
 
 ### Docker Sandboxing
 
-When `[sandbox].enabled = true`, HELIX copies each candidate worktree into a
-temporary Docker workspace and runs agent/evaluator commands there. Agent
-changes are synced back to the real candidate worktree after the backend exits;
-evaluator-side file changes are discarded. HELIX never mounts the host project
-root, parent directories, or home directory by default.
+When `[sandbox].enabled = true`, HELIX starts `[evaluator.sidecar]` once per
+`helix evolve` on a private internal Docker network. Agent containers run in
+copied workspaces on the normal agent network and cannot reach that sidecar.
+Evaluator-runner containers run only during evaluation, join the private
+network, call the sidecar, print evaluator output, and exit.
+The long-lived sidecar does not mount the candidate workspace; the runner must
+stream the needed candidate files/data over RPC, or execute candidate code
+itself and call the sidecar only for private judging/simulation.
+
+Agent changes are synced back to the real candidate worktree after the backend
+exits; evaluator-runner file changes are discarded. HELIX never mounts the host
+project root, parent directories, or home directory by default.
 During copy and sync, HELIX skips unsupported special files such as FIFOs,
 sockets, and device nodes by default. Set `skip_special_files = false` only if
 you want unsupported workspace file types to raise instead of being ignored.
 
 Agent containers mount a persistent Docker auth volume at `/home/node`;
-evaluator containers never receive it. Run `helix sandbox login <backend>` once
-per backend to complete that CLI's normal login flow inside the same Linux
-container environment HELIX will use later:
+evaluator sidecar and runner containers never receive it. Run
+`helix sandbox login <backend>` once per backend to complete that CLI's normal
+login flow inside the same Linux container environment HELIX will use later:
 
 ```bash
 helix sandbox login claude
@@ -454,8 +470,10 @@ When `evolution.val_stage_size` is set to a positive value and `dataset.val_size
 
 ### Evaluator Integrity
 
-HELIX can lock evaluator-critical files so mutations and merges cannot game the
-score by editing the benchmark itself.
+For non-sandboxed local prototypes, HELIX can lock evaluator-critical files so
+mutations and merges cannot game the score by editing the benchmark itself.
+Sandboxed runs should use `[evaluator.sidecar]` instead of repo-local evaluator
+files.
 
 ```toml
 [evaluator]
