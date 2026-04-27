@@ -75,9 +75,9 @@ max_turns = 20
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 
 [sandbox]
-# Set enabled=true to run agent/evaluator subprocesses in Docker using a
-# temporary copy of each candidate worktree. Agent changes sync back; evaluator
-# changes are discarded.
+# Recommended for new projects: set enabled=true after Docker is running and
+# after `helix sandbox login <backend>`. HELIX keeps this opt-in so machines
+# without Docker can still use local workflows.
 enabled = false
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 # network = "bridge"
