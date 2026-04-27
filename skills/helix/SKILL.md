@@ -1,44 +1,79 @@
 ---
 name: helix
-description: Use when creating, validating, or migrating HELIX optimization projects, especially when converting GEPA Optimize Anything examples to HELIX TOML while preserving evaluator behavior, metrics, Pareto semantics, and output artifacts.
+description: Use when creating, validating, running, debugging, or migrating HELIX optimization projects, including GEPA Optimize Anything migrations, Docker sandbox setup, evaluator sidecars, TOML authoring, run monitoring, and output interpretation.
 metadata:
-  short-description: Build and migrate HELIX optimization configs
+  short-description: Build, run, debug, and migrate HELIX configs
 ---
 
 # HELIX
 
-Use this skill when a user wants to run HELIX, write a `helix.toml`, validate a HELIX setup, or migrate a `gepa.optimize_anything.optimize_anything(...)` benchmark to HELIX.
+Use this skill for operator-side HELIX setup. It is for the person writing
+`helix.toml`, evaluator runners, and migration wrappers. Do not give this
+context to a mutation agent.
 
-## Start With Local Source
+## First Moves
 
-HELIX behavior is defined by the checkout in front of you. Before writing or changing a migration, inspect the local files that govern the behavior you need:
+1. Locate the project root: find `helix.toml`, `.helix/`, or ask for the target
+   directory if neither exists.
+2. Inspect `helix.toml`, evaluator entrypoints, and the current git status.
+3. Inspect local source before assuming schema or CLI behavior:
+   `src/helix/config.py`, `src/helix/sandbox.py`, `src/helix/executor.py`,
+   `src/helix/parsers/helix_result.py`, `src/helix/mutator.py`, `README.md`,
+   and `examples/*/helix.toml`.
+4. Prefer Docker sandboxing for new setups:
+   `helix sandbox login <backend>`, then `[sandbox].enabled = true`.
+5. Keep evaluator code and benchmark assets outside the mutable workspace. The
+   mutation agent should see only the candidate workspace and evaluator feedback.
 
-- `src/helix/config.py`: authoritative TOML schema and defaults.
-- `src/helix/parsers/helix_result.py`: per-example `HELIX_RESULT=` parser and strict evaluator contract.
-- `src/helix/executor.py`: evaluator cwd, env scrub, `HELIX_SPLIT`, `HELIX_INSTANCE_IDS`, stdout parsing, and zero-fill warning behavior.
-- `src/helix/mutator.py`: backend CLI arguments, prompt shape, diagnostics rendering, and seedless generation.
-- `README.md` and `examples/*/helix.toml`: current user-facing CLI and config examples.
-- `src/gepa/optimize_anything.py`, `src/gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py`, and the source example's `main.py`: source-side evaluator signature, config, outputs, and run-directory artifacts.
+## Reference Routing
 
-Do not edit benchmark examples unless that is explicitly part of the task. For migrations, prefer adding a HELIX wrapper/config around the existing benchmark code and protecting the evaluator, datasets, metrics, and output scripts from mutation.
+- Creating or fixing `helix.toml`: read `references/toml.md`.
+- Running, monitoring, resuming, and debugging HELIX: read
+  `references/run-debug.md`.
+- Migrating from `../gepa/src/gepa/optimize_anything.py`: read
+  `references/gepa-migration.md`.
 
-## HELIX Model
+## Core Model
 
-HELIX evolves a whole working tree in isolated git worktrees under `.helix/worktrees/`. There is no `target_file`. The configured backend may read, edit, create, or delete files unless constrained by `agent.background` and by protected evaluator files.
+HELIX evolves whole repositories. A mutation backend edits a detached candidate
+worktree, then HELIX evaluates that candidate. Accepted candidates enter a
+Pareto frontier. `helix best --export PATH` copies the best candidate out when
+the run is done.
 
-Each generation generally follows:
+With Docker sandboxing enabled, HELIX copies each candidate into a temporary
+agent container workspace. Agent changes sync back to the candidate worktree;
+evaluator-side changes are discarded. Agent containers get a persistent backend
+auth volume such as `helix-auth-claude`. Candidate workspaces are temporary and
+do not persist between mutations except through HELIX's accepted worktree sync.
 
-1. Evaluate the current candidate with `evaluator.command`.
-2. Select a parent from the Pareto frontier.
-3. Mutate that worktree through the configured coding-agent backend.
-4. Gate the mutation on a train minibatch.
-5. Evaluate accepted candidates on validation ids and update the frontier.
+## Security Boundary
 
-Use `helix clean` only when the user wants to discard saved state and worktrees.
+For new projects, set up two directories:
 
-## Core `helix.toml`
+- A mutable candidate workspace with only the files the agent may inspect and
+  edit.
+- A private evaluator/benchmark directory or image with tests, goldens, data,
+  secrets, services, and scoring logic.
 
-Use the current `[agent]` section. Older local examples may still show backend-specific section names; prefer `[agent]` for new migrations because that is the schema in `src/helix/config.py`.
+When `[sandbox].enabled = true`, evaluator execution should use a sidecar. The
+agent container should never receive evaluator source, evaluator secrets,
+`helix.toml`, `.env*`, `.git`, or HELIX state. It should receive feedback only
+through parsed `HELIX_RESULT` scores and side information.
+
+Do not put evaluator endpoints, credentials, goldens, answer keys, or private
+benchmark details in `agent.background`, candidate files, or mutation prompts.
+Use `passthrough_env` only for non-secret runtime settings such as device and
+cache hints unless the user accepts the exposure.
+
+If a private sidecar directly executes candidate code, that candidate code can
+observe anything in the process it runs inside. Prefer a narrow runner that
+copies or mounts only the candidate artifacts it needs, runs them with a limited
+interface, and returns sanitized scores, stdout, stderr, and feedback.
+
+## Docker Sidecar TOML
+
+Use this shape for new sandboxed projects. The evaluator command is a client
+that runs in `runner_image` and talks to the long-lived private sidecar service.
 
 ```toml
 objective = "Describe exactly what the candidate should improve."
@@ -46,19 +81,22 @@ seed = "."
 rng_seed = 0
 
 # Optional: preserve dependency/cache/device variables through HELIX's env scrub.
-# passthrough_env = ["OPENAI_API_KEY", "CUDA_VISIBLE_DEVICES", "HF_HOME"]
+passthrough_env = ["CUDA_VISIBLE_DEVICES", "HF_HOME"]
 
 [evaluator]
-command = "uv run python evaluate.py"
+command = "python /runner/evaluate_client.py"
 score_parser = "helix_result"
 include_stdout = true
 include_stderr = true
-extra_commands = []
-protected_files = [
-  "evaluate.py",
-  "main.py",
-  "utils.py",
-]
+
+[evaluator.sidecar]
+image = "my-private-evaluator:latest"
+runner_image = "my-evaluator-runner:latest"
+command = "python -m evaluator_server"
+endpoint = "http://helix-evaluator:8080/evaluate"
+startup_timeout_seconds = 120
+# Optional when the default endpoint probe is not enough.
+# healthcheck_command = "python /runner/healthcheck.py"
 
 [dataset]
 train_size = 100
@@ -66,13 +104,12 @@ val_size = 50
 
 [evolution]
 max_generations = 20
-max_evaluations = 500  # metric-call budget: uncached examples, or 1 per uncached single-task/no-example eval call
+max_evaluations = 500
 minibatch_size = 3
 max_workers = 32
-num_parallel_proposals = 1
+num_parallel_proposals = 4
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
-merge_enabled = false
 frontier_type = "hybrid"
 
 [agent]
@@ -81,77 +118,78 @@ model = "gpt-5.5"
 max_turns = 20
 background = """
 Only modify the mutable candidate implementation files.
-Do not edit evaluate.py, datasets, metrics, output writers, or benchmark fixtures.
 Preserve public function names and output artifact formats.
 """
+
+[sandbox]
+enabled = true
+network = "bridge"
+skip_special_files = true
 
 [worktree]
 base_dir = ".helix/worktrees"
 ```
 
-Required top-level fields are `objective` and `[evaluator].command`. All nested config models reject unknown keys, so validate TOML instead of assuming typos are ignored.
+Required top-level fields are `objective` and `[evaluator].command`. Nested
+config models reject unknown keys, so validate TOML instead of assuming typos
+are ignored.
 
-## Codex Backend
-
-For Codex-backed HELIX runs:
-
-```toml
-[agent]
-backend = "codex"
-model = "gpt-5.5"    # Passed verbatim to `codex exec --model ...`; choose a model your Codex CLI supports.
-max_turns = 20       # Rendered into the mutation prompt as a turn budget.
-background = "Concrete mutation constraints and domain guidance."
-```
-
-HELIX invokes Codex as:
-
-```bash
-codex exec --json --dangerously-bypass-approvals-and-sandbox --model <model> <prompt>
-```
-
-`agent.effort` and `agent.allowed_tools` are part of the shared agent schema, but the current Codex invocation only passes `model` plus the prompt. GPT-5.5 defaults to medium reasoning effort when the host does not override it, so do not add effort settings to HELIX configs unless you have eval evidence for a different tradeoff. Put operational constraints in `agent.background`.
+Use repo-local evaluator files only for quick non-sandbox prototypes. In that
+mode, set `evaluator.protected_files` for evaluator code, datasets, metrics,
+and output wrappers, but do not treat that as the security boundary for
+untrusted mutation agents.
 
 ## Dataset Handoff
 
-`[dataset]` holds cardinalities, not file paths. If `dataset.train_size` or `dataset.val_size` is set, HELIX writes `helix_batch.json` in the candidate worktree before each evaluator run:
+`[dataset]` holds cardinalities, not file paths. If `dataset.train_size` or
+`dataset.val_size` is set, HELIX writes `helix_batch.json` in the candidate
+workspace before each evaluator run:
 
 ```json
 ["0", "1", "2"]
 ```
 
-The ids are opaque strings. The evaluator must read `helix_batch.json` from its current working directory and map each id to its own data store. With `evolution.batch_sampler = "stratified"`, ids may look like `"group__case_7"`; do not cast ids to integers unless your evaluator intentionally uses range-index ids.
+The ids are opaque strings. The evaluator client or sidecar must map each id to
+its private data store. With `evolution.batch_sampler = "stratified"`, ids may
+look like `"group__case_7"`; do not cast ids to integers unless your evaluator
+intentionally uses range-index ids.
 
 HELIX also sets:
 
 - `HELIX_SPLIT=train|val`
 - `HELIX_INSTANCE_IDS` as a comma-separated copy of requested ids
+- `HELIX_EVALUATOR_ENDPOINT` for sidecar evaluator clients
 
-Prefer `helix_batch.json` for `score_parser = "helix_result"` because the parser uses that same file to zip positional results back to ids.
+Prefer `helix_batch.json` for `score_parser = "helix_result"` because the
+parser uses that same file to zip positional results back to ids.
 
 ## Evaluator Contract
 
-For migrations from GEPA Optimize Anything, default to:
-
-```toml
-[evaluator]
-command = "uv run python evaluate.py"
-score_parser = "helix_result"
-protected_files = ["evaluate.py", "main.py", "utils.py"]
-```
-
-The evaluator runs as a subprocess with `cwd` set to the candidate worktree. It must emit exactly one `HELIX_RESULT=` line on stdout when using `helix_result`:
+For `score_parser = "helix_result"`, the evaluator command must emit exactly
+one `HELIX_RESULT=` line on stdout:
 
 ```text
 HELIX_RESULT=[[0.8, {"example_id": "0", "feedback": "..."}], [1.0, {"example_id": "1"}]]
 ```
 
-The payload must be valid JSON and must be a list with the same length and order as `helix_batch.json`. Each entry may be:
+The payload must be valid JSON and must be a list with the same length and
+order as `helix_batch.json`. Each entry may be a bare numeric score, a rich pair
+such as `[0.75, {"feedback": "..."}]`, or mixed bare/rich entries in one list.
+Scores must be finite numbers; bools normalize to `1.0` and `0.0`.
+`side_info` must be a dict or `null`.
 
-- a bare numeric score, e.g. `0.75`
-- a rich pair, e.g. `[0.75, {"feedback": "..."}]`
-- mixed bare/rich entries in one list
+For objective, hybrid, or cartesian frontiers, put named objective values in
+`side_info["scores"]`:
 
-HELIX normalizes bare scores to empty `side_info` dicts. Scores must be finite numbers; bools are accepted as `1.0` and `0.0`. `side_info` must be a dict or `null`.
+```python
+side_info = {
+    "scores": {
+        "accuracy": accuracy,
+        "latency": latency_score,
+    },
+    "feedback": feedback,
+}
+```
 
 Do not emit legacy batch-level shapes such as:
 
@@ -162,31 +200,31 @@ HELIX_RESULT=[[0.8, 1.0, 0.5], {"details": "..."}]
 
 Those shapes are intentionally rejected. Emit one entry per example instead.
 
-## Objective Scores And Frontier
+## Running And Monitoring
 
-GEPA Optimize Anything forwards multi-objective scores from `side_info["scores"]`. HELIX mirrors that with the `helix_result` parser:
+Common commands:
 
-```python
-side_info = {
-    "scores": {
-        "sum_radii": score,
-        "validity": validity_score,
-    },
-    "validation_details": details,
-    "stdout": captured_stdout,
-}
+```bash
+helix init
+helix sandbox login codex
+helix sandbox status codex
+helix evolve --config helix.toml --dir .
+helix resume --config helix.toml --dir .
+helix frontier --dir .
+helix best --dir .
+helix best --export ./best-worktree --dir .
+helix history --dir .
+helix log --dir .
+helix clean --dir .
 ```
 
-Use `evolution.frontier_type` according to the source run:
+Use `helix clean` only when the user wants to discard saved state and worktrees.
+Before a long run, smoke-test the evaluator command on a tiny batch and verify
+that stdout contains exactly one `HELIX_RESULT=` line, the payload length equals
+the batch length, each score is finite, and objective frontier runs include
+numeric `side_info["scores"]`.
 
-- `"instance"`: retain candidates by per-example validation score.
-- `"objective"`: retain by objective names from `side_info["scores"]`.
-- `"hybrid"`: retain by instance or objective axes. This is the HELIX default and matches GEPA Optimize Anything's default.
-- `"cartesian"`: retain by `(example_id, objective_name)` pairs.
-
-The train minibatch gate still compares primary per-example scores regardless of frontier type. Non-instance modes need `score_parser = "helix_result"` plus numeric `side_info["scores"]`; otherwise objective axes have no data.
-
-## Migration Map
+## GEPA Migration Map
 
 Map source concepts to HELIX this way:
 
@@ -195,7 +233,7 @@ Map source concepts to HELIX this way:
 | `seed_candidate="..."` | A seed file such as `prompt.txt`, `program.py`, `solve.py`, or `candidate.json` |
 | `seed_candidate={"program": "..."}` | One file per mutable component, or a JSON file plus wrappers |
 | `seed_candidate=None` | `[seedless] enabled = true` with `objective` and optional `seedless.train_path` |
-| `evaluator(candidate, example)` | `evaluate.py` reads candidate files and selected ids, then prints `HELIX_RESULT=...` |
+| `evaluator(candidate, example)` | A private evaluator service plus runner client that prints `HELIX_RESULT=...` |
 | `dataset`, `valset` | Evaluator-owned data plus `[dataset].train_size` and `[dataset].val_size` |
 | `objective=...` | top-level `objective = "..."` |
 | `background=...` | `[agent].background = """..."""` |
@@ -207,151 +245,25 @@ Map source concepts to HELIX this way:
 | `EngineConfig(cache_evaluation=True)` | `[evolution].cache_evaluation = true` |
 | `EngineConfig(acceptance_criterion=...)` | `[evolution].acceptance_criterion = "..."` |
 | `EngineConfig(frontier_type=...)` | `[evolution].frontier_type = "..."` |
-| `EngineConfig(run_dir=...)` outputs | `main.py` or post-run export wrapper writes the same artifacts after `helix best --export` |
+| `EngineConfig(run_dir=...)` outputs | `helix best --export` plus a post-run artifact writer |
 
-HELIX does not directly implement every GEPA Optimize Anything feature. When source runs use `track_best_outputs`, `best_example_evals`, `opt_state` warm starts, refiner loops, callbacks, external trackers, or custom output directories, preserve the observable result with wrapper code and note any behavioral gap in the migration.
-
-## Wrapper Patterns
-
-### Mutable Program File
-
-Use when `seed_candidate={"program": INITIAL_PROGRAM}` or `seed_candidate=SEED_CODE`.
-
-Project layout:
-
-```text
-helix.toml
-program.py              # mutable candidate
-evaluate.py             # protected
-main.py                 # protected export/test wrapper
-utils/                  # protected helpers, datasets, simulators
-```
-
-`evaluate.py` should import or execute `program.py`, select examples from `helix_batch.json`, and emit one result per selected example:
-
-```python
-import json
-import os
-from pathlib import Path
-
-from utils.dataset import train, val
-from utils.metrics import evaluate_program
-
-
-def selected_examples():
-    split = os.environ.get("HELIX_SPLIT", "val")
-    data = train if split == "train" else val
-    ids = json.loads(Path("helix_batch.json").read_text())
-    return [(eid, data[int(eid)]) for eid in ids]
-
-
-def main():
-    payload = []
-    for eid, example in selected_examples():
-        score, side_info = evaluate_program(Path("program.py"), example)
-        side_info = dict(side_info or {})
-        side_info.setdefault("example_id", eid)
-        payload.append([float(score), side_info])
-    print("HELIX_RESULT=" + json.dumps(payload))
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Only cast `eid` to `int` for range-index datasets. For file-stem, grouped, or externally supplied ids, build an id-to-example map instead.
-
-### Prompt File
-
-Use when the source candidate is a string prompt.
-
-```text
-prompt.txt
-evaluate.py
-main.py
-```
-
-`evaluate.py` reads `prompt.txt` for each selected example, calls the original scoring helper, and places model outputs, reasoning, and feedback in per-example `side_info` so HELIX mutation prompts get useful diagnostics.
-
-### JSON Candidate
-
-Use when the source candidate is a dict of multiple text components.
-
-```text
-candidate.json
-evaluate.py
-main.py
-```
-
-Keep the JSON schema stable. If only one component should mutate, state that in `agent.background`. If several components may mutate, tell the backend which keys are mutable and which are fixed.
-
-### `main.py` Export Wrapper
-
-GEPA Optimize Anything examples often write `best_program.py`, `metrics.json`, candidate dumps, charts, or baseline/test scores after `result = optimize_anything(...)`. Preserve those artifacts by turning `main.py` into a HELIX run/export wrapper:
-
-1. Resolve the same run directory flags or env vars as the source script.
-2. Run `helix evolve --config helix.toml --dir .` or assume the run already exists.
-3. Export the best worktree with `helix best --export <tmp-or-run-dir>/best-worktree --dir .`.
-4. Copy the evolved mutable file to the historical artifact path, e.g. `best_program.py`.
-5. Re-run baseline, optimized, and test-set reporting with the original helper functions.
-6. Write `metrics.json`, candidates, charts, and output schemas expected by downstream scripts.
-
-If preserving every candidate dump is important, document that HELIX stores candidate worktrees and state under `.helix/`; add an explicit exporter rather than changing evaluator behavior.
-
-## Seedless Mode
-
-When source uses `seed_candidate=None`, configure:
-
-```toml
-[seedless]
-enabled = true
-train_path = "data/train.jsonl"
-```
-
-`seedless.train_path` is only prompt grounding for seed generation. HELIX reads up to three examples from a JSON array, JSONL file, or directory of JSON files and includes them in the seed-generation prompt. Runtime sampling still comes from `[dataset]` and `helix_batch.json`.
-
-## Validation
-
-Run focused checks before a full evolution:
-
-```bash
-PYTHONPATH=/home/kd/research/helix/src python -c "from pathlib import Path; from helix.config import load_config; print(load_config(Path('helix.toml')))"
-python -m py_compile evaluate.py main.py
-printf '["0"]\n' > helix_batch.json
-HELIX_SPLIT=train uv run python evaluate.py
-rm -f helix_batch.json
-```
-
-For the evaluator smoke test, verify:
-
-- stdout contains exactly one `HELIX_RESULT=` line.
-- the JSON payload length equals `helix_batch.json` length.
-- each entry is a finite score or `[finite_score, side_info_dict]`.
-- objective frontier runs include numeric `side_info["scores"]`.
-- protected files cover evaluators, datasets, metrics, wrappers, and stable output code.
-- required API keys, package managers, datasets, and cache paths are covered by `passthrough_env` or documented as blockers.
-
-Use HELIX commands from the project directory:
-
-```bash
-PYTHONPATH=/home/kd/research/helix/src helix evolve --config helix.toml --dir .
-PYTHONPATH=/home/kd/research/helix/src helix resume --config helix.toml --dir .
-PYTHONPATH=/home/kd/research/helix/src helix frontier --dir .
-PYTHONPATH=/home/kd/research/helix/src helix best --dir .
-PYTHONPATH=/home/kd/research/helix/src helix best --export ./best-worktree --dir .
-PYTHONPATH=/home/kd/research/helix/src helix history --dir .
-PYTHONPATH=/home/kd/research/helix/src helix log --dir .
-```
+HELIX does not directly implement every GEPA Optimize Anything feature. When
+source runs use `track_best_outputs`, `best_example_evals`, `opt_state` warm
+starts, refiner loops, callbacks, external trackers, or custom output
+directories, preserve the observable result with wrapper code and note any
+behavioral gap in the migration.
 
 ## Pitfalls
 
-- Do not use aggregate JSON parsers for Optimize Anything minibatch migrations unless the evaluator already returns correct id-keyed `instance_scores`; `helix_result` is safer for per-example parity.
+- Do not make the evaluator file part of the mutable workspace for sandboxed
+  runs.
 - Do not key `HELIX_RESULT` by ids. It is positional to `helix_batch.json`.
-- Do not print more than one `HELIX_RESULT=` line. HELIX treats that as an evaluator error.
-- Do not let the backend mutate `evaluate.py`, datasets, metrics, simulation helpers, or output writers.
-- Do not put dataset file paths under `[dataset]`; use evaluator-owned paths or `[seedless].train_path` only for seed prompt grounding.
-- Do not assume `HELIX_INSTANCE_IDS` is enough for `helix_result`; the parser reads `helix_batch.json`.
-- Do not forget HELIX's scrubbed environment. Add `passthrough_env` for API keys, GPU settings, cache dirs, or benchmark-specific env vars.
-- Do not rely on source `run_dir` state files being interchangeable with `.helix` state. Preserve user-facing artifacts through export/post-processing.
-- Do not switch `frontier_type` on a resumed run without understanding stored state; use a clean `.helix` directory or a separate run directory for a different frontier.
-- Do not promise full equivalence for source features such as refiner loops, callbacks, tracking integrations, or `opt_state` warm starts unless the migration implements an explicit HELIX-side substitute.
+- Do not print more than one `HELIX_RESULT=` line.
+- Do not put dataset file paths under `[dataset]`; use evaluator-owned paths or
+  `[seedless].train_path` only for seed prompt grounding.
+- Do not assume `HELIX_INSTANCE_IDS` is enough for `helix_result`; the parser
+  reads `helix_batch.json`.
+- Do not rely on source `run_dir` state files being interchangeable with
+  `.helix` state. Preserve user-facing artifacts through export/post-processing.
+- Do not switch `frontier_type` on a resumed run without understanding stored
+  state; use a clean `.helix` directory or a separate run directory.

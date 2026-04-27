@@ -191,6 +191,36 @@ skip_special_files = true
 HELIX keeps this setting opt-in so existing local workflows and machines without
 Docker continue to work, but sandboxing is the recommended mode for new projects.
 
+### Connect The HELIX Agent Skill
+
+This repository ships an agent skill at `skills/helix/` with detailed guidance
+for writing `helix.toml`, running and debugging HELIX, and migrating GEPA
+`optimize_anything.py` workflows.
+
+For Codex, install it into your local Codex skills directory:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -sfn "$(pwd)/skills/helix" "${CODEX_HOME:-$HOME/.codex}/skills/helix"
+```
+
+Then ask Codex:
+
+```text
+Use $helix to set up this project.
+```
+
+For Claude Code, this repo includes `.claude/commands/helix.md`, so inside this
+checkout you can run:
+
+```text
+/helix set up Docker-sandboxed HELIX for this benchmark
+```
+
+To use the command from another project, copy or symlink both
+`skills/helix/` and `.claude/commands/helix.md` into that project, preserving
+the same relative paths.
+
 ### Whole-repo-as-candidate Model
 
 HELIX treats your **entire working tree** as the candidate. There is no `target_file` — the configured backend may read, edit, create, or delete any file in the project tree during each mutation. A minimal project layout looks like:
