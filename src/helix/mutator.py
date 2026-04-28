@@ -466,6 +466,10 @@ MUTATION_PROMPT_ARTIFACT_NAME = ".helix_mutation_prompt.md"
 BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
 BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
 BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
+PROMPT_FILE_INSTRUCTION = (
+    f"Read {MUTATION_PROMPT_ARTIFACT_NAME} in the current workspace and follow "
+    "those instructions exactly."
+)
 
 
 def _ignore_helix_artifacts(worktree_path: Path) -> None:
@@ -551,9 +555,7 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
-        # Claude Code print mode reads stdin when no positional prompt is
-        # supplied. We pass large evolutionary prompts out-of-band so the
-        # Docker argv stays below kernel limits.
+        args.append(PROMPT_FILE_INSTRUCTION)
         return args
 
     if backend == "codex":
@@ -565,6 +567,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
+        args.append(PROMPT_FILE_INSTRUCTION)
         return args
 
     if backend == "cursor":
@@ -580,6 +583,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
+        args.append(PROMPT_FILE_INSTRUCTION)
         return args
 
     if backend == "gemini":
@@ -590,6 +594,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
+        args.extend(["--prompt", PROMPT_FILE_INSTRUCTION])
         return args
 
     if backend == "opencode":
@@ -605,8 +610,8 @@ def _build_backend_args(
             args.extend(["--variant", config.effort])
         args.extend([
             "--file",
-            ".helix_mutation_prompt.md",
-            "Follow the instructions in the attached .helix_mutation_prompt.md exactly.",
+            MUTATION_PROMPT_ARTIFACT_NAME,
+            PROMPT_FILE_INSTRUCTION,
         ])
         return args
 
@@ -878,8 +883,6 @@ def invoke_claude_code(
     backend_worktree_path = "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
     args = _build_backend_args(backend_worktree_path, prompt, config)
     cmd_str = shlex.join(args)
-    stdin_text = prompt if backend in {"claude", "codex", "cursor", "gemini"} else None
-
     backend_env = _scrub_environment(passthrough_env=passthrough_env)
     _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
@@ -895,7 +898,6 @@ def invoke_claude_code(
             sync_back=True,
             image=sandbox_image,
             agent_backend=backend,
-            input_text=stdin_text,
         )
     else:
         result = subprocess.run(
@@ -903,7 +905,6 @@ def invoke_claude_code(
             cwd=worktree_path,
             capture_output=True,
             text=True,
-            input=stdin_text,
             env=backend_env,
         )
 
