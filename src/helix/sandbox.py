@@ -22,7 +22,6 @@ from helix.config import EvaluatorSidecarConfig, SandboxConfig
 
 
 HELIX_ARTIFACT_NAMES = {
-    ".helix_mutation_prompt.md",
     ".helix_backend_result.json",
     ".helix_backend_stdout.txt",
     ".helix_backend_stderr.txt",
@@ -80,6 +79,13 @@ def resolve_sandbox_image(sandbox: SandboxConfig, agent_backend: str | None = No
         raise ValueError(f"No default sandbox image for backend: {agent_backend}") from exc
 
 
+def _is_helix_artifact_name(name: str) -> bool:
+    return (
+        name in HELIX_ARTIFACT_NAMES
+        or name == ".agent_task_prompt.md"
+    )
+
+
 def _ignore_for_copy(path: Path) -> bool:
     parts = path.parts
     return (
@@ -95,7 +101,8 @@ def _ignore_for_sync(path: Path) -> bool:
     return (
         ".git" in parts
         or path.name == "helix.toml"
-        or path.name in HELIX_ARTIFACT_NAMES
+        or _is_helix_artifact_name(path.name)
+        or ".agent_internal" in parts
         or path.name == ".env"
         or path.name.startswith(".env.")
     )

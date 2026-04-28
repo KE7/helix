@@ -13,7 +13,12 @@ from typing import Any
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
-from helix.exceptions import MutationError, RateLimitError, print_helix_error
+from helix.exceptions import (
+    MutationError,
+    PromptArtifactCollisionError,
+    RateLimitError,
+    print_helix_error,
+)
 from helix.executor import _scrub_environment
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
@@ -31,15 +36,12 @@ _MUTATOR_OVERRIDE = None
 # ---------------------------------------------------------------------------
 
 AUTONOMOUS_SYSTEM_PROMPT = """\
-You are an autonomous code-improvement agent operating inside an automated evolutionary loop.
-
-CRITICAL RULES — you MUST follow these at all times:
-- NEVER ask for human input, clarification, or confirmation of any kind.
-- NEVER use tools that request human interaction or pause for approval.
-- NEVER pause, wait, or yield control back to a human.
-- If you are uncertain about something, make your best judgment and proceed.
-- If you are blocked by one approach, try an alternative — do not stop.
-- You are running fully unattended; there is no human monitoring this session.
+Task instructions:
+- Work directly on the requested code changes using the workspace files.
+- Do not request confirmation or clarification; choose a reasonable approach and continue.
+- If one approach fails, try an alternative and keep progressing.
+- Use available tools to inspect, edit, and validate changes.
+- When finished, print exactly: [MUTATION COMPLETE]
 """
 
 SEEDLESS_INIT_PROMPT_TEMPLATE = """\
@@ -462,14 +464,18 @@ def _looks_like_rate_limit(text: str) -> bool:
 #: candidate's worktree root alongside ``helix_batch.json``.  The leading
 #: dot + per-worktree ``.gitignore`` entry keep it out of the candidate
 #: git tree.
-MUTATION_PROMPT_ARTIFACT_NAME = ".helix_mutation_prompt.md"
+MUTATION_PROMPT_ARTIFACT_NAME = ".agent_task_prompt.md"
+MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/task_prompt.md"
 BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
 BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
 BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
-PROMPT_FILE_INSTRUCTION = (
-    f"Read {MUTATION_PROMPT_ARTIFACT_NAME} in the current workspace and follow "
-    "those instructions exactly."
-)
+
+
+def _prompt_file_instruction(prompt_artifact_name: str) -> str:
+    return (
+        f"Read {prompt_artifact_name} in the current workspace and follow "
+        "those instructions exactly."
+    )
 
 
 def _ignore_helix_artifacts(worktree_path: Path) -> None:
@@ -478,7 +484,7 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     The candidate worktree is a real git tree; anything committed there
     bakes into the candidate's evolutionary history.  HELIX writes
     a handful of per-invocation metadata files (``helix_batch.json``,
-    ``.helix_mutation_prompt.md``) that must NOT flow into those
+    ``.agent_task_prompt.md``) that must NOT flow into those
     diffs — otherwise the next generation's mutator sees the prior
     artifact as part of the codebase and the lineage grows a
     meaningless file-rename trail.
@@ -490,6 +496,7 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     patterns = [
         "# HELIX per-invocation artifacts (never commit to candidate tree)",
         MUTATION_PROMPT_ARTIFACT_NAME,
+        ".agent_internal/",
         BACKEND_RESULT_ARTIFACT_NAME,
         BACKEND_STDOUT_ARTIFACT_NAME,
         BACKEND_STDERR_ARTIFACT_NAME,
@@ -503,23 +510,40 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
 
 
-def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> None:
+def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
     """Persist the rendered mutation prompt to the worktree for post-hoc inspection.
 
-    Writes to ``<worktree>/.helix_mutation_prompt.md`` and ensures the
-    per-worktree ``.gitignore`` excludes the file.  Best-effort: any I/O
-    exception is logged at DEBUG and swallowed — a missing artifact is
-    not worth failing a mutation over.
+    Writes to a reserved stable path (``<worktree>/.agent_task_prompt.md``)
+    with deterministic fallback (``<worktree>/.agent_internal/task_prompt.md``)
+    and ensures the per-worktree ``.gitignore`` excludes the file.  Existing
+    files are treated as user-owned collisions and are never overwritten.
+    Returns the artifact filename chosen for this invocation.
     """
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
-        (wt / MUTATION_PROMPT_ARTIFACT_NAME).write_text(prompt)
+        primary_path = wt / MUTATION_PROMPT_ARTIFACT_NAME
+        fallback_path = wt / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+        try:
+            with primary_path.open("x") as f:
+                f.write(prompt)
+            return MUTATION_PROMPT_ARTIFACT_NAME
+        except FileExistsError:
+            fallback_path.parent.mkdir(parents=True, exist_ok=True)
+            with fallback_path.open("x") as f:
+                f.write(prompt)
+            return MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
     except OSError as e:
-        logger.debug(
-            "failed to write mutation-prompt artifact to %s: %s",
-            worktree_path, e,
-        )
+        raise PromptArtifactCollisionError(
+            "Failed to create prompt artifact without overwriting an existing file",
+            operation="write mutation prompt artifact",
+            cwd=worktree_path,
+            suggestion=(
+                f"Remove or rename {MUTATION_PROMPT_ARTIFACT_NAME} and "
+                f"{MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME}, or choose a different "
+                "reserved prompt artifact path."
+            ),
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -536,8 +560,8 @@ def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
 
 def _build_backend_args(
     worktree_path: str,
-    prompt: str,
     config: AgentConfig,
+    prompt_artifact_name: str,
 ) -> list[str]:
     backend = config.backend
     if backend == "claude":
@@ -555,7 +579,7 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
-        args.append(PROMPT_FILE_INSTRUCTION)
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "codex":
@@ -567,7 +591,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.append(PROMPT_FILE_INSTRUCTION)
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "cursor":
@@ -583,7 +607,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.append(PROMPT_FILE_INSTRUCTION)
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "gemini":
@@ -594,7 +618,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.extend(["--prompt", PROMPT_FILE_INSTRUCTION])
+        args.extend(["--prompt", _prompt_file_instruction(prompt_artifact_name)])
         return args
 
     if backend == "opencode":
@@ -610,8 +634,8 @@ def _build_backend_args(
             args.extend(["--variant", config.effort])
         args.extend([
             "--file",
-            MUTATION_PROMPT_ARTIFACT_NAME,
-            PROMPT_FILE_INSTRUCTION,
+            prompt_artifact_name,
+            _prompt_file_instruction(prompt_artifact_name),
         ])
         return args
 
@@ -849,6 +873,7 @@ def invoke_claude_code(
     config: AgentConfig,
     passthrough_env: list[str] | None = None,
     sandbox: SandboxConfig | None = None,
+    prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
 ) -> dict[str, Any]:
     """Invoke the configured backend CLI in *worktree_path*.
 
@@ -881,7 +906,11 @@ def invoke_claude_code(
     backend = config.backend
     backend_name = backend_display_name(backend)
     backend_worktree_path = "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
-    args = _build_backend_args(backend_worktree_path, prompt, config)
+    args = _build_backend_args(
+        backend_worktree_path,
+        config,
+        prompt_artifact_name,
+    )
     cmd_str = shlex.join(args)
     backend_env = _scrub_environment(passthrough_env=passthrough_env)
     _add_backend_auth_env(backend_env, backend)
@@ -1059,7 +1088,7 @@ def mutate(
     # keep it out of the candidate git tree — otherwise it'd leak into
     # every subsequent mutation's diff and the mutator would see its own
     # prior prompt file as part of the codebase.
-    _write_mutation_prompt_artifact(child.worktree_path, prompt)
+    prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
     try:
         invoke_claude_code(
@@ -1068,6 +1097,7 @@ def mutate(
             config.agent,
             passthrough_env=config.passthrough_env,
             sandbox=config.sandbox,
+            prompt_artifact_name=prompt_artifact_name,
         )
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
