@@ -416,7 +416,7 @@ def test_sandbox_auth_status_command_uses_backend_command():
     assert args[-4:] == ["claude", "auth", "status", "--text"]
 
 
-def test_sandbox_auth_claude_login_uses_setup_token_flow():
+def test_sandbox_auth_claude_login_uses_claudeai_flow():
     args = sandbox_auth_docker_args(
         "claude",
         image="helix-claude:latest",
@@ -425,7 +425,7 @@ def test_sandbox_auth_claude_login_uses_setup_token_flow():
     )
 
     assert "helix-auth-claude:/home/node:rw" in args
-    assert args[-2:] == ["claude", "setup-token"]
+    assert args[-4:] == ["claude", "auth", "login", "--claudeai"]
 
 
 def test_sandbox_auth_codex_login_uses_device_auth_flow():

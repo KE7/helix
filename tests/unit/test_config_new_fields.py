@@ -244,12 +244,12 @@ class TestSandboxConfig:
         assert cfg.network == "bridge"
         assert cfg.skip_special_files is True
 
-    def test_sandbox_requires_sidecar_evaluator(self):
+    def test_sandboxed_evaluator_requires_sidecar(self):
         with pytest.raises(ValueError, match=r"\[evaluator.sidecar\]"):
             HelixConfig(
                 objective="Test",
                 evaluator={"command": "pytest"},
-                sandbox=SandboxConfig(enabled=True),
+                sandbox=SandboxConfig(enabled=True, evaluator=True),
             )
 
     def test_sidecar_requires_sandbox(self):
@@ -280,7 +280,7 @@ class TestSandboxConfig:
                     healthcheck_command="python /runner/healthcheck.py",
                 ),
             },
-            sandbox=SandboxConfig(enabled=True),
+            sandbox=SandboxConfig(enabled=True, evaluator=True),
         )
         assert cfg.evaluator.sidecar is not None
         assert cfg.evaluator.sidecar.image == "eval:latest"
@@ -306,6 +306,7 @@ class TestSandboxConfig:
 
             [sandbox]
             enabled = true
+            evaluator = true
             image = "custom-helix:latest"
             network = "none"
             cpus = 2.0
