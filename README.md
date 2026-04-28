@@ -404,6 +404,9 @@ itself and call the sidecar only for private judging/simulation.
 Agent changes are synced back to the real candidate worktree after the backend
 exits; evaluator-runner file changes are discarded. HELIX never mounts the host
 project root, parent directories, or home directory by default.
+`helix.toml`, `.env`, `.env.*`, `.git`, and HELIX runtime artifacts are also
+excluded from sandbox workspace copies/sync-back so agents cannot read sidecar
+configuration or mutate run settings.
 During copy and sync, HELIX skips unsupported special files such as FIFOs,
 sockets, and device nodes by default. Set `skip_special_files = false` only if
 you want unsupported workspace file types to raise instead of being ignored.

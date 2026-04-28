@@ -201,7 +201,8 @@ Sandbox behavior:
 - Evaluator-runner changes are discarded.
 - Agent auth volume mounts at `/home/node`.
 - Evaluator containers do not get agent auth volumes.
-- `.env`, `.env.*`, `.git`, and HELIX artifacts do not sync back.
+- `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX artifacts are excluded
+  from sandbox workspace copies/sync-back.
 - Special files are skipped by default; set `skip_special_files = false` to
   raise on unsupported file types instead.
 
