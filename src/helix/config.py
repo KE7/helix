@@ -468,6 +468,7 @@ class SandboxConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    evaluator: bool = False
     backend: Literal["docker"] = "docker"
     image: str | None = None
     network: Literal["bridge", "none", "host"] = "bridge"
@@ -477,6 +478,7 @@ class SandboxConfig(BaseModel):
     pids_limit: int | None = 512
     add_host_gateway: bool = False
     skip_special_files: bool = True
+    omit_from_agent: list[str] = Field(default_factory=list)
 
 
 class WorktreeConfig(BaseModel):
@@ -526,14 +528,14 @@ class HelixConfig(BaseModel):
                 "'objective' must be non-empty when seedless.enabled=True. "
                 "The LLM needs the objective to generate an initial candidate."
             )
-        if self.sandbox.enabled:
+        if self.sandbox.enabled and self.sandbox.evaluator:
             if self.evaluator.sidecar is None:
                 raise ValueError(
                     "Docker sandboxing requires [evaluator.sidecar] with image, "
                     "command, and endpoint."
                 )
         elif self.evaluator.sidecar is not None:
-            raise ValueError("[evaluator.sidecar] requires sandbox.enabled = true.")
+            raise ValueError("[evaluator.sidecar] requires sandbox.enabled = true and sandbox.evaluator = true.")
 
 
 def load_config(path: Path) -> HelixConfig:

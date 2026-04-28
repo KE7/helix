@@ -198,7 +198,7 @@ def run_evaluator(
 
     evaluator = config.evaluator
     sandbox_image = None
-    if config.sandbox.enabled:
+    if config.sandbox.enabled and config.sandbox.evaluator:
         if evaluator.sidecar is None:
             raise ValueError("Sandboxed evaluation requires [evaluator.sidecar].")
         sandbox_image = evaluator.sidecar.resolved_runner_image
@@ -206,7 +206,7 @@ def run_evaluator(
     # Run main evaluation command
     env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)
     cmd_tokens = _validate_and_split_command(evaluator.command)
-    if config.sandbox.enabled:
+    if config.sandbox.enabled and config.sandbox.evaluator:
         if current_evaluator_sidecar_runtime() is None:
             raise ValueError(
                 "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
