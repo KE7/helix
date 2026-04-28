@@ -1692,6 +1692,13 @@ class TestHelixProgressLifecycle:
             prog.update(10, 1.0)
             prog.update(0, 0.0)
 
+    def test_initial_completed_clamped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Resume progress starts from the saved generation, clamped to bounds."""
+        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
+        assert HelixProgress(max_generations=10, completed=8)._completed == 8
+        assert HelixProgress(max_generations=10, completed=-1)._completed == 0
+        assert HelixProgress(max_generations=10, completed=99)._completed == 10
+
     def test_exit_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Calling __exit__ multiple times must not raise."""
         monkeypatch.setenv("HELIX_NO_PROGRESS", "1")

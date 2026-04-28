@@ -105,8 +105,9 @@ class HelixProgress:
     non-interactive CI pipelines).
     """
 
-    def __init__(self, max_generations: int) -> None:
+    def __init__(self, max_generations: int, completed: int = 0) -> None:
         self._max = max_generations
+        self._completed = max(0, min(completed, max_generations))
         self._progress: Progress | None = None
         self._task_id: TaskID | None = None
         # Disable when HELIX_NO_PROGRESS is set to any non-empty string.
@@ -134,7 +135,7 @@ class HelixProgress:
             self._task_id = self._progress.add_task(
                 "evolving",
                 total=self._max,
-                completed=0,
+                completed=self._completed,
                 best_score=float("nan"),
             )
         return self
@@ -1262,7 +1263,10 @@ def _run_evolution_impl(
     # __enter__ returns self, so _hprog and _hprog_ctx are the same object.
     # We call __exit__ at the end of the loop (and on exception via try/finally
     # wrapped around the loop entry point below).
-    _hprog = HelixProgress(config.evolution.max_generations).__enter__()
+    _hprog = HelixProgress(
+        config.evolution.max_generations,
+        completed=max(0, state.generation),
+    ).__enter__()
 
     for gen in range(start_gen, config.evolution.max_generations + 1):
         state.generation = gen
