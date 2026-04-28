@@ -14,7 +14,6 @@ from helix.exceptions import EvaluatorError, format_error_context
 from helix.parsers import get_parser
 from helix.sandbox import (
     current_evaluator_sidecar_runtime,
-    resolve_sandbox_image,
     run_sandboxed_commands,
 )
 from helix.trace import TRACE, EventType
@@ -198,11 +197,11 @@ def run_evaluator(
         return _override_result
 
     evaluator = config.evaluator
-    sandbox_image = (
-        resolve_sandbox_image(config.sandbox, config.agent.backend)
-        if config.sandbox.enabled
-        else None
-    )
+    sandbox_image = None
+    if config.sandbox.enabled:
+        if evaluator.sidecar is None:
+            raise ValueError("Sandboxed evaluation requires [evaluator.sidecar].")
+        sandbox_image = evaluator.sidecar.resolved_runner_image
 
     # Run main evaluation command
     env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)

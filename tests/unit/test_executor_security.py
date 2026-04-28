@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.population import Candidate
-from helix.config import HelixConfig, EvaluatorConfig, SandboxConfig
+from helix.config import EvaluatorSidecarConfig, EvaluatorConfig, HelixConfig, SandboxConfig
 from helix.executor import (
     run_evaluator,
     _validate_and_split_command,
@@ -281,11 +281,12 @@ class TestRunEvaluator:
 
         candidate = make_candidate()
         config = make_config(command="python /runner/evaluate.py")
-        config.evaluator.sidecar = {
-            "image": "eval:latest",
-            "command": "python -m server",
-            "endpoint": "http://helix-evaluator:8080/evaluate",
-        }
+        config.evaluator.sidecar = EvaluatorSidecarConfig(
+            image="eval:latest",
+            runner_image="eval-runner:latest",
+            command="python -m server",
+            endpoint="http://helix-evaluator:8080/evaluate",
+        )
         config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
 
         run_evaluator(candidate, config)
@@ -293,7 +294,7 @@ class TestRunEvaluator:
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["scope"] == "evaluator"
         assert mock_run.call_args.kwargs["sync_back"] is False
-        assert mock_run.call_args.kwargs["image"] == "ghcr.io/ke7/helix-evo-runner-claude:latest"
+        assert mock_run.call_args.kwargs["image"] == "eval-runner:latest"
 
     def test_sandboxed_evaluator_runs_extra_commands_in_same_sequence(self, mocker):
         mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
@@ -309,11 +310,12 @@ class TestRunEvaluator:
         candidate = make_candidate()
         config = make_config(command="python /runner/evaluate.py")
         config.evaluator.extra_commands = ["python extra.py"]
-        config.evaluator.sidecar = {
-            "image": "eval:latest",
-            "command": "python -m server",
-            "endpoint": "http://helix-evaluator:8080/evaluate",
-        }
+        config.evaluator.sidecar = EvaluatorSidecarConfig(
+            image="eval:latest",
+            runner_image="eval-runner:latest",
+            command="python -m server",
+            endpoint="http://helix-evaluator:8080/evaluate",
+        )
         config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
 
         run_evaluator(candidate, config)

@@ -41,6 +41,7 @@ debug failures.
 
    [evaluator.sidecar]
    image = "my-private-evaluator:latest"
+   runner_image = "my-evaluator-runner:latest"
    command = "python -m benchmark_server"
    endpoint = "http://helix-evaluator:8080/evaluate"
    ```
@@ -129,8 +130,9 @@ Symptoms and checks:
 - All zero minibatch scores: evaluator probably ignored `helix_batch.json` ids
   or keyed results by metric names instead of example ids.
 - Hangs: add evaluator-level timeouts or configure `[sandbox].timeout_seconds`.
-- Missing dependencies in sandbox: build them into the sidecar image or the
-  runner image selected by `[sandbox].image`.
+- Missing dependencies in sandbox: build private evaluator/simulator
+  dependencies into `[evaluator.sidecar].image` and evaluator-client
+  dependencies into `[evaluator.sidecar].runner_image`.
 
 Good `helix_result` smoke evaluator pattern:
 
@@ -208,7 +210,7 @@ venvs directly unless the user accepts portability and sandbox tradeoffs.
 - Add or fix `[sandbox]` and run `helix sandbox login <backend>`.
 - Add `[evaluator.sidecar]` when `[sandbox].enabled = true`.
 - Add evaluator service dependencies to the sidecar image and runner
-  dependencies to the sandbox image.
+  dependencies to `runner_image`.
 - Add `passthrough_env` for non-secret runtime vars such as CUDA/HF caches.
 - Use `protected_files` only for non-sandboxed local prototypes.
 - Switch to `score_parser = "helix_result"` for per-example datasets.

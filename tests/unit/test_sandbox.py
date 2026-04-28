@@ -8,9 +8,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from helix.config import SandboxConfig
+from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
     EvaluatorSidecarRuntime,
+    _healthcheck_docker_args,
     current_evaluator_sidecar_runtime,
     evaluator_sidecar_runtime,
     resolve_sandbox_image,
@@ -171,6 +172,23 @@ def test_sidecar_runtime_is_visible_to_worker_threads():
         thread.join()
 
     assert seen == [runtime]
+
+
+def test_sidecar_healthcheck_uses_runner_image_and_endpoint():
+    sidecar = EvaluatorSidecarConfig(
+        image="eval-service:latest",
+        runner_image="eval-runner:latest",
+        command="python -m server",
+        endpoint="http://helix-evaluator:8080/evaluate",
+        healthcheck_command="python /runner/healthcheck.py",
+    )
+
+    args = _healthcheck_docker_args(sidecar, network="helix-eval-private")
+
+    assert args[args.index("--network") + 1] == "helix-eval-private"
+    assert "HELIX_EVALUATOR_ENDPOINT=http://helix-evaluator:8080/evaluate" in args
+    assert "eval-runner:latest" in args
+    assert args[-2:] == ["python", "/runner/healthcheck.py"]
 
 
 def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path, mocker):

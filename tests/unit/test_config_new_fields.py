@@ -274,14 +274,19 @@ class TestSandboxConfig:
                 "score_parser": "helix_result",
                 "sidecar": EvaluatorSidecarConfig(
                     image="eval:latest",
+                    runner_image="eval-runner:latest",
                     command="python -m server",
                     endpoint="http://helix-evaluator:8080/evaluate",
+                    healthcheck_command="python /runner/healthcheck.py",
                 ),
             },
             sandbox=SandboxConfig(enabled=True),
         )
         assert cfg.evaluator.sidecar is not None
         assert cfg.evaluator.sidecar.image == "eval:latest"
+        assert cfg.evaluator.sidecar.runner_image == "eval-runner:latest"
+        assert cfg.evaluator.sidecar.resolved_runner_image == "eval-runner:latest"
+        assert cfg.evaluator.sidecar.healthcheck_command == "python /runner/healthcheck.py"
 
     def test_toml_loads_sandbox_config(self, tmp_path):
         toml = tmp_path / "helix.toml"
@@ -294,8 +299,10 @@ class TestSandboxConfig:
 
             [evaluator.sidecar]
             image = "eval:latest"
+            runner_image = "eval-runner:latest"
             command = "python -m server"
             endpoint = "http://helix-evaluator:8080/evaluate"
+            healthcheck_command = "python /runner/healthcheck.py"
 
             [sandbox]
             enabled = true
@@ -311,6 +318,8 @@ class TestSandboxConfig:
         assert cfg.sandbox.enabled is True
         assert cfg.evaluator.sidecar is not None
         assert cfg.evaluator.sidecar.endpoint == "http://helix-evaluator:8080/evaluate"
+        assert cfg.evaluator.sidecar.runner_image == "eval-runner:latest"
+        assert cfg.evaluator.sidecar.healthcheck_command == "python /runner/healthcheck.py"
         assert cfg.sandbox.image == "custom-helix:latest"
         assert cfg.sandbox.network == "none"
         assert cfg.sandbox.cpus == 2.0

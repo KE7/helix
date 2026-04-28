@@ -51,7 +51,13 @@ class EvaluatorSidecarConfig(BaseModel):
     image: str
     command: str
     endpoint: str
+    runner_image: str | None = None
+    healthcheck_command: str | None = None
     startup_timeout_seconds: int = 60
+
+    @property
+    def resolved_runner_image(self) -> str:
+        return self.runner_image or self.image
 
 
 class EvaluatorConfig(BaseModel):

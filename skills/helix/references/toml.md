@@ -44,9 +44,12 @@ extra_commands = []
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
+runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
 startup_timeout_seconds = 60
+# Optional when the default HTTP reachability probe is not enough:
+# healthcheck_command = "python /runner/healthcheck.py"
 ```
 
 Rules:
@@ -55,6 +58,10 @@ Rules:
 - In sandbox mode, `command` is the evaluator-runner command. The runner sees a
   copied `/workspace`, receives `HELIX_EVALUATOR_ENDPOINT`, calls the sidecar,
   prints `HELIX_RESULT`, and exits.
+- `runner_image` is the short-lived evaluator-runner image. It should contain
+  the runner script and client dependencies, not private benchmark data.
+- `image` is the long-lived private evaluator service image. It should contain
+  evaluator code, benchmark data, and expensive simulator dependencies.
 - The long-lived sidecar does not mount `/workspace`; the runner must stream
   the needed candidate files/data over RPC, or execute candidate code itself and
   call the sidecar only for private judging/simulation.
@@ -196,7 +203,8 @@ Sandbox behavior:
 - Evaluator sidecar starts once per `helix evolve` on a private internal Docker
   network.
 - Evaluator-runner containers run in fresh copied `/workspace` directories,
-  join the private evaluator network, call the sidecar, and exit.
+  use `[evaluator.sidecar].runner_image`, join the private evaluator network,
+  call the sidecar, and exit.
 - The sidecar sees only what the runner sends over the endpoint.
 - Evaluator-runner changes are discarded.
 - Agent auth volume mounts at `/home/node`.

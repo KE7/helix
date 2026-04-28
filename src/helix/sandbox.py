@@ -265,6 +265,81 @@ def _wait_for_container_running(container_name: str, timeout_seconds: int) -> No
     )
 
 
+def _default_sidecar_healthcheck_command() -> list[str]:
+    return [
+        "python",
+        "-c",
+        (
+            "import os, sys, urllib.error, urllib.request\n"
+            "url = os.environ['HELIX_EVALUATOR_ENDPOINT']\n"
+            "try:\n"
+            "    urllib.request.urlopen(url, timeout=2).close()\n"
+            "except urllib.error.HTTPError:\n"
+            "    sys.exit(0)\n"
+            "except Exception as exc:\n"
+            "    print(exc, file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+        ),
+    ]
+
+
+def _healthcheck_docker_args(
+    sidecar: EvaluatorSidecarConfig,
+    *,
+    network: str,
+) -> list[str]:
+    command = (
+        shlex.split(sidecar.healthcheck_command)
+        if sidecar.healthcheck_command
+        else _default_sidecar_healthcheck_command()
+    )
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        network,
+        "--security-opt",
+        "no-new-privileges",
+        "-e",
+        f"HELIX_EVALUATOR_ENDPOINT={sidecar.endpoint}",
+        sidecar.resolved_runner_image,
+        *command,
+    ]
+
+
+def _wait_for_sidecar_service(
+    sidecar: EvaluatorSidecarConfig,
+    *,
+    network: str,
+    container_name: str,
+) -> None:
+    deadline = time.monotonic() + sidecar.startup_timeout_seconds
+    last_output = ""
+    while time.monotonic() < deadline:
+        status = _run_docker(
+            ["docker", "inspect", "-f", "{{.State.Running}} {{.State.Status}}", container_name],
+            check=False,
+        )
+        if status.returncode == 0:
+            parts = status.stdout.strip().split()
+            if len(parts) > 1 and parts[1] in {"exited", "dead"}:
+                logs = _run_docker(["docker", "logs", container_name], check=False)
+                raise RuntimeError(
+                    "Evaluator sidecar exited before its endpoint became ready.\n"
+                    f"stdout:\n{logs.stdout}\nstderr:\n{logs.stderr}"
+                )
+        result = _run_docker(_healthcheck_docker_args(sidecar, network=network), check=False)
+        if result.returncode == 0:
+            return
+        last_output = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        time.sleep(0.5)
+    raise TimeoutError(
+        "Evaluator sidecar endpoint did not become reachable within "
+        f"{sidecar.startup_timeout_seconds}s: {sidecar.endpoint}\n{last_output}"
+    )
+
+
 @contextmanager
 def start_evaluator_sidecar(
     sidecar: EvaluatorSidecarConfig,
@@ -296,6 +371,7 @@ def start_evaluator_sidecar(
         args.extend(shlex.split(sidecar.command))
         _run_docker(args)
         _wait_for_container_running(container_name, sidecar.startup_timeout_seconds)
+        _wait_for_sidecar_service(sidecar, network=network, container_name=container_name)
         runtime = EvaluatorSidecarRuntime(
             network=network,
             container_name=container_name,
