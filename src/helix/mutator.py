@@ -551,7 +551,9 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
-        args.extend(["-p", prompt])
+        # Claude Code print mode reads stdin when no positional prompt is
+        # supplied. We pass large evolutionary prompts out-of-band so the
+        # Docker argv stays below kernel limits.
         return args
 
     if backend == "codex":
@@ -563,7 +565,6 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.append(prompt)
         return args
 
     if backend == "cursor":
@@ -579,14 +580,12 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.append(prompt)
         return args
 
     if backend == "gemini":
         args = [
             "gemini",
             "--yolo",
-            "--prompt", prompt,
             "--output-format", "stream-json",
         ]
         if config.model:
@@ -604,7 +603,11 @@ def _build_backend_args(
             args.extend(["--model", config.model])
         if config.effort:
             args.extend(["--variant", config.effort])
-        args.append(prompt)
+        args.extend([
+            "--file",
+            ".helix_mutation_prompt.md",
+            "Follow the instructions in the attached .helix_mutation_prompt.md exactly.",
+        ])
         return args
 
     raise ValueError(f"Unsupported backend: {backend}")
@@ -875,6 +878,7 @@ def invoke_claude_code(
     backend_worktree_path = "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
     args = _build_backend_args(backend_worktree_path, prompt, config)
     cmd_str = shlex.join(args)
+    stdin_text = prompt if backend in {"claude", "codex", "cursor", "gemini"} else None
 
     backend_env = _scrub_environment(passthrough_env=passthrough_env)
     _add_backend_auth_env(backend_env, backend)
@@ -891,6 +895,7 @@ def invoke_claude_code(
             sync_back=True,
             image=sandbox_image,
             agent_backend=backend,
+            input_text=stdin_text,
         )
     else:
         result = subprocess.run(
@@ -898,6 +903,7 @@ def invoke_claude_code(
             cwd=worktree_path,
             capture_output=True,
             text=True,
+            input=stdin_text,
             env=backend_env,
         )
 

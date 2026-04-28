@@ -566,8 +566,8 @@ class TestInvokeClaudeCode:
         assert "Read,Edit" in args_list
         assert "--model" not in args_list
         assert "--max-turns" not in args_list
-        assert "-p" in args_list
-        assert "the prompt" in args_list
+        assert "the prompt" not in args_list
+        assert call_args[1]["input"] == "the prompt"
 
     def test_uses_correct_cwd(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
@@ -601,7 +601,8 @@ class TestInvokeClaudeCode:
         assert "--dangerously-bypass-approvals-and-sandbox" in args_list
         assert "--model" in args_list
         assert "gpt-5" in args_list
-        assert args_list[-1] == "the prompt"
+        assert "the prompt" not in args_list
+        assert mock_run.call_args[1]["input"] == "the prompt"
         assert result["events"][0]["thread_id"] == "thr_123"
 
     def test_cursor_cli_args_use_stream_json(self, mocker):
@@ -623,7 +624,8 @@ class TestInvokeClaudeCode:
         assert "--yolo" in args_list
         assert "--workspace" in args_list
         assert "/tmp/wt" in args_list
-        assert args_list[-1] == "the prompt"
+        assert "the prompt" not in args_list
+        assert mock_run.call_args[1]["input"] == "the prompt"
         assert result["events"][0]["session_id"] == "sess_123"
 
     def test_backend_artifacts_written_for_structured_backends(self, tmp_path: Path, mocker):
@@ -668,11 +670,11 @@ class TestInvokeClaudeCode:
     @pytest.mark.parametrize(
         ("backend", "expected_prefix", "expected_flags"),
         [
-            ("gemini", ["gemini"], ["--yolo", "--prompt", "--output-format", "stream-json"]),
+            ("gemini", ["gemini"], ["--yolo", "--output-format", "stream-json"]),
             (
                 "opencode",
                 ["opencode", "run"],
-                ["--format", "json", "--dangerously-skip-permissions"],
+                ["--format", "json", "--dangerously-skip-permissions", "--file"],
             ),
         ],
     )
@@ -692,6 +694,11 @@ class TestInvokeClaudeCode:
         for flag in expected_flags:
             assert flag in args_list
         assert "test-model" in args_list
+        assert "the prompt" not in args_list
+        if backend == "gemini":
+            assert mock_run.call_args[1]["input"] == "the prompt"
+        if backend == "opencode":
+            assert ".helix_mutation_prompt.md" in args_list
         assert result["events"][0]["session_id"] == "sess_123"
 
     def test_opencode_usage_normalization_captures_session_id_and_cost(self, tmp_path: Path, mocker):
