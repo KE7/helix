@@ -1738,7 +1738,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
                 endpoint="http://helix-evaluator:8080/evaluate",
             ),
         ),
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, evaluator=True),
         evolution=EvolutionConfig(max_generations=0),
     )
 
