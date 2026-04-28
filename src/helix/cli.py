@@ -72,6 +72,7 @@ command = "uv run python evaluate.py"
 #
 # [evaluator.sidecar]
 # image = "my-private-evaluator:latest"
+# runner_image = "my-evaluator-runner:latest"
 # command = "python -m benchmark_server"
 # endpoint = "http://helix-evaluator:8080/evaluate"
 

@@ -104,6 +104,7 @@ score_parser = "helix_result"
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
+runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
 
@@ -130,6 +131,7 @@ score_parser = "json_score"
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
+runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
 ```
@@ -265,7 +267,7 @@ If the old GEPA evaluator depended on local packages, either:
 
 - build them into the sidecar image if they are evaluator/benchmark
   dependencies, or
-- build them into the sandbox image if they are evaluator-runner dependencies.
+- build them into `runner_image` if they are evaluator-runner dependencies.
 
 ## Migration Checklist
 

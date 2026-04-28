@@ -193,8 +193,10 @@ score_parser = "helix_result"
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
+runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
+startup_timeout_seconds = 120
 
 [sandbox]
 enabled = true
@@ -400,6 +402,9 @@ network, call the sidecar, print evaluator output, and exit.
 The long-lived sidecar does not mount the candidate workspace; the runner must
 stream the needed candidate files/data over RPC, or execute candidate code
 itself and call the sidecar only for private judging/simulation.
+`[evaluator.sidecar].image` is the private service image; `runner_image` is the
+short-lived client image used for `[evaluator].command`. Keep private benchmark
+data in the service image, not in the runner image.
 
 Agent changes are synced back to the real candidate worktree after the backend
 exits; evaluator-runner file changes are discarded. HELIX never mounts the host
@@ -442,7 +447,7 @@ evaluator uses a local proxy, keep that endpoint in your evaluator code as
 usual. Docker Desktop supports `host.docker.internal`; Linux users can set
 `add_host_gateway = true`.
 
-By default HELIX chooses a published backend-specific image from
+By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-claude`,
 `ghcr.io/ke7/helix-evo-runner-codex`,
 `ghcr.io/ke7/helix-evo-runner-cursor`,
@@ -453,6 +458,11 @@ shared base first with
 build the backend image you need, for example
 `docker build -t helix-runner-codex:latest -f docker/codex.Dockerfile .`, and
 set `[sandbox].image` to that local tag.
+
+Evaluator sidecar images are benchmark-specific and are not published by HELIX.
+Use `ghcr.io/ke7/helix-evo-runner-base` or `docker/base.Dockerfile` as a base
+for your own `runner_image`; build/publish the private sidecar service image
+from your evaluator repository.
 
 ### Dataset Modes
 
