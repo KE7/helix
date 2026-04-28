@@ -47,7 +47,12 @@ from helix.display import (
     render_generation,
     set_phase,
 )
-from helix.exceptions import HelixError, RateLimitError, print_helix_error
+from helix.exceptions import (
+    HelixError,
+    PromptArtifactCollisionError,
+    RateLimitError,
+    print_helix_error,
+)
 from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
 from helix.merger import merge, select_eval_subsample_for_merged_program
@@ -1923,6 +1928,8 @@ def _run_evolution_impl(
                         if isinstance(exc, HelixError):
                             exc.operation = exc.operation or f"parallel mutate {_fail_id}"
                             print_helix_error(exc)
+                            if isinstance(exc, PromptArtifactCollisionError):
+                                raise
                             if isinstance(exc, RateLimitError):
                                 # Loud ERROR log so the user clearly sees which
                                 # proposal slot was dropped and why (Fix 2).

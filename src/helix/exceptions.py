@@ -85,6 +85,10 @@ class MutationError(HelixError):
     """Raised when a mutation attempt fails (timeout, non-zero exit, bad JSON)."""
 
 
+class PromptArtifactCollisionError(HelixError):
+    """Raised when HELIX cannot reserve its prompt artifact path safely."""
+
+
 class EvaluatorError(HelixError):
     """Raised when an evaluator subprocess fails."""
 
