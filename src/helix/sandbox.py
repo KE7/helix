@@ -82,13 +82,19 @@ def resolve_sandbox_image(sandbox: SandboxConfig, agent_backend: str | None = No
 
 def _ignore_for_copy(path: Path) -> bool:
     parts = path.parts
-    return ".git" in parts or path.name == ".env" or path.name.startswith(".env.")
+    return (
+        ".git" in parts
+        or path.name == "helix.toml"
+        or path.name == ".env"
+        or path.name.startswith(".env.")
+    )
 
 
 def _ignore_for_sync(path: Path) -> bool:
     parts = path.parts
     return (
         ".git" in parts
+        or path.name == "helix.toml"
         or path.name in HELIX_ARTIFACT_NAMES
         or path.name == ".env"
         or path.name.startswith(".env.")
