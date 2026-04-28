@@ -513,10 +513,13 @@ def run_sandboxed_commands(
     sync_back: bool,
     image: str | None = None,
     agent_backend: str | None = None,
+    input_text: str | None = None,
 ) -> list[subprocess.CompletedProcess[str]]:
     """Run commands in one Docker sandbox workspace copy."""
     if not commands:
         raise ValueError("at least one sandbox command is required")
+    if input_text is not None and len(commands) != 1:
+        raise ValueError("input_text is only supported for a single sandbox command")
     source = Path(cwd).resolve()
     docker_image = image or sandbox.image
     if docker_image is None:
@@ -559,6 +562,7 @@ def run_sandboxed_commands(
                         cwd=str(source),
                         capture_output=True,
                         text=True,
+                        input=input_text,
                         env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ},
                         timeout=sandbox.timeout_seconds,
                     )
@@ -586,6 +590,7 @@ def run_sandboxed_command(
     sync_back: bool,
     image: str | None = None,
     agent_backend: str | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one command in a Docker sandbox using a copy of *cwd* as workspace."""
     return run_sandboxed_commands(
@@ -597,6 +602,7 @@ def run_sandboxed_command(
         sync_back=sync_back,
         image=image,
         agent_backend=agent_backend,
+        input_text=input_text,
     )[0]
 
 
