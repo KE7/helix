@@ -34,7 +34,7 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
 
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "claude": {
-        "login": ["claude", "setup-token"],
+        "login": ["claude", "auth", "login", "--claudeai"],
         "status": ["claude", "auth", "status", "--text"],
         "logout": ["claude", "auth", "logout"],
     },

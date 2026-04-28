@@ -101,17 +101,28 @@ def _ignore_for_sync(path: Path) -> bool:
     )
 
 
+def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
+    """Return whether a relative path is equal to or under an omitted path."""
+    for item in omitted:
+        if path == item or item in path.parents:
+            return True
+    return False
+
+
 def _copy_tree_contents(
     src: Path,
     dst: Path,
     *,
     for_sync: bool = False,
     skip_special_files: bool = True,
+    omit_paths: set[Path] | None = None,
 ) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     ignore = _ignore_for_sync if for_sync else _ignore_for_copy
+    omitted = omit_paths or set()
     for child in src.iterdir():
-        if ignore(child.relative_to(src)):
+        rel = child.relative_to(src)
+        if ignore(rel) or _matches_omitted_path(rel, omitted):
             continue
         if skip_special_files and not _is_supported_workspace_file(child):
             continue
@@ -129,15 +140,27 @@ def _copy_tree_contents(
                 target,
                 for_sync=for_sync,
                 skip_special_files=skip_special_files,
+                omit_paths={
+                    path.relative_to(rel)
+                    for path in omitted
+                    if path != rel and rel in path.parents
+                },
             )
         else:
             shutil.copy2(child, target)
 
 
-def _remove_extraneous_files(src: Path, dst: Path, *, skip_special_files: bool = True) -> None:
+def _remove_extraneous_files(
+    src: Path,
+    dst: Path,
+    *,
+    skip_special_files: bool = True,
+    omit_paths: set[Path] | None = None,
+) -> None:
+    omitted = omit_paths or set()
     for child in list(dst.iterdir()):
         rel = child.relative_to(dst)
-        if _ignore_for_sync(rel):
+        if _ignore_for_sync(rel) or _matches_omitted_path(rel, omitted):
             continue
         if skip_special_files and not _is_supported_workspace_file(child):
             continue
@@ -148,12 +171,32 @@ def _remove_extraneous_files(src: Path, dst: Path, *, skip_special_files: bool =
                 child.unlink()
             continue
         if child.is_dir() and not child.is_symlink():
-            _remove_extraneous_files(src / rel, child, skip_special_files=skip_special_files)
+            _remove_extraneous_files(
+                src / rel,
+                child,
+                skip_special_files=skip_special_files,
+            )
 
 
-def _sync_back_workspace(src: Path, dst: Path, *, skip_special_files: bool = True) -> None:
-    _remove_extraneous_files(src, dst, skip_special_files=skip_special_files)
-    _copy_tree_contents(src, dst, for_sync=True, skip_special_files=skip_special_files)
+def _sync_back_workspace(
+    src: Path,
+    dst: Path,
+    *,
+    skip_special_files: bool = True,
+    omit_paths: set[Path] | None = None,
+) -> None:
+    _remove_extraneous_files(
+        src,
+        dst,
+        skip_special_files=skip_special_files,
+        omit_paths=omit_paths,
+    )
+    _copy_tree_contents(
+        src,
+        dst,
+        for_sync=True,
+        skip_special_files=skip_special_files,
+    )
 
 
 def _init_synthetic_git_repo(workspace: Path) -> None:
@@ -212,6 +255,21 @@ def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
 def _host_owner() -> str | None:
     if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
         return None
+    try:
+        info = subprocess.run(
+            ["docker", "info", "--format", "{{json .SecurityOptions}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ},
+        )
+        if info.returncode == 0 and "rootless" in (info.stdout or ""):
+            # In rootless Docker, container root maps back to the host user.
+            # Chowning to the numeric host uid from inside the namespace maps
+            # to an unmapped subuid and leaves the host unable to clean up.
+            return "root:root"
+    except Exception:
+        pass
     return f"{os.getuid()}:{os.getgid()}"
 
 
@@ -465,7 +523,17 @@ def run_sandboxed_commands(
         raise ValueError("sandbox image must be provided")
     with tempfile.TemporaryDirectory(prefix="helix-sandbox-") as tmp:
         workspace = Path(tmp) / "workspace"
-        _copy_tree_contents(source, workspace, skip_special_files=sandbox.skip_special_files)
+        omit_paths = (
+            {Path(item) for item in sandbox.omit_from_agent}
+            if scope == "agent"
+            else set()
+        )
+        _copy_tree_contents(
+            source,
+            workspace,
+            skip_special_files=sandbox.skip_special_files,
+            omit_paths=omit_paths,
+        )
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
         sidecar_runtime = current_evaluator_sidecar_runtime() if scope == "evaluator" else None
@@ -488,7 +556,7 @@ def run_sandboxed_commands(
                 results.append(
                     subprocess.run(
                         docker_cmd,
-                        cwd=str(workspace),
+                        cwd=str(source),
                         capture_output=True,
                         text=True,
                         env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ},
@@ -499,7 +567,12 @@ def run_sandboxed_commands(
             if host_owner := _host_owner():
                 _docker_chown_workspace(workspace, docker_image, host_owner)
         if sync_back:
-            _sync_back_workspace(workspace, source, skip_special_files=sandbox.skip_special_files)
+            _sync_back_workspace(
+                workspace,
+                source,
+                skip_special_files=sandbox.skip_special_files,
+                omit_paths=omit_paths,
+            )
     return results
 
 

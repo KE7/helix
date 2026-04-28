@@ -899,7 +899,7 @@ def run_evolution(
     base_dir: Path,
 ) -> Candidate:
     """Run the HELIX evolutionary loop."""
-    if config.sandbox.enabled:
+    if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
             raise HelixError(
                 "Docker sandboxing requires [evaluator.sidecar].",
