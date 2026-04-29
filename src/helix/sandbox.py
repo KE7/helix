@@ -298,6 +298,19 @@ def _run_docker(
     )
 
 
+def _build_add_host_args(
+    *,
+    add_host_gateway: bool,
+    extra_hosts: dict[str, str] | None,
+) -> list[str]:
+    args: list[str] = []
+    if add_host_gateway:
+        args.extend(["--add-host", "host.docker.internal:host-gateway"])
+    for host, target in (extra_hosts or {}).items():
+        args.extend(["--add-host", f"{host}:{target}"])
+    return args
+
+
 def _wait_for_container_running(container_name: str, timeout_seconds: int) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_stderr = ""
@@ -352,6 +365,7 @@ def _healthcheck_docker_args(
     sidecar: EvaluatorSidecarConfig,
     *,
     network: str,
+    extra_hosts: dict[str, str] | None = None,
 ) -> list[str]:
     command = (
         shlex.split(sidecar.healthcheck_command)
@@ -366,6 +380,7 @@ def _healthcheck_docker_args(
         network,
         "--security-opt",
         "no-new-privileges",
+        *_build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts),
         "-e",
         f"HELIX_EVALUATOR_ENDPOINT={sidecar.endpoint}",
         sidecar.resolved_runner_image,
@@ -378,6 +393,7 @@ def _wait_for_sidecar_service(
     *,
     network: str,
     container_name: str,
+    extra_hosts: dict[str, str] | None = None,
 ) -> None:
     deadline = time.monotonic() + sidecar.startup_timeout_seconds
     last_output = ""
@@ -394,7 +410,14 @@ def _wait_for_sidecar_service(
                     "Evaluator sidecar exited before its endpoint became ready.\n"
                     f"stdout:\n{logs.stdout}\nstderr:\n{logs.stderr}"
                 )
-        result = _run_docker(_healthcheck_docker_args(sidecar, network=network), check=False)
+        result = _run_docker(
+            _healthcheck_docker_args(
+                sidecar,
+                network=network,
+                extra_hosts=extra_hosts,
+            ),
+            check=False,
+        )
         if result.returncode == 0:
             return
         last_output = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -410,6 +433,7 @@ def start_evaluator_sidecar(
     sidecar: EvaluatorSidecarConfig,
     *,
     passthrough_env: list[str] | None = None,
+    extra_hosts: dict[str, str] | None = None,
 ) -> Iterator[EvaluatorSidecarRuntime]:
     suffix = uuid.uuid4().hex[:12]
     network = f"helix-eval-{suffix}"
@@ -429,6 +453,7 @@ def start_evaluator_sidecar(
             "--security-opt",
             "no-new-privileges",
         ]
+        args.extend(_build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts))
         for key in passthrough_env or []:
             if key in os.environ:
                 args.extend(["-e", f"{key}={os.environ[key]}"])
@@ -436,7 +461,12 @@ def start_evaluator_sidecar(
         args.extend(shlex.split(sidecar.command))
         _run_docker(args)
         _wait_for_container_running(container_name, sidecar.startup_timeout_seconds)
-        _wait_for_sidecar_service(sidecar, network=network, container_name=container_name)
+        _wait_for_sidecar_service(
+            sidecar,
+            network=network,
+            container_name=container_name,
+            extra_hosts=extra_hosts,
+        )
         runtime = EvaluatorSidecarRuntime(
             network=network,
             container_name=container_name,
@@ -491,8 +521,12 @@ def _docker_args(
         args.extend(["--cpus", str(sandbox.cpus)])
     if sandbox.memory is not None:
         args.extend(["--memory", sandbox.memory])
-    if sandbox.add_host_gateway:
-        args.extend(["--add-host", "host.docker.internal:host-gateway"])
+    args.extend(
+        _build_add_host_args(
+            add_host_gateway=sandbox.add_host_gateway,
+            extra_hosts=sandbox.extra_hosts,
+        )
+    )
 
     container_env = {
         key: value
@@ -620,6 +654,7 @@ def sandbox_auth_docker_args(
     action: Literal["login", "status", "logout"],
     network: str = "bridge",
     add_host_gateway: bool = False,
+    extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
 ) -> list[str]:
     try:
@@ -639,6 +674,7 @@ def sandbox_auth_docker_args(
         network,
         "--security-opt",
         "no-new-privileges",
+        *_build_add_host_args(add_host_gateway=add_host_gateway, extra_hosts=extra_hosts),
         "-v",
         f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw",
         "-e",
@@ -648,8 +684,6 @@ def sandbox_auth_docker_args(
     ]
     if interactive:
         args.insert(2, "-it")
-    if add_host_gateway:
-        args.extend(["--add-host", "host.docker.internal:host-gateway"])
     args.append(image)
     args.extend(command)
     return args
@@ -662,6 +696,7 @@ def run_sandbox_auth_command(
     image: str | None = None,
     network: str = "bridge",
     add_host_gateway: bool = False,
+    extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     docker_image = image or resolve_sandbox_image(SandboxConfig(enabled=True), agent_backend)
@@ -671,6 +706,7 @@ def run_sandbox_auth_command(
         action=action,
         network=network,
         add_host_gateway=add_host_gateway,
+        extra_hosts=extra_hosts,
         interactive=interactive,
     )
     if interactive:

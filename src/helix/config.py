@@ -477,6 +477,7 @@ class SandboxConfig(BaseModel):
     timeout_seconds: int | None = None
     pids_limit: int | None = 512
     add_host_gateway: bool = False
+    extra_hosts: dict[str, str] = Field(default_factory=dict)
     skip_special_files: bool = True
     omit_from_agent: list[str] = Field(default_factory=list)
 

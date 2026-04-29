@@ -64,6 +64,7 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
         memory="2g",
         timeout_seconds=10,
         add_host_gateway=True,
+        extra_hosts={"env-endpoint": "host-gateway", "local-service": "127.0.0.1"},
     )
 
     run_sandboxed_command(
@@ -82,7 +83,10 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     assert "--user node" in joined
     assert "--cpus 1.5" in joined
     assert "--memory 2g" in joined
+    assert "--add-host" in joined
     assert "--add-host host.docker.internal:host-gateway" in joined
+    assert "--add-host env-endpoint:host-gateway" in joined
+    assert "--add-host local-service:127.0.0.1" in joined
     assert "helix-test:latest" in docker_call
     assert "-e" in docker_call
     assert "HOME=/home/node" in docker_call
@@ -396,6 +400,7 @@ def test_sandbox_auth_login_command_uses_persistent_volume():
         "cursor",
         image="helix-cursor:latest",
         action="login",
+        extra_hosts={"local-service": "127.0.0.1"},
         interactive=True,
     )
 
@@ -403,6 +408,7 @@ def test_sandbox_auth_login_command_uses_persistent_volume():
     assert "helix-auth-cursor:/home/node:rw" in args
     assert "helix-cursor:latest" in args
     assert args[-2:] == ["cursor-agent", "login"]
+    assert "--add-host local-service:127.0.0.1" in " ".join(args)
 
 
 def test_sandbox_auth_status_command_uses_backend_command():
