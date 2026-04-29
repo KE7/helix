@@ -242,6 +242,7 @@ class TestSandboxConfig:
         assert cfg.backend == "docker"
         assert cfg.image is None
         assert cfg.network == "bridge"
+        assert cfg.extra_hosts == {}
         assert cfg.skip_special_files is True
 
     def test_sandboxed_evaluator_requires_sidecar(self):
@@ -314,6 +315,10 @@ class TestSandboxConfig:
             timeout_seconds = 300
             add_host_gateway = true
             skip_special_files = false
+
+            [sandbox.extra_hosts]
+            "env-endpoint" = "host-gateway"
+            "local-service" = "127.0.0.1"
         """))
         cfg = load_config(toml)
         assert cfg.sandbox.enabled is True
@@ -328,6 +333,10 @@ class TestSandboxConfig:
         assert cfg.sandbox.timeout_seconds == 300
         assert cfg.sandbox.add_host_gateway is True
         assert cfg.sandbox.skip_special_files is False
+        assert cfg.sandbox.extra_hosts == {
+            "env-endpoint": "host-gateway",
+            "local-service": "127.0.0.1",
+        }
 
     def test_load_config_loads_adjacent_dotenv_without_overriding(self, tmp_path, monkeypatch):
         toml = tmp_path / "helix.toml"
