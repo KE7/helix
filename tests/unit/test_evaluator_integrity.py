@@ -12,6 +12,7 @@ from helix.evolution import (
     _collect_protected_evaluator_paths,
     _detect_evaluator_tamper,
     _load_evaluator_integrity_manifest,
+    _refresh_protected_evaluator_files,
     _write_evaluator_integrity_manifest,
 )
 from helix.exceptions import HelixError
@@ -92,3 +93,37 @@ def test_manifest_roundtrip(tmp_path):
     loaded = _load_evaluator_integrity_manifest(tmp_path)
     assert loaded == manifest
 
+
+def test_refreshes_protected_files_and_directories_from_current_root(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "evaluate.py").write_text("fixed evaluator\n")
+    (project / "splits" / "instance_ids").mkdir(parents=True)
+    (project / "splits" / "train.yaml").write_text("seeds: [0, 1]\n")
+    (project / "splits" / "instance_ids" / "cube_lifting__0.json").write_text("{}\n")
+    (project / "splits" / "instance_ids" / "cube_lifting__1.json").write_text("{}\n")
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "evaluate.py").write_text("stale evaluator\n")
+    (worktree / "splits" / "instance_ids").mkdir(parents=True)
+    (worktree / "splits" / "train.yaml").write_text("trials_per_task: 1\n")
+    (worktree / "splits" / "instance_ids" / "cube_lifting__0.json").write_text("{}\n")
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python evaluate.py",
+            protected_files=["splits"],
+        ),
+    )
+
+    _refresh_protected_evaluator_files(_candidate(str(worktree)), config, project)
+
+    assert (worktree / "evaluate.py").read_text() == "fixed evaluator\n"
+    assert (worktree / "splits" / "train.yaml").read_text() == "seeds: [0, 1]\n"
+    instance_ids = sorted((worktree / "splits" / "instance_ids").glob("*.json"))
+    assert [path.name for path in instance_ids] == [
+        "cube_lifting__0.json",
+        "cube_lifting__1.json",
+    ]
