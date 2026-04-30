@@ -93,9 +93,17 @@ For backend diagnostics in a candidate worktree, inspect:
 .helix_backend_result.json
 .helix_backend_stdout.txt
 .helix_backend_stderr.txt
+.helix_artifacts/backend_transcripts/claude/<session_id>.jsonl
 ```
 
-These are HELIX artifacts and do not sync back from sandbox workspaces.
+The backend result JSON includes normalized usage metadata and, for Claude Code,
+`transcript_artifacts` entries when HELIX can copy the JSONL transcript. In
+Docker sandbox mode HELIX copies Claude transcripts from the backend auth volume
+at `/home/node/.claude/projects/-workspace/<session_id>.jsonl` into the
+candidate worktree before syncing changes back. Codex structured stdout is
+preserved in `.helix_backend_stdout.txt`; durable Codex transcript copying is an
+extension point because HELIX does not currently know a stable Codex transcript
+path in the sandbox auth volume.
 
 ## Resuming
 
