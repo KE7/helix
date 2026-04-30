@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 
 import pytest
 
@@ -12,6 +13,7 @@ from helix.evolution import (
     _collect_protected_evaluator_paths,
     _detect_evaluator_tamper,
     _load_evaluator_integrity_manifest,
+    _refresh_and_snapshot_protected_evaluator_files,
     _refresh_protected_evaluator_files,
     _write_evaluator_integrity_manifest,
 )
@@ -127,3 +129,52 @@ def test_refreshes_protected_files_and_directories_from_current_root(tmp_path):
         "cube_lifting__0.json",
         "cube_lifting__1.json",
     ]
+
+
+def test_refresh_snapshot_normalizes_protected_file_baseline(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "evaluate.py").write_text("current evaluator\n")
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init"], cwd=worktree, check=True, capture_output=True)
+    (worktree / "evaluate.py").write_text("stale evaluator\n")
+    subprocess.run(["git", "add", "evaluate.py"], cwd=worktree, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+    )
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="python evaluate.py"),
+    )
+    candidate = _candidate(str(worktree))
+    manifest = _build_evaluator_integrity_manifest(config, project, project)
+
+    _refresh_and_snapshot_protected_evaluator_files(candidate, config, project)
+
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+    assert _detect_evaluator_tamper(candidate, manifest) == []
+
+    (worktree / "evaluate.py").write_text("backend tampered\n")
+    assert _detect_evaluator_tamper(candidate, manifest) == ["evaluate.py"]

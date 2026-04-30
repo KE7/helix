@@ -408,6 +408,16 @@ def _refresh_protected_evaluator_files(
         _copy_protected_path(source, worktree_root / rel_path)
 
 
+def _refresh_and_snapshot_protected_evaluator_files(
+    candidate: Candidate,
+    config: HelixConfig,
+    project_root: Path,
+) -> None:
+    """Normalize HELIX-owned protected-file refresh before backend mutation."""
+    _refresh_protected_evaluator_files(candidate, config, project_root)
+    snapshot_candidate(candidate, "helix: refresh protected evaluator files")
+
+
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1480,7 +1490,7 @@ def _run_evolution_impl(
                     background=config.agent.background,
                     eval_result_a=era,
                     eval_result_b=erb,
-                    prepare_worktree=lambda cand: _refresh_protected_evaluator_files(
+                    prepare_worktree=lambda cand: _refresh_and_snapshot_protected_evaluator_files(
                         cand, config, project_root
                     ),
                 )
@@ -1966,7 +1976,7 @@ def _run_evolution_impl(
                 config=config,
                 base_dir=worktrees_dir,
                 background=config.agent.background,
-                prepare_worktree=lambda cand: _refresh_protected_evaluator_files(
+                prepare_worktree=lambda cand: _refresh_and_snapshot_protected_evaluator_files(
                     cand, config, project_root
                 ),
             )
