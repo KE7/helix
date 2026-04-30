@@ -515,6 +515,14 @@ class HelixConfig(BaseModel):
             '["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]).'
         ),
     )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Fixed environment variable values to inject into evaluator and "
+            "agent subprocesses after passthrough_env. Use this for repeatable "
+            "run-local endpoints and non-secret defaults."
+        ),
+    )
     evaluator: EvaluatorConfig
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     seedless: SeedlessConfig = Field(default_factory=SeedlessConfig)

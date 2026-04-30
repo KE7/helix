@@ -206,6 +206,7 @@ def merge(
             prompt,
             config.agent,
             passthrough_env=config.passthrough_env,
+            fixed_env=config.env,
             sandbox=config.sandbox,
         )
     except MutationError as exc:

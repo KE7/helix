@@ -790,6 +790,26 @@ class TestInvokeClaudeCode:
 
         assert mock_run.call_args.kwargs["env"]["CURSOR_API_KEY"] == "cursor-key"
 
+    def test_fixed_env_is_passed_to_backend_subprocess(self, mocker, monkeypatch):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://wrong")
+
+        invoke_claude_code(
+            "/tmp/wt",
+            "prompt",
+            AgentConfig(),
+            passthrough_env=["ANTHROPIC_BASE_URL"],
+            fixed_env={
+                "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+                "ANTHROPIC_API_KEY": "dummy",
+            },
+        )
+
+        env = mock_run.call_args.kwargs["env"]
+        assert env["ANTHROPIC_BASE_URL"] == "http://qwen-vllm-endpoint:8003"
+        assert env["ANTHROPIC_API_KEY"] == "dummy"
+
 
 # ---------------------------------------------------------------------------
 # Tests: mutate

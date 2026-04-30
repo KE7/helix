@@ -915,6 +915,7 @@ def run_evolution(
         with start_evaluator_sidecar(
             config.evaluator.sidecar,
             passthrough_env=config.passthrough_env,
+            fixed_env=config.env,
             extra_hosts=config.sandbox.extra_hosts,
         ):
             return _run_evolution_impl(config, project_root, base_dir)

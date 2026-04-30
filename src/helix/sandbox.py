@@ -134,14 +134,17 @@ def _copy_tree_contents(
         if skip_special_files and not _is_supported_workspace_file(child):
             continue
         target = dst / child.name
-        if target.exists() or target.is_symlink():
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
         if child.is_symlink():
+            if target.exists() or target.is_symlink():
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
             os.symlink(os.readlink(child), target)
         elif child.is_dir():
+            if target.exists() or target.is_symlink():
+                if not target.is_dir() or target.is_symlink():
+                    target.unlink()
             _copy_tree_contents(
                 child,
                 target,
@@ -154,6 +157,11 @@ def _copy_tree_contents(
                 },
             )
         else:
+            if target.exists() or target.is_symlink():
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
             shutil.copy2(child, target)
 
 
@@ -182,6 +190,11 @@ def _remove_extraneous_files(
                 src / rel,
                 child,
                 skip_special_files=skip_special_files,
+                omit_paths={
+                    path.relative_to(rel)
+                    for path in omitted
+                    if path != rel and rel in path.parents
+                },
             )
 
 
@@ -203,6 +216,7 @@ def _sync_back_workspace(
         dst,
         for_sync=True,
         skip_special_files=skip_special_files,
+        omit_paths=omit_paths,
     )
 
 
@@ -433,6 +447,7 @@ def start_evaluator_sidecar(
     sidecar: EvaluatorSidecarConfig,
     *,
     passthrough_env: list[str] | None = None,
+    fixed_env: dict[str, str] | None = None,
     extra_hosts: dict[str, str] | None = None,
 ) -> Iterator[EvaluatorSidecarRuntime]:
     suffix = uuid.uuid4().hex[:12]
@@ -457,6 +472,8 @@ def start_evaluator_sidecar(
         for key in passthrough_env or []:
             if key in os.environ:
                 args.extend(["-e", f"{key}={os.environ[key]}"])
+        for key, value in (fixed_env or {}).items():
+            args.extend(["-e", f"{key}={value}"])
         args.append(sidecar.image)
         args.extend(shlex.split(sidecar.command))
         _run_docker(args)

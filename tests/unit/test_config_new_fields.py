@@ -236,6 +236,27 @@ class TestEvolutionFrontierType:
 
 
 class TestSandboxConfig:
+    def test_toml_loads_fixed_env_config(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(textwrap.dedent("""
+            objective = "Test"
+
+            [env]
+            ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+            ANTHROPIC_API_KEY = "dummy"
+
+            [evaluator]
+            command = "pytest -q"
+            score_parser = "exitcode"
+        """))
+
+        cfg = load_config(toml)
+
+        assert cfg.env == {
+            "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+            "ANTHROPIC_API_KEY": "dummy",
+        }
+
     def test_defaults_disabled_for_backwards_compatibility(self):
         cfg = SandboxConfig()
         assert cfg.enabled is False

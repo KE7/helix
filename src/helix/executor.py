@@ -60,6 +60,7 @@ def _scrub_environment(
     split: str | None = None,
     instance_ids: list[str] | None = None,
     passthrough_env: list[str] | None = None,
+    fixed_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Create a scrubbed environment with only allowed variables.
 
@@ -78,6 +79,9 @@ def _scrub_environment(
             and HELIX post-filters the returned instance_scores.
         passthrough_env: Optional list of extra env var names to preserve
             from the parent process (e.g. CUDA_VISIBLE_DEVICES, HF_HOME).
+        fixed_env: Optional mapping of explicit env var values to inject after
+            passthrough values. Useful for run-local endpoints captured in
+            helix.toml.
 
     Returns:
         Dict containing only PATH, HOME, HELIX_* variables,
@@ -112,6 +116,9 @@ def _scrub_environment(
     for key in passthrough_env or []:
         if key in os.environ:
             scrubbed[key] = os.environ[key]
+
+    for key, value in (fixed_env or {}).items():
+        scrubbed[str(key)] = str(value)
 
     return scrubbed
 
@@ -204,7 +211,12 @@ def run_evaluator(
         sandbox_image = evaluator.sidecar.resolved_runner_image
 
     # Run main evaluation command
-    env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)
+    env = _scrub_environment(
+        split,
+        instance_ids=instance_ids,
+        passthrough_env=config.passthrough_env,
+        fixed_env=config.env,
+    )
     cmd_tokens = _validate_and_split_command(evaluator.command)
     if config.sandbox.enabled and config.sandbox.evaluator:
         if current_evaluator_sidecar_runtime() is None:

@@ -19,6 +19,7 @@ from helix.sandbox import (
     run_sandboxed_commands,
     sandbox_auth_docker_args,
     sandbox_auth_volume_name,
+    start_evaluator_sidecar,
 )
 
 
@@ -195,6 +196,33 @@ def test_sidecar_healthcheck_uses_runner_image_and_endpoint():
     assert args[-2:] == ["python", "/runner/healthcheck.py"]
 
 
+def test_start_evaluator_sidecar_injects_fixed_env(mocker):
+    calls: list[list[str]] = []
+
+    def fake_run_docker(args, *, check=True):
+        calls.append(args)
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(args, 0, stdout="true running\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox._run_docker", side_effect=fake_run_docker)
+
+    sidecar = EvaluatorSidecarConfig(
+        image="eval-service:latest",
+        command="python -m server",
+        endpoint="http://helix-evaluator:8080/evaluate",
+    )
+
+    with start_evaluator_sidecar(
+        sidecar,
+        fixed_env={"EVALUATOR_BASE_URL": "http://qwen-vllm-endpoint:8003"},
+    ):
+        pass
+
+    docker_run = next(call for call in calls if call[:3] == ["docker", "run", "-d"])
+    assert "EVALUATOR_BASE_URL=http://qwen-vllm-endpoint:8003" in docker_run
+
+
 def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
@@ -238,6 +266,66 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path,
     assert not (source / ".env.local").exists()
     assert not (source / ".git").exists()
     assert not (source / ".helix_backend_stdout.txt").exists()
+
+
+def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+    (source / "private").mkdir()
+    (source / "private" / "token.txt").write_text("host secret\n")
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            assert not (workspace / "private" / "token.txt").exists()
+            (workspace / "main.py").write_text("new\n")
+            (workspace / "private").mkdir(exist_ok=True)
+            (workspace / "private" / "token.txt").write_text("agent secret\n")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True, omit_from_agent=["private/token.txt"]),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert (source / "main.py").read_text() == "new\n"
+    assert (source / "private" / "token.txt").read_text() == "host secret\n"
+
+
+def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            (workspace / "private").mkdir()
+            (workspace / "private" / "token.txt").write_text("agent secret\n")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True, omit_from_agent=["private"]),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert not (source / "private").exists()
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform")

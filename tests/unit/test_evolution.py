@@ -1736,6 +1736,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
 
     config = HelixConfig(
         objective="Improve",
+        env={"EVALUATOR_BASE_URL": "http://qwen-vllm-endpoint:8003"},
         evaluator=EvaluatorConfig(
             command="python /runner/evaluate.py",
             score_parser="helix_result",
@@ -1758,5 +1759,6 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
     all_mocks["start_evaluator_sidecar"].assert_called_once_with(
         config.evaluator.sidecar,
         passthrough_env=config.passthrough_env,
+        fixed_env=config.env,
         extra_hosts=config.sandbox.extra_hosts,
     )
