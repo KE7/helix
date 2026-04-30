@@ -8,7 +8,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
 from helix.population import Candidate, EvalResult
@@ -1167,6 +1167,7 @@ def mutate(
     config: HelixConfig,
     base_dir: Path,
     background: str | None = None,
+    prepare_worktree: Callable[[Candidate], None] | None = None,
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -1195,6 +1196,8 @@ def mutate(
     """
     child = clone_candidate(parent, new_id, base_dir)
     child.operation = "mutate"
+    if prepare_worktree is not None:
+        prepare_worktree(child)
 
     prompt = build_mutation_prompt(
         config.objective, eval_result, background, config.agent.max_turns,

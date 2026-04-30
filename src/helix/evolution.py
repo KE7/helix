@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import random as _random
+import shutil
 import shlex
 import threading
 import traceback
@@ -365,6 +366,48 @@ def _collect_protected_evaluator_paths(
     return sorted(protected)
 
 
+def _copy_protected_path(source: Path, destination: Path) -> None:
+    """Refresh one protected file/directory in a candidate worktree."""
+    if destination.exists() or destination.is_symlink():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                "__pycache__",
+                "*.pyc",
+                ".pytest_cache",
+                ".mypy_cache",
+                ".ruff_cache",
+            ),
+        )
+    elif source.is_symlink():
+        os.symlink(os.readlink(source), destination)
+    else:
+        shutil.copy2(source, destination)
+
+
+def _refresh_protected_evaluator_files(
+    candidate: Candidate,
+    config: HelixConfig,
+    project_root: Path,
+) -> None:
+    """Copy current root protected evaluator/runtime files into a worktree."""
+    worktree_root = Path(candidate.worktree_path)
+    for rel_path in _collect_protected_evaluator_paths(config, project_root):
+        source = project_root / rel_path
+        if not source.exists() and not source.is_symlink():
+            continue
+        _copy_protected_path(source, worktree_root / rel_path)
+
+
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -693,6 +736,7 @@ def _cached_evaluate_batch(
     cache: "MinibatchEvalCache[object, str] | None",
     config: HelixConfig,
     split: str,
+    project_root: Path,
 ) -> tuple[EvalResult, int]:
     """Evaluate ``candidate`` on ``example_ids`` with per-example caching.
 
@@ -724,6 +768,7 @@ def _cached_evaluate_batch(
         # concurrent ``write_helix_batch`` + ``run_evaluator`` on the same
         # worktree when parent-minibatch evals run in parallel.
         with _worktree_lock(candidate.worktree_path):
+            _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, example_ids)
             result = run_evaluator(
                 candidate, config, split=split, instance_ids=example_ids,
@@ -762,6 +807,7 @@ def _cached_evaluate_batch(
         # parallelism (audit-mutation §C4) requires serialising the
         # ``write_helix_batch`` + ``run_evaluator`` pair on a given worktree.
         with _worktree_lock(candidate.worktree_path):
+            _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, batch)
             fresh = run_evaluator(
                 candidate, config, split=split, instance_ids=batch,
@@ -1072,6 +1118,20 @@ def _run_evolution_impl(
     state = load_state(project_root)
     cfg_hash = _config_hash(config)
     evaluator_manifest = _load_evaluator_integrity_manifest(base_dir)
+    current_root_manifest = _build_evaluator_integrity_manifest(
+        config=config,
+        baseline_root=project_root,
+        project_root=project_root,
+    )
+    if current_root_manifest and current_root_manifest != evaluator_manifest:
+        if evaluator_manifest is not None:
+            print_warning(
+                "Protected evaluator manifest differs from current project root; "
+                "refreshing manifest so resumed candidates use the current "
+                "evaluator/runtime/split contract."
+            )
+        evaluator_manifest = current_root_manifest
+        _write_evaluator_integrity_manifest(base_dir, evaluator_manifest)
 
     # GEPA parity (audit-rng-state-persist C1): bundle eval-cache persistence
     # with state.json writes.  GEPA's single ``GEPAState.save`` call pickles
@@ -1191,13 +1251,14 @@ def _run_evolution_impl(
         if full_val_example_ids:
             _seed_example_ids = list(full_val_example_ids)
             seed_result, _seed_num_actual = _cached_evaluate_batch(
-                seed, _seed_example_ids, minibatch_cache, config, "val",
+                seed, _seed_example_ids, minibatch_cache, config, "val", project_root,
             )
             seed_result.candidate_id = seed.id
             state.budget.evaluations += _evaluation_budget_units(
                 num_actual_examples=_seed_num_actual
             )
         else:
+            _refresh_protected_evaluator_files(seed, config, project_root)
             seed_result = run_evaluator(seed, config)
             seed_result.candidate_id = seed.id
             state.budget.evaluations += _evaluation_budget_units()
@@ -1419,6 +1480,9 @@ def _run_evolution_impl(
                     background=config.agent.background,
                     eval_result_a=era,
                     eval_result_b=erb,
+                    prepare_worktree=lambda cand: _refresh_protected_evaluator_files(
+                        cand, config, project_root
+                    ),
                 )
 
                 if merged is None:
@@ -1521,7 +1585,7 @@ def _run_evolution_impl(
                         # ``continue`` past reflective mutation.
                         merge_attempted = True
                         merge_result, _merge_evals = _cached_evaluate_batch(
-                            merged, merge_subsample_ids, minibatch_cache, config, "val",
+                            merged, merge_subsample_ids, minibatch_cache, config, "val", project_root,
                         )
                         merge_result.candidate_id = merged.id
                         state.budget.evaluations += _evaluation_budget_units(
@@ -1596,7 +1660,7 @@ def _run_evolution_impl(
                             if full_val_example_ids:
                                 _full_val_ids = list(full_val_example_ids)
                                 full_val_result, _full_n = _cached_evaluate_batch(
-                                    merged, _full_val_ids, minibatch_cache, config, "val",
+                                    merged, _full_val_ids, minibatch_cache, config, "val", project_root,
                                 )
                                 full_val_result.candidate_id = merged.id
                                 state.budget.evaluations += _evaluation_budget_units(
@@ -1751,7 +1815,7 @@ def _run_evolution_impl(
             _parent, _pfr, _sub_ids, _new_id = pre_ctx
             if _sub_ids is not None:
                 _mb, _n_uncached = _cached_evaluate_batch(
-                    _parent, list(_sub_ids), minibatch_cache, config, "train",
+                    _parent, list(_sub_ids), minibatch_cache, config, "train", project_root,
                 )
                 _mb.candidate_id = _parent.id
                 return _mb, _n_uncached
@@ -1902,6 +1966,9 @@ def _run_evolution_impl(
                 config=config,
                 base_dir=worktrees_dir,
                 background=config.agent.background,
+                prepare_worktree=lambda cand: _refresh_protected_evaluator_files(
+                    cand, config, project_root
+                ),
             )
 
         mutation_results: list[Candidate | None]
@@ -2029,6 +2096,7 @@ def _run_evolution_impl(
                     minibatch_cache,
                     config,
                     "train",
+                    project_root,
                 )
                 gating_result.candidate_id = child.id
                 _last_eval_result = gating_result
@@ -2170,6 +2238,7 @@ def _run_evolution_impl(
                     minibatch_cache,
                     config,
                     "val",
+                    project_root,
                 )
                 stage_result.candidate_id = child.id
                 _last_eval_result = stage_result
@@ -2245,7 +2314,7 @@ def _run_evolution_impl(
             if full_val_example_ids:
                 _val_example_ids = list(full_val_example_ids)
                 val_result, _n = _cached_evaluate_batch(
-                    child, _val_example_ids, minibatch_cache, config, "val",
+                    child, _val_example_ids, minibatch_cache, config, "val", project_root,
                 )
                 val_result.candidate_id = child.id
                 _last_eval_result = val_result
