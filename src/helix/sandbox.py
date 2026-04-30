@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 import os
 import shlex
 import shutil
@@ -106,6 +107,96 @@ def _ignore_for_sync(path: Path) -> bool:
         or path.name == ".env"
         or path.name.startswith(".env.")
     )
+
+
+def _extract_session_id_from_json_output(stdout: str) -> str | None:
+    """Best-effort session id extraction from backend structured stdout."""
+    if not stdout.strip():
+        return None
+    payloads: list[object] = []
+    try:
+        payloads.append(json.loads(stdout))
+    except json.JSONDecodeError:
+        for raw_line in stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payloads.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    def walk(obj: object) -> Iterator[object]:
+        yield obj
+        if isinstance(obj, dict):
+            for value in obj.values():
+                yield from walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                yield from walk(value)
+
+    for payload in payloads:
+        for node in walk(payload):
+            if not isinstance(node, dict):
+                continue
+            for key in ("session_id", "sessionId", "sessionID"):
+                value = node.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
+def _copy_claude_transcript_from_auth_volume(
+    *,
+    workspace: Path,
+    image: str,
+    agent_backend: str | None,
+    sandbox: SandboxConfig,
+    stdout: str,
+) -> None:
+    if (
+        agent_backend != "claude"
+        or not sandbox.preserve_backend_transcripts
+    ):
+        return
+    session_id = _extract_session_id_from_json_output(stdout)
+    if not session_id:
+        return
+    rel_dir = Path(sandbox.transcript_artifact_dir) / "claude"
+    rel_file = rel_dir / f"{session_id}.jsonl"
+    source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
+    command = (
+        "set -eu; "
+        f"src={shlex.quote(str(source))}; "
+        f"dst={shlex.quote('/workspace/' + str(rel_file))}; "
+        '[ -f "$src" ] || exit 0; '
+        'mkdir -p "$(dirname "$dst")"; '
+        'cp "$src" "$dst"'
+    )
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--workdir",
+        "/workspace",
+        "--user",
+        "node",
+        "--network",
+        "none",
+        "--security-opt",
+        "no-new-privileges",
+        "-v",
+        f"{workspace}:/workspace:rw",
+        "-v",
+        f"{sandbox_auth_volume_name(agent_backend)}:/home/node:ro",
+        "-e",
+        "HOME=/home/node",
+        image,
+        "sh",
+        "-c",
+        command,
+    ]
+    _run_docker(args, check=False)
 
 
 def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
@@ -625,6 +716,14 @@ def run_sandboxed_commands(
                         timeout=sandbox.timeout_seconds,
                     )
                 )
+                if scope == "agent":
+                    _copy_claude_transcript_from_auth_volume(
+                        workspace=workspace,
+                        image=docker_image,
+                        agent_backend=agent_backend,
+                        sandbox=sandbox,
+                        stdout=results[-1].stdout or "",
+                    )
         finally:
             if host_owner := _host_owner():
                 _docker_chown_workspace(workspace, docker_image, host_owner)

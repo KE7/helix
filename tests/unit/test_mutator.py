@@ -692,6 +692,49 @@ class TestInvokeClaudeCode:
         assert payload["usage"]["session_id"] == "sess_123"
         assert payload["usage"]["tool_event_count"] == 1
 
+    def test_claude_backend_artifacts_copy_local_transcript(self, tmp_path: Path, mocker, monkeypatch):
+        transcript_root = tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        transcript_root.mkdir(parents=True)
+        (transcript_root / "sess_123.jsonl").write_text('{"message":"saved"}\n')
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(transcript_root))
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","session_id":"sess_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        artifact = tmp_path / ".helix_artifacts" / "backend_transcripts" / "claude" / "sess_123.jsonl"
+        assert artifact.read_text() == '{"message":"saved"}\n'
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["transcript_artifacts"] == [
+            {
+                "backend": "claude",
+                "session_id": "sess_123",
+                "path": ".helix_artifacts/backend_transcripts/claude/sess_123.jsonl",
+                "source": str(transcript_root / "sess_123.jsonl"),
+                "available": True,
+            }
+        ]
+
+    def test_claude_backend_artifacts_record_missing_transcript(self, tmp_path: Path, mocker, monkeypatch):
+        transcript_root = tmp_path / "missing-root"
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(transcript_root))
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","session_id":"sess_404"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["transcript_artifacts"][0]["available"] is False
+        assert payload["transcript_artifacts"][0]["reason"] == "transcript_not_found"
+
     def test_gemini_tolerates_text_preamble_before_json_stream(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(

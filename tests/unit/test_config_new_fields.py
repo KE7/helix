@@ -265,6 +265,9 @@ class TestSandboxConfig:
         assert cfg.network == "bridge"
         assert cfg.extra_hosts == {}
         assert cfg.skip_special_files is True
+        assert cfg.preserve_backend_transcripts is True
+        assert cfg.transcript_artifact_dir == ".helix_artifacts/backend_transcripts"
+        assert cfg.claude_transcript_root == "/home/node/.claude/projects/-workspace"
 
     def test_sandboxed_evaluator_requires_sidecar(self):
         with pytest.raises(ValueError, match=r"\[evaluator.sidecar\]"):
@@ -336,6 +339,9 @@ class TestSandboxConfig:
             timeout_seconds = 300
             add_host_gateway = true
             skip_special_files = false
+            preserve_backend_transcripts = false
+            transcript_artifact_dir = ".helix/custom-transcripts"
+            claude_transcript_root = "/custom/claude/projects"
 
             [sandbox.extra_hosts]
             "env-endpoint" = "host-gateway"
@@ -354,6 +360,9 @@ class TestSandboxConfig:
         assert cfg.sandbox.timeout_seconds == 300
         assert cfg.sandbox.add_host_gateway is True
         assert cfg.sandbox.skip_special_files is False
+        assert cfg.sandbox.preserve_backend_transcripts is False
+        assert cfg.sandbox.transcript_artifact_dir == ".helix/custom-transcripts"
+        assert cfg.sandbox.claude_transcript_root == "/custom/claude/projects"
         assert cfg.sandbox.extra_hosts == {
             "env-endpoint": "host-gateway",
             "local-service": "127.0.0.1",

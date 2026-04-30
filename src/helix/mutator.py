@@ -470,6 +470,7 @@ MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/task_prompt.md"
 BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
 BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
 BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
+BACKEND_TRANSCRIPT_ARTIFACT_DIR = ".helix_artifacts/backend_transcripts"
 
 
 def _prompt_file_instruction(prompt_artifact_name: str) -> str:
@@ -501,6 +502,7 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         BACKEND_RESULT_ARTIFACT_NAME,
         BACKEND_STDOUT_ARTIFACT_NAME,
         BACKEND_STDERR_ARTIFACT_NAME,
+        ".helix_artifacts/",
         "helix_batch.json",
     ]
     existing = gitignore.read_text() if gitignore.exists() else ""
@@ -836,6 +838,108 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
     return usage
 
 
+def _copy_local_claude_transcript(
+    worktree_path: str,
+    *,
+    session_id: str | None,
+    artifact_dir: str = BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+    transcript_root: str | None = None,
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    wt = Path(worktree_path)
+    rel_path = Path(artifact_dir) / "claude" / f"{session_id}.jsonl"
+    dst = wt / rel_path
+    if dst.exists():
+        return {
+            "backend": "claude",
+            "session_id": session_id,
+            "path": str(rel_path),
+            "source": "sandbox_auth_volume",
+            "available": True,
+        }
+    if transcript_root == "sandbox_auth_volume":
+        return {
+            "backend": "claude",
+            "session_id": session_id,
+            "path": str(rel_path),
+            "source": "sandbox_auth_volume",
+            "available": False,
+            "reason": "transcript_not_found",
+        }
+    root = (
+        Path(transcript_root)
+        if transcript_root is not None
+        else Path(os.environ.get("HELIX_CLAUDE_TRANSCRIPT_ROOT", Path.home() / ".claude/projects/-workspace"))
+    )
+    src = root / f"{session_id}.jsonl"
+    if not src.is_file():
+        return {
+            "backend": "claude",
+            "session_id": session_id,
+            "path": str(rel_path),
+            "source": str(src),
+            "available": False,
+            "reason": "transcript_not_found",
+        }
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        shutil.copy2(src, dst)
+    except OSError as exc:
+        return {
+            "backend": "claude",
+            "session_id": session_id,
+            "path": str(rel_path),
+            "source": str(src),
+            "available": False,
+            "reason": f"copy_failed: {exc}",
+        }
+    return {
+        "backend": "claude",
+        "session_id": session_id,
+        "path": str(rel_path),
+        "source": str(src),
+        "available": True,
+    }
+
+
+def _collect_backend_transcript_artifacts(
+    worktree_path: str,
+    *,
+    backend: str,
+    usage: dict[str, Any],
+    sandbox: SandboxConfig | None,
+) -> list[dict[str, Any]]:
+    if backend != "claude":
+        return []
+    if sandbox is not None and not sandbox.preserve_backend_transcripts:
+        return []
+    session_id = usage.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return []
+    artifact_dir = (
+        sandbox.transcript_artifact_dir
+        if sandbox is not None
+        else BACKEND_TRANSCRIPT_ARTIFACT_DIR
+    )
+    transcript_root = (
+        "sandbox_auth_volume"
+        if sandbox is not None and sandbox.enabled
+        else sandbox.claude_transcript_root
+        if sandbox is not None
+        else None
+    )
+    artifact = _copy_local_claude_transcript(
+        worktree_path,
+        session_id=session_id,
+        artifact_dir=artifact_dir,
+        transcript_root=transcript_root,
+    )
+    return [artifact] if artifact is not None else []
+
+
 def _write_backend_artifacts(
     worktree_path: str,
     *,
@@ -843,12 +947,20 @@ def _write_backend_artifacts(
     command: str,
     result: subprocess.CompletedProcess[str],
     parsed: dict[str, Any] | None,
+    sandbox: SandboxConfig | None = None,
 ) -> None:
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
         (wt / BACKEND_STDOUT_ARTIFACT_NAME).write_text(result.stdout or "")
         (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
+        usage = _normalise_usage_stats(parsed or {})
+        transcript_artifacts = _collect_backend_transcript_artifacts(
+            worktree_path,
+            backend=backend,
+            usage=usage,
+            sandbox=sandbox,
+        )
         payload = {
             "backend": backend,
             "backend_display_name": backend_display_name(backend),
@@ -857,7 +969,8 @@ def _write_backend_artifacts(
             "returncode": result.returncode,
             "stdout_artifact": BACKEND_STDOUT_ARTIFACT_NAME,
             "stderr_artifact": BACKEND_STDERR_ARTIFACT_NAME,
-            "usage": _normalise_usage_stats(parsed or {}),
+            "usage": usage,
+            "transcript_artifacts": transcript_artifacts,
             "parsed": parsed,
         }
         (wt / BACKEND_RESULT_ARTIFACT_NAME).write_text(json.dumps(payload, indent=2))
@@ -1038,6 +1151,7 @@ def invoke_claude_code(
             command=cmd_str,
             result=result,
             parsed=parsed,
+            sandbox=sandbox,
         )
 
 

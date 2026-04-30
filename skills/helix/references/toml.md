@@ -211,6 +211,14 @@ Sandbox behavior:
 - Evaluator containers do not get agent auth volumes.
 - `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX artifacts are excluded
   from sandbox workspace copies/sync-back.
+- Claude Code transcript preservation is enabled by default for agent
+  sandboxes. HELIX looks for
+  `/home/node/.claude/projects/-workspace/<session_id>.jsonl` in the auth
+  volume and copies it to
+  `.helix_artifacts/backend_transcripts/claude/<session_id>.jsonl`.
+  Set `preserve_backend_transcripts = false` under `[sandbox]` to disable it,
+  or override `transcript_artifact_dir` / `claude_transcript_root` for custom
+  layouts.
 - Special files are skipped by default; set `skip_special_files = false` to
   raise on unsupported file types instead.
 

@@ -268,6 +268,57 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path,
     assert not (source / ".helix_backend_stdout.txt").exists()
 
 
+def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            if args[-3:] and args[-3] == "sh" and "sess_123.jsonl" in args[-1]:
+                transcript = (
+                    workspace
+                    / ".helix_artifacts"
+                    / "backend_transcripts"
+                    / "claude"
+                    / "sess_123.jsonl"
+                )
+                transcript.parent.mkdir(parents=True)
+                transcript.write_text('{"message":"saved"}\n')
+            else:
+                (workspace / "main.py").write_text("new\n")
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='{"type":"result","session_id":"sess_123"}\n',
+            stderr="",
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert (source / "main.py").read_text() == "new\n"
+    transcript = source / ".helix_artifacts" / "backend_transcripts" / "claude" / "sess_123.jsonl"
+    assert transcript.read_text() == '{"message":"saved"}\n'
+    copy_call = next(call for call in calls if call[:2] == ["docker", "run"] and "sess_123.jsonl" in " ".join(call))
+    assert "helix-auth-claude:/home/node:ro" in copy_call
+
+
 def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()

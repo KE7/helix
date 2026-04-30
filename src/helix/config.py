@@ -480,6 +480,9 @@ class SandboxConfig(BaseModel):
     extra_hosts: dict[str, str] = Field(default_factory=dict)
     skip_special_files: bool = True
     omit_from_agent: list[str] = Field(default_factory=list)
+    preserve_backend_transcripts: bool = True
+    transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
+    claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
 
 
 class WorktreeConfig(BaseModel):
