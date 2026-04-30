@@ -313,6 +313,12 @@ seed = "."
 # RNG seed for deterministic parent selection (default: 0)
 rng_seed = 0
 
+[env]
+# Fixed non-secret env values injected into evaluator and agent subprocesses
+# after passthrough_env. Useful for repeatable run-local service endpoints.
+# ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+# ANTHROPIC_API_KEY = "dummy"
+
 [evaluator]
 command = "uv run python evaluate.py"
 # Available parsers: "pytest" | "exitcode" | "json_accuracy" | "json_score" | "helix_result"

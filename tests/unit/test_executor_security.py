@@ -166,6 +166,21 @@ class TestEnvironmentScrubbing:
         assert env["HF_HOME"] == "/data/hf"
         assert "SECRET_KEY" not in env
 
+    def test_fixed_env_injects_values_after_passthrough(self, monkeypatch):
+        """fixed_env records run-local values without relying on parent env."""
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://wrong")
+
+        env = _scrub_environment(
+            passthrough_env=["ANTHROPIC_BASE_URL"],
+            fixed_env={
+                "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+                "ANTHROPIC_API_KEY": "dummy",
+            },
+        )
+
+        assert env["ANTHROPIC_BASE_URL"] == "http://qwen-vllm-endpoint:8003"
+        assert env["ANTHROPIC_API_KEY"] == "dummy"
+
     def test_passthrough_env_missing_var_is_ignored(self, monkeypatch):
         """passthrough_env silently skips vars not present in os.environ."""
         monkeypatch.delenv("NONEXISTENT_VAR", raising=False)

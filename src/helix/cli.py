@@ -76,6 +76,12 @@ command = "uv run python evaluate.py"
 # command = "python -m benchmark_server"
 # endpoint = "http://helix-evaluator:8080/evaluate"
 
+[env]
+# Fixed non-secret env values injected into evaluator and agent subprocesses
+# after passthrough_env. Useful for repeatable run-local service endpoints.
+# ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+# ANTHROPIC_API_KEY = "dummy"
+
 [evolution]
 max_generations = 20
 merge_enabled = false

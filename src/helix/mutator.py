@@ -200,6 +200,7 @@ def generate_seed(
         prompt,
         config.agent,
         passthrough_env=config.passthrough_env,
+        fixed_env=config.env,
         sandbox=config.sandbox,
     )
 
@@ -554,7 +555,7 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
     """Pass official headless auth env vars without requiring TOML config."""
     for key in BACKEND_AUTH_ENV.get(backend, ()):
-        if key in os.environ:
+        if key in os.environ and key not in env:
             env[key] = os.environ[key]
 
 
@@ -872,6 +873,7 @@ def invoke_claude_code(
     prompt: str,
     config: AgentConfig,
     passthrough_env: list[str] | None = None,
+    fixed_env: dict[str, str] | None = None,
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
 ) -> dict[str, Any]:
@@ -888,6 +890,9 @@ def invoke_claude_code(
     passthrough_env:
         Optional list of extra env var names to preserve from the parent
         process through the env scrub (e.g. CUDA_VISIBLE_DEVICES).
+    fixed_env:
+        Optional mapping of explicit env var values to inject after
+        passthrough values.
 
     Returns
     -------
@@ -912,7 +917,7 @@ def invoke_claude_code(
         prompt_artifact_name,
     )
     cmd_str = shlex.join(args)
-    backend_env = _scrub_environment(passthrough_env=passthrough_env)
+    backend_env = _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
     _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
@@ -1096,6 +1101,7 @@ def mutate(
             prompt,
             config.agent,
             passthrough_env=config.passthrough_env,
+            fixed_env=config.env,
             sandbox=config.sandbox,
             prompt_artifact_name=prompt_artifact_name,
         )
