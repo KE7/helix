@@ -91,6 +91,7 @@ def _ignore_for_copy(path: Path) -> bool:
     parts = path.parts
     return (
         ".git" in parts
+        or any(part.startswith(".helix") for part in parts)
         or path.name == "helix.toml"
         or path.name == ".env"
         or path.name.startswith(".env.")
@@ -101,6 +102,7 @@ def _ignore_for_sync(path: Path) -> bool:
     parts = path.parts
     return (
         ".git" in parts
+        or any(part.startswith(".helix") for part in parts)
         or path.name == "helix.toml"
         or _is_helix_artifact_name(path.name)
         or ".agent_internal" in parts
@@ -309,6 +311,16 @@ def _sync_back_workspace(
         skip_special_files=skip_special_files,
         omit_paths=omit_paths,
     )
+
+
+def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
+    """Preserve HELIX-owned transcript artifacts while hiding .helix* from agents."""
+    source = src / ".helix_artifacts" / "backend_transcripts"
+    if not source.exists():
+        return
+    target = dst / ".helix_artifacts" / "backend_transcripts"
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target, dirs_exist_ok=True)
 
 
 def _init_synthetic_git_repo(workspace: Path) -> None:
@@ -734,6 +746,8 @@ def run_sandboxed_commands(
                 skip_special_files=sandbox.skip_special_files,
                 omit_paths=omit_paths,
             )
+            if scope == "agent":
+                _sync_back_backend_transcripts(workspace, source)
     return results
 
 

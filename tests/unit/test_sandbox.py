@@ -229,18 +229,28 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path,
     (source / "keep.py").write_text("old\n")
     (source / "delete.py").write_text("bye\n")
     (source / ".env").write_text("SECRET=value\n")
+    (source / ".helix").mkdir()
+    (source / ".helix" / "state.json").write_text("{}\n")
+    (source / ".helix_artifacts").mkdir()
+    (source / ".helix_artifacts" / "old.txt").write_text("old artifact\n")
     (source / "helix.toml").write_text("[evaluator.sidecar]\nendpoint = 'private'\n")
 
     def fake_run(args, **kwargs):
         if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / ".env").exists()
+            assert not (workspace / ".helix").exists()
+            assert not (workspace / ".helix_artifacts").exists()
             assert not (workspace / "helix.toml").exists()
             (workspace / "keep.py").write_text("new\n")
             (workspace / "delete.py").unlink()
             (workspace / "added.py").write_text("added\n")
             (workspace / "helix.toml").write_text("tampered\n")
             (workspace / ".env.local").write_text("NEW_SECRET=value\n")
+            (workspace / ".helix").mkdir()
+            (workspace / ".helix" / "state.json").write_text("tampered\n")
+            (workspace / ".helix_artifacts").mkdir()
+            (workspace / ".helix_artifacts" / "new.txt").write_text("new artifact\n")
             (workspace / ".helix_backend_stdout.txt").write_text("artifact\n")
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
 
@@ -263,6 +273,10 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path,
     assert (source / "added.py").read_text() == "added\n"
     assert (source / ".env").read_text() == "SECRET=value\n"
     assert (source / "helix.toml").read_text() == "[evaluator.sidecar]\nendpoint = 'private'\n"
+    assert (source / ".helix" / "state.json").read_text() == "{}\n"
+    assert (source / ".helix_artifacts" / "old.txt").read_text() == "old artifact\n"
+    assert not (source / ".helix_artifacts" / "new.txt").exists()
+    assert not (source / ".helix_artifacts" / "backend_transcripts").exists()
     assert not (source / ".env.local").exists()
     assert not (source / ".git").exists()
     assert not (source / ".helix_backend_stdout.txt").exists()
