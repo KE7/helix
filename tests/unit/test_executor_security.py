@@ -248,6 +248,20 @@ class TestRunEvaluator:
         assert "HELIX_DEBUG" in env
         assert "AWS_SECRET" not in env
 
+    def test_run_evaluator_passes_eval_salt(self, mocker, monkeypatch):
+        """run_evaluator exposes an explicit per-evaluation salt when provided."""
+        mock_run = mocker.patch("helix.executor.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="output", stderr="", returncode=0)
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        candidate = make_candidate()
+        config = make_config(command="python test.py")
+
+        run_evaluator(candidate, config, split="val", eval_salt="candidate:g1:val:nonce")
+
+        env = mock_run.call_args[1]["env"]
+        assert env["HELIX_EVAL_SALT"] == "candidate:g1:val:nonce"
+
     def test_run_evaluator_uses_shell_false(self, mocker):
         """run_evaluator calls subprocess.run with shell=False."""
         mock_run = mocker.patch("helix.executor.subprocess.run")

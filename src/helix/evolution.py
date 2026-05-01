@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import random as _random
+import secrets
 import shutil
 import shlex
 import threading
@@ -741,7 +742,8 @@ def _cached_evaluate_batch(
     cache: "MinibatchEvalCache[object, str] | None",
     config: HelixConfig,
     split: str,
-    project_root: Path,
+    project_root: Path | None = None,
+    eval_salt: str | None = None,
 ) -> tuple[EvalResult, int]:
     """Evaluate ``candidate`` on ``example_ids`` with per-example caching.
 
@@ -765,6 +767,13 @@ def _cached_evaluate_batch(
     # Cache keys must remain stable across re-evals of the same candidate
     # identity, but train/val batches must not alias when they share
     # positional ids like "0", "1", ... .
+    if project_root is None:
+        project_root = Path(candidate.worktree_path)
+    if eval_salt is None:
+        eval_salt = (
+            f"{candidate.id}:{split}:{secrets.token_hex(8)}:"
+            f"{','.join(str(eid) for eid in example_ids)}"
+        )
     cand_dict: dict[str, str] = {"id": candidate.id, "split": split}
 
     # Non-cached branch — mirrors GEPA state.py:628-633 verbatim.
@@ -776,7 +785,11 @@ def _cached_evaluate_batch(
             _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, example_ids)
             result = run_evaluator(
-                candidate, config, split=split, instance_ids=example_ids,
+                candidate,
+                config,
+                split=split,
+                instance_ids=example_ids,
+                eval_salt=eval_salt,
             )
         return result, len(example_ids)
 
@@ -815,7 +828,11 @@ def _cached_evaluate_batch(
             _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, batch)
             fresh = run_evaluator(
-                candidate, config, split=split, instance_ids=batch,
+                candidate,
+                config,
+                split=split,
+                instance_ids=batch,
+                eval_salt=eval_salt,
             )
         # HELIX does not track rollout outputs per-example; store ``None``
         # per slot (the cache's ``RolloutOutput`` type parameter is
