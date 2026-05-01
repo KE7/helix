@@ -59,6 +59,7 @@ def _validate_and_split_command(cmd: str) -> list[str]:
 def _scrub_environment(
     split: str | None = None,
     instance_ids: list[str] | None = None,
+    eval_salt: str | None = None,
     passthrough_env: list[str] | None = None,
     fixed_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -102,6 +103,9 @@ def _scrub_environment(
     # Add HELIX_INSTANCE_IDS when a minibatch subset is requested.
     if instance_ids is not None:
         scrubbed["HELIX_INSTANCE_IDS"] = ",".join(str(i) for i in instance_ids)
+
+    if eval_salt is not None:
+        scrubbed["HELIX_EVAL_SALT"] = str(eval_salt)
 
     # Include any existing HELIX_* variables
     for key, value in os.environ.items():
@@ -159,6 +163,7 @@ def run_evaluator(
     config: HelixConfig,
     split: str = "val",
     instance_ids: list[str] | None = None,
+    eval_salt: str | None = None,
 ) -> EvalResult:
     """Run the evaluator for a single candidate.
 
@@ -171,6 +176,9 @@ def run_evaluator(
             the evaluator via ``HELIX_INSTANCE_IDS`` and applied as
             a post-filter to ``instance_scores`` for evaluators that
             do not honour it.  None → evaluate the whole split.
+        eval_salt: Optional opaque per-evaluation salt exposed as
+            ``HELIX_EVAL_SALT``.  Evaluators may use it to select
+            dynamic trial/config variants while keeping example ids stable.
 
     Returns:
         EvalResult with scores and instance_scores.
@@ -214,6 +222,7 @@ def run_evaluator(
     env = _scrub_environment(
         split,
         instance_ids=instance_ids,
+        eval_salt=eval_salt,
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
     )
