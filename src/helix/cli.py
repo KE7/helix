@@ -223,12 +223,7 @@ def _load_all_evaluations(base_dir: Path) -> tuple[dict[str, EvalResult], dict[s
         try:
             data = json.loads(path.read_text())
             cid = data["candidate_id"]
-            results[cid] = EvalResult(
-                candidate_id=cid,
-                scores=data.get("scores", {}),
-                instance_scores=data.get("instance_scores", {}),
-                asi=data.get("asi", {}),
-            )
+            results[cid] = EvalResult.from_dict(data)
         except Exception as exc:
             errors[cid] = f"evaluation file unreadable: {exc}"
     return results, errors

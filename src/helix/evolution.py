@@ -253,12 +253,7 @@ def _load_evaluation(base_dir: Path, candidate_id: str) -> EvalResult | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text())
-    return EvalResult(
-        candidate_id=data["candidate_id"],
-        scores=data["scores"],
-        instance_scores=data["instance_scores"],
-        asi=data.get("asi", {}),
-    )
+    return EvalResult.from_dict(data)
 
 
 def _gen_from_id(candidate_id: str) -> int:

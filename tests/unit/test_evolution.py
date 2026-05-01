@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -30,6 +31,7 @@ from helix.config import (
 from helix.evolution import (
     HelixProgress,
     _evaluation_budget_units,
+    _load_evaluation,
     budget_exhausted,
     degrades,
     run_evolution,
@@ -105,6 +107,25 @@ def make_budget_state(evaluations: int = 0) -> EvolutionState:
         budget=BudgetState(evaluations=evaluations),
         config_hash="abc123",
     )
+
+
+def test_load_evaluation_round_trips_optional_eval_result_fields(tmp_path: Path) -> None:
+    result = EvalResult(
+        candidate_id="g0-s0",
+        scores={"success": 0.5},
+        asi={"note": "kept"},
+        instance_scores={"a": 1.0, "b": 0.0},
+        side_info={"batch": "diagnostics"},
+        per_example_side_info=[{"trace": "A"}, {"trace": "B"}],
+        objective_scores=[{"quality": 1.0}, {"quality": 0.0}],
+    )
+    eval_dir = tmp_path / "evaluations"
+    eval_dir.mkdir()
+    (eval_dir / "g0-s0.json").write_text(json.dumps(result.to_dict()))
+
+    loaded = _load_evaluation(tmp_path, "g0-s0")
+
+    assert loaded == result
 
 
 @pytest.fixture
