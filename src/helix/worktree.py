@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from helix.exceptions import GitError, HelixError, print_helix_error
 from helix.population import Candidate

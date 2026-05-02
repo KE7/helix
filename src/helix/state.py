@@ -30,6 +30,9 @@ class BudgetState:
     (cached=0, uncached evaluator call=1 because no per-example ids exist).
     """
     evaluations: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 class EvaluationCache:
@@ -195,6 +198,9 @@ def load_state(base_dir: Path) -> EvolutionState | None:
     budget_data = data.get("budget", {})
     budget = BudgetState(
         evaluations=budget_data.get("evaluations", 0),
+        input_tokens=budget_data.get("input_tokens", 0),
+        output_tokens=budget_data.get("output_tokens", 0),
+        cost_usd=budget_data.get("cost_usd", 0.0),
     )
 
     # Migrate legacy frontier_type: default to "instance" (HELIX's

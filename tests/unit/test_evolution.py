@@ -29,7 +29,6 @@ from helix.config import (
     WorktreeConfig,
 )
 from helix.evolution import (
-    HelixProgress,
     _evaluation_budget_units,
     _load_evaluation,
     budget_exhausted,
@@ -145,6 +144,8 @@ def all_mocks(mocker):
             "helix.evolution._load_evaluation", return_value=None
         ),
         "record_entry": mocker.patch("helix.evolution.record_entry"),
+        "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value={}),
+        "HelixLiveDisplay": mocker.patch("helix.evolution.HelixLiveDisplay"),
         # GEPA parity (merge-pairing audit D1, /tmp/audit_audit-merge-pairing.md:49-50):
         # the merge branch now enforces GEPA's ``len(parent_program_for_candidate) < 3``
         # early-exit (merge.py:130-131), i.e. you need two siblings plus one
@@ -1672,79 +1673,6 @@ class TestMutationCountersTracked:
         )
 
 
-# ---------------------------------------------------------------------------
-# HelixProgress context-manager lifecycle
-# ---------------------------------------------------------------------------
-
-
-class TestHelixProgressLifecycle:
-    """Verify the HelixProgress context-manager contract.
-
-    These tests always run with HELIX_NO_PROGRESS=1 so they don't open a
-    Rich Live display, keeping the test output clean.
-    """
-
-    def test_enter_returns_self(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """__enter__ must return the HelixProgress instance."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        prog = HelixProgress(max_generations=10)
-        result = prog.__enter__()
-        prog.__exit__(None, None, None)
-        assert result is prog
-
-    def test_context_manager_protocol(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """'with' statement must enter and exit cleanly."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        with HelixProgress(max_generations=5) as prog:
-            assert prog is not None
-
-    def test_is_active_false_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """is_active returns False when HELIX_NO_PROGRESS disables the bar."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        with HelixProgress(max_generations=5) as prog:
-            assert prog.is_active is False
-
-    def test_update_does_not_raise_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """update() is a no-op when the progress bar is disabled."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        with HelixProgress(max_generations=10) as prog:
-            # Must not raise for any gen/score value
-            prog.update(1, 0.5)
-            prog.update(10, 1.0)
-            prog.update(0, 0.0)
-
-    def test_initial_completed_clamped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Resume progress starts from the saved generation, clamped to bounds."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        assert HelixProgress(max_generations=10, completed=8)._completed == 8
-        assert HelixProgress(max_generations=10, completed=-1)._completed == 0
-        assert HelixProgress(max_generations=10, completed=99)._completed == 10
-
-    def test_exit_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Calling __exit__ multiple times must not raise."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        prog = HelixProgress(max_generations=3)
-        prog.__enter__()
-        prog.__exit__(None, None, None)
-        prog.__exit__(None, None, None)  # second call must be safe
-
-    def test_is_active_true_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """is_active returns True when the Rich Live display is running."""
-        monkeypatch.delenv("HELIX_NO_PROGRESS", raising=False)
-        # Ensure a clean env: no leftover value from a previous test
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "")
-        # Empty string → enabled (only non-empty disables)
-        with HelixProgress(max_generations=5) as prog:
-            assert prog.is_active is True
-
-    def test_is_active_false_after_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """is_active must be False after __exit__."""
-        monkeypatch.setenv("HELIX_NO_PROGRESS", "1")
-        prog = HelixProgress(max_generations=5)
-        prog.__enter__()
-        assert prog.is_active is False  # disabled → never active
-        prog.__exit__(None, None, None)
-        assert prog.is_active is False
 
 
 def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):

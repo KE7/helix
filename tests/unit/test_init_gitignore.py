@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 
 from helix.cli import cli, _update_gitignore, _create_initial_gitignore
@@ -87,7 +86,7 @@ class TestInitWritesGitignore:
         monkeypatch.chdir(tmp_path)
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("venv/\n")
-        result = self._invoke_init(tmp_path)
+        self._invoke_init(tmp_path)
         content = gitignore.read_text()
         assert "venv/" in content, "existing content should be preserved"
         assert ".helix/" in content

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import random
 
-import pytest
 
 from helix.lineage import LineageEntry, find_merge_triplet
 

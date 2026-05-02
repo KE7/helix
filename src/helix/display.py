@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -14,6 +14,43 @@ if TYPE_CHECKING:
     from helix.population import EvalResult, ParetoFrontier
     from helix.state import BudgetState
     from helix.config import EvolutionConfig
+
+
+from dataclasses import dataclass, field
+from rich.live import Live
+
+
+@dataclass
+class UsageStats:
+    """Tracks resource usage for a single candidate or generation."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    num_turns: int = 0
+    tool_event_count: int = 0
+    tool_names: list[str] = field(default_factory=list)
+    cost_usd: float = 0.0
+
+    def add(self, other: UsageStats | dict[str, Any]) -> None:
+        if isinstance(other, dict):
+            self.input_tokens += int(other.get("input_tokens", 0))
+            self.output_tokens += int(other.get("output_tokens", 0))
+            self.num_turns += int(other.get("num_turns", 0))
+            self.tool_event_count += int(other.get("tool_event_count", 0))
+            self.cost_usd += float(other.get("cost_usd", 0.0))
+            new_tools = other.get("tool_names", [])
+            if isinstance(new_tools, list):
+                for t in new_tools:
+                    if t not in self.tool_names:
+                        self.tool_names.append(t)
+        else:
+            self.input_tokens += other.input_tokens
+            self.output_tokens += other.output_tokens
+            self.num_turns += other.num_turns
+            self.tool_event_count += other.tool_event_count
+            self.cost_usd += other.cost_usd
+            for t in other.tool_names:
+                if t not in self.tool_names:
+                    self.tool_names.append(t)
 
 
 class HelixPhase(Enum):
@@ -37,9 +74,102 @@ class HelixPhase(Enum):
 console = Console(highlight=False)
 
 
-def set_phase(phase: HelixPhase) -> None:
-    """Update the displayed phase using a Rich spinner-style status line."""
-    console.print(f"[bold dim]⟳  {phase.value}…[/bold dim]")
+def render_status_panel(
+    gen: int,
+    total: int,
+    phase: HelixPhase | str,
+    current_usage: UsageStats,
+    cumulative_budget: "BudgetState",
+) -> Panel:
+    """Render a live status panel with current progress and usage stats."""
+    phase_str = phase.value if isinstance(phase, HelixPhase) else str(phase)
+    lines = [
+        f"[bold]Generation {gen} / {total}[/bold]",
+        f"Status: [cyan]{phase_str}[/cyan]",
+        "",
+        "[bold]Current Generation Usage:[/bold]",
+        f"  Tokens: {current_usage.input_tokens:,} in / {current_usage.output_tokens:,} out",
+        f"  Turns : {current_usage.num_turns}",
+    ]
+
+    tools_str = f"{current_usage.tool_event_count}"
+    if current_usage.tool_names:
+        tools_str += f" ({', '.join(current_usage.tool_names)})"
+    lines.append(f"  Tools : {tools_str}")
+
+    lines.extend([
+        "",
+        "[bold]Cumulative Usage:[/bold]",
+        f"  Tokens: {cumulative_budget.input_tokens:,} in / {cumulative_budget.output_tokens:,} out",
+        f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]",
+    ])
+
+    return Panel(
+        "\n".join(lines),
+        title="[bold blue]HELIX Evolution[/bold blue]",
+        border_style="blue",
+        padding=(1, 2),
+    )
+
+
+class HelixLiveDisplay:
+    """Context manager for the HELIX live status display."""
+
+    def __init__(self, gen: int, total: int, cumulative_budget: "BudgetState"):
+        self.gen = gen
+        self.total = total
+        self.cumulative_budget = cumulative_budget
+        self.current_usage = UsageStats()
+        self.phase: HelixPhase | str = "Initializing"
+        self._live = Live(
+            render_status_panel(
+                self.gen, self.total, self.phase, self.current_usage, self.cumulative_budget
+            ),
+            console=console,
+            refresh_per_second=4,
+            transient=True,
+        )
+
+    def update(
+        self,
+        phase: HelixPhase | str | None = None,
+        usage: UsageStats | dict[str, Any] | None = None,
+    ) -> None:
+        """Update the live display with new phase or usage info."""
+        if phase is not None:
+            self.phase = phase
+        if usage is not None:
+            self.current_usage.add(usage)
+        self._live.update(
+            render_status_panel(
+                self.gen, self.total, self.phase, self.current_usage, self.cumulative_budget
+            )
+        )
+
+    def __enter__(self) -> "HelixLiveDisplay":
+        global _active_live
+        _active_live = self
+        self._live.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        global _active_live
+        self._live.stop()
+        _active_live = None
+
+
+# Track the active live display for set_phase
+_active_live: HelixLiveDisplay | None = None
+
+
+def set_phase(phase: HelixPhase | str) -> None:
+    """Update the displayed phase. Updates live display if active, else prints."""
+    global _active_live
+    if _active_live:
+        _active_live.update(phase=phase)
+    else:
+        phase_str = phase.value if isinstance(phase, HelixPhase) else str(phase)
+        console.print(f"[bold dim]⟳  {phase_str}…[/bold dim]")
 
 
 def render_generation(

@@ -34,6 +34,7 @@ class Candidate:
     parent_id: str | None
     parent_ids: list[str]
     operation: str
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
