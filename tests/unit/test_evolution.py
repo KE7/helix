@@ -1600,8 +1600,7 @@ class TestMutationCountersTracked:
     def test_mutation_counters_tracked(self, mocker, tmp_path, all_mocks):
         """mutations_attempted and mutations_accepted are tracked correctly.
 
-        We verify by inspecting the arguments passed to render_generation —
-        it receives the per-run counters so the display can show acceptance rate.
+        We verify by inspecting the arguments passed to HelixLiveDisplay.update.
         """
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
@@ -1623,19 +1622,18 @@ class TestMutationCountersTracked:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # render_generation should have been called with non-zero mutation counters
-        calls = all_mocks["render_generation"].call_args_list
-        # Find the call that recorded the accepted mutation (mutations_accepted > 0)
+        # HelixLiveDisplay.update should have been called with non-zero mutation counters
+        update_calls = all_mocks["HelixLiveDisplay"].return_value.__enter__.return_value.update.call_args_list
         found_accepted = any(
             call.kwargs.get("mutations_accepted", 0) >= 1
-            for call in calls
+            for call in update_calls
         )
         found_attempted = any(
             call.kwargs.get("mutations_attempted", 0) >= 1
-            for call in calls
+            for call in update_calls
         )
-        assert found_attempted, "mutations_attempted should be passed to render_generation"
-        assert found_accepted, "mutations_accepted should be passed to render_generation"
+        assert found_attempted, "mutations_attempted should be passed to live.update"
+        assert found_accepted, "mutations_accepted should be passed to live.update"
 
     def test_rejected_mutation_increments_attempted_not_accepted(
         self, mocker, tmp_path, all_mocks
@@ -1661,16 +1659,19 @@ class TestMutationCountersTracked:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        calls = all_mocks["render_generation"].call_args_list
-        # After rejection: attempted=1, accepted=0
-        found_rejected_call = any(
+        update_calls = all_mocks["HelixLiveDisplay"].return_value.__enter__.return_value.update.call_args_list
+        # After rejection: attempted=1
+        found_attempted = any(
             call.kwargs.get("mutations_attempted", 0) >= 1
-            and call.kwargs.get("mutations_accepted", 0) == 0
-            for call in calls
+            for call in update_calls
         )
-        assert found_rejected_call, (
-            "render_generation should show attempted > 0 and accepted == 0 after a rejection"
+        # But accepted should never be non-zero in any update call
+        any_accepted = any(
+            call.kwargs.get("mutations_accepted", 0) >= 1
+            for call in update_calls
         )
+        assert found_attempted, "mutations_attempted should be passed to live.update"
+        assert not any_accepted, "mutations_accepted should NOT be non-zero after rejection"
 
 
 

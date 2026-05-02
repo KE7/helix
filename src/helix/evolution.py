@@ -31,9 +31,12 @@ from helix.display import (
     print_info,
     print_success,
     print_warning,
+    render_budget,
+    render_frontier_table,
     render_generation,
     set_phase,
 )
+
 from helix.exceptions import (
     HelixError,
     PromptArtifactCollisionError,
@@ -1094,6 +1097,8 @@ def _run_evolution_impl(
         gen=state.generation,
         total=config.evolution.max_generations,
         cumulative_budget=state.budget,
+        frontier=frontier,
+        config_evolution=config.evolution,
     ) as live:
 
         # ------------------------------------------------------------------
@@ -1951,6 +1956,8 @@ def _run_evolution_impl(
                     continue
     
                 mutations_attempted += 1
+                live.update(mutations_attempted=mutations_attempted)
+
                 tampered_paths = _detect_evaluator_tamper(child, evaluator_manifest)
                 if tampered_paths:
                     print_warning(
@@ -2269,31 +2276,30 @@ def _run_evolution_impl(
                 last_iter_found_new_program = True
     
                 mutations_accepted += 1
-    
+                live.update(
+                    mutations_attempted=mutations_attempted,
+                    mutations_accepted=mutations_accepted,
+                )
             # If budget was exhausted during sequential acceptance, break outer loop.
             if _budget_break:
                 break
     
             # Render at end of generation using the last result seen.
-            if _last_eval_result is not None:
-                render_generation(
-                    gen, config.evolution.max_generations, frontier, _last_eval_result,
-                    mutations_attempted=mutations_attempted,
-                    mutations_accepted=mutations_accepted,
-                )
-    
-            # GEPA parity (C2): removed parallel re-eval of all frontier
-            # candidates.  GEPA does NOT re-evaluate the entire frontier after
-            # every acceptance — the old block bypassed _cached_eval() and burned
-            # budget quadratically with growing frontier size.
-    
+            # Post-UX upgrade: we update the live display but do NOT
+            # print a scrolling panel every generation.
+
             _save_state(state)
             TRACE.emit(EventType.ITER_END, decision=str(gen))
 
     # ------------------------------------------------------------------
     # Return best
     # ------------------------------------------------------------------
+    # Permanent summary after the live display disappears
+    render_budget(state.budget, config.evolution)
+    render_frontier_table(frontier, frontier._results)
+
     best = frontier.best()
+
     print_success(f"Evolution complete.  Best candidate: {best.id}")
     TRACE.emit(EventType.OPT_END, candidate_id=best.id)
     return best
