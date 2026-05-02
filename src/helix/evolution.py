@@ -364,6 +364,9 @@ def _collect_protected_evaluator_paths(
 
 def _copy_protected_path(source: Path, destination: Path) -> None:
     """Refresh one protected file/directory in a candidate worktree."""
+    if source.resolve(strict=False) == destination.resolve(strict=False):
+        return
+
     if destination.exists() or destination.is_symlink():
         if destination.is_dir() and not destination.is_symlink():
             shutil.rmtree(destination)
