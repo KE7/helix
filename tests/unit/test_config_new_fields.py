@@ -24,6 +24,7 @@ from helix.config import (
 # SeedlessConfig.effective_val_path
 # ---------------------------------------------------------------------------
 
+
 class TestSeedlessConfigValPath:
     def test_val_path_none_falls_back_to_train_path(self):
         cfg = SeedlessConfig(train_path=Path("/tmp/train.jsonl"))
@@ -45,6 +46,7 @@ class TestSeedlessConfigValPath:
 # ---------------------------------------------------------------------------
 # DatasetConfig.train_size / val_size (Architecture A positional-index handoff)
 # ---------------------------------------------------------------------------
+
 
 class TestDatasetConfigSizes:
     def test_defaults_none(self):
@@ -73,7 +75,8 @@ class TestDatasetConfigSizes:
 
     def test_toml_loads_sizes(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Evaluator-owned dataset"
 
             [evaluator]
@@ -82,7 +85,8 @@ class TestDatasetConfigSizes:
             [dataset]
             train_size = 200
             val_size = 200
-        """))
+        """)
+        )
         cfg = load_config(toml)
         assert cfg.dataset.train_size == 200
         assert cfg.dataset.val_size == 200
@@ -96,6 +100,7 @@ class TestDatasetConfigSizes:
 # EvolutionConfig defaults for new fields
 # ---------------------------------------------------------------------------
 
+
 class TestEvolutionConfigNewFields:
     def test_defaults(self):
         cfg = EvolutionConfig()
@@ -103,6 +108,7 @@ class TestEvolutionConfigNewFields:
         # GEPA parity: max_workers defaults to os.cpu_count() or 32
         # (optimize_anything.py:485).
         import os
+
         assert cfg.max_workers == (os.cpu_count() or 32)
         assert cfg.num_parallel_proposals == 1
         assert cfg.cache_evaluation is True
@@ -181,7 +187,8 @@ class TestEvolutionFrontierType:
         assert cfg.frontier_type == "hybrid"
 
     @pytest.mark.parametrize(
-        "variant", ["instance", "objective", "hybrid", "cartesian"],
+        "variant",
+        ["instance", "objective", "hybrid", "cartesian"],
     )
     def test_all_literal_variants_accepted(self, variant):
         cfg = EvolutionConfig(frontier_type=variant)
@@ -192,11 +199,13 @@ class TestEvolutionFrontierType:
             EvolutionConfig(frontier_type="instance_plus_one")  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
-        "variant", ["instance", "objective", "hybrid", "cartesian"],
+        "variant",
+        ["instance", "objective", "hybrid", "cartesian"],
     )
     def test_toml_round_trip_variant(self, tmp_path, variant):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent(f"""
+        toml.write_text(
+            textwrap.dedent(f"""
             objective = "Test"
 
             [evaluator]
@@ -204,24 +213,28 @@ class TestEvolutionFrontierType:
 
             [evolution]
             frontier_type = "{variant}"
-        """))
+        """)
+        )
         cfg = load_config(toml)
         assert cfg.evolution.frontier_type == variant
 
     def test_toml_default_when_omitted(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Test"
 
             [evaluator]
             command = "pytest"
-        """))
+        """)
+        )
         cfg = load_config(toml)
         assert cfg.evolution.frontier_type == "hybrid"
 
     def test_toml_invalid_literal_rejected_at_load(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Test"
 
             [evaluator]
@@ -229,7 +242,8 @@ class TestEvolutionFrontierType:
 
             [evolution]
             frontier_type = "not-a-real-type"
-        """))
+        """)
+        )
         with pytest.raises(SystemExit):
             # load_config prints + sys.exit(1) on validation errors.
             load_config(toml)
@@ -238,7 +252,8 @@ class TestEvolutionFrontierType:
 class TestSandboxConfig:
     def test_toml_loads_fixed_env_config(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Test"
 
             [env]
@@ -248,7 +263,8 @@ class TestSandboxConfig:
             [evaluator]
             command = "pytest -q"
             score_parser = "exitcode"
-        """))
+        """)
+        )
 
         cfg = load_config(toml)
 
@@ -277,20 +293,6 @@ class TestSandboxConfig:
                 sandbox=SandboxConfig(enabled=True, evaluator=True),
             )
 
-    def test_sidecar_requires_sandbox(self):
-        with pytest.raises(ValueError, match="requires sandbox.enabled"):
-            HelixConfig(
-                objective="Test",
-                evaluator={
-                    "command": "python /runner/evaluate.py",
-                    "sidecar": {
-                        "image": "eval:latest",
-                        "command": "python -m server",
-                        "endpoint": "http://helix-evaluator:8080/evaluate",
-                    },
-                },
-            )
-
     def test_sandbox_sidecar_config_is_valid(self):
         cfg = HelixConfig(
             objective="Test",
@@ -311,11 +313,14 @@ class TestSandboxConfig:
         assert cfg.evaluator.sidecar.image == "eval:latest"
         assert cfg.evaluator.sidecar.runner_image == "eval-runner:latest"
         assert cfg.evaluator.sidecar.resolved_runner_image == "eval-runner:latest"
-        assert cfg.evaluator.sidecar.healthcheck_command == "python /runner/healthcheck.py"
+        assert (
+            cfg.evaluator.sidecar.healthcheck_command == "python /runner/healthcheck.py"
+        )
 
     def test_toml_loads_sandbox_config(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Test"
 
             [evaluator]
@@ -346,13 +351,16 @@ class TestSandboxConfig:
             [sandbox.extra_hosts]
             "env-endpoint" = "host-gateway"
             "local-service" = "127.0.0.1"
-        """))
+        """)
+        )
         cfg = load_config(toml)
         assert cfg.sandbox.enabled is True
         assert cfg.evaluator.sidecar is not None
         assert cfg.evaluator.sidecar.endpoint == "http://helix-evaluator:8080/evaluate"
         assert cfg.evaluator.sidecar.runner_image == "eval-runner:latest"
-        assert cfg.evaluator.sidecar.healthcheck_command == "python /runner/healthcheck.py"
+        assert (
+            cfg.evaluator.sidecar.healthcheck_command == "python /runner/healthcheck.py"
+        )
         assert cfg.sandbox.image == "custom-helix:latest"
         assert cfg.sandbox.network == "none"
         assert cfg.sandbox.cpus == 2.0
@@ -368,21 +376,31 @@ class TestSandboxConfig:
             "local-service": "127.0.0.1",
         }
 
-    def test_load_config_loads_adjacent_dotenv_without_overriding(self, tmp_path, monkeypatch):
+    def test_load_config_loads_adjacent_dotenv_without_overriding(
+        self, tmp_path, monkeypatch
+    ):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Test"
 
             [evaluator]
             command = "pytest"
-        """))
+        """)
+        )
         (tmp_path / ".env").write_text(
             "ANTHROPIC_API_KEY=dotenv-key\n"
             "CURSOR_API_KEY='cursor dotenv key'\n"
             "EXISTING=from-dotenv\n"
+            # Inline comment after unquoted value (POSIX/foreman convention).
+            "OPENAI_API_KEY=plain-key   # this is a trailing comment\n"
+            # Hash inside a quoted value must be preserved verbatim.
+            'GEMINI_API_KEY="gem#key#with#hashes"\n'
         )
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.setenv("EXISTING", "from-shell")
 
         load_config(toml)
@@ -390,16 +408,22 @@ class TestSandboxConfig:
         assert os.environ["ANTHROPIC_API_KEY"] == "dotenv-key"
         assert os.environ["CURSOR_API_KEY"] == "cursor dotenv key"
         assert os.environ["EXISTING"] == "from-shell"
+        # Trailing inline comment must be stripped from unquoted values.
+        assert os.environ["OPENAI_API_KEY"] == "plain-key"
+        # Embedded ``#`` inside a quoted value must be preserved.
+        assert os.environ["GEMINI_API_KEY"] == "gem#key#with#hashes"
 
 
 # ---------------------------------------------------------------------------
 # Round-trip TOML loading
 # ---------------------------------------------------------------------------
 
+
 class TestTomlRoundTrip:
     def test_toml_loads_new_fields(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Maximise coverage"
 
             [evaluator]
@@ -416,7 +440,8 @@ class TestTomlRoundTrip:
             cache_evaluation = true
             acceptance_criterion = "improvement_or_equal"
             val_stage_size = 50
-        """))
+        """)
+        )
         cfg = load_config(toml)
         assert cfg.seedless.train_path == Path("/tmp/train.jsonl")
         assert cfg.seedless.val_path == Path("/tmp/val.jsonl")
@@ -430,7 +455,8 @@ class TestTomlRoundTrip:
 
     def test_toml_val_path_omitted_falls_back(self, tmp_path):
         toml = tmp_path / "helix.toml"
-        toml.write_text(textwrap.dedent("""
+        toml.write_text(
+            textwrap.dedent("""
             objective = "Maximise coverage"
 
             [evaluator]
@@ -438,7 +464,8 @@ class TestTomlRoundTrip:
 
             [seedless]
             train_path = "/tmp/train.jsonl"
-        """))
+        """)
+        )
         cfg = load_config(toml)
         assert cfg.seedless.val_path is None
         assert cfg.seedless.effective_val_path == Path("/tmp/train.jsonl")

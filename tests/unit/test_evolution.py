@@ -108,7 +108,9 @@ def make_budget_state(evaluations: int = 0) -> EvolutionState:
     )
 
 
-def test_load_evaluation_round_trips_optional_eval_result_fields(tmp_path: Path) -> None:
+def test_load_evaluation_round_trips_optional_eval_result_fields(
+    tmp_path: Path,
+) -> None:
     result = EvalResult(
         candidate_id="g0-s0",
         scores={"success": 0.5},
@@ -157,16 +159,28 @@ def all_mocks(mocker):
             "helix.evolution.load_lineage",
             return_value={
                 "g0-s0": LineageEntry(
-                    id="g0-s0", parent=None, parents=[],
-                    operation="seed", generation=0, files_changed=[],
+                    id="g0-s0",
+                    parent=None,
+                    parents=[],
+                    operation="seed",
+                    generation=0,
+                    files_changed=[],
                 ),
                 "g1-s1": LineageEntry(
-                    id="g1-s1", parent="g0-s0", parents=["g0-s0"],
-                    operation="mutate", generation=1, files_changed=[],
+                    id="g1-s1",
+                    parent="g0-s0",
+                    parents=["g0-s0"],
+                    operation="mutate",
+                    generation=1,
+                    files_changed=[],
                 ),
                 "g1-s2": LineageEntry(
-                    id="g1-s2", parent="g0-s0", parents=["g0-s0"],
-                    operation="mutate", generation=1, files_changed=[],
+                    id="g1-s2",
+                    parent="g0-s0",
+                    parents=["g0-s0"],
+                    operation="mutate",
+                    generation=1,
+                    files_changed=[],
                 ),
             },
         ),
@@ -184,7 +198,9 @@ def all_mocks(mocker):
         # _cached_evaluate_batch.  Stub it out so tests can use non-numeric
         # or synthetic instance ids without hitting the filesystem.
         "_write_helix_batch": mocker.patch("helix.evolution._write_helix_batch"),
-        "start_evaluator_sidecar": mocker.patch("helix.evolution.start_evaluator_sidecar"),
+        "start_evaluator_sidecar": mocker.patch(
+            "helix.evolution.start_evaluator_sidecar"
+        ),
     }
 
 
@@ -267,7 +283,9 @@ class TestBudgetExhausted:
 
 
 class TestBudgetExhaustionStopsLoop:
-    def test_budget_exhaustion_stops_loop_evaluations(self, mocker, tmp_path, all_mocks):
+    def test_budget_exhaustion_stops_loop_evaluations(
+        self, mocker, tmp_path, all_mocks
+    ):
         """Evolution stops immediately when evaluations budget exhausted after seed."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
@@ -281,7 +299,6 @@ class TestBudgetExhaustionStopsLoop:
         config = make_config(
             max_generations=10,
             max_evaluations=1,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -305,7 +322,6 @@ class TestBudgetExhaustionStopsLoop:
         config = make_config(
             max_generations=10,
             max_evaluations=3,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -368,7 +384,9 @@ class TestEvaluationBudgetUnits:
 
 
 class TestPerfectScoreEarlyStopping:
-    def test_perfect_score_skips_mutation_continues_loop(self, mocker, tmp_path, all_mocks):
+    def test_perfect_score_skips_mutation_continues_loop(
+        self, mocker, tmp_path, all_mocks
+    ):
         """Perfect score on train eval skips mutation (continue) but loop keeps running.
 
         HELIX uses `continue` (not `break`) when the parent's train score is perfect,
@@ -387,7 +405,6 @@ class TestPerfectScoreEarlyStopping:
             max_generations=10,
             perfect_score_threshold=1.0,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -410,7 +427,6 @@ class TestPerfectScoreEarlyStopping:
             max_generations=2,
             perfect_score_threshold=1.0,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -424,7 +440,9 @@ class TestPerfectScoreEarlyStopping:
 
 
 class TestGatingInEvolutionLoop:
-    def _setup(self, mocker, tmp_path, all_mocks, seed_score: float, child_score: float):
+    def _setup(
+        self, mocker, tmp_path, all_mocks, seed_score: float, child_score: float
+    ):
         """Run 1 generation with tunable seed/child scores."""
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
@@ -441,7 +459,6 @@ class TestGatingInEvolutionLoop:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -462,9 +479,7 @@ class TestGatingInEvolutionLoop:
         removed_ids = [c[0][0].id for c in all_mocks["remove_worktree"].call_args_list]
         assert "g1-s1" not in removed_ids
 
-    def test_gating_tie_rejected_strict_improvement(
-        self, mocker, tmp_path, all_mocks
-    ):
+    def test_gating_tie_rejected_strict_improvement(self, mocker, tmp_path, all_mocks):
         """Tied score (same as parent) is REJECTED under strict improvement acceptance.
 
         GEPA parity: StrictImprovementAcceptance requires new_sum > old_sum.
@@ -493,7 +508,6 @@ class TestGatingInEvolutionLoop:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         best = run_evolution(config, tmp_path, tmp_path / ".helix")
         assert best.id == "g1-s1"
@@ -566,7 +580,6 @@ class TestMergeBehavior:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -590,7 +603,6 @@ class TestMergeBehavior:
             max_generations=1,
             merge_enabled=False,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -621,7 +633,6 @@ class TestMergeBehavior:
             max_merge_invocations=0,  # cap at zero → no merges ever
             merge_val_overlap_floor=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -788,7 +799,10 @@ class TestMergeBehavior:
                 elif candidate.id == "g2-m1":
                     scores = {"1": 0.6, "2": 0.5}
                     merged_eval_calls.append(
-                        (split, tuple(instance_ids) if instance_ids is not None else None)
+                        (
+                            split,
+                            tuple(instance_ids) if instance_ids is not None else None,
+                        )
                     )
                 else:
                     scores = {"1": 0.0}
@@ -843,9 +857,7 @@ class TestMergeBehavior:
             f"remove_worktree was called on: {removed_ids}"
         )
 
-    def test_merge_subsample_size_configurable(
-        self, mocker, tmp_path, all_mocks
-    ):
+    def test_merge_subsample_size_configurable(self, mocker, tmp_path, all_mocks):
         """evolution.merge_subsample_size caps the merge-eval batch size.
 
         GEPA parity (merge.py:262 num_subsample_ids=5, overridable): when
@@ -1006,7 +1018,7 @@ class TestMergeBehavior:
         # Counter-check: dup-counted and unique-counted merged sums differ.
         merged_full = {"1": 1.0, "2": 1.0}
         duplicate_counted = sum(merged_full[k] for k in batch)  # 5.0
-        unique_counted = sum(merged_full.values())               # 2.0
+        unique_counted = sum(merged_full.values())  # 2.0
         assert duplicate_counted != unique_counted, (
             "test is only meaningful when the two semantics disagree: "
             f"dup={duplicate_counted} unique={unique_counted} batch={batch}"
@@ -1089,7 +1101,10 @@ class TestMergeBehavior:
                     scores = {"1": 0.2, "2": 0.8, "3": 0.5, "4": 0.5}
                 elif candidate.id == "g2-m1":
                     merged_eval_calls.append(
-                        (split, tuple(instance_ids) if instance_ids is not None else None)
+                        (
+                            split,
+                            tuple(instance_ids) if instance_ids is not None else None,
+                        )
                     )
                     # Subsample call: merged wins vs required_score = 1.0
                     # (both parents sum to 1.0 on the 2-id subsample).
@@ -1118,7 +1133,9 @@ class TestMergeBehavior:
                 EvolutionState(
                     generation=state.generation,
                     frontier=list(state.frontier),
-                    instance_scores={k: dict(v) for k, v in state.instance_scores.items()},
+                    instance_scores={
+                        k: dict(v) for k, v in state.instance_scores.items()
+                    },
                     budget=BudgetState(evaluations=state.budget.evaluations),
                     config_hash=state.config_hash,
                     mutation_counter=state.mutation_counter,
@@ -1224,14 +1241,20 @@ class TestMergeBehavior:
                 EvolutionState(
                     generation=state.generation,
                     frontier=list(state.frontier),
-                    instance_scores={k: dict(v) for k, v in state.instance_scores.items()},
+                    instance_scores={
+                        k: dict(v) for k, v in state.instance_scores.items()
+                    },
                     budget=BudgetState(evaluations=state.budget.evaluations),
                     config_hash=state.config_hash,
                     mutation_counter=state.mutation_counter,
                     merge_counter=state.merge_counter,
                     total_merge_invocations=state.total_merge_invocations,
-                    merge_attempted_pairs=[list(p) for p in state.merge_attempted_pairs],
-                    merge_description_triplets=[list(t) for t in state.merge_description_triplets],
+                    merge_attempted_pairs=[
+                        list(p) for p in state.merge_attempted_pairs
+                    ],
+                    merge_description_triplets=[
+                        list(t) for t in state.merge_description_triplets
+                    ],
                     i=state.i,
                 )
             )
@@ -1312,14 +1335,20 @@ class TestMergeBehavior:
                 EvolutionState(
                     generation=state.generation,
                     frontier=list(state.frontier),
-                    instance_scores={k: dict(v) for k, v in state.instance_scores.items()},
+                    instance_scores={
+                        k: dict(v) for k, v in state.instance_scores.items()
+                    },
                     budget=BudgetState(evaluations=state.budget.evaluations),
                     config_hash=state.config_hash,
                     mutation_counter=state.mutation_counter,
                     merge_counter=state.merge_counter,
                     total_merge_invocations=state.total_merge_invocations,
-                    merge_attempted_pairs=[list(p) for p in state.merge_attempted_pairs],
-                    merge_description_triplets=[list(t) for t in state.merge_description_triplets],
+                    merge_attempted_pairs=[
+                        list(p) for p in state.merge_attempted_pairs
+                    ],
+                    merge_description_triplets=[
+                        list(t) for t in state.merge_description_triplets
+                    ],
                     i=state.i,
                 )
             )
@@ -1350,9 +1379,7 @@ class TestMergeBehavior:
             f"description triplet must carry (pair, desc_hash), got {triplet}"
         )
 
-    def test_merge_gate_requires_three_candidates(
-        self, mocker, tmp_path, all_mocks
-    ):
+    def test_merge_gate_requires_three_candidates(self, mocker, tmp_path, all_mocks):
         """GEPA parity (merge-pairing audit D1, merge.py:130-131).
 
         The ``len(parent_program_for_candidate) < 3`` early-exit means a
@@ -1369,12 +1396,20 @@ class TestMergeBehavior:
         # Only seed + 1 child → lineage has 2 entries → gate trips.
         all_mocks["load_lineage"].return_value = {
             "g0-s0": LineageEntry(
-                id="g0-s0", parent=None, parents=[],
-                operation="seed", generation=0, files_changed=[],
+                id="g0-s0",
+                parent=None,
+                parents=[],
+                operation="seed",
+                generation=0,
+                files_changed=[],
             ),
             "g1-s1": LineageEntry(
-                id="g1-s1", parent="g0-s0", parents=["g0-s0"],
-                operation="mutate", generation=1, files_changed=[],
+                id="g1-s1",
+                parent="g0-s0",
+                parents=["g0-s0"],
+                operation="mutate",
+                generation=1,
+                files_changed=[],
             ),
         }
 
@@ -1428,12 +1463,13 @@ class TestTrainValSplitRouting:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         child_splits = [split for cid, split in splits_seen if cid == "g1-s1"]
-        assert "train" in child_splits, f"Gating should use train split; saw: {child_splits}"
+        assert "train" in child_splits, (
+            f"Gating should use train split; saw: {child_splits}"
+        )
 
     def test_val_split_used_for_pareto_update(self, mocker, tmp_path, all_mocks):
         """After gating passes, val split is used for the frontier update."""
@@ -1456,7 +1492,6 @@ class TestTrainValSplitRouting:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1489,7 +1524,6 @@ class TestTrainValSplitRouting:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1503,9 +1537,7 @@ class TestTrainValSplitRouting:
 
 
 class TestAppendOnlyPopulation:
-    def test_dominated_candidates_never_pruned(
-        self, mocker, tmp_path, all_mocks
-    ):
+    def test_dominated_candidates_never_pruned(self, mocker, tmp_path, all_mocks):
         """GEPA: population is append-only — dominated candidates are never pruned."""
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
@@ -1524,7 +1556,6 @@ class TestAppendOnlyPopulation:
             max_generations=1,
             cleanup_dominated=True,  # flag is ignored — no pruning regardless
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1561,7 +1592,6 @@ class TestGenerationsFlagOverridesConfig:
         config = make_config(
             max_generations=2,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1583,7 +1613,6 @@ class TestGenerationsFlagOverridesConfig:
         config = make_config(
             max_generations=0,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1618,19 +1647,18 @@ class TestMutationCountersTracked:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # HelixLiveDisplay.update should have been called with non-zero mutation counters
-        update_calls = all_mocks["HelixLiveDisplay"].return_value.__enter__.return_value.update.call_args_list
+        update_calls = all_mocks[
+            "HelixLiveDisplay"
+        ].return_value.__enter__.return_value.update.call_args_list
         found_accepted = any(
-            call.kwargs.get("mutations_accepted", 0) >= 1
-            for call in update_calls
+            call.kwargs.get("mutations_accepted", 0) >= 1 for call in update_calls
         )
         found_attempted = any(
-            call.kwargs.get("mutations_attempted", 0) >= 1
-            for call in update_calls
+            call.kwargs.get("mutations_attempted", 0) >= 1 for call in update_calls
         )
         assert found_attempted, "mutations_attempted should be passed to live.update"
         assert found_accepted, "mutations_accepted should be passed to live.update"
@@ -1655,30 +1683,31 @@ class TestMutationCountersTracked:
         config = make_config(
             max_generations=1,
             max_evaluations=10000,
-
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        update_calls = all_mocks["HelixLiveDisplay"].return_value.__enter__.return_value.update.call_args_list
+        update_calls = all_mocks[
+            "HelixLiveDisplay"
+        ].return_value.__enter__.return_value.update.call_args_list
         # After rejection: attempted=1
         found_attempted = any(
-            call.kwargs.get("mutations_attempted", 0) >= 1
-            for call in update_calls
+            call.kwargs.get("mutations_attempted", 0) >= 1 for call in update_calls
         )
         # But accepted should never be non-zero in any update call
         any_accepted = any(
-            call.kwargs.get("mutations_accepted", 0) >= 1
-            for call in update_calls
+            call.kwargs.get("mutations_accepted", 0) >= 1 for call in update_calls
         )
         assert found_attempted, "mutations_attempted should be passed to live.update"
-        assert not any_accepted, "mutations_accepted should NOT be non-zero after rejection"
-
-
+        assert not any_accepted, (
+            "mutations_accepted should NOT be non-zero after rejection"
+        )
 
 
 def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
     """Docker sandbox runs keep the evaluator service alive around evolution."""
-    all_mocks["start_evaluator_sidecar"].return_value.__enter__.return_value = MagicMock()
+    all_mocks[
+        "start_evaluator_sidecar"
+    ].return_value.__enter__.return_value = MagicMock()
     all_mocks["start_evaluator_sidecar"].return_value.__exit__.return_value = False
     seed = make_candidate()
     all_mocks["create_seed_worktree"].return_value = seed
