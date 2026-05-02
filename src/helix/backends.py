@@ -35,7 +35,18 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "claude": {
         "login": ["claude", "auth", "login", "--claudeai"],
-        "status": ["claude", "auth", "status", "--text"],
+        # ``claude auth status --text`` returns 0 even when there are no
+        # credentials, so we additionally require the on-disk credential file
+        # written by ``claude auth login`` to be non-empty. Using a file probe
+        # avoids depending on the exact human-readable wording (which is
+        # localised in some CLI versions).
+        "status": [
+            "sh",
+            "-lc",
+            "set -eu; "
+            "claude auth status --text 2>&1 || true; "
+            'test -s "${HOME:-/home/node}/.claude/.credentials.json"',
+        ],
         "logout": ["claude", "auth", "logout"],
     },
     "codex": {
@@ -51,10 +62,13 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "gemini": {
         "login": ["gemini", "--skip-trust"],
         "status": ["gemini", "--version"],
+        # The auth volume is mounted at /home/node and is shared across
+        # backends, so logout must scrub only Gemini's state directory rather
+        # than the whole home tree.
         "logout": [
             "sh",
             "-lc",
-            "rm -rf /home/node/.gemini/oauth_creds.json /home/node/.gemini/.oauth_creds.json",
+            'set -eu; rm -rf "/home/node/.gemini" "/home/node/.config/google-gemini"',
         ],
     },
     "opencode": {

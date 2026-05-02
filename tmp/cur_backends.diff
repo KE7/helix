@@ -1,0 +1,26 @@
+diff --git a/src/helix/backends.py b/src/helix/backends.py
+index 3a5915a..08415f6 100644
+--- a/src/helix/backends.py
++++ b/src/helix/backends.py
+@@ -35,7 +35,11 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
+ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
+     "claude": {
+         "login": ["claude", "auth", "login", "--claudeai"],
+-        "status": ["claude", "auth", "status", "--text"],
++        "status": [
++            "sh",
++            "-lc",
++            "out=$(claude auth status --text); echo \"$out\"; if echo \"$out\" | grep -qi 'not logged in'; then exit 1; fi"
++        ],
+         "logout": ["claude", "auth", "logout"],
+     },
+     "codex": {
+@@ -54,7 +58,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
+         "logout": [
+             "sh",
+             "-lc",
+-            "rm -rf /home/node/.gemini/oauth_creds.json /home/node/.gemini/.oauth_creds.json",
++            "find /home/node -mindepth 1 -delete",
+         ],
+     },
+     "opencode": {

@@ -1,0 +1,85 @@
+diff --git a/src/helix/mutator.py b/src/helix/mutator.py
+index 3f3fc01..24d543a 100644
+--- a/src/helix/mutator.py
++++ b/src/helix/mutator.py
+@@ -536,12 +536,12 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
+         primary_path = wt / MUTATION_PROMPT_ARTIFACT_NAME
+         fallback_path = wt / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+         try:
+-            with primary_path.open("x") as f:
++            with primary_path.open("w") as f:
+                 f.write(prompt)
+             return MUTATION_PROMPT_ARTIFACT_NAME
+-        except FileExistsError:
++        except OSError:
+             fallback_path.parent.mkdir(parents=True, exist_ok=True)
+-            with fallback_path.open("x") as f:
++            with fallback_path.open("w") as f:
+                 f.write(prompt)
+             return MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+     except OSError as e:
+@@ -629,7 +629,7 @@ def _build_backend_args(
+         ]
+         if config.model:
+             args.extend(["--model", config.model])
+-        args.extend(["--prompt", _prompt_file_instruction(prompt_artifact_name)])
++        args.append(_prompt_file_instruction(prompt_artifact_name))
+         return args
+ 
+     if backend == "opencode":
+@@ -643,11 +643,7 @@ def _build_backend_args(
+             args.extend(["--model", config.model])
+         if config.effort:
+             args.extend(["--variant", config.effort])
+-        args.extend([
+-            "--file",
+-            prompt_artifact_name,
+-            _prompt_file_instruction(prompt_artifact_name),
+-        ])
++        args.append(_prompt_file_instruction(prompt_artifact_name))
+         return args
+ 
+     raise ValueError(f"Unsupported backend: {backend}")
+@@ -807,7 +803,7 @@ def _coerce_number(value: Any) -> float | None:
+ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
+     usage: dict[str, Any] = {}
+     tool_event_count = 0
+-    tool_names: set[str] = set()
++    tool_names: list[str] = []
+     num_turns = 0
+ 
+     # Claude Code returns num_turns and tool_use_count in the top-level object.
+@@ -820,17 +816,17 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
+         node_type = str(node.get("type", "")).lower()
+ 
+         # Tool usage detection
+-        if "tool" in node_type or node_type == "call":
++        if "tool" in node_type or "call" in node_type:
+             if "name" in node:
+-                tool_names.add(str(node["name"]))
+-            if any(t in node_type for t in ("tool_use", "tool_call", "tool.call", "call")):
++                tool_names.append(str(node["name"]))
++            if any(t in node_type for t in ("tool_use", "tool_call", "tool.call", "call", "function_call")):
+                 tool_event_count += 1
+ 
+         # Turn detection (backend-specific heuristics)
+-        if node_type in ("turn", "message", "exchange"):
+-            num_turns += 1
+-        elif node_type == "step_start":  # OpenCode
+-            num_turns += 1
++        # Avoid double-counting against top-level num_turns if already present
++        if "num_turns" not in parsed:
++            if node_type in ("turn", "exchange") or node_type == "step_start":
++                num_turns += 1
+ 
+         for key, aliases in (
+             ("input_tokens", ("input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input")),
+@@ -866,7 +862,7 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
+     if tool_event_count and "tool_event_count" not in usage:
+         usage["tool_event_count"] = tool_event_count
+     if tool_names:
+-        usage["tool_names"] = sorted(list(tool_names))
++        usage["tool_names"] = tool_names
+     if num_turns and "num_turns" not in usage:
+         usage["num_turns"] = num_turns
+ 

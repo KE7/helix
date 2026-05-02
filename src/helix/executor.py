@@ -225,7 +225,10 @@ def run_evaluator(
                 "Run evaluations through helix.evolution.run_evolution."
             )
         command_results = run_sandboxed_commands(
-            [cmd_tokens, *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands]],
+            [
+                cmd_tokens,
+                *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands],
+            ],
             cwd=candidate.worktree_path,
             env=env,
             sandbox=config.sandbox,
@@ -275,7 +278,10 @@ def run_evaluator(
         )
         logger.info(
             "Evaluator exited with code %d for candidate %s (split=%s):\n%s",
-            returncode, candidate.id, split, error_ctx,
+            returncode,
+            candidate.id,
+            split,
+            error_ctx,
         )
 
     # Collect ASI
@@ -369,7 +375,9 @@ def run_evaluator(
                 len(missing),
                 len(instance_ids),
                 sample,
-                "" if len(missing) <= len(sample) else f" ... +{len(missing) - len(sample)} more",
+                ""
+                if len(missing) <= len(sample)
+                else f" ... +{len(missing) - len(sample)} more",
             )
         instance_scores = filtered
 

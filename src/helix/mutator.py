@@ -148,7 +148,9 @@ def build_seed_generation_prompt(
             f"    {evaluator_cmd}\n\n"
             f"Make sure your implementation is compatible with this command."
         )
-    background_section = "\n".join(background_lines) + ("\n" if background_lines else "")
+    background_section = "\n".join(background_lines) + (
+        "\n" if background_lines else ""
+    )
 
     # Mirror GEPA's dataset grounding: include up to 3 representative examples
     # so the LLM understands the input format before writing the first candidate.
@@ -239,7 +241,8 @@ def _render_side_info_value(value: Any, level: int) -> str:
             parts.append(f"{'#' * level} {k}")
             parts.append(
                 _render_side_info_value(
-                    v, min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
+                    v,
+                    min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
                 )
             )
         if not value:
@@ -251,7 +254,8 @@ def _render_side_info_value(value: Any, level: int) -> str:
             parts.append(f"{'#' * level} Item {i + 1}")
             parts.append(
                 _render_side_info_value(
-                    item, min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
+                    item,
+                    min(level + 1, _MAX_MARKDOWN_HEADER_LEVEL),
                 )
             )
         if not value:
@@ -345,13 +349,12 @@ def build_mutation_prompt(
 
     # Collect any extra_N entries from ASI
     extra_entries = {
-        k: v for k, v in sorted(eval_result.asi.items())
+        k: v
+        for k, v in sorted(eval_result.asi.items())
         if k not in ("stdout", "stderr", "error")
     }
     if extra_entries:
-        extra_lines = "\n".join(
-            f"### {k}\n{v}" for k, v in extra_entries.items()
-        )
+        extra_lines = "\n".join(f"### {k}\n{v}" for k, v in extra_entries.items())
         extra_asi_section = f"### Extra Evaluator Info\n{extra_lines}\n\n"
     else:
         extra_asi_section = ""
@@ -530,20 +533,45 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
     files are treated as user-owned collisions and are never overwritten.
     Returns the artifact filename chosen for this invocation.
     """
+
+    def _try_write(path: Path) -> bool:
+        """Write *prompt* to *path* without clobbering a user-owned file.
+
+        Returns True on success. If the file already exists with identical
+        content (e.g. a resumed run rewriting the same artifact), succeeds
+        idempotently. Returns False if the file exists with different content
+        so the caller can try the fallback path.
+        """
+        try:
+            with path.open("x") as f:
+                f.write(prompt)
+            return True
+        except FileExistsError:
+            try:
+                if path.read_text() == prompt:
+                    # Same artifact already written by a prior attempt; fine
+                    # to reuse without modifying the file.
+                    return True
+            except OSError:
+                pass
+            return False
+
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
         primary_path = wt / MUTATION_PROMPT_ARTIFACT_NAME
         fallback_path = wt / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
-        try:
-            with primary_path.open("x") as f:
-                f.write(prompt)
+        if _try_write(primary_path):
             return MUTATION_PROMPT_ARTIFACT_NAME
-        except FileExistsError:
-            fallback_path.parent.mkdir(parents=True, exist_ok=True)
-            with fallback_path.open("x") as f:
-                f.write(prompt)
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        if _try_write(fallback_path):
             return MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+        # Both paths exist with content that differs from the new prompt;
+        # treat as a user collision so we never silently overwrite.
+        raise FileExistsError(
+            f"both {primary_path.name} and {fallback_path} already exist with "
+            "different content"
+        )
     except OSError as e:
         raise PromptArtifactCollisionError(
             "Failed to create prompt artifact without overwriting an existing file",
@@ -581,8 +609,10 @@ def _build_backend_args(
             "claude",
             "--dangerously-skip-permissions",
             "--print",
-            "--output-format", "json",
-            "--allowedTools", tools_str,
+            "--output-format",
+            "json",
+            "--allowedTools",
+            tools_str,
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -610,11 +640,13 @@ def _build_backend_args(
             "cursor",
             "agent",
             "--print",
-            "--output-format", "stream-json",
+            "--output-format",
+            "stream-json",
             "--yolo",
             "--approve-mcps",
             "--trust",
-            "--workspace", worktree_path,
+            "--workspace",
+            worktree_path,
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -625,29 +657,27 @@ def _build_backend_args(
         args = [
             "gemini",
             "--yolo",
-            "--output-format", "stream-json",
+            "--output-format",
+            "stream-json",
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.extend(["--prompt", _prompt_file_instruction(prompt_artifact_name)])
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "opencode":
         args = [
             "opencode",
             "run",
-            "--format", "json",
+            "--format",
+            "json",
             "--dangerously-skip-permissions",
         ]
         if config.model:
             args.extend(["--model", config.model])
         if config.effort:
             args.extend(["--variant", config.effort])
-        args.extend([
-            "--file",
-            prompt_artifact_name,
-            _prompt_file_instruction(prompt_artifact_name),
-        ])
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     raise ValueError(f"Unsupported backend: {backend}")
@@ -807,7 +837,7 @@ def _coerce_number(value: Any) -> float | None:
 def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     tool_event_count = 0
-    tool_names: set[str] = set()
+    tool_names: list[str] = []
     num_turns = 0
 
     # Claude Code returns num_turns and tool_use_count in the top-level object.
@@ -816,28 +846,72 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
     if "tool_use_count" in parsed:
         usage["tool_event_count"] = _coerce_number(parsed["tool_use_count"])
 
+    # Recognise the exact node types that backends emit for tool/function
+    # invocations. Substring matching on "call" is too loose -- it also fires
+    # for unrelated event types like "recall", "callback", "rollback", etc.
+    _TOOL_NODE_TYPES = {
+        "tool_use",
+        "tool_call",
+        "tool.call",
+        "tool-call",
+        "tool_result",
+        "function_call",
+        "function-call",
+    }
     for node in _walk_json(parsed):
         node_type = str(node.get("type", "")).lower()
 
         # Tool usage detection
-        if "tool" in node_type or node_type == "call":
+        if node_type in _TOOL_NODE_TYPES:
             if "name" in node:
-                tool_names.add(str(node["name"]))
-            if any(t in node_type for t in ("tool_use", "tool_call", "tool.call", "call")):
+                tool_names.append(str(node["name"]))
+            # ``tool_result`` is the backend's reply event; only count the
+            # invocation events to avoid double-counting.
+            if node_type != "tool_result":
                 tool_event_count += 1
 
         # Turn detection (backend-specific heuristics)
-        if node_type in ("turn", "message", "exchange"):
-            num_turns += 1
-        elif node_type == "step_start":  # OpenCode
-            num_turns += 1
+        # Avoid double-counting against top-level num_turns if already present
+        if "num_turns" not in parsed:
+            if node_type in ("turn", "exchange") or node_type == "step_start":
+                num_turns += 1
 
         for key, aliases in (
-            ("input_tokens", ("input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input")),
-            ("output_tokens", ("output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output")),
-            ("cached_input_tokens", ("cached_input_tokens", "cachedTokens", "cacheReadInputTokens", "cacheRead", "cached")),
+            (
+                "input_tokens",
+                (
+                    "input_tokens",
+                    "inputTokens",
+                    "prompt_tokens",
+                    "promptTokens",
+                    "input",
+                ),
+            ),
+            (
+                "output_tokens",
+                (
+                    "output_tokens",
+                    "outputTokens",
+                    "completion_tokens",
+                    "completionTokens",
+                    "output",
+                ),
+            ),
+            (
+                "cached_input_tokens",
+                (
+                    "cached_input_tokens",
+                    "cachedTokens",
+                    "cacheReadInputTokens",
+                    "cacheRead",
+                    "cached",
+                ),
+            ),
             ("reasoning_tokens", ("reasoning_tokens", "reasoningTokens", "thoughts")),
-            ("cost_usd", ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total")),
+            (
+                "cost_usd",
+                ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total"),
+            ),
         ):
             if key in usage:
                 continue
@@ -848,7 +922,14 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
                         usage[key] = value
                         break
         if "session_id" not in usage:
-            for alias in ("session_id", "sessionId", "chat_id", "chatId", "thread_id", "threadId"):
+            for alias in (
+                "session_id",
+                "sessionId",
+                "chat_id",
+                "chatId",
+                "thread_id",
+                "threadId",
+            ):
                 value = node.get(alias)
                 if isinstance(value, str) and value:
                     usage["session_id"] = value
@@ -866,7 +947,7 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
     if tool_event_count and "tool_event_count" not in usage:
         usage["tool_event_count"] = tool_event_count
     if tool_names:
-        usage["tool_names"] = sorted(list(tool_names))
+        usage["tool_names"] = tool_names
     if num_turns and "num_turns" not in usage:
         usage["num_turns"] = num_turns
 
@@ -905,7 +986,12 @@ def _copy_local_claude_transcript(
     root = (
         Path(transcript_root)
         if transcript_root is not None
-        else Path(os.environ.get("HELIX_CLAUDE_TRANSCRIPT_ROOT", Path.home() / ".claude/projects/-workspace"))
+        else Path(
+            os.environ.get(
+                "HELIX_CLAUDE_TRANSCRIPT_ROOT",
+                Path.home() / ".claude/projects/-workspace",
+            )
+        )
     )
     src = root / f"{session_id}.jsonl"
     if not src.is_file():
@@ -1012,7 +1098,8 @@ def _write_backend_artifacts(
     except OSError as e:
         logger.debug(
             "failed to write backend artifacts to %s: %s",
-            worktree_path, e,
+            worktree_path,
+            e,
         )
 
 
@@ -1058,14 +1145,18 @@ def invoke_claude_code(
         return _MUTATOR_OVERRIDE(worktree_path, prompt, config)
     backend = config.backend
     backend_name = backend_display_name(backend)
-    backend_worktree_path = "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
+    backend_worktree_path = (
+        "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
+    )
     args = _build_backend_args(
         backend_worktree_path,
         config,
         prompt_artifact_name,
     )
     cmd_str = shlex.join(args)
-    backend_env = _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
+    backend_env = _scrub_environment(
+        passthrough_env=passthrough_env, fixed_env=fixed_env
+    )
     _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
@@ -1103,7 +1194,9 @@ def invoke_claude_code(
             if backend == "claude":
                 error_text = str(parsed.get("error", ""))
                 if _looks_like_rate_limit(error_text):
-                    logger.error("Rate limit detected in JSON response: %s", error_text[:200])
+                    logger.error(
+                        "Rate limit detected in JSON response: %s", error_text[:200]
+                    )
                     raise RateLimitError(
                         f"{backend_name} returned a rate/usage limit error in JSON response",
                         operation=f"{backend_name} invocation",
@@ -1238,7 +1331,10 @@ def mutate(
         prepare_worktree(child)
 
     prompt = build_mutation_prompt(
-        config.objective, eval_result, background, config.agent.max_turns,
+        config.objective,
+        eval_result,
+        background,
+        config.agent.max_turns,
     )
 
     # Persist the rendered prompt to the worktree for post-hoc inspection:

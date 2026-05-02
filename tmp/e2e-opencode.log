@@ -1,0 +1,48 @@
+Creating seed worktree...
+⟳  Evaluating seed…
+Evaluating seed...
+Seed evaluated: 0.0000
+╭──────────────────────────────── Generation 0 ────────────────────────────────╮
+│ Generation 0 / 2                                                             │
+│   Score  : 0.0000                                                            │
+│   score: 0.0000                                                              │
+│   Status : ACCEPTED                                                          │
+│                                                                              │
+│ Current frontier:                                                            │
+│   g0-s0  0.0000                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Acceptance: g2-s2 does not improve (child_sum=2.1667, parent_sum=2.1667) -- 
+removing.
+╭────────────────────────────── HELIX Evolution ───────────────────────────────╮
+│                                                                              │
+│  Generation 2 / 2                                                            │
+│  Status: Gating mutation                                                     │
+│                                                                              │
+│  Best Score: 2.1667 (g1-s1)                                                  │
+│  Frontier  : g0-s0, g1-s1                                                    │
+│  Acceptance: 1/2 (50.0%)                                                     │
+│                                                                              │
+│  Current Generation Usage:                                                   │
+│    Tokens: 2 in / 62 out                                                     │
+│    Turns : 7                                                                 │
+│    Tools : 6                                                                 │
+│                                                                              │
+│  Cumulative Evolution Total:                                                 │
+│    Tokens: 4 in / 124 out                                                    │
+│    Cost  : $0.0097                                                           │
+│    Budget: 3 evaluations                                                     │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯Evaluations          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  
+                           Pareto Frontier                           
+┏━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┓
+┃ Candidate ┃ Scores       ┃ Instance Wins ┃ Generation ┃ Operation ┃
+┡━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━┩
+│ g0-s0     │ agg=0.0000   │             0 │          0 │ seed      │
+│           │ score=0.0000 │               │            │           │
+├───────────┼──────────────┼───────────────┼────────────┼───────────┤
+│ g1-s1     │ agg=2.1667   │             1 │          1 │ mutate    │
+│           │ score=2.1667 │               │            │           │
+└───────────┴──────────────┴───────────────┴────────────┴───────────┘
+Evolution complete.  Best candidate: g1-s1
+HELIX worktrees and saved state remain on disk after the run. Run helix clean 
+when you want to discard them.

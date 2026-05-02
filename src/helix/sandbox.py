@@ -37,28 +37,51 @@ class EvaluatorSidecarRuntime:
     endpoint: str
 
 
-_EVALUATOR_SIDECAR_RUNTIME: EvaluatorSidecarRuntime | None = None
-_EVALUATOR_SIDECAR_RUNTIME_LOCK = threading.RLock()
+# Process-wide stack of active evaluator sidecar runtimes guarded by a lock.
+#
+# A stack (rather than a single global) lets nested ``evaluator_sidecar_runtime``
+# context managers on the same thread restore the outer runtime correctly.
+#
+# We use a process-wide stack rather than ``threading.local`` because the
+# evolution loop dispatches per-candidate evaluations to a
+# ``ThreadPoolExecutor`` -- those worker threads must see the sidecar that the
+# main thread just started. Running two overlapping evolution loops in the
+# *same* process is not supported (it would also conflict on cwd, file locks,
+# evaluator manifest writes, etc.); concurrent runs should use separate
+# processes.
+_sidecar_stack: list[EvaluatorSidecarRuntime] = []
+_sidecar_stack_lock = threading.RLock()
 
 
 def current_evaluator_sidecar_runtime() -> EvaluatorSidecarRuntime | None:
-    with _EVALUATOR_SIDECAR_RUNTIME_LOCK:
-        return _EVALUATOR_SIDECAR_RUNTIME
+    """Return the most recently pushed evaluator sidecar runtime, or ``None``."""
+    with _sidecar_stack_lock:
+        return _sidecar_stack[-1] if _sidecar_stack else None
 
 
 @contextmanager
 def evaluator_sidecar_runtime(
     runtime: EvaluatorSidecarRuntime,
 ) -> Iterator[EvaluatorSidecarRuntime]:
-    global _EVALUATOR_SIDECAR_RUNTIME
-    with _EVALUATOR_SIDECAR_RUNTIME_LOCK:
-        previous = _EVALUATOR_SIDECAR_RUNTIME
-        _EVALUATOR_SIDECAR_RUNTIME = runtime
+    """Push *runtime* onto the active sidecar stack for the duration of the block.
+
+    Nested ``with`` blocks are supported: the innermost runtime wins, and the
+    outer runtime is restored on exit even if an exception is raised inside the
+    block.
+    """
+    with _sidecar_stack_lock:
+        _sidecar_stack.append(runtime)
     try:
         yield runtime
     finally:
-        with _EVALUATOR_SIDECAR_RUNTIME_LOCK:
-            _EVALUATOR_SIDECAR_RUNTIME = previous
+        with _sidecar_stack_lock:
+            # Remove the most recent occurrence of *runtime*; tolerate odd
+            # stack states (e.g. exceptions during start) without raising in
+            # ``finally``.
+            for i in range(len(_sidecar_stack) - 1, -1, -1):
+                if _sidecar_stack[i] is runtime:
+                    del _sidecar_stack[i]
+                    break
 
 
 def _is_supported_workspace_file(path: Path) -> bool:
@@ -69,7 +92,9 @@ def _is_supported_workspace_file(path: Path) -> bool:
     return stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)
 
 
-def resolve_sandbox_image(sandbox: SandboxConfig, agent_backend: str | None = None) -> str:
+def resolve_sandbox_image(
+    sandbox: SandboxConfig, agent_backend: str | None = None
+) -> str:
     if sandbox.image:
         return sandbox.image
     if agent_backend is None:
@@ -77,14 +102,13 @@ def resolve_sandbox_image(sandbox: SandboxConfig, agent_backend: str | None = No
     try:
         return DEFAULT_BACKEND_IMAGES[agent_backend]
     except KeyError as exc:
-        raise ValueError(f"No default sandbox image for backend: {agent_backend}") from exc
+        raise ValueError(
+            f"No default sandbox image for backend: {agent_backend}"
+        ) from exc
 
 
 def _is_helix_artifact_name(name: str) -> bool:
-    return (
-        name in HELIX_ARTIFACT_NAMES
-        or name == ".agent_task_prompt.md"
-    )
+    return name in HELIX_ARTIFACT_NAMES or name == ".agent_task_prompt.md"
 
 
 def _ignore_for_copy(path: Path) -> bool:
@@ -128,6 +152,14 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
             except json.JSONDecodeError:
                 continue
 
+    # Check top-level payloads first
+    for payload in payloads:
+        if isinstance(payload, dict):
+            for key in ("session_id", "sessionId", "sessionID"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    return value
+
     def walk(obj: object) -> Iterator[object]:
         yield obj
         if isinstance(obj, dict):
@@ -139,7 +171,7 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
 
     for payload in payloads:
         for node in walk(payload):
-            if not isinstance(node, dict):
+            if not isinstance(node, dict) or node is payload:
                 continue
             for key in ("session_id", "sessionId", "sessionID"):
                 value = node.get(key)
@@ -156,10 +188,7 @@ def _copy_claude_transcript_from_auth_volume(
     sandbox: SandboxConfig,
     stdout: str,
 ) -> None:
-    if (
-        agent_backend != "claude"
-        or not sandbox.preserve_backend_transcripts
-    ):
+    if agent_backend != "claude" or not sandbox.preserve_backend_transcripts:
         return
     session_id = _extract_session_id_from_json_output(stdout)
     if not session_id:
@@ -167,10 +196,11 @@ def _copy_claude_transcript_from_auth_volume(
     rel_dir = Path(sandbox.transcript_artifact_dir) / "claude"
     rel_file = rel_dir / f"{session_id}.jsonl"
     source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
+    rel_file_str = str(rel_file).lstrip("/")
     command = (
         "set -eu; "
         f"src={shlex.quote(str(source))}; "
-        f"dst={shlex.quote('/workspace/' + str(rel_file))}; "
+        f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
         '[ -f "$src" ] || exit 0; '
         'mkdir -p "$(dirname "$dst")"; '
         'cp "$src" "$dst"'
@@ -325,25 +355,54 @@ def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
 
 def _init_synthetic_git_repo(workspace: Path) -> None:
     """Create local-only git metadata so agent CLIs can inspect status."""
-    subprocess.run(["git", "init"], cwd=workspace, check=False, capture_output=True)
+    # Build a clean environment that ignores host-level git config and any
+    # GIT_* overrides inherited from the parent process so the synthetic repo
+    # is fully self-contained.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    # Disable any user/system hooks that could veto commits.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    init_args = [
+        "git",
+        "-c",
+        "init.defaultBranch=main",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "init",
+    ]
+    subprocess.run(init_args, cwd=workspace, check=True, capture_output=True, env=env)
     subprocess.run(
         ["git", "config", "user.name", "HELIX Sandbox"],
         cwd=workspace,
-        check=False,
+        check=True,
         capture_output=True,
+        env=env,
     )
     subprocess.run(
         ["git", "config", "user.email", "helix-sandbox@noreply"],
         cwd=workspace,
-        check=False,
+        check=True,
         capture_output=True,
+        env=env,
     )
-    subprocess.run(["git", "add", "-A"], cwd=workspace, check=False, capture_output=True)
     subprocess.run(
-        ["git", "commit", "--allow-empty", "-m", "helix: sandbox baseline"],
+        ["git", "add", "-A"], cwd=workspace, check=True, capture_output=True, env=env
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "helix: sandbox baseline",
+        ],
         cwd=workspace,
-        check=False,
+        check=True,
         capture_output=True,
+        env=env,
     )
 
 
@@ -369,36 +428,79 @@ def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
             'find /workspace -path /workspace/.git -prune -o -exec chown -h "$0" {} +',
             owner,
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
-        env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ},
+        env=_docker_host_env(),
     )
 
 
 def _host_owner() -> str | None:
+    """Return the ``UID:GID`` to chown the workspace back to after a container run.
+
+    Returns ``None`` whenever container UIDs do not map directly to host UIDs --
+    e.g. on macOS, Windows, Docker Desktop on Linux, rootless Docker, or any
+    Docker context that uses a remote daemon or user-namespace remapping --
+    in which case the caller should skip the chown step entirely.
+    """
+    import sys
+
+    if sys.platform in ("darwin", "win32"):
+        return None
     if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
         return None
     try:
         info = subprocess.run(
-            ["docker", "info", "--format", "{{json .SecurityOptions}}"],
+            [
+                "docker",
+                "info",
+                "--format",
+                "{{.OperatingSystem}}|{{.SecurityOptions}}|{{.Name}}",
+            ],
             check=False,
             capture_output=True,
             text=True,
-            env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ},
+            env=_docker_host_env(),
+            timeout=10,
         )
-        if info.returncode == 0 and "rootless" in (info.stdout or ""):
-            # In rootless Docker, container root maps back to the host user.
-            # Chowning to the numeric host uid from inside the namespace maps
-            # to an unmapped subuid and leaves the host unable to clean up.
-            return "root:root"
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError):
+        # If we cannot ask the daemon, do not guess: skipping the chown is
+        # safer than chowning to a UID the host cannot map.
+        return None
+    if info.returncode != 0:
+        return None
+    out = (info.stdout or "").lower()
+    # Rootless Docker, Docker Desktop (incl. Linux), Lima/Colima/OrbStack/podman
+    # machine, and userns-remapped daemons all break the assumption that
+    # container UIDs match host UIDs. Skip chown in any of these.
+    indeterminate_markers = (
+        "rootless",
+        "docker desktop",
+        "colima",
+        "orbstack",
+        "lima",
+        "userns",
+    )
+    if any(marker in out for marker in indeterminate_markers):
+        return None
+    # Remote daemons (docker context with a non-local DOCKER_HOST) also break
+    # local UID assumptions.
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if docker_host and not (
+        docker_host.startswith("unix://")
+        or docker_host.startswith("fd://")
+        or docker_host == ""
+    ):
+        return None
     return f"{os.getuid()}:{os.getgid()}"
 
 
 def _docker_host_env() -> dict[str, str]:
-    return {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+    env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+    for k in os.environ:
+        if k.startswith("DOCKER_"):
+            env[k] = os.environ[k]
+    return env
 
 
 def _run_docker(
@@ -516,7 +618,13 @@ def _wait_for_sidecar_service(
     last_output = ""
     while time.monotonic() < deadline:
         status = _run_docker(
-            ["docker", "inspect", "-f", "{{.State.Running}} {{.State.Status}}", container_name],
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "{{.State.Running}} {{.State.Status}}",
+                container_name,
+            ],
             check=False,
         )
         if status.returncode == 0:
@@ -556,7 +664,11 @@ def start_evaluator_sidecar(
     suffix = uuid.uuid4().hex[:12]
     network = f"helix-eval-{suffix}"
     container_name = f"helix-evaluator-{suffix}"
-    _run_docker(["docker", "network", "create", "--internal", network])
+    net_cmd = ["docker", "network", "create"]
+    if sidecar.internal_network:
+        net_cmd.append("--internal")
+    net_cmd.append(network)
+    _run_docker(net_cmd)
     try:
         args = [
             "docker",
@@ -571,7 +683,9 @@ def start_evaluator_sidecar(
             "--security-opt",
             "no-new-privileges",
         ]
-        args.extend(_build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts))
+        args.extend(
+            _build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts)
+        )
         for key in passthrough_env or []:
             if key in os.environ:
                 args.extend(["-e", f"{key}={os.environ[key]}"])
@@ -614,6 +728,7 @@ def _docker_args(
     image: str,
     agent_backend: str | None,
     network: str | None = None,
+    container_name: str | None = None,
 ) -> list[str]:
     args = [
         "docker",
@@ -630,6 +745,8 @@ def _docker_args(
         "-v",
         f"{workspace}:/workspace:rw",
     ]
+    if container_name:
+        args.extend(["--name", container_name])
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
@@ -649,12 +766,12 @@ def _docker_args(
     )
 
     container_env = {
-        key: value
-        for key, value in env.items()
-        if key not in {"HOME", "PATH"}
+        key: value for key, value in env.items() if key not in {"HOME", "PATH"}
     }
     container_env["HOME"] = "/home/node"
-    container_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    container_env["PATH"] = (
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
 
     for key, value in container_env.items():
         args.extend(["-e", f"{key}={value}"])
@@ -700,13 +817,16 @@ def run_sandboxed_commands(
         )
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
-        sidecar_runtime = current_evaluator_sidecar_runtime() if scope == "evaluator" else None
+        sidecar_runtime = (
+            current_evaluator_sidecar_runtime() if scope == "evaluator" else None
+        )
         command_env = dict(env)
         if sidecar_runtime is not None:
             command_env["HELIX_EVALUATOR_ENDPOINT"] = sidecar_runtime.endpoint
         results = []
         try:
             for command in commands:
+                container_name = f"helix-cmd-{uuid.uuid4().hex[:12]}"
                 docker_cmd = _docker_args(
                     command,
                     command_env,
@@ -716,18 +836,22 @@ def run_sandboxed_commands(
                     docker_image,
                     agent_backend,
                     sidecar_runtime.network if sidecar_runtime is not None else None,
+                    container_name=container_name,
                 )
-                results.append(
-                    subprocess.run(
-                        docker_cmd,
-                        cwd=str(source),
-                        capture_output=True,
-                        text=True,
-                        input=input_text,
-                        env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ},
-                        timeout=sandbox.timeout_seconds,
+                try:
+                    results.append(
+                        subprocess.run(
+                            docker_cmd,
+                            cwd=str(source),
+                            capture_output=True,
+                            text=True,
+                            input=input_text,
+                            env=_docker_host_env(),
+                            timeout=sandbox.timeout_seconds,
+                        )
                     )
-                )
+                finally:
+                    _run_docker(["docker", "rm", "-f", container_name], check=False)
                 if scope == "agent":
                     _copy_claude_transcript_from_auth_volume(
                         workspace=workspace,
@@ -790,7 +914,9 @@ def sandbox_auth_docker_args(
     try:
         command = BACKEND_AUTH_COMMANDS[agent_backend][action]
     except KeyError as exc:
-        raise ValueError(f"No sandbox auth {action!r} command for backend: {agent_backend}") from exc
+        raise ValueError(
+            f"No sandbox auth {action!r} command for backend: {agent_backend}"
+        ) from exc
 
     args = [
         "docker",
@@ -804,7 +930,9 @@ def sandbox_auth_docker_args(
         network,
         "--security-opt",
         "no-new-privileges",
-        *_build_add_host_args(add_host_gateway=add_host_gateway, extra_hosts=extra_hosts),
+        *_build_add_host_args(
+            add_host_gateway=add_host_gateway, extra_hosts=extra_hosts
+        ),
         "-v",
         f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw",
         "-e",
@@ -829,7 +957,9 @@ def run_sandbox_auth_command(
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    docker_image = image or resolve_sandbox_image(SandboxConfig(enabled=True), agent_backend)
+    docker_image = image or resolve_sandbox_image(
+        SandboxConfig(enabled=True), agent_backend
+    )
     args = sandbox_auth_docker_args(
         agent_backend,
         image=docker_image,

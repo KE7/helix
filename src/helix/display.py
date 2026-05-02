@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import threading
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
@@ -23,6 +24,7 @@ from rich.live import Live
 @dataclass
 class UsageStats:
     """Tracks resource usage for a single candidate or generation."""
+
     input_tokens: int = 0
     output_tokens: int = 0
     num_turns: int = 0
@@ -40,8 +42,7 @@ class UsageStats:
             new_tools = other.get("tool_names", [])
             if isinstance(new_tools, list):
                 for t in new_tools:
-                    if t not in self.tool_names:
-                        self.tool_names.append(t)
+                    self.tool_names.append(t)
         else:
             self.input_tokens += other.input_tokens
             self.output_tokens += other.output_tokens
@@ -49,8 +50,7 @@ class UsageStats:
             self.tool_event_count += other.tool_event_count
             self.cost_usd += other.cost_usd
             for t in other.tool_names:
-                if t not in self.tool_names:
-                    self.tool_names.append(t)
+                self.tool_names.append(t)
 
 
 class HelixPhase(Enum):
@@ -59,6 +59,7 @@ class HelixPhase(Enum):
     Each phase corresponds to a major step in the HELIX evolution loop
     and is displayed to the user via set_phase().
     """
+
     SEED_GENERATION = "Generating seed candidate"
     SEED_EVAL = "Evaluating seed"
     TRAIN_EVALUATION = "Running train evaluation"
@@ -94,43 +95,71 @@ def render_status_panel(
     ]
 
     # Evolutionary Progress
-    if frontier and frontier._candidates:
-        try:
-            best_cand = frontier.best()
-            r = frontier._results.get(best_cand.id)
-            score = r.aggregate_score() if r is not None else 0.0
-            lines.append(f"Best Score: [bold green]{score:.4f}[/bold green] ({best_cand.id})")
-        except (ValueError, KeyError):
-            pass
+    if frontier:
+        # Clone dictionaries safely to avoid RuntimeError if changed by a worker thread
+        frontier_candidates = {}
+        frontier_results = {}
+        for _ in range(5):
+            try:
+                frontier_candidates = dict(frontier._candidates)
+                frontier_results = dict(frontier._results)
+                break
+            except RuntimeError:
+                pass
 
-        f_ids = list(frontier._candidates.keys())
-        if len(f_ids) > 1:
-            lines.append(f"Frontier  : [dim]{', '.join(f_ids[:5])}{'...' if len(f_ids) > 5 else ''}[/dim]")
-        
-        if mutations_attempted > 0:
-            rate = (mutations_accepted / mutations_attempted) * 100
-            lines.append(f"Acceptance: {mutations_accepted}/{mutations_attempted} ({rate:.1f}%)")
-        lines.append("")
+        if frontier_candidates:
+            try:
+                best_cand = frontier.best()
+                r = frontier_results.get(best_cand.id)
+                score = r.aggregate_score() if r is not None else 0.0
+                lines.append(
+                    f"Best Score: [bold green]{score:.4f}[/bold green] ({best_cand.id})"
+                )
+            except (ValueError, KeyError, RuntimeError):
+                pass
+
+            f_ids = list(frontier_candidates.keys())
+            if len(f_ids) > 1:
+                lines.append(
+                    f"Frontier  : [dim]{', '.join(f_ids[:5])}{'...' if len(f_ids) > 5 else ''}[/dim]"
+                )
+
+            if mutations_attempted > 0:
+                rate = (mutations_accepted / mutations_attempted) * 100
+                lines.append(
+                    f"Acceptance: {mutations_accepted}/{mutations_attempted} ({rate:.1f}%)"
+                )
+            lines.append("")
 
     # Current Generation Usage
-    lines.extend([
-        "[bold]Current Generation Usage:[/bold]",
-        f"  Tokens: {current_usage.input_tokens:,} in / {current_usage.output_tokens:,} out",
-        f"  Turns : {current_usage.num_turns}",
-    ])
+    lines.extend(
+        [
+            "[bold]Current Generation Usage:[/bold]",
+            f"  Tokens: {current_usage.input_tokens:,} in / {current_usage.output_tokens:,} out",
+            f"  Turns : {current_usage.num_turns}",
+        ]
+    )
 
     tools_str = f"{current_usage.tool_event_count}"
     if current_usage.tool_names:
-        tools_str += f" ({', '.join(current_usage.tool_names)})"
+        from collections import Counter
+
+        counts = Counter(current_usage.tool_names)
+        tool_details = ", ".join(
+            f"{name} x {count}" for name, count in counts.most_common()
+        )
+        tools_str += f" ({tool_details})"
     lines.append(f"  Tools : {tools_str}")
 
     # Cumulative Usage & Budget
-    lines.extend([
-        "",
-        "[bold]Cumulative Evolution Total:[/bold]",
-        f"  Tokens: {cumulative_budget.input_tokens:,} in / {cumulative_budget.output_tokens:,} out",
-        f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]",
-    ])
+    lines.extend(
+        [
+            "",
+            "[bold]Cumulative Evolution Total:[/bold]",
+            f"  Tokens: {cumulative_budget.input_tokens:,} in / {cumulative_budget.output_tokens:,} out",
+            f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]",
+        ]
+    )
 
     if config_evolution:
         cap = config_evolution.max_evaluations
@@ -139,7 +168,9 @@ def render_status_panel(
             bar_width = 20
             filled = int(bar_width * pct / 100)
             bar = "█" * filled + "░" * (bar_width - filled)
-            lines.append(f"  Budget: |{bar}| {cumulative_budget.evaluations}/{cap} evals")
+            lines.append(
+                f"  Budget: |{bar}| {cumulative_budget.evaluations}/{cap} evals"
+            )
         else:
             lines.append(f"  Budget: {cumulative_budget.evaluations} evaluations")
 
@@ -149,6 +180,17 @@ def render_status_panel(
         border_style="blue",
         padding=(1, 2),
     )
+
+
+_local_display = threading.local()
+
+
+def _get_active_live() -> HelixLiveDisplay | None:
+    return getattr(_local_display, "active_live", None)
+
+
+def _set_active_live(live: HelixLiveDisplay | None) -> None:
+    _local_display.active_live = live
 
 
 class HelixLiveDisplay:
@@ -175,7 +217,7 @@ class HelixLiveDisplay:
             self._render(),
             console=console,
             refresh_per_second=4,
-            transient=True,
+            transient=False,
         )
 
     def _render(self) -> Panel:
@@ -210,26 +252,21 @@ class HelixLiveDisplay:
         self._live.update(self._render())
 
     def __enter__(self) -> "HelixLiveDisplay":
-        global _active_live
-        _active_live = self
+        self._previous_live = _get_active_live()
+        _set_active_live(self)
         self._live.start()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        global _active_live
         self._live.stop()
-        _active_live = None
-
-
-# Track the active live display for set_phase
-_active_live: HelixLiveDisplay | None = None
+        _set_active_live(self._previous_live)
 
 
 def set_phase(phase: HelixPhase | str) -> None:
     """Update the displayed phase. Updates live display if active, else prints."""
-    global _active_live
-    if _active_live:
-        _active_live.update(phase=phase)
+    active = _get_active_live()
+    if active:
+        active.update(phase=phase)
     else:
         phase_str = phase.value if isinstance(phase, HelixPhase) else str(phase)
         console.print(f"[bold dim]⟳  {phase_str}…[/bold dim]")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,19 +23,33 @@ from helix.sandbox import (
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
-    return (
-        args[:2] == ["docker", "run"]
-        and any("find /workspace -path /workspace/.git -prune" in item for item in args)
+    return args[:2] == ["docker", "run"] and any(
+        "find /workspace -path /workspace/.git -prune" in item for item in args
     )
 
 
 def test_resolve_sandbox_image_defaults_from_backend():
     cfg = SandboxConfig(enabled=True)
-    assert resolve_sandbox_image(cfg, "claude") == "ghcr.io/ke7/helix-evo-runner-claude:latest"
-    assert resolve_sandbox_image(cfg, "codex") == "ghcr.io/ke7/helix-evo-runner-codex:latest"
-    assert resolve_sandbox_image(cfg, "cursor") == "ghcr.io/ke7/helix-evo-runner-cursor:latest"
-    assert resolve_sandbox_image(cfg, "gemini") == "ghcr.io/ke7/helix-evo-runner-gemini:latest"
-    assert resolve_sandbox_image(cfg, "opencode") == "ghcr.io/ke7/helix-evo-runner-opencode:latest"
+    assert (
+        resolve_sandbox_image(cfg, "claude")
+        == "ghcr.io/ke7/helix-evo-runner-claude:latest"
+    )
+    assert (
+        resolve_sandbox_image(cfg, "codex")
+        == "ghcr.io/ke7/helix-evo-runner-codex:latest"
+    )
+    assert (
+        resolve_sandbox_image(cfg, "cursor")
+        == "ghcr.io/ke7/helix-evo-runner-cursor:latest"
+    )
+    assert (
+        resolve_sandbox_image(cfg, "gemini")
+        == "ghcr.io/ke7/helix-evo-runner-gemini:latest"
+    )
+    assert (
+        resolve_sandbox_image(cfg, "opencode")
+        == "ghcr.io/ke7/helix-evo-runner-opencode:latest"
+    )
 
 
 def test_resolve_sandbox_image_honors_override():
@@ -56,6 +69,7 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value="1000:1000")
 
     cfg = SandboxConfig(
         enabled=True,
@@ -78,7 +92,13 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
         agent_backend="codex",
     )
 
-    docker_call = next(call for call in calls if call[:2] == ["docker", "run"] and "--user" in call and call[call.index("--user") + 1] == "node")
+    docker_call = next(
+        call
+        for call in calls
+        if call[:2] == ["docker", "run"]
+        and "--user" in call
+        and call[call.index("--user") + 1] == "node"
+    )
     joined = " ".join(docker_call)
     assert "--network none" in joined
     assert "--user node" in joined
@@ -120,7 +140,11 @@ def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):
         image="helix-test:latest",
     )
 
-    docker_call = next(call.args[0] for call in mock_run.call_args_list if call.args[0][:2] == ["docker", "run"])
+    docker_call = next(
+        call.args[0]
+        for call in mock_run.call_args_list
+        if call.args[0][:2] == ["docker", "run"]
+    )
     assert "helix-auth-codex:/home/node:rw" not in docker_call
 
 
@@ -159,11 +183,15 @@ def test_sidecar_runtime_switches_evaluator_to_private_network(tmp_path: Path, m
         if call[:2] == ["docker", "run"] and not _is_workspace_chown(call)
     )
     assert docker_call[docker_call.index("--network") + 1] == "helix-eval-private"
-    assert "HELIX_EVALUATOR_ENDPOINT=http://helix-evaluator:8080/evaluate" in docker_call
+    assert (
+        "HELIX_EVALUATOR_ENDPOINT=http://helix-evaluator:8080/evaluate" in docker_call
+    )
     assert "helix-auth-codex:/home/node:rw" not in docker_call
 
 
 def test_sidecar_runtime_is_visible_to_worker_threads():
+    import concurrent.futures
+
     runtime = EvaluatorSidecarRuntime(
         network="helix-eval-private",
         container_name="helix-evaluator-test",
@@ -172,11 +200,50 @@ def test_sidecar_runtime_is_visible_to_worker_threads():
     seen: list[EvaluatorSidecarRuntime | None] = []
 
     with evaluator_sidecar_runtime(runtime):
-        thread = threading.Thread(target=lambda: seen.append(current_evaluator_sidecar_runtime()))
-        thread.start()
-        thread.join()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                lambda: seen.append(current_evaluator_sidecar_runtime())
+            )
+            future.result()
 
     assert seen == [runtime]
+    # Stack must be empty after the context manager exits.
+    assert current_evaluator_sidecar_runtime() is None
+
+
+def test_sidecar_runtime_nested_same_runtime_restores_outer():
+    """Nested ``with`` blocks must restore the outer runtime, not blank it."""
+    outer = EvaluatorSidecarRuntime(
+        network="net-outer", container_name="c-outer", endpoint="http://outer/"
+    )
+    inner = EvaluatorSidecarRuntime(
+        network="net-inner", container_name="c-inner", endpoint="http://inner/"
+    )
+    with evaluator_sidecar_runtime(outer):
+        assert current_evaluator_sidecar_runtime() is outer
+        with evaluator_sidecar_runtime(inner):
+            assert current_evaluator_sidecar_runtime() is inner
+        assert current_evaluator_sidecar_runtime() is outer
+    assert current_evaluator_sidecar_runtime() is None
+
+
+def test_sidecar_runtime_accepts_unhashable_helixconfig_like_object():
+    """Regression: prior design used a WeakKeyDictionary keyed on HelixConfig,
+    which is a Pydantic ``BaseModel`` (unhashable). The new lock+stack design
+    must not key on the config at all, so even an unhashable sentinel works.
+    """
+
+    class Unhashable:
+        __hash__ = None  # type: ignore[assignment]
+
+    runtime = EvaluatorSidecarRuntime(
+        network="net-x", container_name="c-x", endpoint="http://x/"
+    )
+    # Just exercising the API; unhashable config objects must not crash.
+    Unhashable()  # constructed but never used as a key
+    with evaluator_sidecar_runtime(runtime):
+        assert current_evaluator_sidecar_runtime() is runtime
+    assert current_evaluator_sidecar_runtime() is None
 
 
 def test_sidecar_healthcheck_uses_runner_image_and_endpoint():
@@ -202,7 +269,9 @@ def test_start_evaluator_sidecar_injects_fixed_env(mocker):
     def fake_run_docker(args, *, check=True):
         calls.append(args)
         if args[:2] == ["docker", "inspect"]:
-            return subprocess.CompletedProcess(args, 0, stdout="true running\n", stderr="")
+            return subprocess.CompletedProcess(
+                args, 0, stdout="true running\n", stderr=""
+            )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     mocker.patch("helix.sandbox._run_docker", side_effect=fake_run_docker)
@@ -223,7 +292,9 @@ def test_start_evaluator_sidecar_injects_fixed_env(mocker):
     assert "EVALUATOR_BASE_URL=http://qwen-vllm-endpoint:8003" in docker_run
 
 
-def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path, mocker):
+def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
+    tmp_path: Path, mocker
+):
     source = tmp_path / "candidate"
     source.mkdir()
     (source / "keep.py").write_text("old\n")
@@ -272,7 +343,9 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(tmp_path: Path,
     assert not (source / "delete.py").exists()
     assert (source / "added.py").read_text() == "added\n"
     assert (source / ".env").read_text() == "SECRET=value\n"
-    assert (source / "helix.toml").read_text() == "[evaluator.sidecar]\nendpoint = 'private'\n"
+    assert (
+        source / "helix.toml"
+    ).read_text() == "[evaluator.sidecar]\nendpoint = 'private'\n"
     assert (source / ".helix" / "state.json").read_text() == "{}\n"
     assert (source / ".helix_artifacts" / "old.txt").read_text() == "old artifact\n"
     assert not (source / ".helix_artifacts" / "new.txt").exists()
@@ -327,9 +400,19 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
     )
 
     assert (source / "main.py").read_text() == "new\n"
-    transcript = source / ".helix_artifacts" / "backend_transcripts" / "claude" / "sess_123.jsonl"
+    transcript = (
+        source
+        / ".helix_artifacts"
+        / "backend_transcripts"
+        / "claude"
+        / "sess_123.jsonl"
+    )
     assert transcript.read_text() == '{"message":"saved"}\n'
-    copy_call = next(call for call in calls if call[:2] == ["docker", "run"] and "sess_123.jsonl" in " ".join(call))
+    copy_call = next(
+        call
+        for call in calls
+        if call[:2] == ["docker", "run"] and "sess_123.jsonl" in " ".join(call)
+    )
     assert "helix-auth-claude:/home/node:ro" in copy_call
 
 
@@ -393,7 +476,9 @@ def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
     assert not (source / "private").exists()
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform")
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform"
+)
 def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
@@ -422,8 +507,12 @@ def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
     assert not (source / "agent.pipe").exists()
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform")
-def test_sync_preserves_existing_host_special_files_when_skipped(tmp_path: Path, mocker):
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform"
+)
+def test_sync_preserves_existing_host_special_files_when_skipped(
+    tmp_path: Path, mocker
+):
     source = tmp_path / "candidate"
     source.mkdir()
     os.mkfifo(source / "existing.pipe")
@@ -453,7 +542,9 @@ def test_sync_preserves_existing_host_special_files_when_skipped(tmp_path: Path,
     assert (source / "regular.txt").read_text() == "ok\n"
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform")
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="mkfifo is unavailable on this platform"
+)
 def test_special_file_skip_can_be_disabled(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
@@ -572,7 +663,14 @@ def test_sandbox_auth_status_command_uses_backend_command():
     )
 
     assert "helix-auth-claude:/home/node:rw" in args
-    assert args[-4:] == ["claude", "auth", "status", "--text"]
+    assert args[-3:-1] == ["sh", "-lc"]
+    script = args[-1]
+    assert script.startswith("set -eu; ")
+    assert "claude auth status --text" in script
+    # Robust check: requires the on-disk credential file to exist and be
+    # non-empty so the exit code is meaningful even when the CLI itself
+    # exits 0 for an unauthenticated user.
+    assert 'test -s "${HOME:-/home/node}/.claude/.credentials.json"' in script
 
 
 def test_sandbox_auth_claude_login_uses_claudeai_flow():
