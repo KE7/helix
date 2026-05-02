@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 # Differential-testing hook: when set to a callable, ``invoke_claude_code``
 # bypasses the subprocess invocation and delegates to the override with
-# ``(worktree_path, prompt, config) -> dict[str, Any]``.  None (default) =
-# unchanged production behavior.
-_MUTATOR_OVERRIDE = None
+# ``(worktree_path, prompt, config) -> tuple[dict[str, Any], dict[str, Any]]``.
+# None (default) = unchanged production behavior.
+_MUTATOR_OVERRIDE: (
+    Callable[[str, str, AgentConfig], tuple[dict[str, Any], dict[str, Any]]] | None
+) = None
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -173,7 +175,7 @@ def generate_seed(
     worktree_path: str,
     prompt: str,
     config: "HelixConfig",
-) -> None:
+) -> dict[str, Any]:
     """Generate an initial seed candidate by invoking Claude Code once.
 
     Matches GEPA's ``_generate_seed_candidate`` pattern exactly:
@@ -190,12 +192,17 @@ def generate_seed(
     config:
         Full HELIX config (``config.agent`` is used for the backend invocation).
 
+    Returns
+    -------
+    dict[str, Any]
+        Normalized usage stats from the backend invocation.
+
     Raises
     ------
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
-    invoke_claude_code(
+    _, usage = invoke_claude_code(
         worktree_path,
         prompt,
         config.agent,
@@ -203,6 +210,7 @@ def generate_seed(
         fixed_env=config.env,
         sandbox=config.sandbox,
     )
+    return usage
 
 
 _MAX_MARKDOWN_HEADER_LEVEL = 6
@@ -799,10 +807,31 @@ def _coerce_number(value: Any) -> float | None:
 def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     tool_event_count = 0
+    tool_names: set[str] = set()
+    num_turns = 0
+
+    # Claude Code returns num_turns and tool_use_count in the top-level object.
+    if "num_turns" in parsed:
+        usage["num_turns"] = _coerce_number(parsed["num_turns"])
+    if "tool_use_count" in parsed:
+        usage["tool_event_count"] = _coerce_number(parsed["tool_use_count"])
+
     for node in _walk_json(parsed):
         node_type = str(node.get("type", "")).lower()
-        if "tool" in node_type:
-            tool_event_count += 1
+
+        # Tool usage detection
+        if "tool" in node_type or node_type == "call":
+            if "name" in node:
+                tool_names.add(str(node["name"]))
+            if any(t in node_type for t in ("tool_use", "tool_call", "tool.call", "call")):
+                tool_event_count += 1
+
+        # Turn detection (backend-specific heuristics)
+        if node_type in ("turn", "message", "exchange"):
+            num_turns += 1
+        elif node_type == "step_start":  # OpenCode
+            num_turns += 1
+
         for key, aliases in (
             ("input_tokens", ("input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input")),
             ("output_tokens", ("output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output")),
@@ -833,8 +862,14 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
             coerced = _coerce_number(value)
             if coerced is not None:
                 usage["cost_usd"] = coerced
-    if tool_event_count:
+
+    if tool_event_count and "tool_event_count" not in usage:
         usage["tool_event_count"] = tool_event_count
+    if tool_names:
+        usage["tool_names"] = sorted(list(tool_names))
+    if num_turns and "num_turns" not in usage:
+        usage["num_turns"] = num_turns
+
     return usage
 
 
@@ -989,7 +1024,7 @@ def invoke_claude_code(
     fixed_env: dict[str, str] | None = None,
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Invoke the configured backend CLI in *worktree_path*.
 
     Parameters
@@ -1064,6 +1099,7 @@ def invoke_claude_code(
                 cmd_str=cmd_str,
                 worktree_path=worktree_path,
             )
+            usage = _normalise_usage_stats(parsed)
             if backend == "claude":
                 error_text = str(parsed.get("error", ""))
                 if _looks_like_rate_limit(error_text):
@@ -1082,7 +1118,7 @@ def invoke_claude_code(
                             "Retry after backoff or check your API quota."
                         ),
                     )
-            return parsed
+            return parsed, usage
 
         rate_limit_source = result.stderr or result.stdout
         if _looks_like_rate_limit(rate_limit_source):
@@ -1117,12 +1153,13 @@ def invoke_claude_code(
                     cmd_str=cmd_str,
                     worktree_path=worktree_path,
                 )
+                usage = _normalise_usage_stats(parsed)
                 if parsed.get("subtype") == "error_max_turns":
                     logger.warning(
                         "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
                         parsed.get("num_turns", "?"),
                     )
-                    return parsed
+                    return parsed, usage
             except MutationError:
                 parsed = None
 
@@ -1132,6 +1169,7 @@ def invoke_claude_code(
             cmd_str=cmd_str,
             worktree_path=worktree_path,
         )
+        usage = _normalise_usage_stats(parsed)
 
         raise MutationError(
             f"{backend_name} exited with code {result.returncode}",
@@ -1213,7 +1251,7 @@ def mutate(
     prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
     try:
-        invoke_claude_code(
+        _, usage = invoke_claude_code(
             child.worktree_path,
             prompt,
             config.agent,
@@ -1222,6 +1260,7 @@ def mutate(
             sandbox=config.sandbox,
             prompt_artifact_name=prompt_artifact_name,
         )
+        child.usage = usage
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)

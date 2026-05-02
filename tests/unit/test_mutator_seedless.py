@@ -92,7 +92,7 @@ class TestGenerateSeed:
         config = make_config()
         mock_result = {"result": "ok", "subtype": "success"}
 
-        with patch("helix.mutator.invoke_claude_code", return_value=mock_result) as mock_invoke:
+        with patch("helix.mutator.invoke_claude_code", return_value=(mock_result, {})) as mock_invoke:
             generate_seed("/tmp/fake-wt", "some prompt", config)
 
         mock_invoke.assert_called_once()
@@ -102,7 +102,7 @@ class TestGenerateSeed:
         config = make_config()
         worktree_path = "/tmp/my-seed-worktree"
 
-        with patch("helix.mutator.invoke_claude_code", return_value={}) as mock_invoke:
+        with patch("helix.mutator.invoke_claude_code", return_value=({}, {})) as mock_invoke:
             generate_seed(worktree_path, "prompt text", config)
 
         args, kwargs = mock_invoke.call_args
@@ -113,7 +113,7 @@ class TestGenerateSeed:
         config = make_config()
         prompt = "my seed generation prompt"
 
-        with patch("helix.mutator.invoke_claude_code", return_value={}) as mock_invoke:
+        with patch("helix.mutator.invoke_claude_code", return_value=({}, {})) as mock_invoke:
             generate_seed("/tmp/wt", prompt, config)
 
         args, kwargs = mock_invoke.call_args
@@ -123,7 +123,7 @@ class TestGenerateSeed:
         """generate_seed must pass config.agent as third arg to invoke_claude_code."""
         config = make_config()
 
-        with patch("helix.mutator.invoke_claude_code", return_value={}) as mock_invoke:
+        with patch("helix.mutator.invoke_claude_code", return_value=({}, {})) as mock_invoke:
             generate_seed("/tmp/wt", "prompt", config)
 
         args, kwargs = mock_invoke.call_args
@@ -162,11 +162,12 @@ class TestGenerateSeed:
 
         assert call_count == 1, f"Expected exactly 1 call, got {call_count} (retry loop detected!)"
 
-    def test_returns_none_on_success(self):
-        """generate_seed returns None on success (side-effect: files written to worktree)."""
+    def test_returns_usage_on_success(self):
+        """generate_seed returns usage on success (side-effect: files written to worktree)."""
         config = make_config()
+        mock_usage = {"input_tokens": 100}
 
-        with patch("helix.mutator.invoke_claude_code", return_value={"subtype": "success"}):
+        with patch("helix.mutator.invoke_claude_code", return_value=({"subtype": "success"}, mock_usage)):
             result = generate_seed("/tmp/wt", "prompt", config)
 
-        assert result is None
+        assert result == mock_usage

@@ -428,7 +428,7 @@ class TestMutationPromptArtifact:
         wt.mkdir()
         child = make_candidate("g1-s0", str(wt))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch("helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, {}))
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
         return parent, er, config, wt
@@ -450,7 +450,7 @@ class TestMutationPromptArtifact:
                 (wt / ".agent_task_prompt.md").exists()
                 or (wt / ".agent_internal" / "task_prompt.md").exists()
             )
-            return {"result": "ok"}
+            return {"result": "ok"}, {}
 
         mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
         mutate(parent, er, "g1-s0", config, tmp_path)
@@ -563,7 +563,7 @@ class TestInvokeClaudeCode:
             returncode=0,
         )
         config = AgentConfig()
-        result = invoke_claude_code("/tmp/wt", "do something", config)
+        result, usage = invoke_claude_code("/tmp/wt", "do something", config)
         assert result == payload
 
     def test_raises_on_nonzero_returncode(self, mocker):
@@ -634,7 +634,8 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="codex", model="gpt-5")
 
-        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(
+"/tmp/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["codex", "exec"]
@@ -656,7 +657,8 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="cursor", model="gpt-5")
 
-        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(
+"/tmp/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["cursor", "agent"]
@@ -748,7 +750,8 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="gemini")
 
-        result = invoke_claude_code("/tmp/wt", "prompt", config)
+        result, _ = invoke_claude_code(
+"/tmp/wt", "prompt", config)
 
         assert result["events"][0]["type"] == "init"
         assert result["unparsable_lines"] == ["MCP issues detected. Run /mcp list for status."]
@@ -773,7 +776,8 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend=backend, model="test-model")
 
-        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(
+"/tmp/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[: len(expected_prefix)] == expected_prefix
@@ -807,7 +811,7 @@ class TestInvokeClaudeCode:
         mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
 
-        result = invoke_claude_code(
+        result, _ = invoke_claude_code(
             str(tmp_path),
             "prompt",
             AgentConfig(),
@@ -869,7 +873,7 @@ class TestMutate:
         child_path.mkdir()
         child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch("helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, {}))
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
 
@@ -886,7 +890,7 @@ class TestMutate:
         child_path.mkdir()
         child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={})
+        mocker.patch("helix.mutator.invoke_claude_code", return_value=({}, {}))
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
@@ -948,7 +952,7 @@ class TestMutate:
         child_path.mkdir()
         child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={})
+        mocker.patch("helix.mutator.invoke_claude_code", return_value=({}, {}))
         mock_snapshot = mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
@@ -987,7 +991,7 @@ class TestMutate:
         child_path.mkdir()
         child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mock_invoke = mocker.patch("helix.mutator.invoke_claude_code", return_value={})
+        mock_invoke = mocker.patch("helix.mutator.invoke_claude_code", return_value=({}, {}))
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 

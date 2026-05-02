@@ -1,7 +1,6 @@
 """Unit tests for helix.eval_cache."""
 from __future__ import annotations
 
-from typing import Any
 
 from helix.eval_cache import EvaluationCache, _candidate_hash
 
