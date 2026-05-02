@@ -80,6 +80,10 @@ def render_status_panel(
     phase: HelixPhase | str,
     current_usage: UsageStats,
     cumulative_budget: "BudgetState",
+    frontier: "ParetoFrontier | None" = None,
+    config_evolution: "EvolutionConfig | None" = None,
+    mutations_attempted: int = 0,
+    mutations_accepted: int = 0,
 ) -> Panel:
     """Render a live status panel with current progress and usage stats."""
     phase_str = phase.value if isinstance(phase, HelixPhase) else str(phase)
@@ -87,22 +91,57 @@ def render_status_panel(
         f"[bold]Generation {gen} / {total}[/bold]",
         f"Status: [cyan]{phase_str}[/cyan]",
         "",
+    ]
+
+    # Evolutionary Progress
+    if frontier and frontier._candidates:
+        try:
+            best_cand = frontier.best()
+            r = frontier._results.get(best_cand.id)
+            score = r.aggregate_score() if r is not None else 0.0
+            lines.append(f"Best Score: [bold green]{score:.4f}[/bold green] ({best_cand.id})")
+        except (ValueError, KeyError):
+            pass
+
+        f_ids = list(frontier._candidates.keys())
+        if len(f_ids) > 1:
+            lines.append(f"Frontier  : [dim]{', '.join(f_ids[:5])}{'...' if len(f_ids) > 5 else ''}[/dim]")
+        
+        if mutations_attempted > 0:
+            rate = (mutations_accepted / mutations_attempted) * 100
+            lines.append(f"Acceptance: {mutations_accepted}/{mutations_attempted} ({rate:.1f}%)")
+        lines.append("")
+
+    # Current Generation Usage
+    lines.extend([
         "[bold]Current Generation Usage:[/bold]",
         f"  Tokens: {current_usage.input_tokens:,} in / {current_usage.output_tokens:,} out",
         f"  Turns : {current_usage.num_turns}",
-    ]
+    ])
 
     tools_str = f"{current_usage.tool_event_count}"
     if current_usage.tool_names:
         tools_str += f" ({', '.join(current_usage.tool_names)})"
     lines.append(f"  Tools : {tools_str}")
 
+    # Cumulative Usage & Budget
     lines.extend([
         "",
-        "[bold]Cumulative Usage:[/bold]",
+        "[bold]Cumulative Evolution Total:[/bold]",
         f"  Tokens: {cumulative_budget.input_tokens:,} in / {cumulative_budget.output_tokens:,} out",
         f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]",
     ])
+
+    if config_evolution:
+        cap = config_evolution.max_evaluations
+        if cap > 0:
+            pct = min(100, (cumulative_budget.evaluations / cap) * 100)
+            bar_width = 20
+            filled = int(bar_width * pct / 100)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            lines.append(f"  Budget: |{bar}| {cumulative_budget.evaluations}/{cap} evals")
+        else:
+            lines.append(f"  Budget: {cumulative_budget.evaluations} evaluations")
 
     return Panel(
         "\n".join(lines),
@@ -115,36 +154,60 @@ def render_status_panel(
 class HelixLiveDisplay:
     """Context manager for the HELIX live status display."""
 
-    def __init__(self, gen: int, total: int, cumulative_budget: "BudgetState"):
+    def __init__(
+        self,
+        gen: int,
+        total: int,
+        cumulative_budget: "BudgetState",
+        frontier: "ParetoFrontier | None" = None,
+        config_evolution: "EvolutionConfig | None" = None,
+    ):
         self.gen = gen
         self.total = total
         self.cumulative_budget = cumulative_budget
+        self.frontier = frontier
+        self.config_evolution = config_evolution
+        self.mutations_attempted = 0
+        self.mutations_accepted = 0
         self.current_usage = UsageStats()
         self.phase: HelixPhase | str = "Initializing"
         self._live = Live(
-            render_status_panel(
-                self.gen, self.total, self.phase, self.current_usage, self.cumulative_budget
-            ),
+            self._render(),
             console=console,
             refresh_per_second=4,
             transient=True,
+        )
+
+    def _render(self) -> Panel:
+        return render_status_panel(
+            self.gen,
+            self.total,
+            self.phase,
+            self.current_usage,
+            self.cumulative_budget,
+            frontier=self.frontier,
+            config_evolution=self.config_evolution,
+            mutations_attempted=self.mutations_attempted,
+            mutations_accepted=self.mutations_accepted,
         )
 
     def update(
         self,
         phase: HelixPhase | str | None = None,
         usage: UsageStats | dict[str, Any] | None = None,
+        mutations_attempted: int | None = None,
+        mutations_accepted: int | None = None,
     ) -> None:
-        """Update the live display with new phase or usage info."""
+        """Update the live display with new phase, usage, or mutation info."""
         if phase is not None:
             self.phase = phase
         if usage is not None:
             self.current_usage.add(usage)
-        self._live.update(
-            render_status_panel(
-                self.gen, self.total, self.phase, self.current_usage, self.cumulative_budget
-            )
-        )
+        if mutations_attempted is not None:
+            self.mutations_attempted = mutations_attempted
+        if mutations_accepted is not None:
+            self.mutations_accepted = mutations_accepted
+        self._live.update(self._render())
 
     def __enter__(self) -> "HelixLiveDisplay":
         global _active_live
