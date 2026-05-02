@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from helix.evolution import (
     _collect_protected_evaluator_paths,
     _detect_evaluator_tamper,
     _load_evaluator_integrity_manifest,
+    _copy_protected_path,
     _refresh_and_snapshot_protected_evaluator_files,
     _refresh_protected_evaluator_files,
     _write_evaluator_integrity_manifest,
@@ -129,6 +131,25 @@ def test_refreshes_protected_files_and_directories_from_current_root(tmp_path):
         "cube_lifting__0.json",
         "cube_lifting__1.json",
     ]
+
+
+def test_copy_protected_path_noops_when_source_and_destination_match(tmp_path, monkeypatch):
+    source = tmp_path / "splits" / "instance_ids"
+    source.mkdir(parents=True)
+    (source / "cube_lifting__0.json").write_text("{}\n")
+
+    calls: list[Path] = []
+
+    def fail_if_called(path):
+        calls.append(Path(path))
+        raise AssertionError("shutil.rmtree should not be called for same-path refresh")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_if_called)
+
+    _copy_protected_path(source, source)
+
+    assert calls == []
+    assert (source / "cube_lifting__0.json").read_text() == "{}\n"
 
 
 def test_refresh_snapshot_normalizes_protected_file_baseline(tmp_path):
