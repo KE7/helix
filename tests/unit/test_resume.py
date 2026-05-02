@@ -106,8 +106,9 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
     with (
         patch("helix.evolution.create_seed_worktree", return_value=seed_candidate),
         patch("helix.evolution.run_evaluator", side_effect=fake_run_evaluator),
-        patch("helix.evolution.HelixProgress", return_value=mock_ctx),
+        patch("helix.evolution.HelixLiveDisplay", return_value=mock_ctx),
     ):
+
         with pytest.raises(RuntimeError, match="simulated crash"):
             run_evolution(config, project_root, base_dir)
 

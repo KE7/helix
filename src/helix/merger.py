@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
@@ -154,6 +154,7 @@ def merge(
     background: str | None = None,
     eval_result_a: EvalResult | None = None,
     eval_result_b: EvalResult | None = None,
+    prepare_worktree: Callable[[Candidate], None] | None = None,
 ) -> Candidate | None:
     """Merge *candidate_a* and *candidate_b* using Claude Code.
 
@@ -188,6 +189,8 @@ def merge(
     child = clone_candidate(candidate_a, new_id, base_dir)
     child.operation = "merge"
     child.parent_ids = [candidate_a.id, candidate_b.id]
+    if prepare_worktree is not None:
+        prepare_worktree(child)
 
     diff = get_diff(candidate_a, candidate_b)
 
@@ -201,7 +204,15 @@ def merge(
     )
 
     try:
-        invoke_claude_code(child.worktree_path, prompt, config.agent, passthrough_env=config.passthrough_env)
+        _, usage = invoke_claude_code(
+            child.worktree_path,
+            prompt,
+            config.agent,
+            passthrough_env=config.passthrough_env,
+            fixed_env=config.env,
+            sandbox=config.sandbox,
+        )
+        child.usage = usage
     except MutationError as exc:
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         print_helix_error(exc)

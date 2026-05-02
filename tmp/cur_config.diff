@@ -1,0 +1,46 @@
+diff --git a/src/helix/config.py b/src/helix/config.py
+index 2bd11db..58b62d6 100644
+--- a/src/helix/config.py
++++ b/src/helix/config.py
+@@ -4,7 +4,6 @@ from __future__ import annotations
+ 
+ import json
+ import os
+-import shlex
+ import sys
+ import tomllib
+ from pathlib import Path
+@@ -36,11 +35,11 @@ def _load_dotenv_file(path: Path) -> None:
+         if not key or key in os.environ:
+             continue
+         value = value.strip()
+-        try:
+-            parsed = shlex.split(value, comments=True, posix=True)
+-        except ValueError:
+-            parsed = [value]
+-        os.environ[key] = parsed[0] if parsed else ""
++        if value.startswith('"') and value.endswith('"'):
++            value = value[1:-1]
++        elif value.startswith("'") and value.endswith("'"):
++            value = value[1:-1]
++        os.environ[key] = value
+ 
+ 
+ class EvaluatorSidecarConfig(BaseModel):
+@@ -54,6 +53,7 @@ class EvaluatorSidecarConfig(BaseModel):
+     runner_image: str | None = None
+     healthcheck_command: str | None = None
+     startup_timeout_seconds: int = 60
++    internal_network: bool = True
+ 
+     @property
+     def resolved_runner_image(self) -> str:
+@@ -546,8 +546,6 @@ class HelixConfig(BaseModel):
+                     "Docker sandboxing requires [evaluator.sidecar] with image, "
+                     "command, and endpoint."
+                 )
+-        elif self.evaluator.sidecar is not None:
+-            raise ValueError("[evaluator.sidecar] requires sandbox.enabled = true and sandbox.evaluator = true.")
+ 
+ 
+ def load_config(path: Path) -> HelixConfig:

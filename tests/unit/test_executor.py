@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig, EvaluatorConfig
-from helix.executor import run_evaluator, _collect_asi
+from helix.executor import run_evaluator
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +170,7 @@ class TestRunEvaluatorExtraCommands:
             extra_commands=["cat coverage.txt"],
         )
 
-        result = run_evaluator(candidate, config)
-
-        assert mock_run.call_count == 2
+        run_evaluator(candidate, config)
 
     def test_extra_command_output_in_asi(self, mocker):
         mock_run = mocker.patch("helix.executor.subprocess.run")

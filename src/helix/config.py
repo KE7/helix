@@ -11,6 +11,62 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from helix.backends import BackendName
+
+
+def _load_dotenv_file(path: Path) -> None:
+    """Load simple KEY=VALUE dotenv entries into os.environ if unset."""
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export ") :].lstrip()
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            # Quoted value: keep contents verbatim (preserve embedded ``#``,
+            # whitespace, ``=`` etc.) and only strip the surrounding quotes.
+            value = value[1:-1]
+        else:
+            # Unquoted value: strip a trailing inline comment introduced by
+            # ``#`` preceded by whitespace (matches POSIX-shell semantics for
+            # ``.env`` files used by foreman, dotenv, docker-compose, etc.).
+            for i, ch in enumerate(value):
+                if ch == "#" and (i == 0 or value[i - 1].isspace()):
+                    value = value[:i].rstrip()
+                    break
+        os.environ[key] = value
+
+
+class EvaluatorSidecarConfig(BaseModel):
+    """Warm private evaluator service for Docker-sandboxed runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str
+    command: str
+    endpoint: str
+    runner_image: str | None = None
+    healthcheck_command: str | None = None
+    startup_timeout_seconds: int = 60
+    internal_network: bool = True
+
+    @property
+    def resolved_runner_image(self) -> str:
+        return self.runner_image or self.image
+
 
 class EvaluatorConfig(BaseModel):
     """Configuration for candidate evaluation.
@@ -42,6 +98,7 @@ class EvaluatorConfig(BaseModel):
     leave ``objective_scores`` empty, so the multi-axis frontier
     degenerates to the instance path when they're selected.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     command: str
@@ -51,6 +108,7 @@ class EvaluatorConfig(BaseModel):
     include_stdout: bool = True
     include_stderr: bool = True
     extra_commands: list[str] = Field(default_factory=list)
+    sidecar: EvaluatorSidecarConfig | None = None
     protected_files: list[str] = Field(
         default_factory=list,
         description=(
@@ -103,13 +161,9 @@ class DatasetConfig(BaseModel):
 
     def model_post_init(self, __context: object) -> None:  # noqa: D401
         if self.train_size is not None and self.train_size < 0:
-            raise ValueError(
-                f"dataset.train_size must be >= 0 (got {self.train_size})"
-            )
+            raise ValueError(f"dataset.train_size must be >= 0 (got {self.train_size})")
         if self.val_size is not None and self.val_size < 0:
-            raise ValueError(
-                f"dataset.val_size must be >= 0 (got {self.val_size})"
-            )
+            raise ValueError(f"dataset.val_size must be >= 0 (got {self.val_size})")
 
 
 class SeedlessConfig(BaseModel):
@@ -226,8 +280,10 @@ def load_dataset_examples(train_path: Path, max_examples: int = 3) -> list[str]:
                 if len(items) >= max_examples:
                     break
 
-    return [json.dumps(item, ensure_ascii=False) if not isinstance(item, str) else item
-            for item in items]
+    return [
+        json.dumps(item, ensure_ascii=False) if not isinstance(item, str) else item
+        for item in items
+    ]
 
 
 class EvolutionConfig(BaseModel):
@@ -236,6 +292,7 @@ class EvolutionConfig(BaseModel):
     Controls generation count, frontier management, termination caps,
     and parallel proposal settings.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     max_generations: int = 10
@@ -333,26 +390,26 @@ class EvolutionConfig(BaseModel):
         description=(
             "Pareto frontier dimensionality.  Mirrors GEPA's "
             "``FrontierType`` at ``src/gepa/core/state.py:22-23``.  Default "
-            "is ``\"hybrid\"`` to match GEPA ``optimize_anything``'s own "
+            'is ``"hybrid"`` to match GEPA ``optimize_anything``\'s own '
             "default at ``src/gepa/optimize_anything.py:476`` — O.A. is the "
             "right parent for HELIX, not the base ``api.py`` path whose "
-            "default is ``\"instance\"``.\n\n"
-            "- ``\"instance\"``: one frontier key per example-id.  Matches "
+            'default is ``"instance"``.\n\n'
+            '- ``"instance"``: one frontier key per example-id.  Matches '
             "HELIX's historical behaviour and GEPA's ``frontier_type="
-            "\"instance\"``.\n"
-            "- ``\"objective\"``: one frontier key per objective-name, "
+            '"instance"``.\n'
+            '- ``"objective"``: one frontier key per objective-name, '
             "score = mean of that objective across the valset.  Harvested "
-            "from ``side_info[\"scores\"]`` via ``helix_result``.\n"
-            "- ``\"hybrid\"``: both instance and objective frontiers "
+            'from ``side_info["scores"]`` via ``helix_result``.\n'
+            '- ``"hybrid"``: both instance and objective frontiers '
             "maintained; a candidate is retained if it survives on either.\n"
-            "- ``\"cartesian\"``: one frontier key per (val_id, "
+            '- ``"cartesian"``: one frontier key per (val_id, '
             "objective_name) pair.  Mirrors GEPA "
             "``_update_pareto_front_for_cartesian``.\n\n"
             "The acceptance gate stays positional on ``scores_list`` "
             "regardless of ``frontier_type`` (GEPA ``acceptance.py:39-48``); "
             "only the Pareto retention / parent-selection decision is "
             "multi-axis.  Non-``instance`` paths require ``helix_result`` "
-            "to emit per-example ``side_info[\"scores\"]`` dicts — without "
+            'to emit per-example ``side_info["scores"]`` dicts — without '
             "them the objective / cartesian frontiers stay empty and "
             "behaviour degenerates to the instance path."
         ),
@@ -394,11 +451,11 @@ class EvolutionConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    """Configuration for the mutation backend integration.
-    """
+    """Configuration for the mutation backend integration."""
+
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["claude", "codex", "cursor", "gemini", "opencode"] = "claude"
+    backend: BackendName = "claude"
     model: str | None = None
     effort: str | None = None
     max_turns: int | None = None
@@ -408,11 +465,41 @@ class AgentConfig(BaseModel):
     background: str | None = None
 
 
+class SandboxConfig(BaseModel):
+    """Configuration for OS-level subprocess isolation.
+
+    When enabled, HELIX runs untrusted agent/evaluator commands in a Docker
+    container whose only project mount is a temporary copy of the candidate
+    worktree.  Agent-side filesystem changes are synced back explicitly after
+    the backend exits; evaluator-side changes are discarded.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    evaluator: bool = False
+    backend: Literal["docker"] = "docker"
+    image: str | None = None
+    network: Literal["bridge", "none", "host"] = "bridge"
+    cpus: float | None = None
+    memory: str | None = None
+    timeout_seconds: int | None = None
+    pids_limit: int | None = 512
+    add_host_gateway: bool = False
+    extra_hosts: dict[str, str] = Field(default_factory=dict)
+    skip_special_files: bool = True
+    omit_from_agent: list[str] = Field(default_factory=list)
+    preserve_backend_transcripts: bool = True
+    transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
+    claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
+
+
 class WorktreeConfig(BaseModel):
     """Configuration for git worktree management.
 
     Defines where candidate worktrees are created during evolution.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     base_dir: str = ".helix/worktrees"
@@ -428,6 +515,7 @@ class HelixConfig(BaseModel):
     Combines all configuration sections (objective, evaluator, dataset,
     evolution, agent, worktree) and validates compatibility constraints.
     """
+
     model_config = ConfigDict(extra="forbid")
 
     objective: str
@@ -441,11 +529,20 @@ class HelixConfig(BaseModel):
             '["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]).'
         ),
     )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Fixed environment variable values to inject into evaluator and "
+            "agent subprocesses after passthrough_env. Use this for repeatable "
+            "run-local endpoints and non-secret defaults."
+        ),
+    )
     evaluator: EvaluatorConfig
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     seedless: SeedlessConfig = Field(default_factory=SeedlessConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
 
     def model_post_init(self, __context: object) -> None:
@@ -454,6 +551,12 @@ class HelixConfig(BaseModel):
                 "'objective' must be non-empty when seedless.enabled=True. "
                 "The LLM needs the objective to generate an initial candidate."
             )
+        if self.sandbox.enabled and self.sandbox.evaluator:
+            if self.evaluator.sidecar is None:
+                raise ValueError(
+                    "Docker sandboxing requires [evaluator.sidecar] with image, "
+                    "command, and endpoint."
+                )
 
 
 def load_config(path: Path) -> HelixConfig:
@@ -462,6 +565,7 @@ def load_config(path: Path) -> HelixConfig:
     Supports both flat format (``objective = "..."`` at root) and the
     ``[project]`` section format (fields are merged into the root).
     """
+    _load_dotenv_file(path.parent / ".env")
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -477,7 +581,10 @@ def load_config(path: Path) -> HelixConfig:
     # If a [project] section is present, promote its keys to the root level
     # (values already at root take precedence over those inside [project]).
     if "project" in data and isinstance(data["project"], dict):
-        merged = {**data["project"], **{k: v for k, v in data.items() if k != "project"}}
+        merged = {
+            **data["project"],
+            **{k: v for k, v in data.items() if k != "project"},
+        }
         data = merged
 
     try:
@@ -493,7 +600,10 @@ def load_config(path: Path) -> HelixConfig:
             print(f"   Field: {field_path}", file=sys.stderr)
             print(f"   Error: {msg}", file=sys.stderr)
             if error["type"] == "missing":
-                print(f"   Hint: Add '{error['loc'][-1]}' to your helix.toml", file=sys.stderr)
+                print(
+                    f"   Hint: Add '{error['loc'][-1]}' to your helix.toml",
+                    file=sys.stderr,
+                )
             elif error["type"] == "extra_forbidden":
                 print(
                     f"   Hint: '{error['loc'][-1]}' is not a recognised key on this "
@@ -502,6 +612,8 @@ def load_config(path: Path) -> HelixConfig:
                     file=sys.stderr,
                 )
             elif "type" in str(error["type"]):
-                print("   Hint: Check that the value is the correct type", file=sys.stderr)
+                print(
+                    "   Hint: Check that the value is the correct type", file=sys.stderr
+                )
             print(file=sys.stderr)
         sys.exit(1)

@@ -1,0 +1,270 @@
+diff --git a/src/helix/evolution.py b/src/helix/evolution.py
+index f1d25fd..774aedc 100644
+--- a/src/helix/evolution.py
++++ b/src/helix/evolution.py
+@@ -861,6 +861,7 @@ def run_evolution(
+             passthrough_env=config.passthrough_env,
+             fixed_env=config.env,
+             extra_hosts=config.sandbox.extra_hosts,
++            config=config,
+         ):
+             return _run_evolution_impl(config, project_root, base_dir)
+     return _run_evolution_impl(config, project_root, base_dir)
+@@ -1092,7 +1093,127 @@ def _run_evolution_impl(
+     # ------------------------------------------------------------------
+     # Main Loop
+     # ------------------------------------------------------------------
+-    # Use a persistent live display for the entire evolution run.
++
++    # ------------------------------------------------------------------
++    # Seed evaluation
++    # ------------------------------------------------------------------
++    if needs_seed:
++        if config.seedless.enabled:
++            # Seedless mode (GEPA parity): generate the initial candidate
++            # from scratch via a single LLM invocation — no retry loop.
++            set_phase(HelixPhase.SEED_GENERATION)
++            print_info("Seedless mode: creating empty worktree for seed generation...")
++            seed = create_empty_seed_worktree(project_root, worktrees_dir)
++            candidates[seed.id] = seed
++
++            print_info("Generating seed candidate via Claude Code (single attempt)...")
++            # GEPA parity: if a training dataset is provided, read up to 3
++            # representative examples and include them in the seed prompt
++            # (multi-task / generalization mode).  No train_path → single-task
++            # mode (dataset_examples=None skips the ## Sample Inputs section).
++            _dataset_examples: list[str] | None = None
++            if config.seedless.train_path is not None:
++                _dataset_examples = load_dataset_examples(config.seedless.train_path)
++            seed_prompt = build_seed_generation_prompt(
++                objective=config.objective,
++                background=config.agent.background,
++                evaluator_cmd=config.evaluator.command,
++                dataset_examples=_dataset_examples,
++            )
++            # Single attempt, fail-fast — matches GEPA's _generate_seed_candidate.
++            # Clean up the empty worktree if generation raises so we don't
++            # leave orphaned worktrees behind on failure.
++            try:
++                usage = generate_seed(seed.worktree_path, seed_prompt, config)
++                seed.usage = usage
++                state.budget.input_tokens += int(usage.get("input_tokens", 0))
++                state.budget.output_tokens += int(usage.get("output_tokens", 0))
++                state.budget.cost_usd += float(usage.get("cost_usd", 0.0))
++            except Exception:
++                remove_worktree(seed)
++                raise
++            print_success("Seed generation complete.")
++        else:
++            print_info("Creating seed worktree...")
++            seed = create_seed_worktree(project_root, worktrees_dir)
++            candidates[seed.id] = seed
++
++        # Freeze evaluator-related files from the seed baseline so mutation/
++        # merge candidates cannot tamper with evaluator logic.
++        evaluator_manifest = _build_evaluator_integrity_manifest(
++            config=config,
++            baseline_root=Path(seed.worktree_path),
++            project_root=project_root,
++        )
++        _write_evaluator_integrity_manifest(base_dir, evaluator_manifest)
++
++        set_phase(HelixPhase.SEED_EVAL)
++
++        print_info("Evaluating seed...")
++        # Architecture A: write full val indices to helix_batch.json so the
++        # evaluator scores the seed on the complete val split.
++        # GEPA parity: when val_size is set we route through
++        # ``_cached_evaluate_batch`` — the per-example cache consumer mirrors
++        # ``cached_evaluate_full`` at gepa/core/state.py:618.  When val_size
++        # is None (single-task/no-example mode, e.g. circle_packing) we
++        # cannot key the cache by example id, so we fall back to one evaluator
++        # call (counted as one uncached metric call).
++        if full_val_example_ids:
++            _seed_example_ids = list(full_val_example_ids)
++            seed_result, _seed_num_actual = _cached_evaluate_batch(
++                seed, _seed_example_ids, minibatch_cache, config, "val", project_root,
++            )
++            seed_result.candidate_id = seed.id
++            state.budget.evaluations += _evaluation_budget_units(
++                num_actual_examples=_seed_num_actual
++            )
++        else:
++            _refresh_protected_evaluator_files(seed, config, project_root)
++            seed_result = run_evaluator(seed, config)
++            seed_result.candidate_id = seed.id
++            state.budget.evaluations += _evaluation_budget_units()
++
++        _save_evaluation(base_dir, seed_result)
++        frontier.add(seed, seed_result)
++        state.frontier = list(frontier._candidates.keys())
++        state.instance_scores[seed.id] = seed_result.instance_scores
++        # GEPA parity (audit-rng-state-persist C/§3): record per-program
++        # discovery budget at the moment the program enters the frontier.
++        # Mirrors GEPA core/state.py:537 (``num_metric_calls_by_discovery
++        # .append(num_metric_calls_by_discovery_of_new_program)`` inside
++        # ``update_state_with_new_program``).
++        state.num_metric_calls_by_discovery[seed.id] = state.budget.evaluations
++        _save_state(state)
++
++        record_entry(
++            lineage_path,
++            LineageEntry(
++                id=seed.id,
++                parent=None,
++                parents=[],
++                operation="seed",
++                generation=0,
++                files_changed=[],
++            ),
++        )
++        print_success(f"Seed evaluated: {seed_result.aggregate_score():.4f}")
++        render_generation(0, config.evolution.max_generations, frontier, seed_result)
++    elif evaluator_manifest is None:
++        # Resume compatibility: older runs may not have a persisted manifest.
++        # Rebuild one from seed worktree when available, else from project root.
++        baseline_root = worktrees_dir / "g0-s0"
++        if not baseline_root.exists():
++            baseline_root = project_root
++        evaluator_manifest = _build_evaluator_integrity_manifest(
++            config=config,
++            baseline_root=baseline_root,
++            project_root=project_root,
++        )
++        _write_evaluator_integrity_manifest(base_dir, evaluator_manifest)
++
++    # ------------------------------------------------------------------
++    # Generation loop
++    # ------------------------------------------------------------------
+     with HelixLiveDisplay(
+         gen=state.generation,
+         total=config.evolution.max_generations,
+@@ -1100,128 +1221,6 @@ def _run_evolution_impl(
+         frontier=frontier,
+         config_evolution=config.evolution,
+     ) as live:
+-
+-        # ------------------------------------------------------------------
+-        # Seed evaluation
+-        # ------------------------------------------------------------------
+-        if needs_seed:
+-            if config.seedless.enabled:
+-                # Seedless mode (GEPA parity): generate the initial candidate
+-                # from scratch via a single LLM invocation — no retry loop.
+-                set_phase(HelixPhase.SEED_GENERATION)
+-                print_info("Seedless mode: creating empty worktree for seed generation...")
+-                seed = create_empty_seed_worktree(project_root, worktrees_dir)
+-                candidates[seed.id] = seed
+-
+-                print_info("Generating seed candidate via Claude Code (single attempt)...")
+-                # GEPA parity: if a training dataset is provided, read up to 3
+-                # representative examples and include them in the seed prompt
+-                # (multi-task / generalization mode).  No train_path → single-task
+-                # mode (dataset_examples=None skips the ## Sample Inputs section).
+-                _dataset_examples: list[str] | None = None
+-                if config.seedless.train_path is not None:
+-                    _dataset_examples = load_dataset_examples(config.seedless.train_path)
+-                seed_prompt = build_seed_generation_prompt(
+-                    objective=config.objective,
+-                    background=config.agent.background,
+-                    evaluator_cmd=config.evaluator.command,
+-                    dataset_examples=_dataset_examples,
+-                )
+-                # Single attempt, fail-fast — matches GEPA's _generate_seed_candidate.
+-                # Clean up the empty worktree if generation raises so we don't
+-                # leave orphaned worktrees behind on failure.
+-                try:
+-                    usage = generate_seed(seed.worktree_path, seed_prompt, config)
+-                    seed.usage = usage
+-                    live.update(usage=usage)
+-                    state.budget.input_tokens += int(usage.get("input_tokens", 0))
+-                    state.budget.output_tokens += int(usage.get("output_tokens", 0))
+-                    state.budget.cost_usd += float(usage.get("cost_usd", 0.0))
+-                except Exception:
+-                    remove_worktree(seed)
+-                    raise
+-                print_success("Seed generation complete.")
+-            else:
+-                print_info("Creating seed worktree...")
+-                seed = create_seed_worktree(project_root, worktrees_dir)
+-                candidates[seed.id] = seed
+-
+-            # Freeze evaluator-related files from the seed baseline so mutation/
+-            # merge candidates cannot tamper with evaluator logic.
+-            evaluator_manifest = _build_evaluator_integrity_manifest(
+-                config=config,
+-                baseline_root=Path(seed.worktree_path),
+-                project_root=project_root,
+-            )
+-            _write_evaluator_integrity_manifest(base_dir, evaluator_manifest)
+-
+-            set_phase(HelixPhase.SEED_EVAL)
+-
+-            print_info("Evaluating seed...")
+-            # Architecture A: write full val indices to helix_batch.json so the
+-            # evaluator scores the seed on the complete val split.
+-            # GEPA parity: when val_size is set we route through
+-            # ``_cached_evaluate_batch`` — the per-example cache consumer mirrors
+-            # ``cached_evaluate_full`` at gepa/core/state.py:618.  When val_size
+-            # is None (single-task/no-example mode, e.g. circle_packing) we
+-            # cannot key the cache by example id, so we fall back to one evaluator
+-            # call (counted as one uncached metric call).
+-            if full_val_example_ids:
+-                _seed_example_ids = list(full_val_example_ids)
+-                seed_result, _seed_num_actual = _cached_evaluate_batch(
+-                    seed, _seed_example_ids, minibatch_cache, config, "val", project_root,
+-                )
+-                seed_result.candidate_id = seed.id
+-                state.budget.evaluations += _evaluation_budget_units(
+-                    num_actual_examples=_seed_num_actual
+-                )
+-            else:
+-                _refresh_protected_evaluator_files(seed, config, project_root)
+-                seed_result = run_evaluator(seed, config)
+-                seed_result.candidate_id = seed.id
+-                state.budget.evaluations += _evaluation_budget_units()
+-
+-            _save_evaluation(base_dir, seed_result)
+-            frontier.add(seed, seed_result)
+-            state.frontier = list(frontier._candidates.keys())
+-            state.instance_scores[seed.id] = seed_result.instance_scores
+-            # GEPA parity (audit-rng-state-persist C/§3): record per-program
+-            # discovery budget at the moment the program enters the frontier.
+-            # Mirrors GEPA core/state.py:537 (``num_metric_calls_by_discovery
+-            # .append(num_metric_calls_by_discovery_of_new_program)`` inside
+-            # ``update_state_with_new_program``).
+-            state.num_metric_calls_by_discovery[seed.id] = state.budget.evaluations
+-            _save_state(state)
+-
+-            record_entry(
+-                lineage_path,
+-                LineageEntry(
+-                    id=seed.id,
+-                    parent=None,
+-                    parents=[],
+-                    operation="seed",
+-                    generation=0,
+-                    files_changed=[],
+-                ),
+-            )
+-            print_success(f"Seed evaluated: {seed_result.aggregate_score():.4f}")
+-            render_generation(0, config.evolution.max_generations, frontier, seed_result)
+-        elif evaluator_manifest is None:
+-            # Resume compatibility: older runs may not have a persisted manifest.
+-            # Rebuild one from seed worktree when available, else from project root.
+-            baseline_root = worktrees_dir / "g0-s0"
+-            if not baseline_root.exists():
+-                baseline_root = project_root
+-            evaluator_manifest = _build_evaluator_integrity_manifest(
+-                config=config,
+-                baseline_root=baseline_root,
+-                project_root=project_root,
+-            )
+-            _write_evaluator_integrity_manifest(base_dir, evaluator_manifest)
+-
+-        # ------------------------------------------------------------------
+-        # Generation loop
+-        # ------------------------------------------------------------------
+         start_gen = state.generation + 1
+         # GEPA parity: discovery-based merge trigger.  merges_due increments
+         # when a new candidate is accepted to the frontier.

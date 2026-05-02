@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.population import Candidate, EvalResult
-from helix.config import AgentConfig, HelixConfig, EvaluatorConfig
+from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
 from helix.mutator import (
     MutationError,
     BACKEND_RESULT_ARTIFACT_NAME,
@@ -91,7 +91,9 @@ class TestBuildMutationPrompt:
         assert "unique_stderr_abc" in prompt
 
     def test_contains_extra_asi(self):
-        er = make_eval_result(asi={"stdout": "", "stderr": "", "extra_0": "coverage: 80%"})
+        er = make_eval_result(
+            asi={"stdout": "", "stderr": "", "extra_0": "coverage: 80%"}
+        )
         prompt = build_mutation_prompt("goal", er)
         assert "coverage: 80%" in prompt
 
@@ -110,10 +112,10 @@ class TestBuildMutationPrompt:
         prompt = build_mutation_prompt("goal", er)
         assert "[MUTATION COMPLETE]" in prompt
 
-    def test_contains_autonomous_rules(self):
+    def test_contains_execution_instructions(self):
         er = make_eval_result()
         prompt = build_mutation_prompt("goal", er)
-        assert "NEVER ask for human input" in prompt
+        assert "Task instructions:" in prompt
 
     def test_no_scores_fallback(self):
         er = make_eval_result(scores={})
@@ -140,7 +142,8 @@ class TestPerExampleDiagnostics:
             candidate_id="g0-s0",
             scores={"pass_rate": 0.5},
             asi={"stdout": "", "stderr": ""},
-            instance_scores=instance_scores or {"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+            instance_scores=instance_scores
+            or {"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
             side_info=side_info,
             per_example_side_info=per_example_side_info,
         )
@@ -148,7 +151,10 @@ class TestPerExampleDiagnostics:
     def test_renders_per_example_headers_from_instance_scores(self):
         er = self._make(
             per_example_side_info=[
-                {"trajectory": "fell over", "scores": {"success": 1.0, "affordance": 0.8}},
+                {
+                    "trajectory": "fell over",
+                    "scores": {"success": 1.0, "affordance": 0.8},
+                },
                 {"trajectory": "stuck", "scores": {"success": 0.0, "affordance": 0.2}},
             ],
             instance_scores={"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
@@ -414,7 +420,8 @@ class TestPerExampleDiagnostics:
 
 class TestMutationPromptArtifact:
     """``mutate()`` writes the rendered prompt to
-    ``<worktree>/.helix_mutation_prompt.md`` before invoking Claude Code
+    ``<worktree>/.agent_task_prompt.md`` (or reserved fallback)
+    before invoking Claude Code
     and adds the artifact + ``helix_batch.json`` to the worktree's
     ``.gitignore`` so neither leaks into the candidate git tree."""
 
@@ -426,14 +433,14 @@ class TestMutationPromptArtifact:
         wt.mkdir()
         child = make_candidate("g1-s0", str(wt))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch(
+            "helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, {})
+        )
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
         return parent, er, config, wt
 
-    def test_artifact_written_before_claude_invocation(
-        self, tmp_path: Path, mocker
-    ):
+    def test_artifact_written_before_claude_invocation(self, tmp_path: Path, mocker):
         """The prompt file must exist at the time ``invoke_claude_code``
         is called so Claude can in principle read it during the session
         and so post-hoc inspection works even on a crashed mutation."""
@@ -441,32 +448,34 @@ class TestMutationPromptArtifact:
 
         # Capture whether the artifact exists at the moment
         # invoke_claude_code is entered.
-        artifact_path = wt / ".helix_mutation_prompt.md"
         exists_at_invoke: list[bool] = []
 
         def fake_invoke(*_a, **_kw):
-            exists_at_invoke.append(artifact_path.exists())
-            return {"result": "ok"}
+            exists_at_invoke.append(
+                (wt / ".agent_task_prompt.md").exists()
+                or (wt / ".agent_internal" / "task_prompt.md").exists()
+            )
+            return {"result": "ok"}, {}
 
         mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
         mutate(parent, er, "g1-s0", config, tmp_path)
         assert exists_at_invoke == [True]
 
-    def test_artifact_contains_rendered_prompt(
-        self, tmp_path: Path, mocker
-    ):
+    def test_artifact_contains_rendered_prompt(self, tmp_path: Path, mocker):
         parent, er, config, wt = self._build(tmp_path, mocker)
         mutate(parent, er, "g1-s0", config, tmp_path)
 
-        content = (wt / ".helix_mutation_prompt.md").read_text()
+        if (wt / ".agent_task_prompt.md").exists():
+            artifact_path = wt / ".agent_task_prompt.md"
+        else:
+            artifact_path = wt / ".agent_internal" / "task_prompt.md"
+        content = artifact_path.read_text()
         # Objective + autonomous-rules block are both in the rendered
         # prompt via build_mutation_prompt.
         assert config.objective in content
         assert "[MUTATION COMPLETE]" in content
 
-    def test_gitignore_excludes_helix_artifacts(
-        self, tmp_path: Path, mocker
-    ):
+    def test_gitignore_excludes_helix_artifacts(self, tmp_path: Path, mocker):
         """``.gitignore`` in the worktree gains entries for the prompt
         file AND ``helix_batch.json`` so neither file enters the
         candidate diff on the next generation."""
@@ -474,12 +483,11 @@ class TestMutationPromptArtifact:
         mutate(parent, er, "g1-s0", config, tmp_path)
 
         gi = (wt / ".gitignore").read_text()
-        assert ".helix_mutation_prompt.md" in gi
+        assert ".agent_task_prompt.md" in gi
+        assert ".agent_internal/" in gi
         assert "helix_batch.json" in gi
 
-    def test_gitignore_append_is_idempotent(
-        self, tmp_path: Path, mocker
-    ):
+    def test_gitignore_append_is_idempotent(self, tmp_path: Path, mocker):
         """A pre-existing ``.gitignore`` with HELIX patterns already
         present must not grow duplicate entries on subsequent mutate()
         calls — otherwise long runs balloon the gitignore."""
@@ -488,19 +496,19 @@ class TestMutationPromptArtifact:
         (wt / ".gitignore").write_text(
             "*.pyc\n"
             "# HELIX per-invocation artifacts (never commit to candidate tree)\n"
-            ".helix_mutation_prompt.md\n"
+            ".agent_task_prompt.md\n"
+            ".agent_internal/\n"
             "helix_batch.json\n"
         )
         mutate(parent, er, "g1-s0", config, tmp_path)
 
         gi = (wt / ".gitignore").read_text()
-        assert gi.count(".helix_mutation_prompt.md") == 1
+        assert gi.count(".agent_task_prompt.md") == 1
+        assert gi.count(".agent_internal/") == 1
         assert gi.count("helix_batch.json") == 1
         assert "*.pyc" in gi  # existing content preserved
 
-    def test_gitignore_created_when_absent(
-        self, tmp_path: Path, mocker
-    ):
+    def test_gitignore_created_when_absent(self, tmp_path: Path, mocker):
         parent, er, config, wt = self._build(tmp_path, mocker)
         # Ensure no pre-existing gitignore.
         assert not (wt / ".gitignore").exists()
@@ -523,7 +531,7 @@ class TestInvokeClaudeCode:
             returncode=0,
         )
         config = AgentConfig()
-        result = invoke_claude_code("/tmp/wt", "do something", config)
+        result, usage = invoke_claude_code("/tmp/wt", "do something", config)
         assert result == payload
 
     def test_raises_on_nonzero_returncode(self, mocker):
@@ -566,8 +574,9 @@ class TestInvokeClaudeCode:
         assert "Read,Edit" in args_list
         assert "--model" not in args_list
         assert "--max-turns" not in args_list
-        assert "-p" in args_list
-        assert "the prompt" in args_list
+        assert "the prompt" not in args_list
+        assert ".agent_task_prompt.md" in args_list[-1]
+        assert "input" not in call_args[1]
 
     def test_uses_correct_cwd(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
@@ -593,7 +602,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="codex", model="gpt-5")
 
-        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["codex", "exec"]
@@ -601,7 +610,9 @@ class TestInvokeClaudeCode:
         assert "--dangerously-bypass-approvals-and-sandbox" in args_list
         assert "--model" in args_list
         assert "gpt-5" in args_list
-        assert args_list[-1] == "the prompt"
+        assert "the prompt" not in args_list
+        assert ".agent_task_prompt.md" in args_list[-1]
+        assert "input" not in mock_run.call_args[1]
         assert result["events"][0]["thread_id"] == "thr_123"
 
     def test_cursor_cli_args_use_stream_json(self, mocker):
@@ -613,7 +624,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="cursor", model="gpt-5")
 
-        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["cursor", "agent"]
@@ -623,10 +634,14 @@ class TestInvokeClaudeCode:
         assert "--yolo" in args_list
         assert "--workspace" in args_list
         assert "/tmp/wt" in args_list
-        assert args_list[-1] == "the prompt"
+        assert "the prompt" not in args_list
+        assert ".agent_task_prompt.md" in args_list[-1]
+        assert "input" not in mock_run.call_args[1]
         assert result["events"][0]["session_id"] == "sess_123"
 
-    def test_backend_artifacts_written_for_structured_backends(self, tmp_path: Path, mocker):
+    def test_backend_artifacts_written_for_structured_backends(
+        self, tmp_path: Path, mocker
+    ):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout=(
@@ -640,12 +655,71 @@ class TestInvokeClaudeCode:
 
         invoke_claude_code(str(tmp_path), "prompt", config)
 
-        assert (tmp_path / BACKEND_STDOUT_ARTIFACT_NAME).read_text().startswith('{"type":"system"')
+        assert (
+            (tmp_path / BACKEND_STDOUT_ARTIFACT_NAME)
+            .read_text()
+            .startswith('{"type":"system"')
+        )
         assert (tmp_path / BACKEND_STDERR_ARTIFACT_NAME).read_text() == "warning text"
         payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
         assert payload["backend"] == "cursor"
         assert payload["usage"]["session_id"] == "sess_123"
         assert payload["usage"]["tool_event_count"] == 1
+
+    def test_claude_backend_artifacts_copy_local_transcript(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        transcript_root = (
+            tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        )
+        transcript_root.mkdir(parents=True)
+        (transcript_root / "sess_123.jsonl").write_text('{"message":"saved"}\n')
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(transcript_root))
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","session_id":"sess_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        artifact = (
+            tmp_path
+            / ".helix_artifacts"
+            / "backend_transcripts"
+            / "claude"
+            / "sess_123.jsonl"
+        )
+        assert artifact.read_text() == '{"message":"saved"}\n'
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["transcript_artifacts"] == [
+            {
+                "backend": "claude",
+                "session_id": "sess_123",
+                "path": ".helix_artifacts/backend_transcripts/claude/sess_123.jsonl",
+                "source": str(transcript_root / "sess_123.jsonl"),
+                "available": True,
+            }
+        ]
+
+    def test_claude_backend_artifacts_record_missing_transcript(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        transcript_root = tmp_path / "missing-root"
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(transcript_root))
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","session_id":"sess_404"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["transcript_artifacts"][0]["available"] is False
+        assert payload["transcript_artifacts"][0]["reason"] == "transcript_not_found"
 
     def test_gemini_tolerates_text_preamble_before_json_stream(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
@@ -660,15 +734,17 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="gemini")
 
-        result = invoke_claude_code("/tmp/wt", "prompt", config)
+        result, _ = invoke_claude_code("/tmp/wt", "prompt", config)
 
         assert result["events"][0]["type"] == "init"
-        assert result["unparsable_lines"] == ["MCP issues detected. Run /mcp list for status."]
+        assert result["unparsable_lines"] == [
+            "MCP issues detected. Run /mcp list for status."
+        ]
 
     @pytest.mark.parametrize(
         ("backend", "expected_prefix", "expected_flags"),
         [
-            ("gemini", ["gemini"], ["--yolo", "--prompt", "--output-format", "stream-json"]),
+            ("gemini", ["gemini"], ["--yolo", "--output-format", "stream-json"]),
             (
                 "opencode",
                 ["opencode", "run"],
@@ -676,7 +752,9 @@ class TestInvokeClaudeCode:
             ),
         ],
     )
-    def test_gemini_and_opencode_cli_args(self, mocker, backend, expected_prefix, expected_flags):
+    def test_gemini_and_opencode_cli_args(
+        self, mocker, backend, expected_prefix, expected_flags
+    ):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"system","session_id":"sess_123"}\n',
@@ -685,16 +763,21 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend=backend, model="test-model")
 
-        result = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[: len(expected_prefix)] == expected_prefix
         for flag in expected_flags:
             assert flag in args_list
         assert "test-model" in args_list
+        assert "the prompt" not in args_list
+        assert any(".agent_task_prompt.md" in arg for arg in args_list)
+        assert "input" not in mock_run.call_args[1]
         assert result["events"][0]["session_id"] == "sess_123"
 
-    def test_opencode_usage_normalization_captures_session_id_and_cost(self, tmp_path: Path, mocker):
+    def test_opencode_usage_normalization_captures_session_id_and_cost(
+        self, tmp_path: Path, mocker
+    ):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout=(
@@ -712,6 +795,59 @@ class TestInvokeClaudeCode:
         assert payload["usage"]["session_id"] == "ses_123"
         assert payload["usage"]["cost_usd"] == 0.25
 
+    def test_uses_sandbox_when_enabled(self, tmp_path: Path, mocker):
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+
+        result, _ = invoke_claude_code(
+            str(tmp_path),
+            "prompt",
+            AgentConfig(),
+            sandbox=SandboxConfig(enabled=True),
+        )
+
+        assert result == {}
+        mock_run.assert_called_once()
+        assert mock_run.call_args.kwargs["scope"] == "agent"
+        assert mock_run.call_args.kwargs["sync_back"] is True
+        assert (
+            mock_run.call_args.kwargs["image"]
+            == "ghcr.io/ke7/helix-evo-runner-claude:latest"
+        )
+
+    def test_backend_auth_env_is_passed_automatically(self, mocker, monkeypatch):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+        monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
+
+        invoke_claude_code("/tmp/wt", "prompt", AgentConfig(backend="cursor"))
+
+        assert mock_run.call_args.kwargs["env"]["CURSOR_API_KEY"] == "cursor-key"
+
+    def test_fixed_env_is_passed_to_backend_subprocess(self, mocker, monkeypatch):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://wrong")
+
+        invoke_claude_code(
+            "/tmp/wt",
+            "prompt",
+            AgentConfig(),
+            passthrough_env=["ANTHROPIC_BASE_URL"],
+            fixed_env={
+                "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+                "ANTHROPIC_API_KEY": "dummy",
+            },
+        )
+
+        env = mock_run.call_args.kwargs["env"]
+        assert env["ANTHROPIC_BASE_URL"] == "http://qwen-vllm-endpoint:8003"
+        assert env["ANTHROPIC_API_KEY"] == "dummy"
+
 
 # ---------------------------------------------------------------------------
 # Tests: mutate
@@ -719,14 +855,18 @@ class TestInvokeClaudeCode:
 
 
 class TestMutate:
-    def test_returns_candidate_on_success(self, mocker):
-        parent = make_candidate("g0-s0", "/tmp/parent")
+    def test_returns_candidate_on_success(self, tmp_path: Path, mocker):
+        parent = make_candidate("g0-s0", str(tmp_path / "parent"))
         er = make_eval_result("g0-s0")
         config = make_config()
 
-        child = make_candidate("g1-s0", "/tmp/g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch(
+            "helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, {})
+        )
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
 
@@ -734,26 +874,30 @@ class TestMutate:
 
         assert result is child
 
-    def test_sets_operation_to_mutate(self, mocker):
+    def test_sets_operation_to_mutate(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
         er = make_eval_result()
         config = make_config()
 
-        child = make_candidate("g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={})
+        mocker.patch("helix.mutator.invoke_claude_code", return_value=({}, {}))
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
         result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
         assert result.operation == "mutate"
 
-    def test_returns_none_on_mutation_error(self, mocker):
+    def test_returns_none_on_mutation_error(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
         er = make_eval_result()
         config = make_config()
 
-        child = make_candidate("g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
         mocker.patch(
             "helix.mutator.invoke_claude_code",
@@ -767,12 +911,14 @@ class TestMutate:
         assert result is None
         mock_remove.assert_called_once_with(child)
 
-    def test_removes_worktree_on_failure(self, mocker):
+    def test_removes_worktree_on_failure(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
         er = make_eval_result()
         config = make_config()
 
-        child = make_candidate("g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
         mocker.patch(
             "helix.mutator.invoke_claude_code",
@@ -785,7 +931,7 @@ class TestMutate:
 
         mock_remove.assert_called_once_with(child)
 
-    def test_snapshot_not_called_by_mutate_on_success(self, mocker):
+    def test_snapshot_not_called_by_mutate_on_success(self, tmp_path: Path, mocker):
         """mutate() must NOT call snapshot_candidate — the caller owns that step.
 
         Callers (evolution.py) must call save_state() BEFORE snapshot_candidate()
@@ -795,10 +941,14 @@ class TestMutate:
         er = make_eval_result()
         config = make_config()
 
-        child = make_candidate("g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.invoke_claude_code", return_value={})
-        mock_snapshot = mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
+        mocker.patch("helix.mutator.invoke_claude_code", return_value=({}, {}))
+        mock_snapshot = mocker.patch(
+            "helix.mutator.snapshot_candidate", return_value="sha"
+        )
         mocker.patch("helix.mutator.remove_worktree")
 
         result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
@@ -807,12 +957,14 @@ class TestMutate:
         assert result is child
         mock_snapshot.assert_not_called()
 
-    def test_snapshot_not_called_on_failure(self, mocker):
+    def test_snapshot_not_called_on_failure(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
         er = make_eval_result()
         config = make_config()
 
-        child = make_candidate("g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
         mocker.patch(
             "helix.mutator.invoke_claude_code",
@@ -825,14 +977,18 @@ class TestMutate:
 
         mock_snapshot.assert_not_called()
 
-    def test_passes_background_to_prompt(self, mocker):
+    def test_passes_background_to_prompt(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
         er = make_eval_result()
         config = make_config()
 
-        child = make_candidate("g1-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mock_invoke = mocker.patch("helix.mutator.invoke_claude_code", return_value={})
+        mock_invoke = mocker.patch(
+            "helix.mutator.invoke_claude_code", return_value=({}, {})
+        )
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
@@ -840,3 +996,82 @@ class TestMutate:
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "special context" in prompt_arg
+
+
+# ---------------------------------------------------------------------------
+# Mutation prompt artifact behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_write_mutation_prompt_artifact_idempotent_resume(tmp_path):
+    """Writing the same prompt twice must succeed without raising or clobbering."""
+    from helix.mutator import (
+        _write_mutation_prompt_artifact,
+        MUTATION_PROMPT_ARTIFACT_NAME,
+    )
+
+    name1 = _write_mutation_prompt_artifact(str(tmp_path), "the prompt body")
+    assert name1 == MUTATION_PROMPT_ARTIFACT_NAME
+    # Idempotent on resume: same content -> success, no exception.
+    name2 = _write_mutation_prompt_artifact(str(tmp_path), "the prompt body")
+    assert name2 == MUTATION_PROMPT_ARTIFACT_NAME
+    assert (tmp_path / MUTATION_PROMPT_ARTIFACT_NAME).read_text() == "the prompt body"
+
+
+def test_write_mutation_prompt_artifact_uses_fallback_on_user_collision(tmp_path):
+    """A user-owned primary path must not be clobbered; fall back instead."""
+    from helix.mutator import (
+        _write_mutation_prompt_artifact,
+        MUTATION_PROMPT_ARTIFACT_NAME,
+        MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
+    )
+
+    user_content = "this is the user's existing file -- do not touch"
+    primary = tmp_path / MUTATION_PROMPT_ARTIFACT_NAME
+    primary.write_text(user_content)
+    name = _write_mutation_prompt_artifact(str(tmp_path), "fresh helix prompt")
+    assert name == MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+    # User file is preserved verbatim.
+    assert primary.read_text() == user_content
+    # Helix wrote to the fallback path.
+    assert (
+        tmp_path / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+    ).read_text() == "fresh helix prompt"
+
+
+def test_write_mutation_prompt_artifact_raises_when_both_collide(tmp_path):
+    """If both primary and fallback exist with different content, raise."""
+    from helix.mutator import (
+        _write_mutation_prompt_artifact,
+        MUTATION_PROMPT_ARTIFACT_NAME,
+        MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
+        PromptArtifactCollisionError,
+    )
+
+    (tmp_path / MUTATION_PROMPT_ARTIFACT_NAME).write_text("user A")
+    fb = tmp_path / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+    fb.parent.mkdir(parents=True, exist_ok=True)
+    fb.write_text("user B")
+    with pytest.raises(PromptArtifactCollisionError):
+        _write_mutation_prompt_artifact(str(tmp_path), "fresh helix prompt")
+    # Neither user file is modified.
+    assert (tmp_path / MUTATION_PROMPT_ARTIFACT_NAME).read_text() == "user A"
+    assert fb.read_text() == "user B"
+
+
+def test_normalise_usage_stats_ignores_recall_and_callback(monkeypatch):
+    """Substring matching on 'call' must not over-fire on unrelated event types."""
+    from helix.mutator import _normalise_usage_stats
+
+    parsed = {
+        "events": [
+            {"type": "recall", "name": "memory.recall"},
+            {"type": "callback", "name": "on_done"},
+            {"type": "rollback", "name": "rb"},
+            {"type": "tool_call", "name": "Read"},
+            {"type": "function_call", "name": "search"},
+        ],
+    }
+    result = _normalise_usage_stats(parsed)
+    assert result.get("tool_event_count") == 2
+    assert result.get("tool_names") == ["Read", "search"]
