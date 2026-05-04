@@ -54,7 +54,7 @@ The difference between HELIX and `/chat/completions`-style evolvers (GEPA, DSPy-
 | Self-correction | None per proposal (retries are separate generations) | Inside one mutation: diagnose a test failure, edit another file, re-run, commit only if green |
 | Cost accounting | 1 LLM call = 1 proposal | 1 proposal = N turns, gated by `max_turns` + whatever the agent decides is enough |
 
-This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-OSS behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
+This is why a full solver module or a shrinkwrap of an ML kernel behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
 
 ---
 
@@ -79,62 +79,67 @@ This is why `solver/solution.py` on cap-x or a shrinkwrap of a ML kernel on GPT-
 ## 🔄 How It Works
 
 ```
-                    ┌──────────────┐
-                    │   Seed Code  │
-                    └──────┬───────┘
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │   Evaluate   │◄──────────────────────┐
-                    │  (parallel)  │                       │
-                    └──────┬───────┘                       │
-                           │                               │
-                           ▼                               │
-                    ┌──────────────┐                       │
-                    │ Select Parent│                       │
-                    │  (Pareto)    │                       │
-                    └──────┬───────┘                       │
-                           │                               │
-                           ▼                               │
-               ┌───────────────────────┐                   │
-               │  Mutate via Agent     │                   │
-               │  Backend in Worktree  │                   │
-               │                       │                   │
-               │  • Read files         │                   │
-               │  • Edit multi-file    │                   │
-               │  • Run tests          │                   │
-               │  • Self-correct       │                   │
-               └───────────┬───────────┘                   │
-                           │                               │
-                           ▼                               │
-                    ┌──────────────┐     ┌──────────┐      │
-                    │Gate on Train │────▶│  Reject  │      │
-                    │  (regress?)  │ yes └──────────┘      │
-                    └──────┬───────┘                       │
-                       no  │                               │
-                           ▼                               │
-                    ┌──────────────┐                       │
-                    │Pareto Update │                       │
-                    │ (val scores) │                       │
-                    └──────┬───────┘                       │
-                           │                               │
-                      ┌────┴────┐                          │
-                      │ Merge?  │ every N gens             │
-                      └────┬────┘                          │
-                           │                               │
-                           ▼                               │
-                    ┌──────────────┐                       │
-                    │   Cleanup    │                       │
-                    │  dominated   │───────────────────────┘
-                    └──────────────┘
+                              ┌──────────────────────┐
+                              │   Host HELIX Engine  │
+                              │  state, frontier,    │
+                              │  worktree copies     │
+                              └──────────┬───────────┘
+                                         │
+                    starts once per run  │
+                                         ▼
+                 ┌────────────────────────────────────────┐
+                 │ Private Evaluator Sidecar              │
+                 │ Docker network: helix-eval-*           │
+                 │ • benchmark code/data stay here        │
+                 │ • no published host ports              │
+                 │ • no agent auth volume                 │
+                 └───────────────────▲────────────────────┘
+                                     │ HTTP/RPC only
+                                     │
+          ┌──────────────────────────┴──────────────────────────┐
+          │                                                     │
+          ▼                                                     ▼
+ ┌──────────────────────┐                              ┌──────────────────────┐
+ │ Evaluator Runner     │                              │ Evaluator Runner     │
+ │ short-lived Docker   │            ...               │ short-lived Docker   │
+ │ • copied /workspace  │                              │ • copied /workspace  │
+ │ • private eval net   │                              │ • private eval net   │
+ │ • prints HELIX_RESULT│                              │ • prints HELIX_RESULT│
+ └──────────┬───────────┘                              └──────────┬───────────┘
+            │                                                     │
+            └────────────── scores / ASI / stderr ────────────────┘
+                                         │
+                                         ▼
+                              ┌──────────────────────┐
+                              │ Select Parent        │
+                              │ Pareto + train gate  │
+                              └──────────┬───────────┘
+                                         │
+                                         ▼
+                 ┌────────────────────────────────────────┐
+                 │ Mutator Agent Container                │
+                 │ Docker network: normal agent egress    │
+                 │ • copied /workspace                    │
+                 │ • backend auth volume                  │
+                 │ • no evaluator network or endpoint     │
+                 │ • edits sync back after exit           │
+                 └───────────────────┬────────────────────┘
+                                     │
+                                     ▼
+                              ┌──────────────────────┐
+                              │ Gate / Pareto Update │
+                              │ Merge / Cleanup      │
+                              └──────────┬───────────┘
+                                         │
+                                         └── repeat generations
 ```
 
 **The loop in detail:**
 
 1. **Seed** — Your starting code is copied into a git worktree and evaluated
-2. **Evaluate** — Run your evaluator command; parse scores per test/instance
+2. **Evaluate** — Start the private evaluator sidecar once, then run short-lived evaluator-runner containers that call it and print `HELIX_RESULT`
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
-4. **Mutate** — Spawn the configured agent backend in an isolated worktree with full tool access. It reads files, diagnoses failures, makes surgical multi-file edits, and runs commands to verify
+4. **Mutate** — Spawn the configured agent backend in an isolated Docker workspace. It can edit candidate files and use its backend auth, but it does not join the evaluator network
 5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
 7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend
@@ -164,6 +169,73 @@ helix init
 ```
 
 This creates a `helix.toml` config file and a `.helix/` directory. Edit `helix.toml` to set your objective and evaluator.
+
+### Recommended: Enable Docker Sandboxing
+
+For a first HELIX run, use Docker sandboxing. It keeps mutation agents in
+copied workspaces and requires a private evaluator sidecar, so agents never see
+the evaluator source, benchmark data, or evaluator endpoint.
+
+Install and start Docker, then log in to your selected backend inside its
+persistent sandbox auth volume:
+
+```bash
+helix sandbox login claude      # or codex, cursor, gemini, opencode
+helix sandbox status claude
+```
+
+Then enable the sandbox and configure the evaluator sidecar in `helix.toml`:
+
+```toml
+[evaluator]
+command = "python /runner/evaluate_client.py"
+score_parser = "helix_result"
+
+[evaluator.sidecar]
+image = "my-private-evaluator:latest"
+runner_image = "my-evaluator-runner:latest"
+command = "python -m benchmark_server"
+endpoint = "http://helix-evaluator:8080/evaluate"
+startup_timeout_seconds = 120
+
+[sandbox]
+enabled = true
+network = "bridge"
+skip_special_files = true
+```
+
+HELIX keeps this setting opt-in so existing local workflows and machines without
+Docker continue to work, but sandboxing is the recommended mode for new projects.
+
+### Connect The HELIX Agent Skill
+
+This repository ships an agent skill at `skills/helix/` with detailed guidance
+for writing `helix.toml`, running and debugging HELIX, and migrating GEPA
+`optimize_anything.py` workflows.
+
+For Codex, install it into your local Codex skills directory:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -sfn "$(pwd)/skills/helix" "${CODEX_HOME:-$HOME/.codex}/skills/helix"
+```
+
+Then ask Codex:
+
+```text
+Use $helix to set up this project.
+```
+
+For Claude Code, this repo includes `.claude/commands/helix.md`, so inside this
+checkout you can run:
+
+```text
+/helix set up Docker-sandboxed HELIX for this benchmark
+```
+
+To use the command from another project, copy or symlink both
+`skills/helix/` and `.claude/commands/helix.md` into that project, preserving
+the same relative paths.
 
 ### Whole-repo-as-candidate Model
 
@@ -241,6 +313,12 @@ seed = "."
 # RNG seed for deterministic parent selection (default: 0)
 rng_seed = 0
 
+[env]
+# Fixed non-secret env values injected into evaluator and agent subprocesses
+# after passthrough_env. Useful for repeatable run-local service endpoints.
+# ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+# ANTHROPIC_API_KEY = "dummy"
+
 [evaluator]
 command = "uv run python evaluate.py"
 # Available parsers: "pytest" | "exitcode" | "json_accuracy" | "json_score" | "helix_result"
@@ -308,9 +386,89 @@ max_turns = 20
 allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 
+[sandbox]
+enabled = false                  # true = run agent/evaluator subprocesses in Docker
+# image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
+network = "bridge"               # "bridge" | "none" | "host"
+skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
+# Agent containers mount a persistent Docker auth volume named
+# helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
+
 [worktree]
 base_dir = ".helix/worktrees"
 ```
+
+### Docker Sandboxing
+
+When `[sandbox].enabled = true`, HELIX starts `[evaluator.sidecar]` once per
+`helix evolve` on a private internal Docker network. Agent containers run in
+copied workspaces on the normal agent network and cannot reach that sidecar.
+Evaluator-runner containers run only during evaluation, join the private
+network, call the sidecar, print evaluator output, and exit.
+The long-lived sidecar does not mount the candidate workspace; the runner must
+stream the needed candidate files/data over RPC, or execute candidate code
+itself and call the sidecar only for private judging/simulation.
+`[evaluator.sidecar].image` is the private service image; `runner_image` is the
+short-lived client image used for `[evaluator].command`. Keep private benchmark
+data in the service image, not in the runner image.
+
+Agent changes are synced back to the real candidate worktree after the backend
+exits; evaluator-runner file changes are discarded. HELIX never mounts the host
+project root, parent directories, or home directory by default.
+`helix.toml`, `.env`, `.env.*`, `.git`, and HELIX runtime artifacts are also
+excluded from sandbox workspace copies/sync-back so agents cannot read sidecar
+configuration or mutate run settings.
+During copy and sync, HELIX skips unsupported special files such as FIFOs,
+sockets, and device nodes by default. Set `skip_special_files = false` only if
+you want unsupported workspace file types to raise instead of being ignored.
+
+Agent containers mount a persistent Docker auth volume at `/home/node`;
+evaluator sidecar and runner containers never receive it. Run
+`helix sandbox login <backend>` once per backend to complete that CLI's normal
+login flow inside the same Linux container environment HELIX will use later:
+
+```bash
+helix sandbox login claude
+helix sandbox status claude
+```
+
+For Claude, HELIX uses `claude setup-token` for sandbox login because that is
+the flow that works cleanly in browserless Docker/SSH-style environments; it
+prints a URL and then accepts the code from the browser in the terminal.
+Codex similarly uses `codex login --device-auth` so the callback does not depend
+on a localhost server inside the container. Gemini starts its normal
+interactive CLI with `--skip-trust` so its authentication picker is not blocked
+by the temporary sandbox workspace trust prompt. OpenCode starts the normal TUI
+so you can choose the provider/model and complete provider login in one setup
+session.
+
+The volume names are `helix-auth-claude`, `helix-auth-codex`,
+`helix-auth-cursor`, `helix-auth-gemini`, and `helix-auth-opencode`.
+This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
+browser-login tokens may live in Keychain; on Linux they may live in
+Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
+Those stores are session- and OS-specific, so copying their databases into a
+Linux Docker image is not a reliable authentication mechanism. If your
+evaluator uses a local proxy, keep that endpoint in your evaluator code as
+usual. Docker Desktop supports `host.docker.internal`; Linux users can set
+`add_host_gateway = true`.
+
+By default HELIX chooses a published backend-specific mutator image from
+`agent.backend`: `ghcr.io/ke7/helix-evo-runner-claude`,
+`ghcr.io/ke7/helix-evo-runner-codex`,
+`ghcr.io/ke7/helix-evo-runner-cursor`,
+`ghcr.io/ke7/helix-evo-runner-gemini`, or
+`ghcr.io/ke7/helix-evo-runner-opencode`. To build locally instead, build the
+shared base first with
+`docker build -t helix-runner-base:latest -f docker/base.Dockerfile .`, then
+build the backend image you need, for example
+`docker build -t helix-runner-codex:latest -f docker/codex.Dockerfile .`, and
+set `[sandbox].image` to that local tag.
+
+Evaluator sidecar images are benchmark-specific and are not published by HELIX.
+Use `ghcr.io/ke7/helix-evo-runner-base` or `docker/base.Dockerfile` as a base
+for your own `runner_image`; build/publish the private sidecar service image
+from your evaluator repository.
 
 ### Dataset Modes
 
@@ -336,8 +494,10 @@ When `evolution.val_stage_size` is set to a positive value and `dataset.val_size
 
 ### Evaluator Integrity
 
-HELIX can lock evaluator-critical files so mutations and merges cannot game the
-score by editing the benchmark itself.
+For non-sandboxed local prototypes, HELIX can lock evaluator-critical files so
+mutations and merges cannot game the score by editing the benchmark itself.
+Sandboxed runs should use `[evaluator.sidecar]` instead of repo-local evaluator
+files.
 
 ```toml
 [evaluator]
@@ -412,6 +572,9 @@ print(json.dumps({
 | Command | Description |
 |---|---|
 | `helix init` | Initialize HELIX in the current directory — creates `helix.toml` and `.helix/` |
+| `helix sandbox login BACKEND` | Log into an agent backend inside its persistent Docker auth volume |
+| `helix sandbox status [BACKEND]` | Show sandbox login status for one backend or all supported backends |
+| `helix sandbox logout BACKEND` | Log out a backend from its persistent Docker auth volume |
 | `helix evolve` | Run the evolutionary loop |
 | `helix frontier` | Display the current Pareto frontier as a table |
 | `helix best` | Show the best candidate; `--export PATH` to copy it out |

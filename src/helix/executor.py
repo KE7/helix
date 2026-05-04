@@ -9,9 +9,13 @@ import subprocess
 from typing import Any
 
 from helix.population import Candidate, EvalResult
-from helix.config import HelixConfig, EvaluatorConfig
-from helix.exceptions import EvaluatorError, print_helix_error, format_error_context
+from helix.config import HelixConfig
+from helix.exceptions import EvaluatorError, format_error_context
 from helix.parsers import get_parser
+from helix.sandbox import (
+    current_evaluator_sidecar_runtime,
+    run_sandboxed_commands,
+)
 from helix.trace import TRACE, EventType
 
 logger = logging.getLogger(__name__)
@@ -56,6 +60,7 @@ def _scrub_environment(
     split: str | None = None,
     instance_ids: list[str] | None = None,
     passthrough_env: list[str] | None = None,
+    fixed_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Create a scrubbed environment with only allowed variables.
 
@@ -74,6 +79,9 @@ def _scrub_environment(
             and HELIX post-filters the returned instance_scores.
         passthrough_env: Optional list of extra env var names to preserve
             from the parent process (e.g. CUDA_VISIBLE_DEVICES, HF_HOME).
+        fixed_env: Optional mapping of explicit env var values to inject after
+            passthrough values. Useful for run-local endpoints captured in
+            helix.toml.
 
     Returns:
         Dict containing only PATH, HOME, HELIX_* variables,
@@ -108,6 +116,9 @@ def _scrub_environment(
     for key in passthrough_env or []:
         if key in os.environ:
             scrubbed[key] = os.environ[key]
+
+    for key, value in (fixed_env or {}).items():
+        scrubbed[str(key)] = str(value)
 
     return scrubbed
 
@@ -193,18 +204,62 @@ def run_evaluator(
         return _override_result
 
     evaluator = config.evaluator
+    sandbox_image = None
+    if config.sandbox.enabled and config.sandbox.evaluator:
+        if evaluator.sidecar is None:
+            raise ValueError("Sandboxed evaluation requires [evaluator.sidecar].")
+        sandbox_image = evaluator.sidecar.resolved_runner_image
 
     # Run main evaluation command
-    env = _scrub_environment(split, instance_ids=instance_ids, passthrough_env=config.passthrough_env)
-    cmd_tokens = _validate_and_split_command(evaluator.command)
-    result = subprocess.run(
-        cmd_tokens,
-        shell=False,
-        cwd=candidate.worktree_path,
-        capture_output=True,
-        text=True,
-        env=env,
+    env = _scrub_environment(
+        split,
+        instance_ids=instance_ids,
+        passthrough_env=config.passthrough_env,
+        fixed_env=config.env,
     )
+    cmd_tokens = _validate_and_split_command(evaluator.command)
+    if config.sandbox.enabled and config.sandbox.evaluator:
+        if current_evaluator_sidecar_runtime() is None:
+            raise ValueError(
+                "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
+                "Run evaluations through helix.evolution.run_evolution."
+            )
+        command_results = run_sandboxed_commands(
+            [
+                cmd_tokens,
+                *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands],
+            ],
+            cwd=candidate.worktree_path,
+            env=env,
+            sandbox=config.sandbox,
+            scope="evaluator",
+            sync_back=False,
+            image=sandbox_image,
+            agent_backend=config.agent.backend,
+        )
+        result = command_results[0]
+        extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:]]
+    else:
+        result = subprocess.run(
+            cmd_tokens,
+            shell=False,
+            cwd=candidate.worktree_path,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        extra_outputs = []
+        for extra_cmd in evaluator.extra_commands:
+            extra_cmd_tokens = _validate_and_split_command(extra_cmd)
+            extra_result = subprocess.run(
+                extra_cmd_tokens,
+                shell=False,
+                cwd=candidate.worktree_path,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            extra_outputs.append((extra_result.stdout, extra_result.stderr))
 
     stdout = result.stdout
     stderr = result.stderr
@@ -223,22 +278,11 @@ def run_evaluator(
         )
         logger.info(
             "Evaluator exited with code %d for candidate %s (split=%s):\n%s",
-            returncode, candidate.id, split, error_ctx,
+            returncode,
+            candidate.id,
+            split,
+            error_ctx,
         )
-
-    # Run extra commands and collect output
-    extra_outputs: list[tuple[str, str]] = []
-    for extra_cmd in evaluator.extra_commands:
-        extra_cmd_tokens = _validate_and_split_command(extra_cmd)
-        extra_result = subprocess.run(
-            extra_cmd_tokens,
-            shell=False,
-            cwd=candidate.worktree_path,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        extra_outputs.append((extra_result.stdout, extra_result.stderr))
 
     # Collect ASI
     asi = _collect_asi(stdout, stderr, extra_outputs, config)
@@ -331,7 +375,9 @@ def run_evaluator(
                 len(missing),
                 len(instance_ids),
                 sample,
-                "" if len(missing) <= len(sample) else f" ... +{len(missing) - len(sample)} more",
+                ""
+                if len(missing) <= len(sample)
+                else f" ... +{len(missing) - len(sample)} more",
             )
         instance_scores = filtered
 
@@ -360,5 +406,3 @@ def run_evaluator(
         score=_result.aggregate_score(),
     )
     return _result
-
-

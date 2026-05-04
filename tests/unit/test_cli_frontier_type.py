@@ -20,12 +20,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from helix.cli import _reconstruct_frontier
-from helix.population import Candidate, EvalResult
+from helix.cli import _load_all_evaluations, _reconstruct_frontier
+from helix.population import EvalResult
 from helix.state import BudgetState, EvolutionState, load_state, save_state
 
 
@@ -38,6 +37,26 @@ def _write_evaluation(base_dir: Path, cid: str, result: EvalResult) -> None:
 def _write_fake_worktree(base_dir: Path, cid: str) -> None:
     wt = base_dir / ".helix" / "worktrees" / cid
     wt.mkdir(parents=True, exist_ok=True)
+
+
+def test_load_all_evaluations_round_trips_optional_eval_result_fields(
+    tmp_path: Path,
+) -> None:
+    result = EvalResult(
+        candidate_id="g0-s0",
+        scores={"success": 0.5},
+        asi={"note": "kept"},
+        instance_scores={"a": 1.0, "b": 0.0},
+        side_info={"batch": "diagnostics"},
+        per_example_side_info=[{"trace": "A"}, {"trace": "B"}],
+        objective_scores=[{"quality": 1.0}, {"quality": 0.0}],
+    )
+    _write_evaluation(tmp_path, "g0-s0", result)
+
+    loaded, errors = _load_all_evaluations(tmp_path / ".helix")
+
+    assert errors == {}
+    assert loaded == {"g0-s0": result}
 
 
 class TestFrontierTypePersistence:
@@ -137,7 +156,6 @@ class TestReconstructFrontierUsesPersistedType:
     ) -> EvolutionState:
         # Seed a minimal on-disk artifact set so _reconstruct_frontier
         # picks up the single frontier member.
-        base_dir = tmp_path / ".helix"
         _write_fake_worktree(tmp_path, "g0-s0")
         er = EvalResult(
             candidate_id="g0-s0",

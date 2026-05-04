@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.population import Candidate
-from helix.config import HelixConfig, EvaluatorConfig
+from helix.config import EvaluatorSidecarConfig, EvaluatorConfig, HelixConfig, SandboxConfig
 from helix.executor import (
     run_evaluator,
     _validate_and_split_command,
@@ -166,6 +166,21 @@ class TestEnvironmentScrubbing:
         assert env["HF_HOME"] == "/data/hf"
         assert "SECRET_KEY" not in env
 
+    def test_fixed_env_injects_values_after_passthrough(self, monkeypatch):
+        """fixed_env records run-local values without relying on parent env."""
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://wrong")
+
+        env = _scrub_environment(
+            passthrough_env=["ANTHROPIC_BASE_URL"],
+            fixed_env={
+                "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+                "ANTHROPIC_API_KEY": "dummy",
+            },
+        )
+
+        assert env["ANTHROPIC_BASE_URL"] == "http://qwen-vllm-endpoint:8003"
+        assert env["ANTHROPIC_API_KEY"] == "dummy"
+
     def test_passthrough_env_missing_var_is_ignored(self, monkeypatch):
         """passthrough_env silently skips vars not present in os.environ."""
         monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
@@ -270,3 +285,70 @@ class TestRunEvaluator:
         assert isinstance(call_args[0], list)
         assert call_args[0][0] == "python"
         assert "test.py" in call_args[0]
+
+    def test_run_evaluator_uses_sandbox_when_enabled(self, mocker):
+        mock_sandbox_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mock_host_run = mocker.patch("helix.executor.subprocess.run")
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
+        mock_sandbox_run.return_value = [MagicMock(stdout="", stderr="", returncode=0)]
+
+        candidate = make_candidate()
+        config = make_config(command="python /runner/evaluate.py")
+        config.evaluator.sidecar = EvaluatorSidecarConfig(
+            image="eval:latest",
+            runner_image="eval-runner:latest",
+            command="python -m server",
+            endpoint="http://helix-evaluator:8080/evaluate",
+        )
+        config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True, evaluator=True)})
+
+        run_evaluator(candidate, config)
+
+        mock_sandbox_run.assert_called_once()
+        mock_host_run.assert_not_called()
+        assert mock_sandbox_run.call_args.kwargs["scope"] == "evaluator"
+        assert mock_sandbox_run.call_args.kwargs["sync_back"] is False
+        assert mock_sandbox_run.call_args.kwargs["image"] == "eval-runner:latest"
+
+    def test_sandboxed_evaluator_runs_extra_commands_in_same_sequence(self, mocker):
+        mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
+        mock_run.return_value = [
+            MagicMock(stdout="main", stderr="", returncode=0),
+            MagicMock(stdout="extra", stderr="", returncode=0),
+        ]
+
+        candidate = make_candidate()
+        config = make_config(command="python /runner/evaluate.py")
+        config.evaluator.extra_commands = ["python extra.py"]
+        config.evaluator.sidecar = EvaluatorSidecarConfig(
+            image="eval:latest",
+            runner_image="eval-runner:latest",
+            command="python -m server",
+            endpoint="http://helix-evaluator:8080/evaluate",
+        )
+        config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True, evaluator=True)})
+
+        run_evaluator(candidate, config)
+
+        assert mock_run.call_args.args[0] == [["python", "/runner/evaluate.py"], ["python", "extra.py"]]
+
+    def test_run_evaluator_uses_host_when_sandbox_enabled_but_evaluator_disabled(self, mocker):
+        mock_host_run = mocker.patch("helix.executor.subprocess.run")
+        mock_sandbox_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mock_host_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        candidate = make_candidate()
+        config = make_config(command="python evaluate.py")
+        config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True, evaluator=False)})
+
+        run_evaluator(candidate, config)
+
+        mock_host_run.assert_called_once()
+        mock_sandbox_run.assert_not_called()

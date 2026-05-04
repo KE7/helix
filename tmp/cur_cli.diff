@@ -1,0 +1,111 @@
+diff --git a/src/helix/cli.py b/src/helix/cli.py
+index 0f832c9..0e9f0d6 100644
+--- a/src/helix/cli.py
++++ b/src/helix/cli.py
+@@ -366,13 +366,21 @@ def sandbox_cli() -> None:
+ @click.option("--network", default="bridge", show_default=True, help="Docker network mode.")
+ @click.option("--add-host-gateway", is_flag=True, default=False,
+               help="Add host.docker.internal for Linux Docker hosts.")
++@click.option("--extra-host", "extra_hosts_list", multiple=True,
++              help="Add a custom host-to-IP mapping (format: host:ip).")
+ def sandbox_login(
+     backend: str,
+     image: str | None,
+     network: str,
+     add_host_gateway: bool,
++    extra_hosts_list: tuple[str, ...],
+ ) -> None:
+     """Log into a backend inside its persistent sandbox auth volume."""
++    import os
++    if not os.isatty(0) or not os.isatty(1):
++        print_error("sandbox login requires an interactive terminal (TTY).")
++        raise SystemExit(1)
++
+     volume = sandbox_auth_volume_name(backend)
+     print_info(f"Using Docker auth volume [cyan]{volume}[/cyan].")
+     if backend == "gemini":
+@@ -380,12 +388,18 @@ def sandbox_login(
+             "Gemini CLI does not expose a dedicated login subcommand; HELIX "
+             "starts the interactive Gemini CLI so you can complete its auth flow."
+         )
++    extra_hosts = {}
++    for entry in extra_hosts_list:
++        if ":" in entry:
++            k, v = entry.split(":", 1)
++            extra_hosts[k] = v
+     result = run_sandbox_auth_command(
+         backend,
+         action="login",
+         image=image,
+         network=network,
+         add_host_gateway=add_host_gateway,
++        extra_hosts=extra_hosts,
+         interactive=True,
+     )
+     if result.returncode != 0:
+@@ -398,23 +412,35 @@ def sandbox_login(
+ @click.option("--network", default="bridge", show_default=True, help="Docker network mode.")
+ @click.option("--add-host-gateway", is_flag=True, default=False,
+               help="Add host.docker.internal for Linux Docker hosts.")
++@click.option("--extra-host", "extra_hosts_list", multiple=True,
++              help="Add a custom host-to-IP mapping (format: host:ip).")
+ def sandbox_status(
+     backend: str | None,
+     image: str | None,
+     network: str,
+     add_host_gateway: bool,
++    extra_hosts_list: tuple[str, ...],
+ ) -> None:
+     """Show login status for one backend or all backends."""
++    if image is not None and backend is None:
++        raise click.UsageError("--image can only be used when a specific backend is provided.")
++
+     backends = [backend] if backend is not None else BACKENDS
+     exit_code = 0
++    extra_hosts = {}
++    for entry in extra_hosts_list:
++        if ":" in entry:
++            k, v = entry.split(":", 1)
++            extra_hosts[k] = v
+     for item in backends:
+         console.print(f"[bold]{item}[/bold] ({sandbox_auth_volume_name(item)})")
+         result = run_sandbox_auth_command(
+             item,
+             action="status",
+-            image=image,
++            image=image if backend is not None else None,
+             network=network,
+             add_host_gateway=add_host_gateway,
++            extra_hosts=extra_hosts,
+         )
+         output = (result.stdout or "").strip()
+         error = (result.stderr or "").strip()
+@@ -434,19 +460,28 @@ def sandbox_status(
+ @click.option("--network", default="bridge", show_default=True, help="Docker network mode.")
+ @click.option("--add-host-gateway", is_flag=True, default=False,
+               help="Add host.docker.internal for Linux Docker hosts.")
++@click.option("--extra-host", "extra_hosts_list", multiple=True,
++              help="Add a custom host-to-IP mapping (format: host:ip).")
+ def sandbox_logout(
+     backend: str,
+     image: str | None,
+     network: str,
+     add_host_gateway: bool,
++    extra_hosts_list: tuple[str, ...],
+ ) -> None:
+     """Log out a backend from its persistent sandbox auth volume."""
++    extra_hosts = {}
++    for entry in extra_hosts_list:
++        if ":" in entry:
++            k, v = entry.split(":", 1)
++            extra_hosts[k] = v
+     result = run_sandbox_auth_command(
+         backend,
+         action="logout",
+         image=image,
+         network=network,
+         add_host_gateway=add_host_gateway,
++        extra_hosts=extra_hosts,
+     )
+     if result.stdout:
+         console.print(result.stdout.strip())
