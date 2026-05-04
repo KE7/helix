@@ -1,0 +1,4 @@
+interface:
+  display_name: "HELIX"
+  short_description: "Configure, run, and debug HELIX"
+  default_prompt: "Use $helix to configure, run, debug, or migrate a HELIX optimization project."

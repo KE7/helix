@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -93,7 +91,7 @@ def seedless_mocks(mocker):
             "helix.evolution.build_seed_generation_prompt",
             return_value="<seed prompt>",
         ),
-        "generate_seed": mocker.patch("helix.evolution.generate_seed"),
+        "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value={}),
         "run_evaluator": mocker.patch(
             "helix.evolution.run_evaluator",
             return_value=seed_result,

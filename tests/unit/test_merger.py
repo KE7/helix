@@ -79,9 +79,9 @@ class TestBuildMergePrompt:
         prompt = build_merge_prompt("goal", None, None, "")
         assert "[MERGE COMPLETE]" in prompt
 
-    def test_contains_autonomous_rules(self):
+    def test_contains_execution_instructions(self):
         prompt = build_merge_prompt("goal", None, None, "")
-        assert "NEVER ask for human input" in prompt
+        assert "Task instructions:" in prompt
 
     def test_includes_eval_scores_when_provided(self):
         er_a = make_eval_result("g0-s0", scores={"pass_rate": 0.8})
@@ -114,7 +114,7 @@ class TestMerge:
         child = make_candidate("g1-m0", "/tmp/g1-m0")
         mocker.patch("helix.merger.clone_candidate", return_value=child)
         mocker.patch("helix.merger.get_diff", return_value="+x = 1")
-        mocker.patch("helix.merger.invoke_claude_code", return_value={"result": "ok"})
+        mocker.patch("helix.merger.invoke_claude_code", return_value=({"result": "ok"}, {}))
         mocker.patch("helix.merger.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.merger.remove_worktree")
 
@@ -130,7 +130,7 @@ class TestMerge:
         child = make_candidate("g1-m0")
         mocker.patch("helix.merger.clone_candidate", return_value=child)
         mocker.patch("helix.merger.get_diff", return_value="")
-        mocker.patch("helix.merger.invoke_claude_code", return_value={})
+        mocker.patch("helix.merger.invoke_claude_code", return_value=({}, {}))
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
@@ -146,7 +146,7 @@ class TestMerge:
         child = make_candidate("g1-m0")
         mocker.patch("helix.merger.clone_candidate", return_value=child)
         mocker.patch("helix.merger.get_diff", return_value="")
-        mocker.patch("helix.merger.invoke_claude_code", return_value={})
+        mocker.patch("helix.merger.invoke_claude_code", return_value=({}, {}))
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
@@ -207,7 +207,7 @@ class TestMerge:
         child = make_candidate("g1-m0")
         mocker.patch("helix.merger.clone_candidate", return_value=child)
         mocker.patch("helix.merger.get_diff", return_value="")
-        mocker.patch("helix.merger.invoke_claude_code", return_value={})
+        mocker.patch("helix.merger.invoke_claude_code", return_value=({}, {}))
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
@@ -244,7 +244,7 @@ class TestMerge:
         child = make_candidate("g1-m0")
         mocker.patch("helix.merger.clone_candidate", return_value=child)
         mocker.patch("helix.merger.get_diff", return_value="")
-        mock_invoke = mocker.patch("helix.merger.invoke_claude_code", return_value={})
+        mock_invoke = mocker.patch("helix.merger.invoke_claude_code", return_value=({}, {}))
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 

@@ -639,7 +639,7 @@ class TestCachedEvaluateBatch:
         write_batch_mock = mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
         )
 
         assert run_eval_mock.call_count == 0, (
@@ -677,7 +677,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
         )
 
         assert seen_instance_ids == [["0", "1", "2"]], (
@@ -726,7 +726,7 @@ class TestCachedEvaluateBatch:
         )
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
         )
 
         # Evaluator called exactly once, with only the missing id.
@@ -810,7 +810,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train",
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
         )
 
         # instance_scores merge: cached 0/2 + fresh 1 (established
@@ -867,7 +867,7 @@ class TestCachedEvaluateBatch:
 
         # First call: full miss → evaluator runs once.
         first_result, first_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "train",
+            cand, ["0", "1"], cache, cfg, "train", Path("/tmp"),
         )
         assert call_count["n"] == 1
         assert first_num_actual == 2
@@ -875,7 +875,7 @@ class TestCachedEvaluateBatch:
 
         # Second call with the same (candidate, ids): full hit → no re-run.
         second_result, second_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "train",
+            cand, ["0", "1"], cache, cfg, "train", Path("/tmp"),
         )
         assert call_count["n"] == 1, (
             "Evaluator must not be invoked a second time for cached ids"
@@ -913,7 +913,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0"], cache, self._trivial_config(), "val",
+            cand, ["0"], cache, self._trivial_config(), "val", Path("/tmp"),
         )
 
         assert seen_splits == ["val"]
@@ -944,7 +944,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train",
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
         )
 
         assert seen_instance_ids == [["0", "1"]]

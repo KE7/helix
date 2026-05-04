@@ -14,8 +14,10 @@ from rich.table import Table
 from rich.tree import Tree
 
 from helix import __version__
+from helix.backends import BACKENDS
 from helix.config import load_config
 from helix.logging_config import setup_file_logging
+from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
 from helix.display import (
     console,
     print_error,
@@ -52,7 +54,8 @@ objective = "Describe the optimisation objective"
 
 [evaluator]
 # Command to evaluate a candidate (run from worktree root).
-# Use the SAME environment your evaluator dependencies live in, e.g.
+# Without Docker sandboxing, use the SAME environment your evaluator
+# dependencies live in, e.g.
 #   command = "uv run python evaluate.py"
 # or
 #   command = "bash run_eval.sh"
@@ -61,6 +64,23 @@ objective = "Describe the optimisation objective"
 command = "uv run python evaluate.py"
 # score_parser = "pytest"   # or "exitcode", "json_accuracy", "json_score"
 # protected_files = ["evaluate.py"]  # optional extra evaluator-immutable files
+#
+# With [sandbox].enabled = true, configure [evaluator.sidecar] and make
+# command an evaluator-runner command such as:
+#   command = "python /runner/evaluate_client.py"
+#   score_parser = "helix_result"
+#
+# [evaluator.sidecar]
+# image = "my-private-evaluator:latest"
+# runner_image = "my-evaluator-runner:latest"
+# command = "python -m benchmark_server"
+# endpoint = "http://helix-evaluator:8080/evaluate"
+
+[env]
+# Fixed non-secret env values injected into evaluator and agent subprocesses
+# after passthrough_env. Useful for repeatable run-local service endpoints.
+# ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+# ANTHROPIC_API_KEY = "dummy"
 
 [evolution]
 max_generations = 20
@@ -71,6 +91,17 @@ backend = "claude"
 # model = "sonnet"  # optional backend-specific model
 max_turns = 20
 # background = "Only modify files under src/. Do not touch tests/ or config/."
+
+[sandbox]
+# Recommended for new projects: set enabled=true after Docker is running and
+# after `helix sandbox login <backend>`. HELIX keeps this opt-in so machines
+# without Docker can still use local workflows.
+enabled = false
+# image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
+# network = "bridge"
+# skip_special_files = true  # skip FIFOs/sockets/devices during workspace sync
+# Agent containers mount a persistent Docker auth volume named
+# helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
 """
 
 _HELIX_DIR = ".helix"
@@ -180,7 +211,9 @@ def _update_gitignore(project_root: Path) -> None:
         gitignore.write_text(entry + "\n")
 
 
-def _load_all_evaluations(base_dir: Path) -> tuple[dict[str, EvalResult], dict[str, str]]:
+def _load_all_evaluations(
+    base_dir: Path,
+) -> tuple[dict[str, EvalResult], dict[str, str]]:
     """Load saved evaluation results and parse errors from base_dir/evaluations/."""
     results: dict[str, EvalResult] = {}
     errors: dict[str, str] = {}
@@ -192,12 +225,7 @@ def _load_all_evaluations(base_dir: Path) -> tuple[dict[str, EvalResult], dict[s
         try:
             data = json.loads(path.read_text())
             cid = data["candidate_id"]
-            results[cid] = EvalResult(
-                candidate_id=cid,
-                scores=data.get("scores", {}),
-                instance_scores=data.get("instance_scores", {}),
-                asi=data.get("asi", {}),
-            )
+            results[cid] = EvalResult.from_dict(data)
         except Exception as exc:
             errors[cid] = f"evaluation file unreadable: {exc}"
     return results, errors
@@ -222,7 +250,10 @@ def _reconstruct_frontier(
     # (or a hand-crafted state.json with a bogus literal).
     _raw_ft = getattr(state, "frontier_type", "instance")
     _valid: tuple[FrontierType, ...] = (
-        "instance", "objective", "hybrid", "cartesian",
+        "instance",
+        "objective",
+        "hybrid",
+        "cartesian",
     )
     frontier_type: FrontierType = _raw_ft if _raw_ft in _valid else "instance"
     frontier = ParetoFrontier(frontier_type=frontier_type)
@@ -238,7 +269,9 @@ def _reconstruct_frontier(
             skipped.append(f"{cid}: missing worktree")
             continue
         if result is None:
-            skipped.append(f"{cid}: {eval_errors.get(cid, 'missing evaluation result')}")
+            skipped.append(
+                f"{cid}: {eval_errors.get(cid, 'missing evaluation result')}"
+            )
             continue
         try:
             gen = int(cid.split("-")[0].lstrip("g"))
@@ -318,8 +351,201 @@ def init() -> None:
         "     evaluator dependencies (for example [cyan]uv run python evaluate.py[/cyan]\n"
         "     or [cyan]bash run_eval.sh[/cyan], not whichever [cyan]python3[/cyan] happens\n"
         "     to be on PATH).\n"
+        "     If you enable Docker sandboxing, add [cyan][evaluator.sidecar][/cyan]\n"
+        "     and use an evaluator-runner command instead.\n"
         "  2. Run [cyan]helix evolve[/cyan] to start evolution.\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# sandbox
+# ---------------------------------------------------------------------------
+
+
+def _parse_extra_hosts(entries: tuple[str, ...]) -> dict[str, str]:
+    """Parse ``--extra-host`` CLI values into a ``{host: ip}`` mapping.
+
+    Accepts both ``host=ip`` and ``host:ip`` syntax. The ``=`` form is required
+    for IPv6 addresses (which themselves contain ``:``); the ``:`` form uses
+    ``rsplit`` so a literal IPv4 address still works. IPv6 addresses may be
+    enclosed in square brackets, which are stripped.
+    """
+    extra_hosts: dict[str, str] = {}
+    for entry in entries:
+        if "=" in entry:
+            host, ip = entry.split("=", 1)
+        elif ":" in entry:
+            host, ip = entry.rsplit(":", 1)
+        else:
+            raise click.BadParameter(
+                f"--extra-host expects 'host=ip' or 'host:ip', got: {entry!r}"
+            )
+        host = host.strip()
+        ip = ip.strip()
+        if ip.startswith("[") and ip.endswith("]"):
+            ip = ip[1:-1]
+        if not host or not ip:
+            raise click.BadParameter(f"--extra-host has empty host or ip: {entry!r}")
+        extra_hosts[host] = ip
+    return extra_hosts
+
+
+@cli.group(name="sandbox")
+def sandbox_cli() -> None:
+    """Manage HELIX Docker sandbox helpers."""
+
+
+@sandbox_cli.command(name="login")
+@click.argument("backend", type=click.Choice(BACKENDS))
+@click.option("--image", default=None, help="Override the backend runner image.")
+@click.option(
+    "--network", default="bridge", show_default=True, help="Docker network mode."
+)
+@click.option(
+    "--add-host-gateway",
+    is_flag=True,
+    default=False,
+    help="Add host.docker.internal for Linux Docker hosts.",
+)
+@click.option(
+    "--extra-host",
+    "extra_hosts_list",
+    multiple=True,
+    help="Add a custom host-to-IP mapping (format: host:ip).",
+)
+def sandbox_login(
+    backend: str,
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+    extra_hosts_list: tuple[str, ...],
+) -> None:
+    """Log into a backend inside its persistent sandbox auth volume."""
+    import os
+
+    if not os.isatty(0) or not os.isatty(1):
+        print_error("sandbox login requires an interactive terminal (TTY).")
+        raise SystemExit(1)
+
+    volume = sandbox_auth_volume_name(backend)
+    print_info(f"Using Docker auth volume [cyan]{volume}[/cyan].")
+    if backend == "gemini":
+        print_warning(
+            "Gemini CLI does not expose a dedicated login subcommand; HELIX "
+            "starts the interactive Gemini CLI so you can complete its auth flow."
+        )
+    extra_hosts = _parse_extra_hosts(extra_hosts_list)
+    result = run_sandbox_auth_command(
+        backend,
+        action="login",
+        image=image,
+        network=network,
+        add_host_gateway=add_host_gateway,
+        extra_hosts=extra_hosts,
+        interactive=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+
+@sandbox_cli.command(name="status")
+@click.argument("backend", required=False, type=click.Choice(BACKENDS))
+@click.option("--image", default=None, help="Override the backend runner image.")
+@click.option(
+    "--network", default="bridge", show_default=True, help="Docker network mode."
+)
+@click.option(
+    "--add-host-gateway",
+    is_flag=True,
+    default=False,
+    help="Add host.docker.internal for Linux Docker hosts.",
+)
+@click.option(
+    "--extra-host",
+    "extra_hosts_list",
+    multiple=True,
+    help="Add a custom host-to-IP mapping (format: host:ip).",
+)
+def sandbox_status(
+    backend: str | None,
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+    extra_hosts_list: tuple[str, ...],
+) -> None:
+    """Show login status for one backend or all backends."""
+    if image is not None and backend is None:
+        raise click.UsageError(
+            "--image can only be used when a specific backend is provided."
+        )
+
+    backends = [backend] if backend is not None else BACKENDS
+    exit_code = 0
+    extra_hosts = _parse_extra_hosts(extra_hosts_list)
+    for item in backends:
+        console.print(f"[bold]{item}[/bold] ({sandbox_auth_volume_name(item)})")
+        result = run_sandbox_auth_command(
+            item,
+            action="status",
+            image=image if backend is not None else None,
+            network=network,
+            add_host_gateway=add_host_gateway,
+            extra_hosts=extra_hosts,
+        )
+        output = (result.stdout or "").strip()
+        error = (result.stderr or "").strip()
+        if output:
+            console.print(output)
+        if error:
+            console.print(error, style="red")
+        if result.returncode != 0:
+            exit_code = result.returncode
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
+@sandbox_cli.command(name="logout")
+@click.argument("backend", type=click.Choice(BACKENDS))
+@click.option("--image", default=None, help="Override the backend runner image.")
+@click.option(
+    "--network", default="bridge", show_default=True, help="Docker network mode."
+)
+@click.option(
+    "--add-host-gateway",
+    is_flag=True,
+    default=False,
+    help="Add host.docker.internal for Linux Docker hosts.",
+)
+@click.option(
+    "--extra-host",
+    "extra_hosts_list",
+    multiple=True,
+    help="Add a custom host-to-IP mapping (format: host:ip).",
+)
+def sandbox_logout(
+    backend: str,
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+    extra_hosts_list: tuple[str, ...],
+) -> None:
+    """Log out a backend from its persistent sandbox auth volume."""
+    extra_hosts = _parse_extra_hosts(extra_hosts_list)
+    result = run_sandbox_auth_command(
+        backend,
+        action="logout",
+        image=image,
+        network=network,
+        add_host_gateway=add_host_gateway,
+        extra_hosts=extra_hosts,
+    )
+    if result.stdout:
+        console.print(result.stdout.strip())
+    if result.stderr:
+        console.print(result.stderr.strip(), style="red")
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+    print_success(f"Logged out sandbox backend {backend!r}.")
 
 
 # ---------------------------------------------------------------------------
@@ -337,24 +563,42 @@ def init() -> None:
         "Run `helix init` first to create one, or see README for the minimal schema."
     ),
 )
-@click.option("--config", "config_path", default="helix.toml", show_default=True,
-              help="Path to helix.toml config file.")
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
+@click.option(
+    "--config",
+    "config_path",
+    default="helix.toml",
+    show_default=True,
+    help="Path to helix.toml config file.",
+)
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
 @click.option("--objective", default=None, help="Override the objective string.")
 @click.option("--evaluator", default=None, help="Override the evaluator command.")
-@click.option("--generations", default=None, type=int,
-              help="Override max_generations.")
-@click.option("--no-merge", "no_merge", is_flag=True, default=False,
-              help="Disable merge operations.")
-@click.option("--backend", default=None,
-              type=click.Choice(["claude", "codex", "cursor", "gemini", "opencode"]),
-              help="Override the mutation backend.")
-@click.option("--model", default=None,
-              help="Override the backend model.")
-@click.option("--effort", default=None,
-              help="Override backend effort / reasoning level when supported.")
+@click.option("--generations", default=None, type=int, help="Override max_generations.")
+@click.option(
+    "--no-merge",
+    "no_merge",
+    is_flag=True,
+    default=False,
+    help="Disable merge operations.",
+)
+@click.option(
+    "--backend",
+    default=None,
+    type=click.Choice(["claude", "codex", "cursor", "gemini", "opencode"]),
+    help="Override the mutation backend.",
+)
+@click.option("--model", default=None, help="Override the backend model.")
+@click.option(
+    "--effort",
+    default=None,
+    help="Override backend effort / reasoning level when supported.",
+)
 def evolve(
     config_path: str,
     project_dir: Path | None,
@@ -393,7 +637,9 @@ def evolve(
         config = config.model_copy(update={"objective": objective})
     if evaluator:
         config = config.model_copy(
-            update={"evaluator": config.evaluator.model_copy(update={"command": evaluator})}
+            update={
+                "evaluator": config.evaluator.model_copy(update={"command": evaluator})
+            }
         )
     if generations is not None:
         config = config.model_copy(
@@ -406,7 +652,9 @@ def evolve(
     if no_merge:
         config = config.model_copy(
             update={
-                "evolution": config.evolution.model_copy(update={"merge_enabled": False})
+                "evolution": config.evolution.model_copy(
+                    update={"merge_enabled": False}
+                )
             }
         )
     if backend is not None or model is not None or effort is not None:
@@ -447,9 +695,13 @@ def evolve(
 
 
 @cli.command("frontier")
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
 def frontier_cmd(project_dir: Path | None) -> None:
     """Show the current Pareto frontier."""
     project_root = project_dir if project_dir is not None else Path.cwd()
@@ -473,11 +725,20 @@ def frontier_cmd(project_dir: Path | None) -> None:
 
 
 @cli.command()
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
-@click.option("--export", "export_path", default=None, type=click.Path(),
-              help="Export best candidate to this path.")
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
+@click.option(
+    "--export",
+    "export_path",
+    default=None,
+    type=click.Path(),
+    help="Export best candidate to this path.",
+)
 def best(project_dir: Path | None, export_path: str | None) -> None:
     """Show the best candidate and optionally export it."""
     project_root = project_dir if project_dir is not None else Path.cwd()
@@ -498,7 +759,9 @@ def best(project_dir: Path | None, export_path: str | None) -> None:
     best_cand = frontier.best()
     best_result = frontier._results.get(best_cand.id)
 
-    console.print(f"\n[bold green]Best candidate:[/bold green] [cyan]{best_cand.id}[/cyan]")
+    console.print(
+        f"\n[bold green]Best candidate:[/bold green] [cyan]{best_cand.id}[/cyan]"
+    )
     if best_result:
         console.print(f"  Aggregate score: {best_result.aggregate_score():.4f}")
         for k, v in sorted(best_result.scores.items()):
@@ -519,9 +782,13 @@ def best(project_dir: Path | None, export_path: str | None) -> None:
 
 
 @cli.command()
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
 def history(project_dir: Path | None) -> None:
     """Show the candidate lineage as a tree."""
     project_root = project_dir if project_dir is not None else Path.cwd()
@@ -540,7 +807,9 @@ def history(project_dir: Path | None) -> None:
     # Process roots first
     for entry in lineage.values():
         if entry.parent is None:
-            node = tree.add(f"[cyan]{entry.id}[/cyan]  gen={entry.generation}  op={entry.operation}")
+            node = tree.add(
+                f"[cyan]{entry.id}[/cyan]  gen={entry.generation}  op={entry.operation}"
+            )
             nodes[entry.id] = node
 
     # Iteratively attach children (handle arbitrary ordering)
@@ -578,9 +847,13 @@ def history(project_dir: Path | None) -> None:
 
 
 @cli.command("log")
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
 def log_cmd(project_dir: Path | None) -> None:
     """Show the evolution trajectory: per-generation parent lineage and mutation log."""
     project_root = project_dir if project_dir is not None else Path.cwd()
@@ -602,9 +875,7 @@ def log_cmd(project_dir: Path | None) -> None:
     for entry in entries:
         summary = entry.get("summary", {})
         summary_str = (
-            ", ".join(f"{k}={v}" for k, v in summary.items())
-            if summary
-            else ""
+            ", ".join(f"{k}={v}" for k, v in summary.items()) if summary else ""
         )
         table.add_row(
             str(entry.get("generation", "")),
@@ -623,11 +894,20 @@ def log_cmd(project_dir: Path | None) -> None:
 
 
 @cli.command()
-@click.option("--config", "config_path", default="helix.toml", show_default=True,
-              help="Path to helix.toml config file.")
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
+@click.option(
+    "--config",
+    "config_path",
+    default="helix.toml",
+    show_default=True,
+    help="Path to helix.toml config file.",
+)
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
 def resume(config_path: str, project_dir: Path | None) -> None:
     """Resume a previously started evolution run."""
     from helix.evolution import run_evolution
@@ -684,9 +964,13 @@ def resume(config_path: str, project_dir: Path | None) -> None:
 
 
 @cli.command()
-@click.option("--dir", "project_dir", default=None,
-              type=click.Path(exists=True, file_okay=False, path_type=Path),
-              help="Project root directory (defaults to current working directory).")
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
 def clean(project_dir: Path | None) -> None:
     """Remove all HELIX worktrees and delete the .helix/ directory."""
     project_root = project_dir if project_dir is not None else Path.cwd()

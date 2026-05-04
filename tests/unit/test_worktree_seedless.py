@@ -6,7 +6,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from helix.worktree import create_empty_seed_worktree
 

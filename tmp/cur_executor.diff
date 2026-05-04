@@ -1,0 +1,21 @@
+diff --git a/src/helix/executor.py b/src/helix/executor.py
+index 5fb84b5..ebee7fa 100644
+--- a/src/helix/executor.py
++++ b/src/helix/executor.py
+@@ -219,7 +219,7 @@ def run_evaluator(
+     )
+     cmd_tokens = _validate_and_split_command(evaluator.command)
+     if config.sandbox.enabled and config.sandbox.evaluator:
+-        if current_evaluator_sidecar_runtime() is None:
++        if current_evaluator_sidecar_runtime(config) is None:
+             raise ValueError(
+                 "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
+                 "Run evaluations through helix.evolution.run_evolution."
+@@ -233,6 +233,7 @@ def run_evaluator(
+             sync_back=False,
+             image=sandbox_image,
+             agent_backend=config.agent.backend,
++            config=config,
+         )
+         result = command_results[0]
+         extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:]]
