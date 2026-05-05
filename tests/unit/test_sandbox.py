@@ -23,9 +23,23 @@ from helix.sandbox import (
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
-    return args[:2] == ["docker", "run"] and any(
-        "find /workspace -path /workspace/.git -prune" in item for item in args
+    return (
+        args[:2] == ["docker", "run"]
+        and any("-exec chown" in item for item in args)
+        and any("find /workspace -path /workspace/.git -prune" in item for item in args)
     )
+
+
+def _is_workspace_chmod(args: list[str]) -> bool:
+    return (
+        args[:2] == ["docker", "run"]
+        and any("-exec chmod" in item for item in args)
+        and any("find /workspace -path /workspace/.git -prune" in item for item in args)
+    )
+
+
+def _is_workspace_permission_maintenance(args: list[str]) -> bool:
+    return _is_workspace_chown(args) or _is_workspace_chmod(args)
 
 
 def test_resolve_sandbox_image_defaults_from_backend():
@@ -117,6 +131,8 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     chown_calls = [call for call in calls if _is_workspace_chown(call)]
     assert len(chown_calls) == 2
     assert "node:node" in chown_calls[0]
+    chmod_calls = [call for call in calls if _is_workspace_chmod(call)]
+    assert len(chmod_calls) == 3
 
 
 def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):
@@ -180,7 +196,7 @@ def test_sidecar_runtime_switches_evaluator_to_private_network(tmp_path: Path, m
     docker_call = next(
         call
         for call in seen_calls
-        if call[:2] == ["docker", "run"] and not _is_workspace_chown(call)
+        if call[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(call)
     )
     assert docker_call[docker_call.index("--network") + 1] == "helix-eval-private"
     assert (
@@ -307,7 +323,7 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
     (source / "helix.toml").write_text("[evaluator.sidecar]\nendpoint = 'private'\n")
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / ".env").exists()
             assert not (workspace / ".helix").exists()
@@ -364,7 +380,7 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             if args[-3:] and args[-3] == "sh" and "sess_123.jsonl" in args[-1]:
                 transcript = (
@@ -424,7 +440,7 @@ def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
     (source / "private" / "token.txt").write_text("host secret\n")
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / "private" / "token.txt").exists()
             (workspace / "main.py").write_text("new\n")
@@ -454,7 +470,7 @@ def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
     source.mkdir()
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             (workspace / "private").mkdir()
             (workspace / "private" / "token.txt").write_text("agent secret\n")
@@ -484,7 +500,7 @@ def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
     source.mkdir()
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             os.mkfifo(workspace / "agent.pipe")
             (workspace / "regular.txt").write_text("ok\n")
@@ -518,7 +534,7 @@ def test_sync_preserves_existing_host_special_files_when_skipped(
     os.mkfifo(source / "existing.pipe")
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / "existing.pipe").exists()
             (workspace / "regular.txt").write_text("ok\n")
@@ -550,7 +566,7 @@ def test_special_file_skip_can_be_disabled(tmp_path: Path, mocker):
     source.mkdir()
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             os.mkfifo(workspace / "agent.pipe")
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
@@ -577,7 +593,7 @@ def test_evaluator_does_not_sync_changes_back(tmp_path: Path, mocker):
     (source / "helix_batch.json").write_text('["0"]\n')
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert (workspace / "helix_batch.json").read_text() == '["0"]\n'
             (workspace / "main.py").write_text("mutated\n")
@@ -608,7 +624,7 @@ def test_sandboxed_command_sequence_reuses_workspace(tmp_path: Path, mocker):
     seen_workspaces: list[Path] = []
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if args[:2] == ["docker", "run"] and not _is_workspace_permission_maintenance(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             seen_workspaces.append(workspace)
             if args[-1] == "write":

@@ -425,8 +425,44 @@ def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
             image,
             "sh",
             "-c",
-            'find /workspace -path /workspace/.git -prune -o -exec chown -h "$0" {} +',
+            (
+                'find /workspace -path /workspace/.git -prune -o '
+                '-exec chown -h "$0" {} +; '
+                'find /workspace -path /workspace/.git -prune -o '
+                '-exec chmod u+rwX,go+rwX {} +'
+            ),
             owner,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_docker_host_env(),
+    )
+
+
+def _docker_relax_workspace_permissions(workspace: Path, image: str) -> None:
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--workdir",
+            "/workspace",
+            "--user",
+            "root",
+            "--network",
+            "none",
+            "--security-opt",
+            "no-new-privileges",
+            "-v",
+            f"{workspace}:/workspace:rw",
+            image,
+            "sh",
+            "-c",
+            (
+                "find /workspace -path /workspace/.git -prune -o "
+                "-exec chmod u+rwX,go+rwX {} +"
+            ),
         ],
         check=False,
         capture_output=True,
@@ -861,6 +897,7 @@ def run_sandboxed_commands(
                         stdout=results[-1].stdout or "",
                     )
         finally:
+            _docker_relax_workspace_permissions(workspace, docker_image)
             if host_owner := _host_owner():
                 _docker_chown_workspace(workspace, docker_image, host_owner)
         if sync_back:
