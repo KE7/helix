@@ -93,6 +93,7 @@ def make_config(
             max_merge_invocations=max_merge_invocations,
             merge_val_overlap_floor=merge_val_overlap_floor,
             merge_subsample_size=merge_subsample_size,
+            frontier_type="instance",
         ),
         worktree=WorktreeConfig(cleanup_dominated=cleanup_dominated),
     )
@@ -1730,8 +1731,8 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        evolution=EvolutionConfig(max_generations=0),
-    )
+            evolution=EvolutionConfig(max_generations=0, frontier_type="instance"),
+        )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
 

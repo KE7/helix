@@ -198,16 +198,15 @@ class TestObjectiveScoresHarvest:
             {},
         ]
 
-    def test_scores_key_non_dict_ignored(self, tmp_path: Path) -> None:
+    def test_scores_key_non_dict_rejected(self, tmp_path: Path) -> None:
         _write_batch(tmp_path, ["a"])
         payload = [[1.0, {"scores": "not-a-dict"}]]
         line = f"HELIX_RESULT={json.dumps(payload)}"
 
-        _s, _is, _pesi, obj = helix_result_parse(0, line + "\n", "", tmp_path)
+        with pytest.raises(EvaluatorError, match="scores.*dict"):
+            helix_result_parse(0, line + "\n", "", tmp_path)
 
-        assert obj == [{}]
-
-    def test_scores_drops_non_numeric_and_non_finite(self, tmp_path: Path) -> None:
+    def test_scores_rejects_non_numeric_and_non_finite(self, tmp_path: Path) -> None:
         _write_batch(tmp_path, ["a"])
         # Hand-rolled JSON to smuggle NaN / Infinity past json.dumps.
         stdout = (
@@ -215,9 +214,16 @@ class TestObjectiveScoresHarvest:
             '{"good": 0.5, "bad_str": "nope", "nan": NaN, "inf": Infinity}}]]\n'
         )
 
-        _s, _is, _pesi, obj = helix_result_parse(0, stdout, "", tmp_path)
+        with pytest.raises(EvaluatorError, match="finite numeric scalars"):
+            helix_result_parse(0, stdout, "", tmp_path)
 
-        assert obj == [{"good": 0.5}]
+    def test_pairwise_objective_payload_rejected(self, tmp_path: Path) -> None:
+        _write_batch(tmp_path, ["a"])
+        payload = [[1.0, {"scores": {"bt": {"wins": [["a", "b"]]}}}]]
+        line = f"HELIX_RESULT={json.dumps(payload)}"
+
+        with pytest.raises(EvaluatorError, match="Bradley-Terry.*not supported"):
+            helix_result_parse(0, line + "\n", "", tmp_path)
 
     def test_scores_harvest_coerces_bool_and_int(self, tmp_path: Path) -> None:
         _write_batch(tmp_path, ["a"])

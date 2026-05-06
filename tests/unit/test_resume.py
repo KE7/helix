@@ -63,7 +63,7 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
     config = HelixConfig(
         objective="test",
         evaluator=EvaluatorConfig(command="echo 1"),
-        evolution=EvolutionConfig(max_generations=3),
+        evolution=EvolutionConfig(max_generations=3, frontier_type="instance"),
         agent=AgentConfig(),
         dataset=DatasetConfig(),
         worktree=WorktreeConfig(),

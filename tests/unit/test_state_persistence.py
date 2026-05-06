@@ -63,6 +63,7 @@ def _make_full_state() -> EvolutionState:
             "g1-s1": 14,
             "g2-m1": 28,
         },
+        active_frontier={"task_a": ["g2-m1"], "task_b": ["g2-m1"]},
     )
 
 
@@ -80,6 +81,7 @@ def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     assert loaded == state
     # Sanity-check that the new fields specifically survived.
     assert loaded.num_metric_calls_by_discovery == state.num_metric_calls_by_discovery
+    assert loaded.active_frontier == state.active_frontier
     assert loaded.schema_version == SCHEMA_VERSION
 
 
@@ -323,6 +325,7 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "merge_description_triplets",
         "i",
         "num_metric_calls_by_discovery",
+        "active_frontier",
         "frontier_type",
     }
     assert set(raw.keys()) == expected_keys, (
