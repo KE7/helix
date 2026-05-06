@@ -332,6 +332,14 @@ class EvolutionConfig(BaseModel):
             "GEPA parity: ReflectionConfig.reflection_minibatch_size default."
         ),
     )
+    stratified_samples_per_group: int = Field(
+        default=1,
+        description=(
+            "When batch_sampler='stratified', number of examples to draw from each "
+            "selected group. Total evals per minibatch are "
+            "minibatch_size * stratified_samples_per_group."
+        ),
+    )
     max_workers: int = Field(
         default_factory=lambda: os.cpu_count() or 32,
         description=(
@@ -421,8 +429,11 @@ class EvolutionConfig(BaseModel):
         # time so every downstream consumer sees a plain int.  Mirrors
         # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
         if self.num_parallel_proposals == "auto":
+            effective_minibatch_size = self.minibatch_size
+            if self.batch_sampler == "stratified":
+                effective_minibatch_size *= self.stratified_samples_per_group
             self.num_parallel_proposals = max(
-                1, self.max_workers // max(1, self.minibatch_size)
+                1, self.max_workers // max(1, effective_minibatch_size)
             )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(
@@ -447,6 +458,11 @@ class EvolutionConfig(BaseModel):
                 "evolution.group_key_separator must be a non-empty string "
                 "when evolution.batch_sampler='stratified' "
                 f"(got {self.group_key_separator!r})"
+            )
+        if self.stratified_samples_per_group < 1:
+            raise ValueError(
+                "evolution.stratified_samples_per_group must be >= 1 "
+                f"(got {self.stratified_samples_per_group})"
             )
 
 

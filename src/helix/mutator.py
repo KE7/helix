@@ -632,6 +632,8 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(config.effort)}"])
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 

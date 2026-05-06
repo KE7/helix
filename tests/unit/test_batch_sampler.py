@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -149,6 +150,21 @@ def test_stratified_minibatch_contains_k_distinct_groups() -> None:
         assert groups == {"a", "b", "c"}, (
             f"minibatch {i} had groups {groups}, expected {{'a','b','c'}}"
         )
+
+
+def test_stratified_samples_per_group_returns_multiple_from_each_group() -> None:
+    ids = [f"{g}__{i}" for g in ("a", "b", "c") for i in range(6)]
+    loader = _Loader(ids)
+    sampler = StratifiedBatchSampler(
+        minibatch_size=3,
+        group_fn=_group_by_prefix,
+        rng=random.Random(0),
+        samples_per_group=2,
+    )
+    batch = sampler.next_minibatch_ids(loader, _State(i=0))
+    assert len(batch) == 6
+    counts = Counter(_group_by_prefix(eid) for eid in batch)
+    assert counts == {"a": 2, "b": 2, "c": 2}
 
 
 def test_stratified_epoch_covers_all_instances() -> None:

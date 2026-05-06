@@ -984,6 +984,7 @@ def _run_evolution_impl(
                 minibatch_size=config.evolution.minibatch_size,
                 group_fn=_group_fn,
                 rng=rng,
+                samples_per_group=config.evolution.stratified_samples_per_group,
             )
         else:
             batch_sampler = EpochShuffledBatchSampler[str](

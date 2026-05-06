@@ -167,8 +167,13 @@ class StratifiedBatchSampler(Generic[DataId]):
         minibatch_size: int,
         group_fn: Callable[[DataId], str],
         rng: random.Random | None = None,
+        samples_per_group: int = 1,
     ) -> None:
-        self.minibatch_size = minibatch_size
+        if samples_per_group < 1:
+            raise ValueError("samples_per_group must be >= 1")
+        self.groups_per_minibatch = minibatch_size
+        self.samples_per_group = samples_per_group
+        self.minibatch_size = minibatch_size * samples_per_group
         self.group_fn = group_fn
         self.rng = rng if rng is not None else random.Random(0)
         self.shuffled_ids: list[DataId] = []
@@ -194,7 +199,7 @@ class StratifiedBatchSampler(Generic[DataId]):
         num_groups = len(group_keys)
 
         # Fallback path: not enough groups to guarantee stratification.
-        if num_groups < self.minibatch_size:
+        if num_groups < self.groups_per_minibatch:
             if self._fallback is None:
                 self._fallback = EpochShuffledBatchSampler[DataId](
                     minibatch_size=self.minibatch_size, rng=self.rng
@@ -225,18 +230,23 @@ class StratifiedBatchSampler(Generic[DataId]):
         # across rounds, so no group is starved within an epoch when
         # ``num_groups > m`` and ``num_groups % m != 0``.
         max_rounds = max(len(buckets[k]) for k in group_keys)
-        m = self.minibatch_size
+        m = self.groups_per_minibatch
+        s = self.samples_per_group
         whole_rounds_per_round = (num_groups // m) * m
         trimmed: list[DataId] = []
         for r in range(max_rounds):
             offset = r % num_groups
             rotated_keys = group_keys[offset:] + group_keys[:offset]
-            round_slice = [buckets[k][r] for k in rotated_keys if r < len(buckets[k])]
+            round_slice = [
+                k for k in rotated_keys if (r + 1) * s <= len(buckets[k])
+            ]
             # Take at most whole_rounds_per_round entries, then clip to a
             # multiple of m in case this round is partial.
             keep = min(len(round_slice), whole_rounds_per_round)
             keep -= keep % m
-            trimmed.extend(round_slice[:keep])
+            for key in round_slice[:keep]:
+                start = r * s
+                trimmed.extend(buckets[key][start : start + s])
 
         self.shuffled_ids = trimmed
 
