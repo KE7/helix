@@ -51,7 +51,13 @@ from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
-from helix.population import Candidate, EvalResult, ParetoFrontier
+from helix.population import (
+    Candidate,
+    CandidateSummary,
+    EvalResult,
+    HelixResult,
+    ParetoFrontier,
+)
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
@@ -857,6 +863,91 @@ def _has_example_scores(result: EvalResult | None, example_ids: list[str]) -> bo
     return all(eid in result.instance_scores for eid in example_ids)
 
 
+def _build_helix_result(
+    *,
+    best: Candidate,
+    frontier: ParetoFrontier,
+    state: EvolutionState,
+    base_dir: Path,
+    config: HelixConfig,
+    lineage_path: Path,
+) -> HelixResult:
+    """Build the structured programmatic result for a completed run."""
+    lineage = load_lineage(lineage_path)
+    non_dominated_ids = sorted(frontier.get_non_dominated())
+    non_dominated = set(non_dominated_ids)
+    parents: dict[str, list[str]] = {}
+    summaries: list[CandidateSummary] = []
+
+    for cid, candidate in frontier._candidates.items():
+        entry = lineage.get(cid)
+        candidate_parents = (
+            list(entry.parents)
+            if entry is not None and entry.parents
+            else list(candidate.parent_ids)
+        )
+        if not candidate_parents and entry is not None and entry.parent is not None:
+            candidate_parents = [entry.parent]
+        parents[cid] = candidate_parents
+
+        result = frontier._results.get(cid)
+        aggregate_score = result.aggregate_score() if result is not None else 0.0
+        sum_score = result.sum_score() if result is not None else 0.0
+        summaries.append(
+            CandidateSummary(
+                candidate=candidate,
+                aggregate_score=aggregate_score,
+                sum_score=sum_score,
+                scores=dict(result.scores) if result is not None else {},
+                instance_scores=(
+                    dict(result.instance_scores) if result is not None else {}
+                ),
+                objective_scores=(
+                    list(result.objective_scores)
+                    if result is not None and result.objective_scores is not None
+                    else None
+                ),
+                parents=candidate_parents,
+                operation=entry.operation if entry is not None else candidate.operation,
+                generation=entry.generation if entry is not None else candidate.generation,
+                discovered_at_evaluation=state.num_metric_calls_by_discovery.get(cid),
+                is_non_dominated=cid in non_dominated,
+            )
+        )
+
+    summaries.sort(key=lambda s: (s.generation, s.id))
+    return HelixResult(
+        best_candidate=best,
+        best_result=frontier._results.get(best.id),
+        candidates=list(frontier._candidates.values()),
+        candidate_summaries=summaries,
+        parents=parents,
+        aggregate_scores={
+            cid: result.aggregate_score() for cid, result in frontier._results.items()
+        },
+        sum_scores={cid: result.sum_score() for cid, result in frontier._results.items()},
+        instance_scores={
+            cid: dict(result.instance_scores) for cid, result in frontier._results.items()
+        },
+        objective_scores={
+            cid: (
+                list(result.objective_scores)
+                if result.objective_scores is not None
+                else None
+            )
+            for cid, result in frontier._results.items()
+        },
+        frontier_ids=list(state.frontier),
+        non_dominated_ids=non_dominated_ids,
+        frontier_type=state.frontier_type,
+        budget=state.budget,
+        discovery_counts=dict(state.num_metric_calls_by_discovery),
+        run_dir=str(base_dir),
+        seed=config.rng_seed,
+        config_hash=state.config_hash,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -866,7 +957,7 @@ def run_evolution(
     config: HelixConfig,
     project_root: Path,
     base_dir: Path,
-) -> Candidate:
+) -> HelixResult:
     """Run the HELIX evolutionary loop."""
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
@@ -889,7 +980,7 @@ def _run_evolution_impl(
     config: HelixConfig,
     project_root: Path,
     base_dir: Path,
-) -> Candidate:
+) -> HelixResult:
     """Run the HELIX evolutionary loop.
 
     Parameters
@@ -904,8 +995,8 @@ def _run_evolution_impl(
 
     Returns
     -------
-    Candidate
-        The best candidate from the final frontier.
+    HelixResult
+        Structured result for the completed run, including the best candidate.
     """
     TRACE.emit(EventType.OPT_START)
     init_base_dir(base_dir, config)
@@ -2424,4 +2515,11 @@ def _run_evolution_impl(
 
     print_success(f"Evolution complete.  Best candidate: {best.id}")
     TRACE.emit(EventType.OPT_END, candidate_id=best.id)
-    return best
+    return _build_helix_result(
+        best=best,
+        frontier=frontier,
+        state=state,
+        base_dir=base_dir,
+        config=config,
+        lineage_path=lineage_path,
+    )

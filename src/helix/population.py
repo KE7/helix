@@ -129,6 +129,111 @@ class EvalResult:
         )
 
 
+@dataclass
+class CandidateSummary:
+    """Programmatic summary of one evolved candidate in a HELIX result."""
+
+    candidate: Candidate
+    aggregate_score: float
+    sum_score: float
+    scores: dict[str, float]
+    instance_scores: dict[str, float]
+    objective_scores: list[dict[str, float]] | None
+    parents: list[str]
+    operation: str
+    generation: int
+    discovered_at_evaluation: int | None = None
+    is_non_dominated: bool = False
+
+    @property
+    def id(self) -> str:
+        """Candidate id convenience alias."""
+        return self.candidate.id
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dict."""
+        return {
+            "id": self.candidate.id,
+            "worktree_path": self.candidate.worktree_path,
+            "branch_name": self.candidate.branch_name,
+            "generation": self.generation,
+            "parents": self.parents,
+            "operation": self.operation,
+            "usage": self.candidate.usage,
+            "aggregate_score": self.aggregate_score,
+            "sum_score": self.sum_score,
+            "scores": self.scores,
+            "instance_scores": self.instance_scores,
+            "objective_scores": self.objective_scores,
+            "discovered_at_evaluation": self.discovered_at_evaluation,
+            "is_non_dominated": self.is_non_dominated,
+        }
+
+
+@dataclass
+class HelixResult:
+    """Structured result object returned by a HELIX evolution run.
+
+    Mirrors GEPA-style programmatic access without changing the on-disk
+    worktree/state model: callers can inspect the best candidate, every
+    accepted candidate summary, lineage, scores, budgets, frontier axes, and
+    run identity without scraping CLI output or JSON files.
+    """
+
+    best_candidate: Candidate
+    best_result: EvalResult | None
+    candidates: list[Candidate]
+    candidate_summaries: list[CandidateSummary]
+    parents: dict[str, list[str]]
+    aggregate_scores: dict[str, float]
+    sum_scores: dict[str, float]
+    instance_scores: dict[str, dict[str, float]]
+    objective_scores: dict[str, list[dict[str, float]] | None]
+    frontier_ids: list[str]
+    non_dominated_ids: list[str]
+    frontier_type: FrontierType
+    budget: Any
+    discovery_counts: dict[str, int]
+    run_dir: str
+    seed: int | None
+    config_hash: str
+
+    @property
+    def id(self) -> str:
+        """Compatibility alias for callers that previously used best.id."""
+        return self.best_candidate.id
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dict."""
+        budget_dict = (
+            self.budget
+            if isinstance(self.budget, dict)
+            else {
+                key: getattr(self.budget, key)
+                for key in ("evaluations", "input_tokens", "output_tokens", "cost_usd")
+                if hasattr(self.budget, key)
+            }
+        )
+        return {
+            "best_candidate_id": self.best_candidate.id,
+            "best_result": self.best_result.to_dict() if self.best_result else None,
+            "candidates": [summary.to_dict() for summary in self.candidate_summaries],
+            "parents": self.parents,
+            "aggregate_scores": self.aggregate_scores,
+            "sum_scores": self.sum_scores,
+            "instance_scores": self.instance_scores,
+            "objective_scores": self.objective_scores,
+            "frontier_ids": self.frontier_ids,
+            "non_dominated_ids": self.non_dominated_ids,
+            "frontier_type": self.frontier_type,
+            "budget": budget_dict,
+            "discovery_counts": self.discovery_counts,
+            "run_dir": self.run_dir,
+            "seed": self.seed,
+            "config_hash": self.config_hash,
+        }
+
+
 class ParetoFrontier:
     """GEPA-style unbounded frontier with coverage-based dominance.
 
