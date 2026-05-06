@@ -343,10 +343,10 @@ class EvolutionConfig(BaseModel):
         ),
     )
     cache_evaluation: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Enable (candidate_hash, example_id) evaluation cache. "
-            "GEPA parity: EngineConfig.cache_evaluation."
+            "Enable content-addressed evaluation caches. Defaults off, matching "
+            "GEPA Optimize Anything's conservative cache_evaluation behavior."
         ),
     )
     acceptance_criterion: Literal["strict_improvement", "improvement_or_equal"] = Field(

@@ -200,16 +200,26 @@ def test_eval_cache_load_returns_none_when_missing(tmp_path: Path) -> None:
     assert load_eval_cache(tmp_path) is None
 
 
-def test_eval_cache_load_rejects_non_dict(tmp_path: Path) -> None:
-    """A corrupt eval_cache.pkl must raise rather than silently succeed."""
+def test_eval_cache_load_tolerates_non_dict(tmp_path: Path) -> None:
+    """A corrupt eval_cache.pkl warns and resumes with an empty cache."""
     import pickle as _pickle
 
     helix_dir = tmp_path / ".helix"
     helix_dir.mkdir(parents=True)
     (helix_dir / "eval_cache.pkl").write_bytes(_pickle.dumps(["not", "a", "dict"]))
 
-    with pytest.raises(ValueError, match="did not contain a dict"):
-        load_eval_cache(tmp_path)
+    with pytest.warns(RuntimeWarning, match="Ignoring eval cache"):
+        assert load_eval_cache(tmp_path) is None
+
+
+def test_eval_cache_load_tolerates_unreadable_pickle(tmp_path: Path) -> None:
+    """Unreadable pickle bytes should not abort resume."""
+    helix_dir = tmp_path / ".helix"
+    helix_dir.mkdir(parents=True)
+    (helix_dir / "eval_cache.pkl").write_bytes(b"not a pickle")
+
+    with pytest.warns(RuntimeWarning, match="Ignoring unreadable eval cache"):
+        assert load_eval_cache(tmp_path) is None
 
 
 # ---------------------------------------------------------------------------
