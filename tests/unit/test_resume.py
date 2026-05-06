@@ -266,6 +266,70 @@ def test_resume_keyboard_interrupt_preserves_state_and_prints_clean_hint(tmp_pat
     assert "helix clean" in result.output.lower(), result.output
 
 
+def test_resume_rejects_frontier_type_change() -> None:
+    """A persisted frontier cannot be resumed under a different dimensionality."""
+    from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="hybrid"),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "instance"
+    state.resume_semantics = _resume_semantics(config)
+    state.resume_semantics["evolution"]["frontier_type"] = "instance"
+
+    with pytest.raises(ValueError, match="frontier_type"):
+        _validate_resume_semantics(state, config)
+
+
+def test_resume_rejects_semantic_config_change() -> None:
+    """Config edits that change optimization semantics must hard-fail resume."""
+    from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    saved_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="hybrid", minibatch_size=3),
+    )
+    current_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="hybrid", minibatch_size=7),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "hybrid"
+    state.resume_semantics = _resume_semantics(saved_config)
+
+    with pytest.raises(ValueError, match="minibatch_size"):
+        _validate_resume_semantics(state, current_config)
+
+
+def test_resume_allows_cache_toggle_without_semantic_rejection() -> None:
+    """Cache toggles are handled by cache persistence, not semantic rejection."""
+    from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    saved_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="hybrid", cache_evaluation=True),
+    )
+    current_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="hybrid", cache_evaluation=False),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "hybrid"
+    state.resume_semantics = _resume_semantics(saved_config)
+
+    _validate_resume_semantics(state, current_config)
+
+
 def test_evolve_success_prints_clean_hint(tmp_path: Path) -> None:
     """CLI evolve should remind the user that HELIX state/worktrees remain on disk."""
     from click.testing import CliRunner

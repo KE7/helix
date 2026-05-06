@@ -64,6 +64,7 @@ from helix.population import (
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
+    clear_eval_cache,
     EvaluationCache,
     EvolutionState,
     load_eval_cache,
@@ -95,6 +96,93 @@ def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> 
 def _config_hash(config: HelixConfig) -> str:
     data = config.model_dump_json()
     return hashlib.sha256(data.encode()).hexdigest()[:16]
+
+
+def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
+    """Return config fields that define resume-compatible optimization semantics."""
+    return {
+        "objective": config.objective,
+        "rng_seed": config.rng_seed,
+        "evaluator": {
+            "command": config.evaluator.command,
+            "score_parser": config.evaluator.score_parser,
+            "extra_commands": list(config.evaluator.extra_commands),
+            "protected_files": list(config.evaluator.protected_files),
+        },
+        "dataset": config.dataset.model_dump(mode="json"),
+        "seedless": {
+            "enabled": config.seedless.enabled,
+            "train_path": (
+                str(config.seedless.train_path)
+                if config.seedless.train_path is not None
+                else None
+            ),
+            "val_path": (
+                str(config.seedless.val_path)
+                if config.seedless.val_path is not None
+                else None
+            ),
+        },
+        "evolution": {
+            "frontier_type": config.evolution.frontier_type,
+            "acceptance_criterion": config.evolution.acceptance_criterion,
+            "minibatch_size": config.evolution.minibatch_size,
+            "batch_sampler": config.evolution.batch_sampler,
+            "group_key_separator": config.evolution.group_key_separator,
+            "val_stage_size": config.evolution.val_stage_size,
+            "merge_enabled": config.evolution.merge_enabled,
+            "max_merge_invocations": config.evolution.max_merge_invocations,
+            "merge_val_overlap_floor": config.evolution.merge_val_overlap_floor,
+            "merge_subsample_size": config.evolution.merge_subsample_size,
+        },
+    }
+
+
+def _semantic_diffs(
+    saved: dict[str, Any],
+    current: dict[str, Any],
+    prefix: str = "",
+) -> list[str]:
+    diffs: list[str] = []
+    for key in sorted(set(saved) | set(current)):
+        path = f"{prefix}.{key}" if prefix else key
+        if key not in saved:
+            diffs.append(f"{path}: missing in saved state, current={current[key]!r}")
+            continue
+        if key not in current:
+            diffs.append(f"{path}: saved={saved[key]!r}, missing in current config")
+            continue
+        saved_value = saved[key]
+        current_value = current[key]
+        if isinstance(saved_value, dict) and isinstance(current_value, dict):
+            diffs.extend(_semantic_diffs(saved_value, current_value, path))
+        elif saved_value != current_value:
+            diffs.append(f"{path}: saved={saved_value!r}, current={current_value!r}")
+    return diffs
+
+
+def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> None:
+    """Reject resume when current config would reinterpret persisted state."""
+    current = _resume_semantics(config)
+    if state.frontier_type != config.evolution.frontier_type:
+        raise ValueError(
+            "Cannot resume with a different evolution.frontier_type: "
+            f"saved={state.frontier_type!r}, current={config.evolution.frontier_type!r}. "
+            "Start a fresh run or restore the original config."
+        )
+
+    if not state.resume_semantics:
+        return
+
+    diffs = _semantic_diffs(state.resume_semantics, current)
+    if diffs:
+        preview = "; ".join(diffs[:5])
+        if len(diffs) > 5:
+            preview += f"; ... {len(diffs) - 5} more"
+        raise ValueError(
+            "Cannot resume because the current config changes optimization "
+            f"semantics: {preview}. Start a fresh run or restore the original config."
+        )
 
 
 def init_base_dir(base_dir: Path, config: HelixConfig) -> None:
@@ -1215,6 +1303,8 @@ def _run_evolution_impl(
         _persisted_cache = load_eval_cache(project_root)
         if _persisted_cache is not None:
             minibatch_cache._cache.update(_persisted_cache)
+    else:
+        clear_eval_cache(project_root)
 
     # Acceptance criterion (GEPA §5.1).
     acceptance = (
@@ -1259,6 +1349,8 @@ def _run_evolution_impl(
         save_state(s, project_root)
         if minibatch_cache is not None:
             save_eval_cache(minibatch_cache._cache, project_root)
+        else:
+            clear_eval_cache(project_root)
 
     def _sync_frontier_state() -> None:
         assert state is not None
@@ -1277,10 +1369,14 @@ def _run_evolution_impl(
             # with the SAME axis later — even if ``helix.toml``'s
             # ``evolution.frontier_type`` is edited between runs.
             frontier_type=config.evolution.frontier_type,
+            resume_semantics=_resume_semantics(config),
         )
         needs_seed = True
     else:
         needs_seed = False
+        _validate_resume_semantics(state, config)
+        if not state.resume_semantics:
+            state.resume_semantics = _resume_semantics(config)
         # Keep ``state.frontier_type`` pinned to whatever was stored;
         # it already matches the frontier that was built.  On a legacy
         # state with no persisted field (defaulted to "instance" by

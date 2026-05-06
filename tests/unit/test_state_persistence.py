@@ -29,6 +29,7 @@ from helix.state import (
     SCHEMA_VERSION,
     BudgetState,
     EvolutionState,
+    clear_eval_cache,
     load_eval_cache,
     load_state,
     save_eval_cache,
@@ -352,6 +353,7 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "num_metric_calls_by_discovery",
         "active_frontier",
         "frontier_type",
+        "resume_semantics",
     }
     assert set(raw.keys()) == expected_keys, (
         f"state.json keys diverged from schema_version={SCHEMA_VERSION} "
@@ -375,3 +377,14 @@ def test_legacy_state_load_followed_by_save_writes_versioned_payload(tmp_path: P
     raw = json.loads((tmp_path / ".helix" / "state.json").read_text())
     assert raw["schema_version"] == SCHEMA_VERSION
     assert raw["num_metric_calls_by_discovery"] == {}
+
+
+def test_clear_eval_cache_removes_stale_pickle(tmp_path: Path) -> None:
+    """Disabling cache must not leave a stale pickle for later resumes."""
+    cache: MinibatchEvalCache[object, str] = MinibatchEvalCache[object, str]()
+    cache.put({"prompt.md": "v1"}, "task_a", output="out-a", score=0.4)
+    save_eval_cache(cache._cache, tmp_path)
+
+    clear_eval_cache(tmp_path)
+
+    assert load_eval_cache(tmp_path) is None
