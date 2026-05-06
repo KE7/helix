@@ -330,7 +330,7 @@ def render_generation(
         title=f"[bold blue]Generation {gen}[/bold blue]",
         border_style="blue",
     )
-    console.print(panel)
+    _get_target_console().print(panel)
 
 
 def render_frontier_table(
@@ -365,7 +365,7 @@ def render_frontier_table(
         win_count = str(len(wins.get(cid, set())))
         table.add_row(cid, scores_str, win_count, str(cand.generation), cand.operation)
 
-    console.print(table)
+    _get_target_console().print(table)
 
 
 def render_budget(budget: "BudgetState", config_evolution: "EvolutionConfig") -> None:
@@ -385,21 +385,27 @@ def render_budget(budget: "BudgetState", config_evolution: "EvolutionConfig") ->
         )
 
 
+def _get_target_console() -> Console:
+    """Return the Live display's console if active, else the global console."""
+    active = _get_active_live()
+    return active._live.console if active else console
+
+
 def print_info(msg: str) -> None:
     """Print an informational message in cyan."""
-    console.print(f"[cyan]{msg}[/cyan]")
+    _get_target_console().print(f"[cyan]{msg}[/cyan]")
 
 
 def print_success(msg: str) -> None:
     """Print a success message in bold green."""
-    console.print(f"[green bold]{msg}[/green bold]")
+    _get_target_console().print(f"[green bold]{msg}[/green bold]")
 
 
 def print_warning(msg: str) -> None:
     """Print a warning message in yellow."""
-    console.print(f"[yellow]{msg}[/yellow]")
+    _get_target_console().print(f"[yellow]{msg}[/yellow]")
 
 
 def print_error(msg: str) -> None:
     """Print an error message in bold red."""
-    console.print(f"[red bold]{msg}[/red bold]")
+    _get_target_console().print(f"[red bold]{msg}[/red bold]")
