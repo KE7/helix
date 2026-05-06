@@ -1,0 +1,104 @@
+"""Tests for centralized HELIX budget/progress accounting."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from helix import budget
+from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig
+from helix.state import BudgetState, EvolutionState
+from helix.trace import TRACE, EventType
+
+
+def make_state(evaluations: int = 0) -> EvolutionState:
+    return EvolutionState(
+        generation=0,
+        frontier=[],
+        instance_scores={},
+        budget=BudgetState(evaluations=evaluations),
+        config_hash="test",
+    )
+
+
+def make_config(max_evaluations: int) -> HelixConfig:
+    return HelixConfig(
+        objective="Improve the code",
+        evaluator=EvaluatorConfig(command="pytest -q"),
+        evolution=EvolutionConfig(max_evaluations=max_evaluations),
+    )
+
+
+def test_evaluation_units_preserve_existing_semantics() -> None:
+    assert budget.evaluation_budget_units(num_actual_examples=5) == 5
+    assert budget.evaluation_budget_units(num_actual_examples=0) == 0
+    assert budget.evaluation_budget_units(was_cached=True) == 0
+    assert budget.evaluation_budget_units() == 1
+
+
+def test_budget_exhausted_preserves_evaluation_cap_semantics() -> None:
+    assert budget.budget_exhausted(make_state(10), make_config(100)) is False
+    assert budget.budget_exhausted(make_state(200), make_config(200)) is True
+    assert budget.budget_exhausted(make_state(250), make_config(200)) is True
+    assert budget.budget_exhausted(make_state(250), make_config(-1)) is False
+
+
+def test_charge_evaluation_updates_counter_and_emits_event() -> None:
+    state = make_state(3)
+
+    with TRACE.record() as events:
+        charged = budget.charge_evaluation(
+            state,
+            num_actual_examples=2,
+            candidate_id="g1-s1",
+            split="train",
+            source="mutation_minibatch_gate",
+        )
+
+    assert charged == 2
+    assert state.budget.evaluations == 5
+    assert len(events) == 1
+    event = events[0]
+    assert event.type is EventType.BUDGET_UPDATE
+    assert event.candidate_id == "g1-s1"
+    assert event.split == "train"
+    assert event.decision == "mutation_minibatch_gate"
+    assert event.budget_delta == 2
+    assert event.budget_evaluations == 5
+
+
+def test_progress_counters_update_through_budget_api() -> None:
+    state = make_state()
+
+    budget.start_generation(state, 4)
+    first_i = budget.advance_proposal_counter(state, source="iteration")
+    mutation_id = budget.next_mutation_id(state, 4)
+    merge_id = budget.next_merge_id(state, 4)
+    budget.record_merge_invocation(state)
+    state.budget.evaluations = 9
+    budget.record_discovery_budget(state, mutation_id)
+
+    assert state.generation == 4
+    assert first_i == 0
+    assert state.i == 0
+    assert mutation_id == "g4-s1"
+    assert state.mutation_counter == 1
+    assert merge_id == "g4-m1"
+    assert state.merge_counter == 1
+    assert state.total_merge_invocations == 1
+    assert state.num_metric_calls_by_discovery == {"g4-s1": 9}
+
+
+def test_evolution_counter_mutations_route_through_budget_api() -> None:
+    evolution_py = Path(__file__).parents[2] / "src" / "helix" / "evolution.py"
+    source = evolution_py.read_text()
+
+    forbidden_patterns = [
+        r"state\.budget\.(evaluations|input_tokens|output_tokens|cost_usd)\s*\+=",
+        r"state\.generation\s*=",
+        r"state\.i\s*\+=",
+        r"state\.(mutation_counter|merge_counter|total_merge_invocations)\s*\+=",
+        r"state\.num_metric_calls_by_discovery\[[^\]]+\]\s*=",
+    ]
+    for pattern in forbidden_patterns:
+        assert re.search(pattern, source) is None
