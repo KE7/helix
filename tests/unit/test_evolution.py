@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from helix import budget as budget_api
 from helix.config import (
     DatasetConfig,
     EvolutionConfig,
@@ -26,6 +27,7 @@ from helix.config import (
     EvaluatorSidecarConfig,
     HelixConfig,
     SandboxConfig,
+    SeedlessConfig,
     WorktreeConfig,
 )
 from helix.evolution import (
@@ -511,6 +513,133 @@ class TestGatingInEvolutionLoop:
         )
         best = run_evolution(config, tmp_path, tmp_path / ".helix")
         assert best.id == "g1-s1"
+
+
+class TestLlmUsageBudgetIntegration:
+    def test_seedless_generation_usage_charged_through_budget_api(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        usage = {"input_tokens": 21, "output_tokens": 12, "cost_usd": 0.41}
+        mocker.patch("helix.evolution.create_empty_seed_worktree", return_value=seed)
+        mocker.patch(
+            "helix.evolution.build_seed_generation_prompt", return_value="<seed prompt>"
+        )
+        all_mocks["generate_seed"].return_value = usage
+        all_mocks["run_evaluator"].return_value = make_eval_result("g0-s0", {"i1": 0.5})
+        all_mocks["mutate"].return_value = None
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            HelixConfig(
+                objective="Optimise the solver",
+                seedless=SeedlessConfig(enabled=True),
+                evaluator=EvaluatorConfig(command="pytest -q"),
+                evolution=EvolutionConfig(
+                    max_generations=1,
+                    max_evaluations=1000,
+                    perfect_score_threshold=None,
+                ),
+            ),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        seed_call = next(
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "seed_generation"
+        )
+        state = seed_call.args[0]
+        assert seed_call.kwargs["candidate_id"] == "g0-s0"
+        assert state.budget.input_tokens == 21
+        assert state.budget.output_tokens == 12
+        assert state.budget.cost_usd == pytest.approx(0.41)
+
+    def test_mutation_usage_charged_through_budget_api(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        child.usage = {"input_tokens": 22, "output_tokens": 13, "cost_usd": 0.42}
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9})
+            return make_eval_result(candidate.id, {"i1": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        mutation_call = next(
+            call for call in spy.call_args_list if call.kwargs.get("source") == "mutation"
+        )
+        state = mutation_call.args[0]
+        assert mutation_call.kwargs["candidate_id"] == "g1-s1"
+        assert state.budget.input_tokens == 22
+        assert state.budget.output_tokens == 13
+        assert state.budget.cost_usd == pytest.approx(0.42)
+
+    def test_merge_usage_charged_through_budget_api(self, mocker, tmp_path, all_mocks):
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        merged.operation = "merge"
+        merged.parent_ids = ["g0-s0", "g1-s1"]
+        merged.usage = {"input_tokens": 23, "output_tokens": 14, "cost_usd": 0.43}
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"1": 0.9, "2": 0.9})
+            if candidate.id == "g2-m1":
+                return make_eval_result("g2-m1", {"1": 1.0, "2": 1.0})
+            return make_eval_result(candidate.id, {"1": 0.3, "2": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(
+                max_generations=2,
+                perfect_score_threshold=None,
+                merge_enabled=True,
+                max_merge_invocations=5,
+                merge_val_overlap_floor=1,
+                merge_subsample_size=2,
+            ),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        merge_call = next(
+            call for call in spy.call_args_list if call.kwargs.get("source") == "merge"
+        )
+        state = merge_call.args[0]
+        assert merge_call.kwargs["candidate_id"] == "g2-m1"
+        assert state.budget.input_tokens == 23
+        assert state.budget.output_tokens == 14
+        assert state.budget.cost_usd == pytest.approx(0.43)
 
 
 # ---------------------------------------------------------------------------
