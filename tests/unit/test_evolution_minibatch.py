@@ -22,8 +22,13 @@ from helix.config import (
     SeedlessConfig,
     WorktreeConfig,
 )
-from helix.evolution import HelixDataLoader, _make_data_loader, run_evolution
-from helix.population import Candidate, EvalResult
+from helix.evolution import (
+    HelixDataLoader,
+    _inject_top_k_best_example_history,
+    _make_data_loader,
+    run_evolution,
+)
+from helix.population import Candidate, EvalResult, ParetoFrontier
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +64,40 @@ def _write_train_jsonl(path: Path, n: int = 6) -> Path:
         for i in range(n):
             f.write(json.dumps({"idx": i, "x": i}) + "\n")
     return p
+
+
+def test_top_k_best_example_history_injection_preserves_side_info() -> None:
+    """Reflection evals expose top-K per-example frontier history."""
+    frontier = ParetoFrontier()
+    cand_a = _make_candidate("cand-a")
+    cand_b = _make_candidate("cand-b")
+    frontier.add(cand_a, _make_result("cand-a", {"0": 0.2, "1": 0.9}))
+    frontier.add(cand_b, _make_result("cand-b", {"0": 0.8, "1": 0.4}))
+
+    current = EvalResult(
+        candidate_id="cand-current",
+        scores={},
+        asi={},
+        instance_scores={"0": 0.1, "1": 0.1},
+        per_example_side_info=[{"trace": "keep-0"}, {"trace": "keep-1"}],
+    )
+
+    updated = _inject_top_k_best_example_history(current, frontier, k=1)
+
+    assert updated.per_example_side_info == [
+        {
+            "trace": "keep-0",
+            "top_k_best_example_history": [
+                {"candidate_id": "cand-b", "score": 0.8}
+            ],
+        },
+        {
+            "trace": "keep-1",
+            "top_k_best_example_history": [
+                {"candidate_id": "cand-a", "score": 0.9}
+            ],
+        },
+    ]
 
 
 def _make_minibatch_config(
@@ -627,7 +666,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-A")
-        cand_dict = {"id": cand.id, "split": "train"}
+        cand_dict = {"content_key": cand.id, "split": "train"}
         cache.put_batch(
             cand_dict,
             ["0", "1", "2"],
@@ -650,6 +689,37 @@ class TestCachedEvaluateBatch:
         )
         assert num_actual == 0
         assert result.instance_scores == {"0": 0.1, "1": 0.2, "2": 0.3}
+
+    def test_content_key_reuses_cache_across_candidate_ids(self, mocker: Any) -> None:
+        """Equivalent candidate content should reuse per-example cache entries."""
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cand_b = self._make_cand("cand-B")
+        mocker.patch(
+            "helix.evolution._candidate_content_key",
+            side_effect=lambda candidate: "same-content",
+        )
+
+        cache.put_batch(
+            {"content_key": "same-content", "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.7, 0.8],
+        )
+
+        run_eval_mock = mocker.patch("helix.evolution.run_evaluator")
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", Path("/tmp"),
+        )
+
+        assert num_actual == 0
+        assert run_eval_mock.call_count == 0
+        assert result.candidate_id == cand_b.id
+        assert result.instance_scores == {"0": 0.7, "1": 0.8}
 
     def test_cache_miss_invokes_full_evaluator(self, mocker: Any) -> None:
         """Empty cache → evaluator is invoked with ALL requested ids."""
@@ -686,6 +756,40 @@ class TestCachedEvaluateBatch:
         assert num_actual == 3
         assert result.instance_scores == {"0": 0.5, "1": 0.5, "2": 0.5}
 
+    def test_cache_disabled_invokes_evaluator_every_time(self, mocker: Any) -> None:
+        """cache=None is the strict off mode behind cache_evaluation=False."""
+        from helix.evolution import _cached_evaluate_batch
+
+        cand = self._make_cand("cand-no-cache")
+        seen_instance_ids: list[list[str] | None] = []
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            seen_instance_ids.append(instance_ids)
+            return _make_result(
+                candidate.id, {eid: 0.4 for eid in (instance_ids or [])}
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        first, first_actual = _cached_evaluate_batch(
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+        )
+        second, second_actual = _cached_evaluate_batch(
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+        )
+
+        assert seen_instance_ids == [["0", "1"], ["0", "1"]]
+        assert first_actual == 2
+        assert second_actual == 2
+        assert first.instance_scores == second.instance_scores == {"0": 0.4, "1": 0.4}
+
     def test_partial_cache_hit(self, mocker: Any) -> None:
         """2-of-3 cached → evaluator runs with ONLY the 1 uncached id."""
         from helix.eval_cache import EvaluationCache as MBCache
@@ -693,7 +797,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-C")
-        cand_dict = {"id": cand.id, "split": "train"}
+        cand_dict = {"content_key": cand.id, "split": "train"}
         # Pre-populate 0 and 2; leave 1 uncached.
         cache.put_batch(
             cand_dict,
@@ -765,7 +869,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-pcfm")
-        cand_dict = {"id": cand.id, "split": "train"}
+        cand_dict = {"content_key": cand.id, "split": "train"}
         # Pre-populate ids "0" and "2" with both score AND
         # objective_scores (the cache stores these natively).
         cache.put_batch(
