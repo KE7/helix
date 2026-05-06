@@ -36,7 +36,7 @@ from helix.evolution import (
     run_evolution,
 )
 from helix.lineage import LineageEntry
-from helix.population import Candidate, EvalResult
+from helix.population import Candidate, EvalResult, HelixResult
 from helix.state import BudgetState, EvolutionState
 
 
@@ -93,6 +93,7 @@ def make_config(
             max_merge_invocations=max_merge_invocations,
             merge_val_overlap_floor=merge_val_overlap_floor,
             merge_subsample_size=merge_subsample_size,
+            frontier_type="instance",
         ),
         worktree=WorktreeConfig(cleanup_dominated=cleanup_dominated),
     )
@@ -511,6 +512,79 @@ class TestGatingInEvolutionLoop:
         )
         best = run_evolution(config, tmp_path, tmp_path / ".helix")
         assert best.id == "g1-s1"
+
+    def test_returns_structured_helix_result(self, mocker, tmp_path, all_mocks):
+        """run_evolution exposes GEPA-style structured result metadata."""
+        seed = make_candidate("g0-s0")
+        child = Candidate(
+            id="g1-s1",
+            worktree_path="/tmp/helix/g1-s1",
+            branch_name="helix/g1-s1",
+            generation=1,
+            parent_id=seed.id,
+            parent_ids=[seed.id],
+            operation="mutate",
+            usage={"input_tokens": 7, "output_tokens": 3, "cost_usd": 0.01},
+        )
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["load_lineage"].return_value = {
+            "g0-s0": LineageEntry(
+                id="g0-s0",
+                parent=None,
+                parents=[],
+                operation="seed",
+                generation=0,
+                files_changed=[],
+            ),
+            "g1-s1": LineageEntry(
+                id="g1-s1",
+                parent="g0-s0",
+                parents=["g0-s0"],
+                operation="mutate",
+                generation=1,
+                files_changed=["solve.py"],
+            ),
+        }
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return EvalResult(
+                    candidate_id="g1-s1",
+                    scores={"accuracy": 0.9},
+                    asi={},
+                    instance_scores={"i1": 0.8, "i2": 1.0},
+                    objective_scores=[{"quality": 0.7}, {"quality": 0.9}],
+                )
+            return make_eval_result(candidate.id, {"i1": 0.2, "i2": 0.4})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(max_generations=1, max_evaluations=10000)
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert isinstance(result, HelixResult)
+        assert result.id == "g1-s1"
+        assert result.best_candidate is child
+        assert result.best_result is not None
+        assert result.best_result.scores == {"accuracy": 0.9}
+        assert result.parents["g1-s1"] == ["g0-s0"]
+        assert result.aggregate_scores["g1-s1"] == pytest.approx(0.9)
+        assert result.sum_scores["g1-s1"] == pytest.approx(1.8)
+        assert result.instance_scores["g1-s1"] == {"i1": 0.8, "i2": 1.0}
+        assert result.objective_scores["g1-s1"] == [
+            {"quality": 0.7},
+            {"quality": 0.9},
+        ]
+        assert result.frontier_ids == ["g0-s0", "g1-s1"]
+        assert set(result.non_dominated_ids) == {"g1-s1"}
+        assert result.frontier_type == "instance"
+        assert result.discovery_counts == {"g0-s0": 1, "g1-s1": 3}
+        assert result.budget.evaluations == 3
+        assert result.run_dir == str(tmp_path / ".helix")
+        assert result.seed == config.rng_seed
+        assert result.config_hash
+        assert result.candidate_summaries[-1].to_dict()["parents"] == ["g0-s0"]
 
 
 # ---------------------------------------------------------------------------
@@ -1730,7 +1804,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        evolution=EvolutionConfig(max_generations=0),
+        evolution=EvolutionConfig(max_generations=0, frontier_type="instance"),
     )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
