@@ -66,6 +66,7 @@ def make_config(
             max_generations=max_generations,
             max_evaluations=max_evaluations,
             perfect_score_threshold=None,
+            frontier_type="instance",
         ),
         worktree=WorktreeConfig(),
     )

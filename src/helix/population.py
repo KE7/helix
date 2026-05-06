@@ -8,16 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import random
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-logger = logging.getLogger(__name__)
-
-
 FrontierType = Literal["instance", "objective", "hybrid", "cartesian"]
+
+
+class MissingObjectiveScoresError(ValueError):
+    """Raised when an objective-bearing frontier mode lacks objective scores."""
 
 
 @dataclass
@@ -222,6 +222,7 @@ class ParetoFrontier:
 
     def add(self, candidate: Candidate, result: EvalResult) -> None:
         """Add a candidate and its evaluation result.  Population is append-only."""
+        self._validate_objective_scores(candidate.id, result)
         self._candidates[candidate.id] = candidate
         self._results[candidate.id] = result
         self._update_per_key(candidate.id, result)
@@ -230,6 +231,29 @@ class ParetoFrontier:
         # lets a caller inspect any axis post-hoc.
         self._update_objective(candidate.id, result)
         self._update_cartesian(candidate.id, result)
+
+    def _validate_objective_scores(self, cid: str, result: EvalResult) -> None:
+        """Reject non-instance frontier modes with no usable objective axes."""
+        if self._frontier_type == "instance":
+            return
+        if result.objective_scores is None:
+            raise MissingObjectiveScoresError(
+                f"frontier_type={self._frontier_type!r} requires per-example "
+                f"objective_scores for candidate {cid!r}; use the helix_result "
+                'parser and emit side_info["scores"] for each example.'
+            )
+        if len(result.objective_scores) != len(result.instance_scores):
+            raise MissingObjectiveScoresError(
+                f"frontier_type={self._frontier_type!r} requires objective_scores "
+                f"length to match instance_scores for candidate {cid!r} "
+                f"({len(result.objective_scores)} != {len(result.instance_scores)})."
+            )
+        if not any(slot for slot in result.objective_scores):
+            raise MissingObjectiveScoresError(
+                f"frontier_type={self._frontier_type!r} requires at least one "
+                f"objective score for candidate {cid!r}; all objective_scores "
+                "slots were empty."
+            )
 
     def _update_per_key(self, cid: str, result: EvalResult) -> None:
         """Incrementally update per-key best tracking for a single candidate.
@@ -288,17 +312,11 @@ class ParetoFrontier:
         # is positional to the same id list.  Zip together.
         val_ids = list(result.instance_scores.keys())
         if len(val_ids) != len(result.objective_scores):
-            # Defensive: skip cartesian updates when lengths disagree
-            # (should not happen on the helix_result path but could on
-            # hand-constructed EvalResults in tests).  Log at DEBUG so
-            # the skip is traceable without polluting the default log.
-            logger.debug(
-                "ParetoFrontier._update_cartesian: skipping cid=%r — "
-                "objective_scores length %d does not match "
-                "instance_scores length %d",
-                cid, len(result.objective_scores), len(val_ids),
+            raise MissingObjectiveScoresError(
+                f"cartesian frontier requires objective_scores length to match "
+                f"instance_scores for candidate {cid!r} "
+                f"({len(result.objective_scores)} != {len(val_ids)})."
             )
-            return
         for val_id, slot in zip(val_ids, result.objective_scores):
             for obj_name, score in slot.items():
                 key = f"{val_id}::{obj_name}"
@@ -363,6 +381,13 @@ class ParetoFrontier:
         for k, v in self._objective_best.items():
             merged[f"obj::{k}"] = v
         return merged
+
+    def active_frontier_snapshot(self) -> dict[str, list[str]]:
+        """Return a JSON-ready copy of the active fronts by frontier key."""
+        return {
+            key: sorted(front)
+            for key, front in sorted(self._active_frontier().items())
+        }
 
     # ------------------------------------------------------------------
     # GEPA coverage-based dominance
@@ -528,11 +553,16 @@ class ParetoFrontier:
             cid for cid, freq in program_frequency.items() for _ in range(freq)
         ]
 
-        # GEPA-parity fix for score-only evaluators: if no instance scores
-        # were recorded (e.g. evaluator uses aggregate scores only), the cleaned
-        # per-key frontier is empty and sampling_list would be empty.  Fall back
-        # to selecting uniformly from all candidates so evolution can continue.
+        # Instance mode keeps HELIX's score-only fallback.  Objective-bearing
+        # modes validate objective_scores at add/update time, so an empty
+        # active frontier there is a state invariant failure rather than a
+        # reason to silently use scalar/all-candidate semantics.
         if not sampling_list:
+            if self._frontier_type != "instance":
+                raise MissingObjectiveScoresError(
+                    f"frontier_type={self._frontier_type!r} has no active "
+                    "objective frontier entries; cannot select a parent."
+                )
             sampling_list = list(self._candidates.keys())
         return self._candidates[self._rng.choice(sampling_list)]
 

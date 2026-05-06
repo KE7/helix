@@ -95,8 +95,8 @@ class EvaluatorConfig(BaseModel):
     ``"json_score"``) aggregate to a single score and do NOT produce
     id-keyed per-instance scores; combining them with ``instance_ids``
     triggers the zero-fill warning in :mod:`helix.executor`.  They also
-    leave ``objective_scores`` empty, so the multi-axis frontier
-    degenerates to the instance path when they're selected.
+    leave ``objective_scores`` empty, so ``frontier_type`` values other
+    than ``"instance"`` fail loudly when selected with these parsers.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -410,8 +410,8 @@ class EvolutionConfig(BaseModel):
             "only the Pareto retention / parent-selection decision is "
             "multi-axis.  Non-``instance`` paths require ``helix_result`` "
             'to emit per-example ``side_info["scores"]`` dicts — without '
-            "them the objective / cartesian frontiers stay empty and "
-            "behaviour degenerates to the instance path."
+            "them the objective / cartesian frontiers raise instead of "
+            "falling back to scalar semantics."
         ),
     )
 
