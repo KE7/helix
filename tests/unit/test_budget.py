@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import pytest
+
+from helix.backends import BACKENDS
 from helix import budget
-from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig
+from helix.config import AgentConfig, EvolutionConfig, EvaluatorConfig, HelixConfig
+from helix.mutator import invoke_claude_code
 from helix.state import BudgetState, EvolutionState
 from helix.trace import TRACE, EventType
 
@@ -65,6 +71,108 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
     assert event.decision == "mutation_minibatch_gate"
     assert event.budget_delta == 2
     assert event.budget_evaluations == 5
+
+
+@pytest.mark.parametrize(
+    ("backend", "stdout", "expected"),
+    [
+        (
+            "claude",
+            json.dumps(
+                {
+                    "type": "result",
+                    "session_id": "claude-session",
+                    "usage": {"input_tokens": 11, "output_tokens": 7},
+                    "total_cost_usd": 0.31,
+                }
+            ),
+            (11, 7, 0.31),
+        ),
+        (
+            "codex",
+            "\n".join(
+                [
+                    '{"type":"session.started","session_id":"codex-session"}',
+                    (
+                        '{"type":"turn","usage":{"prompt_tokens":12,'
+                        '"completion_tokens":8,"total_cost_usd":0.32}}'
+                    ),
+                ]
+            ),
+            (12, 8, 0.32),
+        ),
+        (
+            "cursor",
+            "\n".join(
+                [
+                    '{"type":"system","sessionId":"cursor-session"}',
+                    (
+                        '{"type":"assistant","usage":{"inputTokens":13,'
+                        '"outputTokens":9,"costUsd":0.33}}'
+                    ),
+                ]
+            ),
+            (13, 9, 0.33),
+        ),
+        (
+            "gemini",
+            "\n".join(
+                [
+                    "MCP advisory preamble tolerated by the Gemini parser.",
+                    '{"type":"init","session_id":"gemini-session"}',
+                    (
+                        '{"type":"result","usageMetadata":{"prompt_tokens":14,'
+                        '"completion_tokens":10},"cost":0.34}'
+                    ),
+                ]
+            ),
+            (14, 10, 0.34),
+        ),
+        (
+            "opencode",
+            "\n".join(
+                [
+                    '{"type":"step_start","sessionID":"opencode-session"}',
+                    (
+                        '{"type":"step_finish","part":{"tokens":{"input":15,'
+                        '"output":11},"cost":0.35}}'
+                    ),
+                ]
+            ),
+            (15, 11, 0.35),
+        ),
+    ],
+)
+def test_backend_usage_parsing_charges_llm_budget(
+    backend: str,
+    stdout: str,
+    expected: tuple[int, int, float],
+    tmp_path: Path,
+    mocker,
+) -> None:
+    assert backend in BACKENDS
+    worktree = tmp_path / backend
+    worktree.mkdir()
+    mock_run = mocker.patch("helix.mutator.subprocess.run")
+    mock_run.return_value = MagicMock(stdout=stdout, stderr="", returncode=0)
+    state = make_state()
+
+    _parsed, usage = invoke_claude_code(
+        str(worktree),
+        "read the prompt artifact",
+        AgentConfig(backend=backend),
+    )
+    budget.charge_llm_usage(
+        state,
+        usage,
+        candidate_id=f"{backend}-candidate",
+        source=backend,
+    )
+
+    expected_input, expected_output, expected_cost = expected
+    assert state.budget.input_tokens == expected_input
+    assert state.budget.output_tokens == expected_output
+    assert state.budget.cost_usd == pytest.approx(expected_cost)
 
 
 def test_progress_counters_update_through_budget_api() -> None:
