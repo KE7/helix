@@ -9,6 +9,7 @@ mock all I/O and mock ``run_evaluator`` with controlled score sequences.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,24 @@ def _write_train_jsonl(path: Path, n: int = 6) -> Path:
         for i in range(n):
             f.write(json.dumps({"idx": i, "x": i}) + "\n")
     return p
+
+
+def _git(args: list[str], cwd: Path) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _init_repo(path: Path) -> None:
+    path.mkdir()
+    _git(["init"], path)
+    _git(["config", "user.name", "HELIX Test"], path)
+    _git(["config", "user.email", "helix-test@noreply"], path)
 
 
 def test_top_k_best_example_history_injection_preserves_side_info() -> None:
@@ -720,6 +739,111 @@ class TestCachedEvaluateBatch:
         assert run_eval_mock.call_count == 0
         assert result.candidate_id == cand_b.id
         assert result.instance_scores == {"0": 0.7, "1": 0.8}
+
+    def test_tree_key_reuses_cache_across_different_commits_with_same_tree(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Commit metadata/history changes must not invalidate content cache."""
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch, _candidate_content_key
+
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "prompt.md").write_text("same tracked content\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "initial content"], repo)
+
+        cand_a = self._make_cand("cand-A")
+        cand_a.worktree_path = str(repo)
+        commit_a = _git(["rev-parse", "HEAD"], repo)
+        tree_a = _git(["rev-parse", "HEAD^{tree}"], repo)
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cache.put_batch(
+            {"content_key": _candidate_content_key(cand_a), "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.7, 0.8],
+        )
+
+        _git(["commit", "--allow-empty", "-m", "metadata only"], repo)
+        cand_b = self._make_cand("cand-B")
+        cand_b.worktree_path = str(repo)
+        commit_b = _git(["rev-parse", "HEAD"], repo)
+        tree_b = _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert commit_a != commit_b
+        assert tree_a == tree_b
+
+        run_eval_mock = mocker.patch("helix.evolution.run_evaluator")
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", tmp_path,
+        )
+
+        assert num_actual == 0
+        assert run_eval_mock.call_count == 0
+        assert result.candidate_id == cand_b.id
+        assert result.instance_scores == {"0": 0.7, "1": 0.8}
+
+    def test_tree_key_misses_cache_when_tracked_content_changes(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Tracked file changes must produce a different cache identity."""
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch, _candidate_content_key
+
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "prompt.md").write_text("v1\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "initial content"], repo)
+
+        cand_a = self._make_cand("cand-A")
+        cand_a.worktree_path = str(repo)
+        tree_a = _git(["rev-parse", "HEAD^{tree}"], repo)
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cache.put_batch(
+            {"content_key": _candidate_content_key(cand_a), "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.7, 0.8],
+        )
+
+        (repo / "prompt.md").write_text("v2\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "changed tracked content"], repo)
+        cand_b = self._make_cand("cand-B")
+        cand_b.worktree_path = str(repo)
+        tree_b = _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert tree_a != tree_b
+
+        seen_instance_ids: list[list[str] | None] = []
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            seen_instance_ids.append(instance_ids)
+            return _make_result(
+                candidate.id, {eid: 0.5 for eid in (instance_ids or [])}
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", tmp_path,
+        )
+
+        assert seen_instance_ids == [["0", "1"]]
+        assert num_actual == 2
+        assert result.candidate_id == cand_b.id
+        assert result.instance_scores == {"0": 0.5, "1": 0.5}
 
     def test_cache_miss_invokes_full_evaluator(self, mocker: Any) -> None:
         """Empty cache → evaluator is invoked with ALL requested ids."""
