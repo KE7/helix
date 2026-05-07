@@ -628,7 +628,7 @@ def _candidate_content_key(candidate: Candidate) -> str:
     """Return a stable content key for cache reuse across equivalent candidates."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", "rev-parse", "HEAD^{tree}"],
             cwd=candidate.worktree_path,
             check=True,
             capture_output=True,
@@ -639,7 +639,7 @@ def _candidate_content_key(candidate: Candidate) -> str:
             return sha
     except Exception:
         logger.warning(
-            "Could not resolve git HEAD for candidate %s; falling back to id cache key.",
+            "Could not resolve git tree for candidate %s; falling back to id cache key.",
             candidate.id,
         )
     return candidate.id
