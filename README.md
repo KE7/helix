@@ -330,7 +330,8 @@ command = "uv run python evaluate.py"
 #   HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]           # mixed
 # Positional to `helix_batch.json`. HELIX zips it into id-keyed
 # `instance_scores` and stores the side_info list for the reflection
-# prompt. Use for minibatch runs (`dataset.train_size` set).
+# prompt. `HELIX_RESULT` is a machine protocol; use `from helix import log`
+# for human-readable evaluator notes.
 score_parser = "json_score"
 include_stdout = true
 include_stderr = true
@@ -564,6 +565,19 @@ print(json.dumps({
     "instance_scores": {"puzzle_001": 1.0, "puzzle_002": 0.0}
 }))
 ```
+
+For GEPA-style reflective feedback, prefer structured per-example
+`side_info` when using `score_parser = "helix_result"`. For additional
+human-readable notes that are not tied to one example, evaluators may call
+`from helix import log` and then `log("what happened", key=value)`. HELIX
+captures these notes through `HELIX_ASI_LOG`, not stdout, and renders them as
+Evaluator Notes in mutation prompts.
+
+Raw `HELIX_RESULT=...` JSON is only consumed by HELIX as a machine protocol and
+is not shown to mutators. Evaluator stdout/stderr remain stored for debugging,
+but successful mutation prompts omit them when structured diagnostics or
+`helix.log()` notes are available; failed evaluations still include stdout and
+stderr as fallback debug context.
 
 ---
 
