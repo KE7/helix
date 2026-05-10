@@ -93,6 +93,19 @@ class EvaluatorError(HelixError):
     """Raised when an evaluator subprocess fails."""
 
 
+class ResumeIncompatibleError(HelixError):
+    """Raised when resuming would reinterpret persisted evolution state.
+
+    Triggered by ``helix.evolution._validate_resume_semantics`` when the
+    current ``HelixConfig`` differs from the snapshot recorded in
+    ``EvolutionState.resume_semantics`` for a field that changes the
+    meaning of saved scores / frontier (e.g. ``frontier_type``,
+    ``minibatch_size``, ``acceptance_criterion``).  Caught by the
+    ``helix evolve`` and ``helix resume`` CLI handlers so the user sees a
+    friendly error instead of a Python traceback.
+    """
+
+
 class RateLimitError(HelixError):
     """Raised when Claude Code hits a rate / usage limit.
 
