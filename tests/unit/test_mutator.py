@@ -684,7 +684,7 @@ class TestInvokeClaudeCode:
             stderr="",
             returncode=0,
         )
-        config = AgentConfig(backend="codex", model="gpt-5")
+        config = AgentConfig(backend="codex", model="gpt-5", effort="high")
 
         result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
 
@@ -694,10 +694,26 @@ class TestInvokeClaudeCode:
         assert "--dangerously-bypass-approvals-and-sandbox" in args_list
         assert "--model" in args_list
         assert "gpt-5" in args_list
+        assert "-c" in args_list
+        assert 'model_reasoning_effort="high"' in args_list
         assert "the prompt" not in args_list
         assert ".agent_task_prompt.md" in args_list[-1]
         assert "input" not in mock_run.call_args[1]
         assert result["events"][0]["thread_id"] == "thr_123"
+
+    def test_codex_effort_config_value_is_toml_escaped(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"thread.started","thread_id":"thr_123"}\n',
+            stderr="",
+            returncode=0,
+        )
+        config = AgentConfig(backend="codex", effort='high"quoted')
+
+        invoke_claude_code("/tmp/wt", "the prompt", config)
+
+        args_list = mock_run.call_args[0][0]
+        assert 'model_reasoning_effort="high\\"quoted"' in args_list
 
     def test_cursor_cli_args_use_stream_json(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
