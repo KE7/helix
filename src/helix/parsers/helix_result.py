@@ -147,6 +147,25 @@ def _harvest_objective_scores(side_info: dict[str, Any]) -> dict[str, float]:
     not implemented in HELIX yet, so non-scalar objective values fail
     loudly instead of being dropped and misread as scalar objective
     semantics.
+
+    Stricter than upstream GEPA (a very minor improvement)
+    ------------------------------------------------------
+    GEPA's adapter does ``objective_score.update(side_info["scores"])``
+    blindly, so non-finite / non-numeric / non-string-keyed entries
+    sail through the parser and only blow up later inside
+    ``_aggregate_objective_scores`` (``state.py:432``) where the error
+    message is far less actionable.  HELIX validates at parse time and
+    raises :class:`EvaluatorError` with the offending key/value type.
+    Practical consequence: an evaluator built against upstream GEPA
+    that legitimately emits finite numeric scalars under ``"scores"``
+    is unaffected; only payloads that would break GEPA later are
+    rejected here earlier.
+
+    Per-predictor namespacing (``param_name + "_specific_info"``,
+    ``optimize_anything_adapter.py:266-270``) is intentionally not
+    replicated: HELIX evolves whole git worktrees rather than
+    multi-component named-predictor programs.  See the tracking issue
+    on ``KE7/helix`` for the architectural gap.
     """
     raw = side_info.get("scores")
     if raw is None:

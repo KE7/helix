@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,7 +43,7 @@ from helix.evolution import (
 )
 from helix.lineage import LineageEntry
 from helix.mutator import generate_seed as _real_generate_seed
-from helix.population import Candidate, EvalResult, HelixResult
+from helix.population import Candidate, EvalResult, HelixResult, ParetoFrontier
 from helix.state import BudgetState, EvolutionState
 
 
@@ -63,17 +64,39 @@ def make_candidate(cid: str = "g0-s0", generation: int = 0) -> Candidate:
     )
 
 
+# Sentinel for ``make_eval_result(objective_scores=...)`` so callers can
+# explicitly pass ``None`` to construct an objectiveless EvalResult (used
+# only by tests that exercise the missing-objectives validation path).
+_DEFAULT_OBJECTIVES: Any = object()
+
+
 def make_eval_result(
     candidate_id: str = "g0-s0",
     instance_scores: dict[str, float] | None = None,
+    objective_scores: list[dict[str, float]] | None = _DEFAULT_OBJECTIVES,
 ) -> EvalResult:
+    """Build an :class:`EvalResult` for evolution unit tests.
+
+    Defaults to a per-example ``objective_scores`` slot list (one
+    ``{"quality": <instance_score>}`` per id) so the result satisfies
+    :meth:`ParetoFrontier._validate_objective_scores` under the
+    GEPA-O.A. default ``frontier_type = "hybrid"``.  Tests that
+    intentionally exercise the missing-objectives path pass
+    ``objective_scores=None`` explicitly.
+    """
     if instance_scores is None:
         instance_scores = {"i1": 0.5, "i2": 0.5}
+    if objective_scores is _DEFAULT_OBJECTIVES:
+        # Caller did not specify — synthesise valid slots.
+        objective_scores = [
+            {"quality": float(score)} for score in instance_scores.values()
+        ]
     return EvalResult(
         candidate_id=candidate_id,
         scores={},
         asi={},
         instance_scores=instance_scores,
+        objective_scores=objective_scores,
     )
 
 
@@ -86,21 +109,18 @@ def make_config(
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 5,
     merge_subsample_size: int = 5,
-    frontier_type: str = "instance",
+    frontier_type: str = "hybrid",
 ) -> HelixConfig:
     """Build a HelixConfig for evolution unit tests.
 
-    ``frontier_type`` defaults to ``"instance"`` (NOT
-    :class:`EvolutionConfig`'s GEPA-O.A. ``"hybrid"`` default).  The
-    bulk of this suite drives ``run_evolution`` against
-    ``make_eval_result`` outputs that carry no per-example
-    ``objective_scores``; under HELIX's stricter
-    ``ParetoFrontier._validate_objective_scores`` such results would
-    correctly raise ``MissingObjectiveScoresError`` on any
-    objective-bearing frontier mode.  Pinning ``"instance"`` here keeps
-    those tests focused on whatever they're actually exercising; tests
-    that want to assert on multi-axis frontier behaviour pass a
-    different value explicitly.
+    ``frontier_type`` defaults to ``"hybrid"`` to match
+    :class:`EvolutionConfig`'s GEPA-O.A. default
+    (``src/gepa/optimize_anything.py:476``).  The companion
+    :func:`make_eval_result` synthesises per-example
+    ``objective_scores`` slots so results pass
+    :meth:`ParetoFrontier._validate_objective_scores` under the default;
+    tests that need a specific frontier dimensionality pass an
+    explicit value.
     """
     evolution_kwargs: dict[str, object] = dict(
         max_generations=max_generations,
@@ -582,9 +602,7 @@ class TestGatingInEvolutionLoop:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        config = make_config(
-            max_generations=1, max_evaluations=10000, frontier_type="instance",
-        )
+        config = make_config(max_generations=1, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert isinstance(result, HelixResult)
@@ -603,7 +621,8 @@ class TestGatingInEvolutionLoop:
         ]
         assert result.frontier_ids == ["g0-s0", "g1-s1"]
         assert set(result.non_dominated_ids) == {"g1-s1"}
-        assert result.frontier_type == "instance"
+        # ``make_config`` defaults to GEPA-O.A. ``"hybrid"``.
+        assert result.frontier_type == "hybrid"
         # Counts reflect ``state.budget.evaluations`` at accept time.  The
         # absolute numbers depend on the budget-accounting policy in
         # ``helix.budget`` (see PR #16 / centralized accounting); we lock
@@ -645,9 +664,7 @@ class TestGatingInEvolutionLoop:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        config = make_config(
-            max_generations=2, max_evaluations=10000, frontier_type="instance",
-        )
+        config = make_config(max_generations=2, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert set(result.non_dominated_ids) == {"g1-s1", "g2-s1"}
@@ -677,9 +694,7 @@ class TestGatingInEvolutionLoop:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        config = make_config(
-            max_generations=1, max_evaluations=10000, frontier_type="instance",
-        )
+        config = make_config(max_generations=1, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         payload = result.to_dict()
@@ -687,7 +702,8 @@ class TestGatingInEvolutionLoop:
         rendered = json.loads(json.dumps(payload))
         assert result.id == rendered["best_candidate_id"]
         assert rendered["best_candidate_id"] == "g1-s1"
-        assert rendered["frontier_type"] == "instance"
+        # ``make_config`` defaults to GEPA-O.A. ``"hybrid"``.
+        assert rendered["frontier_type"] == "hybrid"
         assert rendered["budget"]["evaluations"] == result.budget.evaluations
         assert rendered["budget"]["input_tokens"] == result.budget.input_tokens
         assert rendered["budget"]["output_tokens"] == result.budget.output_tokens
@@ -763,7 +779,6 @@ class TestGatingInEvolutionLoop:
             max_merge_invocations=5,
             merge_val_overlap_floor=1,
             max_evaluations=10000,
-            frontier_type="instance",
         )
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -797,9 +812,7 @@ class TestGatingInEvolutionLoop:
             )
 
         all_mocks["run_evaluator"].side_effect = run_eval
-        config = make_config(
-            max_generations=1, max_evaluations=10000, frontier_type="instance",
-        )
+        config = make_config(max_generations=1, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         with pytest.raises(FrozenInstanceError):
@@ -836,9 +849,7 @@ class TestGatingInEvolutionLoop:
             else make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
         )
 
-        config = make_config(
-            max_generations=1, max_evaluations=10000, frontier_type="instance",
-        )
+        config = make_config(max_generations=1, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         snapshot_evals = result.budget.evaluations
@@ -874,9 +885,7 @@ class TestGatingInEvolutionLoop:
             else make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
         )
 
-        config = make_config(
-            max_generations=1, max_evaluations=10000, frontier_type="instance",
-        )
+        config = make_config(max_generations=1, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # First access materializes the view.
@@ -946,11 +955,6 @@ class TestLlmUsageBudgetIntegration:
                     max_generations=1,
                     max_evaluations=1000,
                     perfect_score_threshold=None,
-                    # Pin instance frontier: this test's EvalResult has
-                    # no per-example objective_scores, so the default
-                    # GEPA-O.A. ``"hybrid"`` frontier would (correctly)
-                    # raise ``MissingObjectiveScoresError``.
-                    frontier_type="instance",
                 ),
             ),
             tmp_path,
@@ -1018,10 +1022,6 @@ class TestLlmUsageBudgetIntegration:
                     max_generations=1,
                     max_evaluations=1000,
                     perfect_score_threshold=None,
-                    # See sibling test: pin instance frontier so the
-                    # objectiveless EvalResult doesn't trip the default
-                    # GEPA-O.A. ``"hybrid"`` validator.
-                    frontier_type="instance",
                 ),
             ),
             tmp_path,
@@ -2353,7 +2353,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        evolution=EvolutionConfig(max_generations=0, frontier_type="instance"),
+        evolution=EvolutionConfig(max_generations=0),
     )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -2374,14 +2374,28 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
 class TestActiveFrontierSyncOnObjectiveMode:
     """Regression: ``state.active_frontier`` must be kept in lock-step with
     ``ParetoFrontier.active_frontier_snapshot()`` at every accept site
-    (init, seed, mutation, merge) when ``frontier_type != "instance"``.
+    (init/load, seed, mutation, merge) when
+    ``frontier_type != "instance"``.
 
     Without this sync, resume on a multi-axis run would lose the
-    retained Pareto front.  The four touch points
-    (``_sync_frontier_state`` calls) are inspected indirectly by
-    asserting on the ``EvolutionState`` passed into ``save_state`` after
-    a minimal seed-only run.
+    retained Pareto front.  Each ``_sync_frontier_state`` call site
+    in :mod:`helix.evolution` is exercised by inspecting the
+    ``EvolutionState`` passed into ``save_state``.
     """
+
+    @staticmethod
+    def _objective_eval(
+        cid: str,
+        instance_scores: dict[str, float],
+        quality: list[float],
+    ) -> EvalResult:
+        return EvalResult(
+            candidate_id=cid,
+            scores={},
+            asi={},
+            instance_scores=instance_scores,
+            objective_scores=[{"quality": q} for q in quality],
+        )
 
     def test_seed_acceptance_populates_active_frontier_for_objective_mode(
         self, mocker, tmp_path, all_mocks
@@ -2390,13 +2404,10 @@ class TestActiveFrontierSyncOnObjectiveMode:
         all_mocks["create_seed_worktree"].return_value = seed
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            # Per-example objective_scores positional to instance_scores order.
-            return EvalResult(
-                candidate_id=candidate.id,
-                scores={},
-                asi={},
-                instance_scores={"i1": 0.5, "i2": 0.6},
-                objective_scores=[{"quality": 0.7}, {"quality": 0.9}],
+            return self._objective_eval(
+                candidate.id,
+                {"i1": 0.5, "i2": 0.6},
+                [0.7, 0.9],
             )
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -2428,3 +2439,149 @@ class TestActiveFrontierSyncOnObjectiveMode:
         )
         # And the append-only candidate list is in lock-step.
         assert last_state.frontier == ["g0-s0"]
+
+    def test_mutation_acceptance_updates_active_frontier_for_objective_mode(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """The mutation accept site (``evolution.py`` line ~2383) must
+        also re-snapshot the active frontier."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                # Child wins on the objective axis — should displace seed.
+                return self._objective_eval(
+                    "g1-s1",
+                    {"i1": 0.9, "i2": 0.95},
+                    [0.92, 0.95],
+                )
+            return self._objective_eval(
+                candidate.id,
+                {"i1": 0.5, "i2": 0.6},
+                [0.5, 0.6],
+            )
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = HelixConfig(
+            objective="Improve the code",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=1,
+                max_evaluations=100,
+                perfect_score_threshold=None,
+                frontier_type="objective",
+            ),
+            worktree=WorktreeConfig(),
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        save_calls = all_mocks["save_state"].call_args_list
+        assert save_calls, "save_state should have been invoked at least once"
+        last_state = save_calls[-1].args[0]
+
+        # Child's mean quality (0.935) strictly exceeds seed's (0.55), so
+        # it is the sole objective-axis winner after the mutation
+        # acceptance sync runs.
+        assert last_state.active_frontier == {"quality": ["g1-s1"]}, (
+            "active_frontier must reflect the mutation-acceptance sync, "
+            f"got {last_state.active_frontier!r}"
+        )
+        assert set(last_state.frontier) == {"g0-s0", "g1-s1"}
+
+    def test_init_sync_rebuilds_active_frontier_on_resume(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """On resume (``load_state`` returns non-None), evolution rebuilds
+        the in-memory frontier and must call
+        ``ParetoFrontier.active_frontier_snapshot()`` via the init
+        sync site (``evolution.py`` post-load branch).
+
+        Spying on ``active_frontier_snapshot`` is the most direct
+        observation: it isolates the init touch point from save-state
+        plumbing (``save_state`` only fires later in the loop, which
+        does not run when ``max_generations=0``).
+        """
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None  # No mutation this run.
+
+        # The resume path skips ``frontier.add`` for any id whose
+        # worktree dir is missing on disk — create the placeholder so
+        # the frontier rebuild actually runs.
+        base_dir = tmp_path / ".helix"
+        worktree_dir = base_dir / "worktrees" / "g0-s0"
+        worktree_dir.mkdir(parents=True, exist_ok=True)
+
+        # Simulate a prior run's persisted state and re-load it.
+        prior_state = EvolutionState(
+            generation=0,
+            frontier=["g0-s0"],
+            instance_scores={"g0-s0": {"i1": 0.5, "i2": 0.6}},
+            budget=BudgetState(evaluations=1),
+            config_hash="cfg-prior",
+            i=0,
+            num_metric_calls_by_discovery={"g0-s0": 0},
+            active_frontier={"stale": ["should-be-rebuilt"]},
+            frontier_type="objective",
+        )
+        all_mocks["load_state"].return_value = prior_state
+
+        # Resume rebuilds the frontier from on-disk evaluations; provide
+        # the per-example objective_scores so the validator is satisfied.
+        prior_eval = self._objective_eval(
+            "g0-s0",
+            {"i1": 0.5, "i2": 0.6},
+            [0.7, 0.9],
+        )
+        all_mocks["_load_evaluation"].return_value = prior_eval
+        all_mocks["load_lineage"].return_value = {
+            "g0-s0": LineageEntry(
+                id="g0-s0",
+                parent=None,
+                parents=[],
+                operation="seed",
+                generation=0,
+                files_changed=[],
+            ),
+        }
+
+        snapshot_spy = mocker.spy(
+            ParetoFrontier, "active_frontier_snapshot"
+        )
+
+        config = HelixConfig(
+            objective="Improve the code",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=0,
+                max_evaluations=10,
+                perfect_score_threshold=None,
+                frontier_type="objective",
+            ),
+            worktree=WorktreeConfig(),
+        )
+        run_evolution(config, tmp_path, base_dir)
+
+        # The init sync site must have invoked the snapshot helper, and
+        # the first call's return value must reflect the rebuilt
+        # frontier (stale placeholder gone, replaced by the loaded
+        # candidate's objective-axis snapshot).
+        assert snapshot_spy.call_count >= 1, (
+            "init sync site did not call active_frontier_snapshot; "
+            "the rebuild path is broken"
+        )
+        first_snapshot = snapshot_spy.spy_return_list[0]
+        assert "stale" not in first_snapshot, (
+            "init sync must overwrite the stale snapshot from the "
+            f"prior state.json; got {first_snapshot!r}"
+        )
+        assert first_snapshot == {"quality": ["g0-s0"]}, (
+            "init sync must rebuild active_frontier from the loaded "
+            f"EvalResult; got {first_snapshot!r}"
+        )
