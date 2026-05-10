@@ -199,6 +199,7 @@ def _make_minibatch_config(
         cache_evaluation=cache_evaluation,
         acceptance_criterion=acceptance_criterion,
         val_stage_size=val_stage_size,
+        frontier_type="instance",
     )
     if max_workers is not None:
         evo_kwargs["max_workers"] = max_workers
@@ -655,6 +656,7 @@ class TestMinibatchGateIntegration:
                 max_generations=1,
                 max_evaluations=100,
                 perfect_score_threshold=None,
+                frontier_type="instance",
             ),
             worktree=WorktreeConfig(),
         )
@@ -732,6 +734,7 @@ class TestCachedEvaluateBatch:
                 perfect_score_threshold=None,
                 minibatch_size=3,
                 cache_evaluation=True,
+                frontier_type="instance",
             ),
             worktree=WorktreeConfig(),
         )
@@ -1937,6 +1940,7 @@ class TestWholeCandidateBudget:
                 max_generations=1,
                 max_evaluations=100,
                 perfect_score_threshold=None,
+                frontier_type="instance",
             ),
             worktree=WorktreeConfig(),
         )

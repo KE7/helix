@@ -39,6 +39,12 @@ def make_eval_result(
     candidate_id: str = "g0-s0",
     instance_scores: dict[str, float] | None = None,
 ) -> EvalResult:
+    """Build an EvalResult with default per-example ``objective_scores``.
+
+    The synthesised objective slots let the result satisfy
+    :meth:`ParetoFrontier._validate_objective_scores` under the
+    GEPA-O.A. default ``frontier_type = "hybrid"``.
+    """
     if instance_scores is None:
         instance_scores = {"i1": 0.5}
     return EvalResult(
@@ -46,6 +52,9 @@ def make_eval_result(
         scores={"score": 0.5},
         asi={},
         instance_scores=instance_scores,
+        objective_scores=[
+            {"quality": float(score)} for score in instance_scores.values()
+        ],
     )
 
 
@@ -55,6 +64,13 @@ def make_config(
     max_generations: int = 1,
     max_evaluations: int = 1000,
 ) -> HelixConfig:
+    """Build a HelixConfig for the seedless test suite.
+
+    Leaves ``frontier_type`` at :class:`EvolutionConfig`'s
+    GEPA-O.A. default (``"hybrid"``).  Eval results from
+    :func:`make_eval_result` carry per-example ``objective_scores``
+    so the validator is satisfied.
+    """
     from helix.config import SeedlessConfig
 
     return HelixConfig(

@@ -24,7 +24,12 @@ import random
 
 import pytest
 
-from helix.population import Candidate, EvalResult, ParetoFrontier
+from helix.population import (
+    Candidate,
+    EvalResult,
+    MissingObjectiveScoresError,
+    ParetoFrontier,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +161,14 @@ class TestObjectiveFrontier:
         assert frontier._objective_best["latency"] == {"a"}
         assert frontier._objective_best["accuracy"] == {"a", "b"}
 
-    def test_empty_objective_scores_is_noop(self):
-        frontier = ParetoFrontier(frontier_type="objective")
-        frontier.add(
-            _make_candidate("a"),
-            _make_result("a", {"i0": 1.0}, objective_scores=None),
-        )
-        assert frontier._objective_best == {}
+    @pytest.mark.parametrize("frontier_type", ["objective", "hybrid", "cartesian"])
+    def test_missing_objective_scores_fails_loudly(self, frontier_type):
+        frontier = ParetoFrontier(frontier_type=frontier_type)
+        with pytest.raises(MissingObjectiveScoresError, match="requires"):
+            frontier.add(
+                _make_candidate("a"),
+                _make_result("a", {"i0": 1.0}, objective_scores=None),
+            )
 
     def test_active_frontier_is_objective_dict(self):
         frontier = ParetoFrontier(frontier_type="objective")
@@ -239,18 +245,26 @@ class TestCartesianFrontier:
         assert frontier._cartesian_best["i0::obj"] == {"a"}
         assert frontier._cartesian_best["i1::obj"] == {"b"}
 
-    def test_length_mismatch_skips_cartesian_update(self):
+    def test_length_mismatch_fails_loudly(self):
         """Defensive: if ``objective_scores`` length ≠ ``instance_scores``
-        length (should not happen on the helix_result path), skip."""
+        length (should not happen on the helix_result path), raise."""
         frontier = ParetoFrontier(frontier_type="cartesian")
-        frontier.add(
-            _make_candidate("a"),
-            _make_result(
-                "a", {"i0": 1.0, "i1": 0.0},
-                objective_scores=[{"obj": 0.5}],  # len 1 vs ids len 2
-            ),
-        )
-        assert frontier._cartesian_best == {}
+        with pytest.raises(MissingObjectiveScoresError, match="length"):
+            frontier.add(
+                _make_candidate("a"),
+                _make_result(
+                    "a", {"i0": 1.0, "i1": 0.0},
+                    objective_scores=[{"obj": 0.5}],  # len 1 vs ids len 2
+                ),
+            )
+
+    def test_empty_objective_slots_fail_loudly(self):
+        frontier = ParetoFrontier(frontier_type="hybrid")
+        with pytest.raises(MissingObjectiveScoresError, match="all objective_scores"):
+            frontier.add(
+                _make_candidate("a"),
+                _make_result("a", {"i0": 1.0}, objective_scores=[{}]),
+            )
 
     def test_active_frontier_is_cartesian_dict(self):
         frontier = ParetoFrontier(frontier_type="cartesian")
@@ -284,6 +298,23 @@ class TestHybridFrontier:
         assert "inst::i0" in merged
         assert "inst::i1" in merged
         assert "obj::obj" in merged
+
+    def test_active_frontier_snapshot_is_distinct_from_candidates(self):
+        frontier = ParetoFrontier(frontier_type="hybrid")
+        frontier.add(
+            _make_candidate("a"),
+            _make_result("a", {"i0": 1.0}, objective_scores=[{"obj": 0.1}]),
+        )
+        frontier.add(
+            _make_candidate("b"),
+            _make_result("b", {"i0": 0.0}, objective_scores=[{"obj": 0.9}]),
+        )
+
+        assert list(frontier._candidates) == ["a", "b"]
+        assert frontier.active_frontier_snapshot() == {
+            "inst::i0": ["a"],
+            "obj::obj": ["b"],
+        }
 
     def test_hybrid_survives_on_either_axis(self):
         """Candidate a wins an instance key but is dominated on objective;
@@ -343,10 +374,10 @@ class TestSelectParentRespectsFrontierType:
         objective-axis winners rather than falling back to
         instance-axis."""
         frontier = ParetoFrontier(frontier_type="objective", rng=random.Random(0))
-        # Candidate a wins on instance but has no objective_scores.
+        # Candidate a wins on instance but loses objective.
         frontier.add(
             _make_candidate("a"),
-            _make_result("a", {"i0": 1.0}, objective_scores=None),
+            _make_result("a", {"i0": 1.0}, objective_scores=[{"obj": 0.1}]),
         )
         # Candidate b is the sole objective-axis winner.
         frontier.add(

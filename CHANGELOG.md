@@ -40,6 +40,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation errors, pointing users at likely typos or misplaced keys.
 
 ### Changed
+- **BREAKING**: `score_parser = "helix_result"` now rejects malformed
+  `side_info["scores"]` payloads instead of silently dropping fields.
+  Non-dict `"scores"` values, non-string objective names, and non-finite
+  / non-numeric objective values now raise `EvaluatorError` at parse
+  time.  Previously these were dropped (with a logged warning at most),
+  which let evaluators stuff arbitrary diagnostics under `"scores"` —
+  including pairwise / Bradley-Terry payloads — and then misread the
+  result as scalar objective semantics.  Pairwise / BT payloads are
+  not implemented in HELIX yet; emit them under a different
+  `side_info` key.  Migration: ensure `side_info["scores"]` is a
+  `dict[str, float|int|bool]` with finite numeric values, or omit the
+  key entirely.
+- **BREAKING**: Non-`"instance"` `evolution.frontier_type` values now
+  fail loudly when an `EvalResult` lacks per-example `objective_scores`,
+  has length-mismatched `objective_scores`, or has all-empty objective
+  slots.  `ParetoFrontier.add()` raises the new
+  `MissingObjectiveScoresError` instead of silently degenerating to
+  scalar / instance-axis behaviour.  `select_parent()` likewise raises
+  rather than falling back to all-candidate sampling on objective-bearing
+  modes.  The `"instance"` path keeps its existing fallback semantics.
 - **BREAKING**: `evolution.cache_evaluation` now defaults to `False`
   (previously `True`).  Matches GEPA Optimize Anything's conservative
   cache_evaluation default
