@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import tempfile
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,23 +37,23 @@ class BudgetState:
 
 
 class EvaluationCache:
-    """Simple evaluation cache keyed by (candidate_id, split).
+    """Simple evaluation cache keyed by (candidate_content_key, split).
 
-    GEPA parity: avoids re-evaluating identical candidates.
-    GEPA uses (candidate_hash, example_id); HELIX uses (candidate_id, split)
-    since HELIX evaluates whole candidates via shell commands.
+    GEPA parity: avoids re-evaluating identical candidate content.  GEPA uses
+    ``(candidate_hash, example_id)``; HELIX's no-example/single-task path has
+    no example ids, so it uses the content key plus split.
     """
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, str], dict[str, Any]] = {}
 
-    def get(self, candidate_id: str, split: str) -> dict[str, Any] | None:
+    def get(self, candidate_key: str, split: str) -> dict[str, Any] | None:
         """Return cached result dict or None."""
-        return self._cache.get((candidate_id, split))
+        return self._cache.get((candidate_key, split))
 
-    def put(self, candidate_id: str, split: str, result_dict: dict[str, Any]) -> None:
+    def put(self, candidate_key: str, split: str, result_dict: dict[str, Any]) -> None:
         """Store a result in the cache."""
-        self._cache[(candidate_id, split)] = result_dict
+        self._cache[(candidate_key, split)] = result_dict
 
     def __len__(self) -> int:
         return len(self._cache)
@@ -270,11 +271,22 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
     target = _eval_cache_path(base_dir)
     if not target.exists():
         return None
-    with open(target, "rb") as f:
-        loaded = pickle.load(f)
-    if not isinstance(loaded, dict):
-        raise ValueError(
-            f"eval_cache.pkl at {target} did not contain a dict "
-            f"(got {type(loaded).__name__})."
+    try:
+        with open(target, "rb") as f:
+            loaded = pickle.load(f)
+    except Exception as exc:
+        warnings.warn(
+            f"Ignoring unreadable eval cache at {target}: {type(exc).__name__}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
         )
+        return None
+    if not isinstance(loaded, dict):
+        warnings.warn(
+            f"Ignoring eval cache at {target}: expected dict, got "
+            f"{type(loaded).__name__}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
     return loaded

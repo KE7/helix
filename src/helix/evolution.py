@@ -9,6 +9,7 @@ import os
 import random as _random
 import shutil
 import shlex
+import subprocess
 import threading
 import traceback
 from pathlib import Path
@@ -623,22 +624,82 @@ def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
         return lock
 
 
+def _candidate_content_key(candidate: Candidate) -> str:
+    """Return a stable content key for cache reuse across equivalent candidates.
+
+    Contract: the caller is responsible for ensuring the candidate's worktree
+    has its evaluation-relevant content committed (clean working tree, no
+    untracked files). The key is derived from ``HEAD^{tree}``, which is
+    content-addressable over the *committed* tracked tree only — it does not
+    reflect uncommitted modifications, the staged index, or untracked files.
+
+    Defensive behavior: if the worktree is detected to be dirty (modified
+    tracked files or untracked, non-ignored files present), we fall back to
+    ``candidate.id`` so that two candidates with identical HEAD trees but
+    differing dirty state cannot collide on the same cache key. Submodule
+    contents are summarized as gitlinks inside the parent tree, so changing
+    the submodule pointer changes the key but in-place edits inside an
+    uncommitted submodule do not — keep submodule state committed for
+    reliable reuse.
+    """
+    try:
+        tree_proc = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=candidate.worktree_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        sha = tree_proc.stdout.strip()
+        if not sha:
+            return candidate.id
+
+        # Reject the tree SHA if the worktree is dirty or has untracked
+        # (non-ignored) files; otherwise we'd risk a false cache hit.
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+            cwd=candidate.worktree_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if status_proc.stdout.strip():
+            logger.warning(
+                "Candidate %s worktree is not clean; falling back to id cache "
+                "key to avoid stale-content cache hits.",
+                candidate.id,
+            )
+            return candidate.id
+        return sha
+    except Exception as exc:
+        logger.warning(
+            "Could not resolve git tree for candidate %s (%s); falling back "
+            "to id cache key.",
+            candidate.id,
+            exc,
+        )
+    return candidate.id
+
+
 def _cached_eval(
     candidate: Candidate,
     config: HelixConfig,
     split: str,
-    cache: EvaluationCache,
+    cache: EvaluationCache | None,
 ) -> tuple[EvalResult, bool]:
     """Run evaluator with cache.  Returns (result, was_cached).
 
-    GEPA parity (Fix 11): avoid re-evaluating identical (candidate_id, split)
-    pairs.  Only genuinely new evaluations should consume budget.
+    GEPA parity: cache only when enabled, and key by candidate content rather
+    than HELIX's lineage id so equivalent candidates can reuse results.
     """
-    cached = cache.get(candidate.id, split)
+    if cache is None:
+        return run_evaluator(candidate, config, split=split), False
+    candidate_key = _candidate_content_key(candidate)
+    cached = cache.get(candidate_key, split)
     if cached is not None:
         return EvalResult.from_dict(cached), True
     result = run_evaluator(candidate, config, split=split)
-    cache.put(candidate.id, split, result.to_dict())
+    cache.put(candidate_key, split, result.to_dict())
     return result, False
 
 
@@ -669,11 +730,6 @@ def _cached_evaluate_batch(
     subprocess (0 if all were cached) — mirrors GEPA's
     ``len(uncached_ids)`` return value.
     """
-    # Cache keys must remain stable across re-evals of the same candidate
-    # identity, but train/val batches must not alias when they share
-    # positional ids like "0", "1", ... .
-    cand_dict: dict[str, str] = {"id": candidate.id, "split": split}
-
     # Non-cached branch — mirrors GEPA state.py:628-633 verbatim.
     if cache is None:
         # Per-worktree lock (see ``_worktree_lock`` docstring): serializes
@@ -693,6 +749,13 @@ def _cached_evaluate_batch(
     # Cached branch — delegate to the GEPA-parity helper on the cache
     # itself (helix.eval_cache.EvaluationCache.evaluate_with_cache_full,
     # which is a line-for-line port of GEPA state.py:94-130).
+    # Cache keys must remain stable across equivalent candidate content, but
+    # train/val batches must not alias when they share positional ids like
+    # "0", "1", ... .
+    cand_dict: dict[str, str] = {
+        "content_key": _candidate_content_key(candidate),
+        "split": split,
+    }
 
     # Closure side-channel: the cache stores ``(output, score, objective_scores)``
     # per id but has no slot for freeform ``side_info``.  Collect fresh
@@ -804,6 +867,57 @@ def _cached_evaluate_batch(
         objective_scores=objective_scores_list,
     )
     return merged, num_actual_evals
+
+
+def _inject_top_k_best_example_history(
+    eval_result: EvalResult,
+    frontier: ParetoFrontier,
+    *,
+    k: int = 3,
+) -> EvalResult:
+    """Attach per-example best-history context for reflection prompts.
+
+    Optimize Anything exposes top-performing example histories to reflection.
+    HELIX's compatible surface is a per-example ``side_info`` field named
+    ``top_k_best_example_history``; it is rendered by the existing diagnostics
+    prompt path without changing candidate/worktree semantics.
+    """
+    if k <= 0 or not eval_result.instance_scores or not frontier._results:
+        return eval_result
+
+    example_ids = list(eval_result.instance_scores.keys())
+    history_by_id: dict[str, list[dict[str, Any]]] = {}
+    for eid in example_ids:
+        rows: list[dict[str, Any]] = []
+        for cid, result in frontier._results.items():
+            if eid in result.instance_scores:
+                rows.append(
+                    {
+                        "candidate_id": cid,
+                        "score": float(result.instance_scores[eid]),
+                    }
+                )
+        rows.sort(key=lambda row: row["score"], reverse=True)
+        if rows:
+            history_by_id[eid] = rows[:k]
+
+    if not history_by_id:
+        return eval_result
+
+    per_example = (
+        [dict(item) for item in eval_result.per_example_side_info]
+        if eval_result.per_example_side_info is not None
+        else [{} for _ in example_ids]
+    )
+    if len(per_example) != len(example_ids):
+        per_example = [{} for _ in example_ids]
+
+    for idx, eid in enumerate(example_ids):
+        history_rows = history_by_id.get(eid)
+        if history_rows:
+            per_example[idx]["top_k_best_example_history"] = history_rows
+    eval_result.per_example_side_info = per_example
+    return eval_result
 
 
 def _full_val_example_ids(
@@ -921,9 +1035,11 @@ def _run_evolution_impl(
     rng = _random.Random(config.rng_seed)
     frontier = ParetoFrontier(rng=rng, frontier_type=config.evolution.frontier_type)
 
-    # GEPA parity (Fix 11): evaluation cache — skip re-evaluation of
-    # identical (candidate_id, split) pairs.
-    eval_cache = EvaluationCache()
+    # No-example/single-task cache.  This is deliberately gated by
+    # cache_evaluation, the same flag as the per-example cache below.
+    eval_cache: EvaluationCache | None = (
+        EvaluationCache() if config.evolution.cache_evaluation else None
+    )
 
     # -- Phase 3 integration: minibatch sampling + GEPA-style acceptance.
     # Construct train/val loaders.  Missing train_path → single-task
@@ -1190,9 +1306,11 @@ def _run_evolution_impl(
             )
         else:
             _refresh_protected_evaluator_files(seed, config, project_root)
-            seed_result = run_evaluator(seed, config)
+            seed_result, _seed_cached = _cached_eval(seed, config, "val", eval_cache)
             seed_result.candidate_id = seed.id
-            state.budget.evaluations += _evaluation_budget_units()
+            state.budget.evaluations += _evaluation_budget_units(
+                was_cached=_seed_cached
+            )
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
@@ -1893,10 +2011,17 @@ def _run_evolution_impl(
                     eval_for_mutate = parent_mb_result
                 else:
                     set_phase(HelixPhase.TRAIN_EVALUATION)
-                    eval_for_mutate, _ = _cached_eval(
+                    eval_for_mutate, _train_cached = _cached_eval(
                         parent, config, "train", eval_cache
                     )
                     eval_for_mutate.candidate_id = parent.id
+                    state.budget.evaluations += _evaluation_budget_units(
+                        was_cached=_train_cached
+                    )
+
+                eval_for_mutate = _inject_top_k_best_example_history(
+                    eval_for_mutate, frontier
+                )
 
                 # Skip-if-perfect (GEPA reflective_mutation.py:308-327, audit
                 # finding M1 in audit-init-engine.md B1/B2):
