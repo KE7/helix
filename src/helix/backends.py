@@ -9,6 +9,33 @@ BackendName: TypeAlias = Literal["claude", "codex", "cursor", "gemini", "opencod
 
 BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "opencode")
 
+
+# ---------------------------------------------------------------------------
+# AgentConfig.effort metadata
+# ---------------------------------------------------------------------------
+#
+# ``agent.effort`` is the user-facing knob for "reasoning level / thinking
+# budget" on backends that expose one.  The string value is forwarded to a
+# backend-native CLI flag in ``helix.mutator``:
+#
+#   - ``claude``:    ``--effort <value>``   (Claude Code thinking budget)
+#   - ``opencode``:  ``--variant <value>``  (model variant selector)
+#   - others:        silently ignored (no equivalent CLI surface)
+#
+# The two registries below let the config layer fail fast on bad combinations
+# without hard-coding backend knowledge into ``HelixConfig``.
+
+EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset({"claude", "opencode"})
+"""Backends that propagate ``agent.effort`` to their underlying CLI."""
+
+# ``None`` here means "any non-empty string accepted" — we still let a
+# strange value through and let the backend CLI decide, but a known set of
+# values lets HELIX warn early on obvious typos like ``effrot = "high"``.
+EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
+    "claude": frozenset({"low", "medium", "high"}),
+    "opencode": None,  # variant strings are model-specific; opencode validates them.
+}
+
 BACKEND_DISPLAY_NAMES: dict[str, str] = {
     "claude": "Claude Code",
     "codex": "Codex CLI",

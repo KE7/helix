@@ -251,3 +251,87 @@ class TestDirectModelConstruction:
         cfg = WorktreeConfig()
         assert cfg.base_dir == ".helix/worktrees"
         assert cfg.cleanup_dominated is False  # deprecated: GEPA append-only
+
+
+# ---------------------------------------------------------------------------
+# agent.effort validation (per-backend allowlist + ignored-backend warning)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentEffortValidation:
+    """Surface obvious mismatches between ``agent.effort`` and ``agent.backend``.
+
+    HELIX forwards ``agent.effort`` to a backend-native CLI flag in
+    ``helix.mutator`` (``claude --effort``, ``opencode --variant``).  The
+    other backends silently ignore the field — without a warning the
+    setting looks like it's taking effect when it isn't.
+    """
+
+    def _base_kwargs(self):
+        return {
+            "objective": "test",
+            "evaluator": EvaluatorConfig(command="echo 1"),
+        }
+
+    def test_effort_unset_is_silent(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="claude"),
+        )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warns_on_ignoring_backend_codex(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="codex", effort="high"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("does not propagate" in w and "Codex" in w for w in warnings), warnings
+
+    def test_effort_warns_on_ignoring_backend_gemini(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="gemini", effort="high"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("does not propagate" in w for w in warnings), warnings
+
+    def test_effort_warns_on_ignoring_backend_cursor(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="cursor", effort="medium"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("does not propagate" in w for w in warnings), warnings
+
+    def test_effort_accepts_valid_value_on_claude(self, recwarn):
+        for value in ("low", "medium", "high"):
+            HelixConfig(
+                **self._base_kwargs(),
+                agent=AgentConfig(backend="claude", effort=value),
+            )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warns_on_unknown_value_for_claude(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="claude", effort="extreme"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("not a recognized value" in w and "extreme" in w for w in warnings), warnings
+
+    def test_effort_does_not_warn_on_unrestricted_backend(self, recwarn):
+        """opencode accepts arbitrary --variant strings; HELIX must not warn."""
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="opencode", effort="qwen-coder-plus"),
+        )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warning_is_warning_not_error(self):
+        """The validation must remain a warning so users can override safely."""
+        # Should not raise even with a deliberately-unsupported combo.
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="codex", effort="high"),
+        )
