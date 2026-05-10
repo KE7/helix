@@ -147,10 +147,24 @@ def _collect_asi(
         stderr: Main command stderr.
         extra_outputs: List of (stdout, stderr) tuples from extra_commands.
         config: HelixConfig controlling what to include.
+        log: Rendered ``helix.log()`` notes captured from the evaluator's
+            ``HELIX_ASI_LOG`` file.  Stored under the ``"log"`` key when
+            non-empty so the mutation prompt can render it as
+            ``## Evaluator Notes``.
+        returncode: Evaluator subprocess exit code.  Stored as a
+            stringified ``"_returncode"`` key so downstream consumers
+            (notably the mutation prompt builder) can distinguish
+            success from failure when deciding whether stdout/stderr
+            should be surfaced as fallback debug context.  Kept inside
+            ``asi`` rather than promoted to a typed field to preserve
+            the GEPA O.A. EvaluationBatch interface.
 
     Returns:
-        Dict with keys "stdout", "stderr", "log", "extra_0", etc.
-        All values are the FULL output — never truncated.
+        Dict with keys "stdout", "stderr", "log", "_returncode",
+        "extra_0", "extra_1", etc.  All values are the FULL output —
+        never truncated.  Reserved keys consumed by HELIX itself
+        (``log``, ``_returncode``) are filtered out before the catch-all
+        "extra" rendering in the mutation prompt.
     """
     asi: dict[str, str] = {}
 
@@ -234,19 +248,37 @@ def run_evaluator(
     )
     helix_log_name = f".helix_asi_log_{uuid.uuid4().hex}.jsonl"
     helix_log_path = Path(candidate.worktree_path) / helix_log_name
+    # Absolute path inside the sidecar — the evaluator command may run
+    # with a different cwd than the one we mount the worktree at, so the
+    # ``HELIX_ASI_LOG`` env var and the trailing capture command both
+    # use the absolute ``/workspace/...`` form to remove that
+    # assumption.
+    helix_log_sandbox_path = f"/workspace/{helix_log_name}"
     cmd_tokens = _validate_and_split_command(evaluator.command)
     if config.sandbox.enabled and config.sandbox.evaluator:
-        env[HELIX_ASI_LOG_ENV] = f"/workspace/{helix_log_name}"
+        env[HELIX_ASI_LOG_ENV] = helix_log_sandbox_path
         if current_evaluator_sidecar_runtime() is None:
             raise ValueError(
                 "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
                 "Run evaluations through helix.evolution.run_evolution."
             )
+        # The trailing ``cat`` command captures the JSONL log file from
+        # inside the sidecar.  ``2>/dev/null || true`` keeps a missing
+        # file (no ``helix.log()`` calls) from looking like a sandbox
+        # error.  Cleanup is deliberately asymmetric vs. the host path
+        # below: the worktree is disposed by the caller after
+        # evaluation, so we do not need to ``rm`` the log inside the
+        # sandbox.  If worktrees become reusable, reintroduce an
+        # explicit ``rm`` step here to mirror the host ``finally``.
         command_results = run_sandboxed_commands(
             [
                 cmd_tokens,
                 *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands],
-                ["sh", "-c", f"cat {shlex.quote(helix_log_name)} 2>/dev/null || true"],
+                [
+                    "sh",
+                    "-c",
+                    f"cat {shlex.quote(helix_log_sandbox_path)} 2>/dev/null || true",
+                ],
             ],
             cwd=candidate.worktree_path,
             env=env,
@@ -260,6 +292,10 @@ def run_evaluator(
         helix_log_text = read_asi_log_text(command_results[-1].stdout)
         extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:-1]]
     else:
+        # Host path: the same env var also propagates to ``extra_commands``
+        # below — those subprocesses will append to the same JSONL file
+        # if they call ``helix.log()``.  Notes from extras are merged in
+        # invocation order with the main command's notes.
         env[HELIX_ASI_LOG_ENV] = str(helix_log_path)
         try:
             result = subprocess.run(
