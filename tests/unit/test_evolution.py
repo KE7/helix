@@ -1731,8 +1731,8 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-            evolution=EvolutionConfig(max_generations=0, frontier_type="instance"),
-        )
+        evolution=EvolutionConfig(max_generations=0, frontier_type="instance"),
+    )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -1742,3 +1742,67 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
         fixed_env=config.env,
         extra_hosts=config.sandbox.extra_hosts,
     )
+
+
+# ---------------------------------------------------------------------------
+# run_evolution — active_frontier sync on multi-axis frontier_type
+# ---------------------------------------------------------------------------
+
+
+class TestActiveFrontierSyncOnObjectiveMode:
+    """Regression: ``state.active_frontier`` must be kept in lock-step with
+    ``ParetoFrontier.active_frontier_snapshot()`` at every accept site
+    (init, seed, mutation, merge) when ``frontier_type != "instance"``.
+
+    Without this sync, resume on a multi-axis run would lose the
+    retained Pareto front.  The four touch points
+    (``_sync_frontier_state`` calls) are inspected indirectly by
+    asserting on the ``EvolutionState`` passed into ``save_state`` after
+    a minimal seed-only run.
+    """
+
+    def test_seed_acceptance_populates_active_frontier_for_objective_mode(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            # Per-example objective_scores positional to instance_scores order.
+            return EvalResult(
+                candidate_id=candidate.id,
+                scores={},
+                asi={},
+                instance_scores={"i1": 0.5, "i2": 0.6},
+                objective_scores=[{"quality": 0.7}, {"quality": 0.9}],
+            )
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = HelixConfig(
+            objective="Improve the code",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=0,
+                max_evaluations=10,
+                perfect_score_threshold=None,
+                frontier_type="objective",
+            ),
+            worktree=WorktreeConfig(),
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        save_calls = all_mocks["save_state"].call_args_list
+        assert save_calls, "save_state should have been invoked at least once"
+        last_state = save_calls[-1].args[0]
+
+        # Objective-mode active_frontier keys are bare objective names
+        # (no inst:: / obj:: prefix — that prefixing only happens on the
+        # hybrid path).  Mean across the two example slots is 0.8.
+        assert last_state.active_frontier == {"quality": ["g0-s0"]}, (
+            "active_frontier must be populated after seed acceptance "
+            "in objective frontier mode"
+        )
+        # And the append-only candidate list is in lock-step.
+        assert last_state.frontier == ["g0-s0"]

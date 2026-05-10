@@ -1060,7 +1060,7 @@ def _run_evolution_impl(
 
     def _sync_frontier_state() -> None:
         assert state is not None
-        state.frontier = list(frontier._candidates.keys())
+        state.frontier = frontier.candidate_ids()
         state.active_frontier = frontier.active_frontier_snapshot()
 
     if state is None:
