@@ -32,6 +32,7 @@ class EventType(str, Enum):
     FRONTIER_UPDATE = "FRONTIER_UPDATE"
     ITER_END = "ITER_END"
     OPT_END = "OPT_END"
+    BUDGET_UPDATE = "BUDGET_UPDATE"
 
 
 @dataclass
@@ -43,7 +44,27 @@ class Event:
     hit_ids: list[Any] | None = None
     miss_ids: list[Any] | None = None
     decision: str | None = None
+    # Human-readable label for *why* an event was emitted (e.g., the
+    # ``charge_evaluation`` source: "seed_val", "merge_subsample",
+    # "mutation_minibatch_gate", ...).  Distinct from ``decision``,
+    # which carries iteration-level accept/reject text, and from
+    # ``source`` below, which is reserved for the ``"file:line"`` stack
+    # frame captured by ``inspect`` when enabled.
+    reason: str | None = None
     score: float | None = None
+    budget_delta: int | None = None
+    budget_evaluations: int | None = None
+    input_tokens_delta: int | None = None
+    output_tokens_delta: int | None = None
+    cost_usd_delta: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
+    generation: int | None = None
+    proposal_index: int | None = None
+    mutation_counter: int | None = None
+    merge_counter: int | None = None
+    merge_invocations: int | None = None
     source: str | None = None  # "file:line" — captured via inspect when enabled
 
 

@@ -2,6 +2,7 @@
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
+from helix.asi import log
 from helix.population import (
     Candidate,
     CandidateSummary,
@@ -20,4 +21,5 @@ __all__ = [
     "EvalResult",
     "HelixResult",
     "__version__",
+    "log",
 ]
