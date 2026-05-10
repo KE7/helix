@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+import warnings
 from pathlib import Path
 
 import pytest
@@ -329,9 +330,67 @@ class TestAgentEffortValidation:
         assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
 
     def test_effort_warning_is_warning_not_error(self):
-        """The validation must remain a warning so users can override safely."""
-        # Should not raise even with a deliberately-unsupported combo.
-        HelixConfig(
-            **self._base_kwargs(),
-            agent=AgentConfig(backend="codex", effort="high"),
+        """The validation must emit a warning (not raise) on unsupported combos."""
+        # ``pytest.warns`` makes both invariants explicit at once: HelixConfig
+        # must construct successfully *and* a UserWarning must be emitted.
+        with pytest.warns(UserWarning, match="does not propagate"):
+            HelixConfig(
+                **self._base_kwargs(),
+                agent=AgentConfig(backend="codex", effort="high"),
+            )
+
+    def test_every_backend_has_effort_metadata(self):
+        """Every entry in ``BACKENDS`` must be classified by the validator.
+
+        Guards against drift: when a new backend is added to ``BACKENDS``
+        without anyone updating ``EFFORT_AWARE_BACKENDS`` /
+        ``EFFORT_VALID_VALUES``, this test surfaces it immediately rather
+        than letting the validator silently emit the wrong message (or no
+        message) for the new backend.
+        """
+        from helix.backends import (
+            BACKENDS,
+            EFFORT_AWARE_BACKENDS,
+            EFFORT_VALID_VALUES,
         )
+
+        # Every effort-aware backend must appear in EFFORT_VALID_VALUES so
+        # the "is this a known value?" branch can fire.
+        for backend in EFFORT_AWARE_BACKENDS:
+            assert backend in EFFORT_VALID_VALUES, (
+                f"{backend!r} is in EFFORT_AWARE_BACKENDS but missing from "
+                "EFFORT_VALID_VALUES; the validator can't decide whether "
+                "values are typos."
+            )
+
+        # Every BACKENDS entry must produce a predictable signal under a
+        # sentinel ``effort`` value:
+        #   - ignoring backends            -> "does not propagate" warning
+        #   - aware + restricted allowlist -> "not a recognized value" warning
+        #   - aware + unrestricted (None)  -> silent (any string is allowed)
+        # Using a sentinel guaranteed not to be in any restricted allowlist
+        # forces aware-restricted backends to warn too.
+        sentinel = "__helix_effort_sentinel__"
+        for backend in BACKENDS:
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter("always")
+                HelixConfig(
+                    **self._base_kwargs(),
+                    agent=AgentConfig(backend=backend, effort=sentinel),
+                )
+            messages = [
+                str(w.message) for w in captured if w.category is UserWarning
+            ]
+            if backend not in EFFORT_AWARE_BACKENDS:
+                assert any(
+                    "does not propagate" in m for m in messages
+                ), f"{backend!r} produced no 'does not propagate' warning: {messages}"
+            elif EFFORT_VALID_VALUES.get(backend) is not None:
+                assert any(
+                    "not a recognized value" in m for m in messages
+                ), f"{backend!r} produced no 'not a recognized value' warning: {messages}"
+            else:
+                # Unrestricted aware backend (e.g. opencode): silent is correct.
+                assert messages == [], (
+                    f"{backend!r} is unrestricted but emitted warnings: {messages}"
+                )

@@ -913,7 +913,20 @@ def log_cmd(project_dir: Path | None) -> None:
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Project root directory (defaults to current working directory).",
 )
-def resume(config_path: str, project_dir: Path | None) -> None:
+@click.option(
+    "--effort",
+    default=None,
+    help=(
+        "Override backend reasoning-effort level for the resumed run. "
+        "Forwarded as --effort to the 'claude' backend (low|medium|high) "
+        "and as --variant to the 'opencode' backend; ignored by "
+        "codex/cursor/gemini (a warning is emitted when set on a backend "
+        "that does not support it)."
+    ),
+)
+def resume(
+    config_path: str, project_dir: Path | None, effort: str | None
+) -> None:
     """Resume a previously started evolution run."""
     from helix.evolution import run_evolution
 
@@ -953,6 +966,12 @@ def resume(config_path: str, project_dir: Path | None) -> None:
     except FileNotFoundError:
         print_error(f"Config file not found: {cfg_file}")
         raise SystemExit(1)
+
+    # Apply CLI overrides (parity with ``helix evolve``).
+    if effort is not None:
+        config = config.model_copy(
+            update={"agent": config.agent.model_copy(update={"effort": effort})}
+        )
 
     print_info(f"Resuming from generation {state.generation if state else 0}…")
     try:
