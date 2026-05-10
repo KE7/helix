@@ -19,13 +19,16 @@ BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "ope
 # backend-native CLI flag in ``helix.mutator``:
 #
 #   - ``claude``:    ``--effort <value>``   (Claude Code thinking budget)
+#   - ``codex``:     ``-c model_reasoning_effort=<value>`` (Codex CLI config)
 #   - ``opencode``:  ``--variant <value>``  (model variant selector)
 #   - others:        silently ignored (no equivalent CLI surface)
 #
 # The two registries below let the config layer fail fast on bad combinations
 # without hard-coding backend knowledge into ``HelixConfig``.
 
-EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset({"claude", "opencode"})
+EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset(
+    {"claude", "codex", "opencode"}
+)
 """Backends that propagate ``agent.effort`` to their underlying CLI."""
 
 # ``None`` here means "any string accepted" — we still let strange values
@@ -38,6 +41,7 @@ EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset({"claude", "opencode"}
 # until this map is updated; the value still passes through to the CLI.
 EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
     "claude": frozenset({"low", "medium", "high"}),
+    "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
     "opencode": None,  # variant strings are model-specific; opencode validates them.
 }
 
