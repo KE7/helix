@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -20,6 +21,9 @@ from typing import Literal
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 HELIX_ARTIFACT_NAMES = {
@@ -250,21 +254,32 @@ def _copy_tree_contents(
     dst.mkdir(parents=True, exist_ok=True)
     ignore = _ignore_for_sync if for_sync else _ignore_for_copy
     omitted = omit_paths or set()
-    for child in src.iterdir():
+    try:
+        children = list(src.iterdir())
+    except OSError as exc:
+        logger.warning("skipping inaccessible sandbox directory %s: %s", src, exc)
+        return
+    for child in children:
         rel = child.relative_to(src)
         if ignore(rel) or _matches_omitted_path(rel, omitted):
             continue
         if skip_special_files and not _is_supported_workspace_file(child):
             continue
         target = dst / child.name
-        if child.is_symlink():
+        try:
+            child_is_symlink = child.is_symlink()
+            child_is_dir = child.is_dir()
+        except OSError as exc:
+            logger.warning("skipping inaccessible sandbox path %s: %s", child, exc)
+            continue
+        if child_is_symlink:
             if target.exists() or target.is_symlink():
                 if target.is_dir() and not target.is_symlink():
                     shutil.rmtree(target)
                 else:
                     target.unlink()
             os.symlink(os.readlink(child), target)
-        elif child.is_dir():
+        elif child_is_dir:
             if target.exists() or target.is_symlink():
                 if not target.is_dir() or target.is_symlink():
                     target.unlink()
@@ -285,7 +300,10 @@ def _copy_tree_contents(
                     shutil.rmtree(target)
                 else:
                     target.unlink()
-            shutil.copy2(child, target)
+            try:
+                shutil.copy2(child, target)
+            except PermissionError as exc:
+                logger.warning("skipping inaccessible sandbox file %s: %s", child, exc)
 
 
 def _remove_extraneous_files(
@@ -296,13 +314,29 @@ def _remove_extraneous_files(
     omit_paths: set[Path] | None = None,
 ) -> None:
     omitted = omit_paths or set()
-    for child in list(dst.iterdir()):
+    try:
+        children = list(dst.iterdir())
+    except OSError as exc:
+        logger.warning("skipping inaccessible destination directory %s: %s", dst, exc)
+        return
+    for child in children:
         rel = child.relative_to(dst)
         if _ignore_for_sync(rel) or _matches_omitted_path(rel, omitted):
             continue
         if skip_special_files and not _is_supported_workspace_file(child):
             continue
-        if not (src / rel).exists() and not (src / rel).is_symlink():
+        source_child = src / rel
+        try:
+            source_exists = source_child.exists() or source_child.is_symlink()
+        except OSError as exc:
+            logger.warning(
+                "keeping %s because sandbox source %s is inaccessible: %s",
+                child,
+                source_child,
+                exc,
+            )
+            continue
+        if not source_exists:
             if child.is_dir() and not child.is_symlink():
                 shutil.rmtree(child)
             else:
@@ -319,6 +353,28 @@ def _remove_extraneous_files(
                     if path != rel and rel in path.parents
                 },
             )
+
+
+def _safe_rmtree(path: Path, *, docker_image: str | None = None) -> None:
+    try:
+        shutil.rmtree(path)
+        return
+    except FileNotFoundError:
+        return
+    except OSError as first_exc:
+        if docker_image and (host_owner := _host_owner()):
+            _docker_chown_workspace(path, docker_image, host_owner)
+            try:
+                shutil.rmtree(path)
+                return
+            except OSError as second_exc:
+                logger.warning(
+                    "failed to clean sandbox temp dir %s after chown: %s",
+                    path,
+                    second_exc,
+                )
+                return
+        logger.warning("failed to clean sandbox temp dir %s: %s", path, first_exc)
 
 
 def _sync_back_workspace(
@@ -346,11 +402,18 @@ def _sync_back_workspace(
 def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
     """Preserve HELIX-owned transcript artifacts while hiding .helix* from agents."""
     source = src / ".helix_artifacts" / "backend_transcripts"
-    if not source.exists():
+    try:
+        if not source.exists():
+            return
+    except OSError as exc:
+        logger.warning("skipping inaccessible backend transcript artifacts %s: %s", source, exc)
         return
     target = dst / ".helix_artifacts" / "backend_transcripts"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, dirs_exist_ok=True)
+    try:
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    except OSError as exc:
+        logger.warning("skipping backend transcript artifact copy from %s: %s", source, exc)
 
 
 def _init_synthetic_git_repo(workspace: Path) -> None:
@@ -802,8 +865,9 @@ def run_sandboxed_commands(
     docker_image = image or sandbox.image
     if docker_image is None:
         raise ValueError("sandbox image must be provided")
-    with tempfile.TemporaryDirectory(prefix="helix-sandbox-") as tmp:
-        workspace = Path(tmp) / "workspace"
+    tmp_path = Path(tempfile.mkdtemp(prefix="helix-sandbox-"))
+    try:
+        workspace = tmp_path / "workspace"
         omit_paths = (
             {Path(item) for item in sandbox.omit_from_agent}
             if scope == "agent"
@@ -872,7 +936,9 @@ def run_sandboxed_commands(
             )
             if scope == "agent":
                 _sync_back_backend_transcripts(workspace, source)
-    return results
+        return results
+    finally:
+        _safe_rmtree(tmp_path, docker_image=docker_image)
 
 
 def run_sandboxed_command(

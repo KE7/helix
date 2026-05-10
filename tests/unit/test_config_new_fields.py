@@ -111,7 +111,7 @@ class TestEvolutionConfigNewFields:
 
         assert cfg.max_workers == (os.cpu_count() or 32)
         assert cfg.num_parallel_proposals == 1
-        assert cfg.cache_evaluation is True
+        assert cfg.cache_evaluation is False
         assert cfg.acceptance_criterion == "strict_improvement"
         assert cfg.val_stage_size is None
 
