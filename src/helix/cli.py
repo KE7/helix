@@ -599,9 +599,10 @@ def sandbox_logout(
     default=None,
     help=(
         "Override backend reasoning-effort level. Forwarded as --effort to "
-        "the 'claude' backend (low|medium|high) and as --variant to the "
-        "'opencode' backend; ignored by codex/cursor/gemini (a warning is "
-        "emitted when set on a backend that does not support it)."
+        "the 'claude' backend (low|medium|high), as model_reasoning_effort "
+        "to the 'codex' backend, and as --variant to the 'opencode' backend; "
+        "ignored by cursor/gemini (a warning is emitted when set on a backend "
+        "that does not support it)."
     ),
 )
 def evolve(

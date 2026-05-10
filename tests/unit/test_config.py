@@ -262,10 +262,11 @@ class TestDirectModelConstruction:
 class TestAgentEffortValidation:
     """Surface obvious mismatches between ``agent.effort`` and ``agent.backend``.
 
-    HELIX forwards ``agent.effort`` to a backend-native CLI flag in
-    ``helix.mutator`` (``claude --effort``, ``opencode --variant``).  The
-    other backends silently ignore the field — without a warning the
-    setting looks like it's taking effect when it isn't.
+    HELIX forwards ``agent.effort`` to a backend-native CLI flag/config in
+    ``helix.mutator`` (``claude --effort``, ``codex -c
+    model_reasoning_effort=...``, ``opencode --variant``).  The other
+    backends silently ignore the field — without a warning the setting looks
+    like it's taking effect when it isn't.
     """
 
     def _base_kwargs(self):
@@ -281,13 +282,13 @@ class TestAgentEffortValidation:
         )
         assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
 
-    def test_effort_warns_on_ignoring_backend_codex(self, recwarn):
-        HelixConfig(
-            **self._base_kwargs(),
-            agent=AgentConfig(backend="codex", effort="high"),
-        )
-        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
-        assert any("does not propagate" in w and "Codex" in w for w in warnings), warnings
+    def test_effort_accepts_valid_value_on_codex(self, recwarn):
+        for value in ("minimal", "low", "medium", "high", "xhigh"):
+            HelixConfig(
+                **self._base_kwargs(),
+                agent=AgentConfig(backend="codex", effort=value),
+            )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
 
     def test_effort_warns_on_ignoring_backend_gemini(self, recwarn):
         HelixConfig(
@@ -321,6 +322,14 @@ class TestAgentEffortValidation:
         warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
         assert any("not a recognized value" in w and "extreme" in w for w in warnings), warnings
 
+    def test_effort_warns_on_unknown_value_for_codex(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="codex", effort="extreme"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("not a recognized value" in w and "extreme" in w for w in warnings), warnings
+
     def test_effort_does_not_warn_on_unrestricted_backend(self, recwarn):
         """opencode accepts arbitrary --variant strings; HELIX must not warn."""
         HelixConfig(
@@ -336,7 +345,7 @@ class TestAgentEffortValidation:
         with pytest.warns(UserWarning, match="does not propagate"):
             HelixConfig(
                 **self._base_kwargs(),
-                agent=AgentConfig(backend="codex", effort="high"),
+                agent=AgentConfig(backend="gemini", effort="high"),
             )
 
     def test_every_backend_has_effort_metadata(self):

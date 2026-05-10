@@ -689,7 +689,7 @@ def _build_backend_args(
         # ``effort`` is the user-facing knob for reasoning-level / thinking
         # budget; the registry of backends that honor it lives in
         # ``helix.backends.EFFORT_AWARE_BACKENDS`` and must stay in sync
-        # with this branch (and the ``opencode`` branch below).
+        # with this branch (and the ``codex`` / ``opencode`` branches below).
         if config.effort:
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
@@ -706,6 +706,10 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(
+                ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
+            )
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 

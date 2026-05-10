@@ -571,7 +571,7 @@ def _validate_agent_effort(agent: AgentConfig) -> None:
 
     Two cases are surfaced:
 
-    1. **Backend ignores the field** (``codex`` / ``cursor`` / ``gemini``):
+    1. **Backend ignores the field** (``cursor`` / ``gemini``):
        ``effort`` is silently dropped by ``helix.mutator`` because those CLIs
        don't expose an equivalent flag.  Without a warning, users assume the
        knob is taking effect.
