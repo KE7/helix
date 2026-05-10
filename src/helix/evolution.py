@@ -110,22 +110,52 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
     Top-level keys:
       * ``objective``: changes the optimization target outright.
       * ``rng_seed``: pinned for full determinism parity with the prior run.
-      * ``evaluator``: command, parser, extra commands, protected files —
-        all influence what saved scores actually mean.
+      * ``evaluator``: command, parser, stdout/stderr capture flags, extra
+        commands, protected files, sidecar configuration — all influence
+        what saved scores actually mean (GEPA Optimize Anything parity).
       * ``dataset``: full pydantic dump; train/val splits and grouping
         affect which examples saved scores were computed against.
       * ``seedless``: enabled flag and external train/val paths.
       * ``evolution``: frontier dimensionality, acceptance, minibatch /
         sampler shape, val-stage size, and merge policy.
+
+    Deliberately omitted (safe to toggle between runs):
+      * ``evolution.cache_evaluation``: cache state is handled
+        separately via ``eval_cache.pkl`` persistence.
+      * ``evolution.max_generations`` / ``max_evaluations`` / parallelism:
+        budgets and concurrency, not score interpretation.
+      * ``agent.*``: changing the mutation backend / model / effort
+        affects only future proposals, not the meaning of saved scores.
+        (GEPA likewise treats the LM client as out-of-band of the
+        persisted state.)
+      * ``sandbox`` / ``worktree`` / top-level ``seed`` / ``passthrough_env``
+        / ``env``: runtime / filesystem layout.  The separate
+        ``evaluator_integrity_manifest`` covers evaluator-environment
+        drift.
     """
+    # GEPA Optimize Anything parity: ``EvaluatorConfig.include_stdout`` /
+    # ``include_stderr`` directly change which bytes the score parser sees,
+    # so toggling them mid-run can silently reinterpret saved scores.
+    # ``sidecar`` describes a completely different evaluator runtime
+    # (image, runner image, endpoint); resuming under a different sidecar
+    # would compare scores produced by different binaries.  Both are
+    # hard-rejected on resume to match the strict-equality stance GEPA
+    # gets implicitly by pickling its full config alongside state.
     return {
         "objective": config.objective,
         "rng_seed": config.rng_seed,
         "evaluator": {
             "command": config.evaluator.command,
             "score_parser": config.evaluator.score_parser,
+            "include_stdout": config.evaluator.include_stdout,
+            "include_stderr": config.evaluator.include_stderr,
             "extra_commands": list(config.evaluator.extra_commands),
             "protected_files": list(config.evaluator.protected_files),
+            "sidecar": (
+                config.evaluator.sidecar.model_dump(mode="json")
+                if config.evaluator.sidecar is not None
+                else None
+            ),
         },
         "dataset": config.dataset.model_dump(mode="json"),
         "seedless": {
