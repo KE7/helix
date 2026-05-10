@@ -278,6 +278,7 @@ class TestRunEvolutionResume:
             instance_scores={"g0-s0": {"i1": 0.5}},
             budget=BudgetState(evaluations=1),
             config_hash="abc123",
+            frontier_type=config.evolution.frontier_type,
         )
         seedless_mocks["load_state"].return_value = existing_state
         # _load_evaluation must return a result for frontier reconstruction
@@ -305,6 +306,7 @@ class TestRunEvolutionResume:
             instance_scores={"g0-s0": {"i1": 0.5}},
             budget=BudgetState(evaluations=1),
             config_hash="abc123",
+            frontier_type=config.evolution.frontier_type,
         )
         seedless_mocks["load_state"].return_value = existing_state
         seed_result = make_eval_result("g0-s0")
