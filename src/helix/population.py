@@ -10,9 +10,14 @@ import hashlib
 import json
 import logging
 import random
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import asdict, dataclass, field
+from functools import cached_property
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
+
+if TYPE_CHECKING:
+    from helix.state import BudgetState
 
 logger = logging.getLogger(__name__)
 
@@ -176,44 +181,67 @@ class HelixResult:
 
     Mirrors GEPA-style programmatic access without changing the on-disk
     worktree/state model: callers can inspect the best candidate, every
-    accepted candidate summary, lineage, scores, budgets, frontier axes, and
+    accepted candidate, lineage, scores, budgets, frontier axes, and
     run identity without scraping CLI output or JSON files.
+
+    Canonical per-candidate data lives on :attr:`candidate_summaries`
+    (sorted by ``(generation, id)``).  The ``parents``,
+    ``aggregate_scores``, ``sum_scores``, ``instance_scores``, and
+    ``objective_scores`` cached properties are convenience views derived
+    from that list — they share no storage and stay consistent by
+    construction.
     """
 
     best_candidate: Candidate
     best_result: EvalResult | None
     candidates: list[Candidate]
     candidate_summaries: list[CandidateSummary]
-    parents: dict[str, list[str]]
-    aggregate_scores: dict[str, float]
-    sum_scores: dict[str, float]
-    instance_scores: dict[str, dict[str, float]]
-    objective_scores: dict[str, list[dict[str, float]] | None]
+    # ``frontier_ids`` preserves insertion order from
+    # ``EvolutionState.frontier``; ``non_dominated_ids`` is sorted for
+    # stable diffing across runs.  Both intentional.
     frontier_ids: list[str]
     non_dominated_ids: list[str]
     frontier_type: FrontierType
-    budget: Any
+    budget: "BudgetState"
     discovery_counts: dict[str, int]
     run_dir: str
     seed: int | None
     config_hash: str
 
-    @property
-    def id(self) -> str:
-        """Compatibility alias for callers that previously used best.id."""
-        return self.best_candidate.id
+    @cached_property
+    def parents(self) -> dict[str, list[str]]:
+        """Lineage parent ids per candidate, derived from ``candidate_summaries``."""
+        return {s.id: list(s.parents) for s in self.candidate_summaries}
+
+    @cached_property
+    def aggregate_scores(self) -> dict[str, float]:
+        """Per-candidate mean instance score (GEPA aggregate semantics)."""
+        return {s.id: s.aggregate_score for s in self.candidate_summaries}
+
+    @cached_property
+    def sum_scores(self) -> dict[str, float]:
+        """Per-candidate sum of instance scores (GEPA acceptance semantics)."""
+        return {s.id: s.sum_score for s in self.candidate_summaries}
+
+    @cached_property
+    def instance_scores(self) -> dict[str, dict[str, float]]:
+        """Per-candidate per-instance score map."""
+        return {s.id: dict(s.instance_scores) for s in self.candidate_summaries}
+
+    @cached_property
+    def objective_scores(self) -> dict[str, list[dict[str, float]] | None]:
+        """Per-candidate per-example objective slots (None when not harvested)."""
+        return {
+            s.id: (list(s.objective_scores) if s.objective_scores is not None else None)
+            for s in self.candidate_summaries
+        }
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a JSON-compatible dict."""
-        budget_dict = (
-            self.budget
-            if isinstance(self.budget, dict)
-            else {
-                key: getattr(self.budget, key)
-                for key in ("evaluations", "input_tokens", "output_tokens", "cost_usd")
-                if hasattr(self.budget, key)
-            }
-        )
+        """Serialize to a JSON-compatible dict.
+
+        ``budget`` is rendered via :func:`dataclasses.asdict` so any new
+        :class:`helix.state.BudgetState` field shows up automatically.
+        """
         return {
             "best_candidate_id": self.best_candidate.id,
             "best_result": self.best_result.to_dict() if self.best_result else None,
@@ -223,11 +251,11 @@ class HelixResult:
             "sum_scores": self.sum_scores,
             "instance_scores": self.instance_scores,
             "objective_scores": self.objective_scores,
-            "frontier_ids": self.frontier_ids,
-            "non_dominated_ids": self.non_dominated_ids,
+            "frontier_ids": list(self.frontier_ids),
+            "non_dominated_ids": list(self.non_dominated_ids),
             "frontier_type": self.frontier_type,
-            "budget": budget_dict,
-            "discovery_counts": self.discovery_counts,
+            "budget": asdict(self.budget),
+            "discovery_counts": dict(self.discovery_counts),
             "run_dir": self.run_dir,
             "seed": self.seed,
             "config_hash": self.config_hash,
@@ -320,6 +348,28 @@ class ParetoFrontier:
     def frontier_type(self) -> FrontierType:
         """Selected Pareto dimensionality (GEPA parity)."""
         return self._frontier_type
+
+    # ------------------------------------------------------------------
+    # Public read-only accessors
+    # ------------------------------------------------------------------
+    # ``_candidates`` and ``_results`` are append-only internal storage;
+    # external callers (e.g. ``_build_helix_result``, ``render_frontier_table``)
+    # use these read-only views so the storage layout can change without
+    # breaking them.
+
+    @property
+    def candidates(self) -> Mapping[str, Candidate]:
+        """Read-only view of all stored candidates keyed by id."""
+        return MappingProxyType(self._candidates)
+
+    @property
+    def results(self) -> Mapping[str, EvalResult]:
+        """Read-only view of stored evaluation results keyed by candidate id."""
+        return MappingProxyType(self._results)
+
+    def get_result(self, candidate_id: str) -> EvalResult | None:
+        """Return the stored ``EvalResult`` for *candidate_id* or ``None``."""
+        return self._results.get(candidate_id)
 
     # ------------------------------------------------------------------
     # Mutation helpers — mirrors GEPAState._update_pareto_front_for_val_id

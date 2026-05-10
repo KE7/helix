@@ -872,15 +872,33 @@ def _build_helix_result(
     config: HelixConfig,
     lineage_path: Path,
 ) -> HelixResult:
-    """Build the structured programmatic result for a completed run."""
+    """Build the structured programmatic result for a completed run.
+
+    Reads the lineage JSON once at end-of-run.  ``record_entry`` flushes
+    every accept-time mutation/merge to disk synchronously, so the file
+    is the authoritative source by the time we get here.  Falls back to
+    each candidate's in-memory ``parent_ids`` / ``operation`` /
+    ``generation`` when no lineage entry is present (defensive — every
+    real accept site writes one).
+
+    Per-candidate data is materialized once on each
+    :class:`CandidateSummary`; :class:`HelixResult` exposes
+    ``aggregate_scores`` / ``sum_scores`` / ``instance_scores`` /
+    ``objective_scores`` / ``parents`` as cached views over that list,
+    so there is a single source of truth.
+    """
     lineage = load_lineage(lineage_path)
     non_dominated_ids = sorted(frontier.get_non_dominated())
     non_dominated = set(non_dominated_ids)
-    parents: dict[str, list[str]] = {}
     summaries: list[CandidateSummary] = []
 
-    for cid, candidate in frontier._candidates.items():
+    for cid, candidate in frontier.candidates.items():
         entry = lineage.get(cid)
+        # Parent resolution priority:
+        #   1. ``LineageEntry.parents`` — multi-parent (merge) source of truth.
+        #   2. ``Candidate.parent_ids`` — populated at construction for both
+        #      mutations and merges, used when lineage has nothing.
+        #   3. ``LineageEntry.parent`` — legacy single-parent fallback.
         candidate_parents = (
             list(entry.parents)
             if entry is not None and entry.parents
@@ -888,9 +906,8 @@ def _build_helix_result(
         )
         if not candidate_parents and entry is not None and entry.parent is not None:
             candidate_parents = [entry.parent]
-        parents[cid] = candidate_parents
 
-        result = frontier._results.get(cid)
+        result = frontier.get_result(cid)
         aggregate_score = result.aggregate_score() if result is not None else 0.0
         sum_score = result.sum_score() if result is not None else 0.0
         summaries.append(
@@ -918,25 +935,12 @@ def _build_helix_result(
     summaries.sort(key=lambda s: (s.generation, s.id))
     return HelixResult(
         best_candidate=best,
-        best_result=frontier._results.get(best.id),
-        candidates=list(frontier._candidates.values()),
+        best_result=frontier.get_result(best.id),
+        candidates=list(frontier.candidates.values()),
         candidate_summaries=summaries,
-        parents=parents,
-        aggregate_scores={
-            cid: result.aggregate_score() for cid, result in frontier._results.items()
-        },
-        sum_scores={cid: result.sum_score() for cid, result in frontier._results.items()},
-        instance_scores={
-            cid: dict(result.instance_scores) for cid, result in frontier._results.items()
-        },
-        objective_scores={
-            cid: (
-                list(result.objective_scores)
-                if result.objective_scores is not None
-                else None
-            )
-            for cid, result in frontier._results.items()
-        },
+        # Insertion-order copy of state.frontier — preserves accept order
+        # so callers can replay ``frontier_ids`` in chronological order.
+        # ``non_dominated_ids`` is sorted (above) for stable diffing.
         frontier_ids=list(state.frontier),
         non_dominated_ids=non_dominated_ids,
         frontier_type=state.frontier_type,
