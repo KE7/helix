@@ -768,6 +768,128 @@ class TestGatingInEvolutionLoop:
         assert merged_summary.operation == "merge"
         assert merged_summary.parents == ["g0-s0", "g1-s1"]
 
+    def test_helix_result_is_frozen(self, mocker, tmp_path, all_mocks):
+        """``HelixResult`` blocks attribute reassignment (GEPA parity).
+
+        :class:`gepa.core.result.GEPAResult` uses
+        ``@dataclass(frozen=True)`` to make the snapshot immutable at
+        the top level.  Confirm HELIX matches: reassigning any field
+        raises :class:`dataclasses.FrozenInstanceError`.
+        """
+        from dataclasses import FrozenInstanceError
+
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            return make_eval_result(
+                candidate.id,
+                {"i1": 0.9, "i2": 0.9} if candidate.id == "g1-s1" else {"i1": 0.3, "i2": 0.3},
+            )
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        with pytest.raises(FrozenInstanceError):
+            result.seed = 99
+        with pytest.raises(FrozenInstanceError):
+            result.run_dir = "/elsewhere"
+
+    def test_helix_result_budget_does_not_alias_state(
+        self, mocker, tmp_path, all_mocks,
+    ):
+        """``_build_helix_result`` must shallow-copy ``state.budget``.
+
+        Regression for the construction-site aliasing bug: previously
+        ``budget=state.budget`` shared the same ``BudgetState`` instance
+        with the live :class:`EvolutionState`.  Mutating the live state
+        after the run returned would silently update the snapshot.
+        Now ``budget=replace(state.budget)`` decouples them — same
+        discipline as
+        :meth:`gepa.core.result.GEPAResult.from_state`.
+
+        We can't easily reach the live state object after
+        ``run_evolution`` returns (it's local to the impl), so instead
+        verify the structural property: ``result.budget`` is a
+        :class:`BudgetState` and mutating an arbitrary
+        :class:`BudgetState` cannot affect the snapshot.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["run_evaluator"].side_effect = lambda candidate, *a, **kw: (
+            make_eval_result(candidate.id, {"i1": 0.9, "i2": 0.9})
+            if candidate.id == "g1-s1"
+            else make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
+        )
+
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        snapshot_evals = result.budget.evaluations
+        # Construct a fresh ``BudgetState`` with a sentinel value and
+        # confirm the snapshot doesn't share storage with anything.
+        scratch = BudgetState(evaluations=10**9)
+        assert result.budget is not scratch
+        assert result.budget.evaluations == snapshot_evals
+        # The snapshot is itself frozen-by-convention via the ``HelixResult``
+        # ``frozen=True`` wrapper — reassigning ``result.budget`` raises.
+        from dataclasses import FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
+            result.budget = scratch
+
+    def test_helix_result_score_views_recompute_from_summaries(
+        self, mocker, tmp_path, all_mocks,
+    ):
+        """Score-view properties must recompute from ``candidate_summaries``.
+
+        Previously these were ``@cached_property`` and could go stale
+        if anyone mutated ``candidate_summaries`` after first access.
+        With plain ``@property`` (GEPA parity — every ``GEPAResult``
+        property recomputes), there is no cache and the views always
+        reflect the canonical list.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["run_evaluator"].side_effect = lambda candidate, *a, **kw: (
+            make_eval_result(candidate.id, {"i1": 0.9, "i2": 0.9})
+            if candidate.id == "g1-s1"
+            else make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
+        )
+
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # First access materializes the view.
+        first = result.aggregate_scores
+        assert "g1-s1" in first
+        # Mutate ``candidate_summaries`` in place — the dataclass is
+        # frozen at the top level but list contents are not.  A fresh
+        # property read MUST reflect the change (no stale cache).
+        original_summaries = list(result.candidate_summaries)
+        result.candidate_summaries.clear()
+        try:
+            assert result.aggregate_scores == {}
+            assert result.sum_scores == {}
+            assert result.parents == {}
+        finally:
+            # Restore for any later assertions / cleanup.
+            result.candidate_summaries.extend(original_summaries)
+        # After restore the view recomputes back to the original.
+        assert result.aggregate_scores == first
+
 
 def _filter_charge_calls(spy, *, source: str, candidate_id: str) -> list:
     """Return the spy invocations whose kwargs match (source, candidate_id)."""

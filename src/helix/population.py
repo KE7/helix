@@ -12,7 +12,6 @@ import logging
 import random
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
-from functools import cached_property
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -213,21 +212,29 @@ class CandidateSummary:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class HelixResult:
-    """Structured result object returned by a HELIX evolution run.
+    """Immutable snapshot returned by a HELIX evolution run.
 
     Mirrors GEPA-style programmatic access without changing the on-disk
     worktree/state model: callers can inspect the best candidate, every
     accepted candidate, lineage, scores, budgets, frontier axes, and
     run identity without scraping CLI output or JSON files.
 
+    GEPA parity: matches the immutability shape of ``GEPAResult``
+    (``src/gepa/core/result.py``) — top-level ``frozen=True`` with plain
+    list/dict fields and ``@property`` views recomputed on each access.
+    The ``frozen=True`` dataclass blocks attribute reassignment; the
+    construction site (``_build_helix_result``) takes shallow defensive
+    copies of every collection so no field aliases the live
+    :class:`EvolutionState`.
+
     Canonical per-candidate data lives on :attr:`candidate_summaries`
-    (sorted by ``(generation, id)``).  The ``parents``,
-    ``aggregate_scores``, ``sum_scores``, ``instance_scores``, and
-    ``objective_scores`` cached properties are convenience views derived
-    from that list — they share no storage and stay consistent by
-    construction.
+    (sorted by ``(generation, id)``).  ``parents``, ``aggregate_scores``,
+    ``sum_scores``, ``instance_scores``, and ``objective_scores`` are
+    plain ``@property`` views (not cached) — they recompute from
+    ``candidate_summaries`` on every access, so they cannot drift out of
+    sync with the canonical list.
     """
 
     best_candidate: Candidate
@@ -251,27 +258,27 @@ class HelixResult:
         """Compatibility alias for callers that previously received Candidate."""
         return self.best_candidate.id
 
-    @cached_property
+    @property
     def parents(self) -> dict[str, list[str]]:
         """Lineage parent ids per candidate, derived from ``candidate_summaries``."""
         return {s.id: list(s.parents) for s in self.candidate_summaries}
 
-    @cached_property
+    @property
     def aggregate_scores(self) -> dict[str, float]:
         """Per-candidate mean instance score (GEPA aggregate semantics)."""
         return {s.id: s.aggregate_score for s in self.candidate_summaries}
 
-    @cached_property
+    @property
     def sum_scores(self) -> dict[str, float]:
         """Per-candidate sum of instance scores (GEPA acceptance semantics)."""
         return {s.id: s.sum_score for s in self.candidate_summaries}
 
-    @cached_property
+    @property
     def instance_scores(self) -> dict[str, dict[str, float]]:
         """Per-candidate per-instance score map."""
         return {s.id: dict(s.instance_scores) for s in self.candidate_summaries}
 
-    @cached_property
+    @property
     def objective_scores(self) -> dict[str, list[dict[str, float]] | None]:
         """Per-candidate per-example objective slots (None when not harvested)."""
         return {
