@@ -26,7 +26,7 @@ from helix.display import (
     print_warning,
     render_frontier_table,
 )
-from helix.exceptions import RateLimitError
+from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_helix_error
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
@@ -673,6 +673,13 @@ def evolve(
     setup_file_logging(base_dir)
     try:
         run_evolution(config, project_root, base_dir)
+    except ResumeIncompatibleError as exc:
+        # The current config would reinterpret persisted state.  Show the
+        # full Rich panel (with operation/phase/suggestion) instead of
+        # letting a raw traceback escape from the CLI.
+        logger.error("Resume rejected: %s", exc)
+        print_helix_error(exc)
+        raise SystemExit(2)
     except RateLimitError as exc:
         # Rate limits exhausted retries and bubbled all the way to the CLI.
         # State has been saved during the run; tell the user how to resume.
@@ -952,6 +959,18 @@ def resume(config_path: str, project_dir: Path | None) -> None:
     print_info(f"Resuming from generation {state.generation if state else 0}…")
     try:
         run_evolution(config, project_root, base_dir)
+    except ResumeIncompatibleError as exc:
+        logger.error("Resume rejected: %s", exc)
+        print_helix_error(exc)
+        raise SystemExit(2)
+    except RateLimitError as exc:
+        logger.error("Rate limit reached during resume: %s", exc)
+        print_error(
+            f"Rate limit reached: {exc}\n"
+            "Evolution state has been saved. "
+            "Run [cyan]helix resume[/cyan] again when rate limits clear."
+        )
+        raise SystemExit(2)
     except KeyboardInterrupt:
         _handle_keyboard_interrupt(project_root)
     else:

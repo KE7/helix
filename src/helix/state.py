@@ -18,8 +18,9 @@ from helix.population import FrontierType
 # GEPA parity (audit-rng-state-persist D1):
 # GEPA core/state.py:153 declares ``_VALIDATION_SCHEMA_VERSION: ClassVar[int] = 5``
 # and migrates older state dicts on load (state.py:355-376).  HELIX previously
-# had no schema version on ``state.json``; newer bumps mark explicit
-# JSON-native schema additions.
+# had no schema version on ``state.json``; subsequent bumps mark explicit
+# JSON-native schema additions (the unversioned predecessor is treated as
+# v0; ``load_state`` migrates by default-filling missing fields).
 SCHEMA_VERSION: int = 2
 
 
@@ -116,6 +117,11 @@ class EvolutionState:
     # fall back to ``"instance"`` (HELIX's historical single-axis
     # default) in ``load_state``.
     frontier_type: FrontierType = "instance"
+    # Resume compatibility metadata for settings that affect optimization
+    # semantics.  This is intentionally a small JSON-native dict rather than
+    # a GEPA-style single pickled artifact: HELIX still persists worktrees,
+    # evaluations, lineage, and state as separate artifacts.
+    resume_semantics: dict[str, Any] = field(default_factory=dict)
     # GEPA parity (audit-rng-state-persist D1): persisted schema version.
     # Mirrors GEPA core/state.py:182 / class-var :153.  Bumped when the
     # serialized schema changes; ``load_state`` migrates older payloads by
@@ -166,6 +172,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "num_metric_calls_by_discovery": state.num_metric_calls_by_discovery,
         "active_frontier": state.active_frontier,
         "frontier_type": state.frontier_type,
+        "resume_semantics": state.resume_semantics,
     }
 
     # Atomic write: write to tmp file in same directory, then rename
@@ -237,6 +244,7 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         num_metric_calls_by_discovery=data.get("num_metric_calls_by_discovery", {}),
         active_frontier=data.get("active_frontier", {}),
         frontier_type=frontier_type,
+        resume_semantics=data.get("resume_semantics", {}),
         schema_version=SCHEMA_VERSION,
     )
 
@@ -321,3 +329,17 @@ def _quarantine_corrupt_cache(target: Path, *, reason: str) -> Path:
         # the file in place.  The save path uses ``os.replace`` to overwrite
         # atomically, so a future successful save still wins.
         return target
+
+
+def clear_eval_cache(base_dir: Path) -> None:
+    """Remove the persisted per-example eval cache if present.
+
+    Used by ``run_evolution`` when ``cache_evaluation`` is disabled to make
+    sure a stale pickle from a prior cache-enabled run does not get
+    revived later.  Idempotent: a missing target is a no-op.
+    """
+    target = _eval_cache_path(base_dir)
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
