@@ -31,10 +31,12 @@ from helix.config import (
     SeedlessConfig,
     WorktreeConfig,
 )
-from helix.evolution import (
-    _evaluation_budget_units,
-    _load_evaluation,
+from helix.budget import (
     budget_exhausted,
+    evaluation_budget_units as _evaluation_budget_units,
+)
+from helix.evolution import (
+    _load_evaluation,
     degrades,
     run_evolution,
 )
@@ -744,6 +746,14 @@ class TestLlmUsageBudgetIntegration:
 
 
 class TestMergeBehavior:
+    # ``mutate`` is mocked to return the same ``child`` candidate on every
+    # call, so its id (``g1-s1``) gets re-recorded across generations.  In
+    # production ``next_mutation_id`` allocates a fresh id per gen, so the
+    # duplicate-discovery warning would never fire there.  Filter it here
+    # to keep the suite quiet without weakening the production guard.
+    @pytest.mark.filterwarnings(
+        "ignore:discovery budget already recorded:UserWarning"
+    )
     def test_merge_fires_when_new_program_accepted(self, mocker, tmp_path, all_mocks):
         """Merge is triggered in the NEXT generation after acceptance (GEPA parity).
 
