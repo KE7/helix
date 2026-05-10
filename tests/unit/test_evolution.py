@@ -575,6 +575,7 @@ class TestGatingInEvolutionLoop:
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert isinstance(result, HelixResult)
+        assert result.id == "g1-s1"
         assert result.best_candidate.id == "g1-s1"
         assert result.best_candidate is child
         assert result.best_result is not None
@@ -665,6 +666,7 @@ class TestGatingInEvolutionLoop:
         payload = result.to_dict()
         # Must round-trip cleanly — asdict(budget) is the load-bearing piece.
         rendered = json.loads(json.dumps(payload))
+        assert result.id == rendered["best_candidate_id"]
         assert rendered["best_candidate_id"] == "g1-s1"
         assert rendered["frontier_type"] == "instance"
         assert rendered["budget"]["evaluations"] == result.budget.evaluations
