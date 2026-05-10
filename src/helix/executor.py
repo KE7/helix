@@ -6,8 +6,16 @@ import logging
 import os
 import shlex
 import subprocess
+import uuid
+from pathlib import Path
 from typing import Any
 
+from helix.asi import (
+    HELIX_ASI_LOG_ENV,
+    clear as clear_asi_log,
+    read as read_asi_log,
+    read_text as read_asi_log_text,
+)
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.exceptions import EvaluatorError, format_error_context
@@ -128,8 +136,11 @@ def _collect_asi(
     stderr: str,
     extra_outputs: list[tuple[str, str]],
     config: HelixConfig,
+    *,
+    log: str = "",
+    returncode: int | None = None,
 ) -> dict[str, str]:
-    """Collect arbitrary string info from stdout, stderr, and extra command outputs.
+    """Collect arbitrary string info from evaluator outputs and helix.log notes.
 
     Args:
         stdout: Main command stdout.
@@ -138,11 +149,15 @@ def _collect_asi(
         config: HelixConfig controlling what to include.
 
     Returns:
-        Dict with keys "stdout", "stderr", "extra_0", "extra_1", etc.
+        Dict with keys "stdout", "stderr", "log", "extra_0", etc.
         All values are the FULL output — never truncated.
     """
     asi: dict[str, str] = {}
 
+    if returncode is not None:
+        asi["_returncode"] = str(returncode)
+    if log:
+        asi["log"] = log
     if config.evaluator.include_stdout:
         asi["stdout"] = stdout
     if config.evaluator.include_stderr:
@@ -217,8 +232,11 @@ def run_evaluator(
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
     )
+    helix_log_name = f".helix_asi_log_{uuid.uuid4().hex}.jsonl"
+    helix_log_path = Path(candidate.worktree_path) / helix_log_name
     cmd_tokens = _validate_and_split_command(evaluator.command)
     if config.sandbox.enabled and config.sandbox.evaluator:
+        env[HELIX_ASI_LOG_ENV] = f"/workspace/{helix_log_name}"
         if current_evaluator_sidecar_runtime() is None:
             raise ValueError(
                 "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
@@ -228,6 +246,7 @@ def run_evaluator(
             [
                 cmd_tokens,
                 *[_validate_and_split_command(cmd) for cmd in evaluator.extra_commands],
+                ["sh", "-c", f"cat {shlex.quote(helix_log_name)} 2>/dev/null || true"],
             ],
             cwd=candidate.worktree_path,
             env=env,
@@ -238,28 +257,34 @@ def run_evaluator(
             agent_backend=config.agent.backend,
         )
         result = command_results[0]
-        extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:]]
+        helix_log_text = read_asi_log_text(command_results[-1].stdout)
+        extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:-1]]
     else:
-        result = subprocess.run(
-            cmd_tokens,
-            shell=False,
-            cwd=candidate.worktree_path,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        extra_outputs = []
-        for extra_cmd in evaluator.extra_commands:
-            extra_cmd_tokens = _validate_and_split_command(extra_cmd)
-            extra_result = subprocess.run(
-                extra_cmd_tokens,
+        env[HELIX_ASI_LOG_ENV] = str(helix_log_path)
+        try:
+            result = subprocess.run(
+                cmd_tokens,
                 shell=False,
                 cwd=candidate.worktree_path,
                 capture_output=True,
                 text=True,
                 env=env,
             )
-            extra_outputs.append((extra_result.stdout, extra_result.stderr))
+            extra_outputs = []
+            for extra_cmd in evaluator.extra_commands:
+                extra_cmd_tokens = _validate_and_split_command(extra_cmd)
+                extra_result = subprocess.run(
+                    extra_cmd_tokens,
+                    shell=False,
+                    cwd=candidate.worktree_path,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                extra_outputs.append((extra_result.stdout, extra_result.stderr))
+            helix_log_text = read_asi_log(helix_log_path)
+        finally:
+            clear_asi_log(helix_log_path)
 
     stdout = result.stdout
     stderr = result.stderr
@@ -285,7 +310,14 @@ def run_evaluator(
         )
 
     # Collect ASI
-    asi = _collect_asi(stdout, stderr, extra_outputs, config)
+    asi = _collect_asi(
+        stdout,
+        stderr,
+        extra_outputs,
+        config,
+        log=helix_log_text,
+        returncode=returncode,
+    )
 
     # Guard: at most one HELIX_RESULT= line is expected.  Multiple is an
     # evaluator-contract violation (race or accidental double-emit).

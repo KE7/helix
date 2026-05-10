@@ -322,6 +322,7 @@ class TestRunEvaluator:
         mock_run.return_value = [
             MagicMock(stdout="main", stderr="", returncode=0),
             MagicMock(stdout="extra", stderr="", returncode=0),
+            MagicMock(stdout="", stderr="", returncode=0),
         ]
 
         candidate = make_candidate()
@@ -333,11 +334,16 @@ class TestRunEvaluator:
             command="python -m server",
             endpoint="http://helix-evaluator:8080/evaluate",
         )
-        config = config.model_copy(update={"sandbox": SandboxConfig(enabled=True, evaluator=True)})
+        config = config.model_copy(
+            update={"sandbox": SandboxConfig(enabled=True, evaluator=True)}
+        )
 
         run_evaluator(candidate, config)
 
-        assert mock_run.call_args.args[0] == [["python", "/runner/evaluate.py"], ["python", "extra.py"]]
+        commands = mock_run.call_args.args[0]
+        assert commands[:2] == [["python", "/runner/evaluate.py"], ["python", "extra.py"]]
+        assert commands[2][:2] == ["sh", "-c"]
+        assert ".helix_asi_log_" in commands[2][2]
 
     def test_run_evaluator_uses_host_when_sandbox_enabled_but_evaluator_disabled(self, mocker):
         mock_host_run = mocker.patch("helix.executor.subprocess.run")

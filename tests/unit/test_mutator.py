@@ -85,6 +85,20 @@ class TestBuildMutationPrompt:
         prompt = build_mutation_prompt("goal", er)
         assert "unique_stdout_xyz" in prompt
 
+    def test_hides_helix_result_machine_protocol_from_prompt(self):
+        er = make_eval_result(
+            asi={
+                "stdout": (
+                    "HELIX_RESULT=[[1.0, {\"task_completed\": true}]]\n"
+                    "human fallback line\n"
+                ),
+                "stderr": "",
+            }
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "human fallback line" in prompt
+        assert "HELIX_RESULT=" not in prompt
+
     def test_contains_stderr(self):
         er = make_eval_result(asi={"stdout": "", "stderr": "unique_stderr_abc"})
         prompt = build_mutation_prompt("goal", er)
@@ -121,6 +135,53 @@ class TestBuildMutationPrompt:
         er = make_eval_result(scores={})
         prompt = build_mutation_prompt("goal", er)
         assert "no scores recorded" in prompt
+
+    def test_renders_helix_log_notes(self):
+        er = make_eval_result(
+            asi={"stdout": "debug stdout", "stderr": "", "log": "note"}
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "## Evaluator Notes" in prompt
+        assert "note" in prompt
+
+    def test_suppresses_success_stdout_when_log_exists(self):
+        er = make_eval_result(
+            asi={"stdout": "debug stdout", "stderr": "debug stderr", "log": "note"}
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "note" in prompt
+        assert "debug stdout" not in prompt
+        assert "debug stderr" not in prompt
+
+    def test_suppresses_success_stdout_when_structured_diagnostics_exist(self):
+        er = EvalResult(
+            candidate_id="g0-s0",
+            scores={"pass_rate": 0.5},
+            asi={"stdout": "debug stdout", "stderr": "debug stderr"},
+            instance_scores={"ex_0": 1.0},
+            per_example_side_info=[{"note": "structured note"}],
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "structured note" in prompt
+        assert "debug stdout" not in prompt
+        assert "debug stderr" not in prompt
+
+    def test_includes_stdout_stderr_when_evaluator_failed(self):
+        er = EvalResult(
+            candidate_id="g0-s0",
+            scores={"pass_rate": 0.0},
+            asi={
+                "stdout": "debug stdout",
+                "stderr": "debug stderr",
+                "log": "note",
+                "_returncode": "1",
+            },
+            instance_scores={"ex_0": 0.0},
+            per_example_side_info=[{"note": "structured note"}],
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "debug stdout" in prompt
+        assert "debug stderr" in prompt
 
 
 class TestPerExampleDiagnostics:
