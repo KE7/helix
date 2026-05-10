@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import threading
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1044,7 +1045,11 @@ def _build_helix_result(
         frontier_ids=list(state.frontier),
         non_dominated_ids=non_dominated_ids,
         frontier_type=state.frontier_type,
-        budget=state.budget,
+        # Defensive shallow copy — ``state.budget`` is mutated by the
+        # budget-accounting code throughout the run; the snapshot must
+        # not alias it (GEPA parity: ``GEPAResult.from_state`` shallow-
+        # copies every collection coming off the live state).
+        budget=replace(state.budget),
         discovery_counts=dict(state.num_metric_calls_by_discovery),
         run_dir=str(base_dir),
         seed=config.rng_seed,
