@@ -201,25 +201,40 @@ def test_eval_cache_load_returns_none_when_missing(tmp_path: Path) -> None:
 
 
 def test_eval_cache_load_tolerates_non_dict(tmp_path: Path) -> None:
-    """A corrupt eval_cache.pkl warns and resumes with an empty cache."""
+    """A corrupt eval_cache.pkl warns, quarantines, and resumes with an empty cache."""
     import pickle as _pickle
 
     helix_dir = tmp_path / ".helix"
     helix_dir.mkdir(parents=True)
-    (helix_dir / "eval_cache.pkl").write_bytes(_pickle.dumps(["not", "a", "dict"]))
+    target = helix_dir / "eval_cache.pkl"
+    target.write_bytes(_pickle.dumps(["not", "a", "dict"]))
 
-    with pytest.warns(RuntimeWarning, match="Ignoring eval cache"):
+    with pytest.warns(RuntimeWarning, match="Quarantined to "):
         assert load_eval_cache(tmp_path) is None
+
+    # The corrupt file must be moved aside (not deleted) so the user can
+    # post-mortem, and must not still occupy the canonical path (so the
+    # next save doesn't have to overwrite it implicitly).
+    assert not target.exists()
+    quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == _pickle.dumps(["not", "a", "dict"])
 
 
 def test_eval_cache_load_tolerates_unreadable_pickle(tmp_path: Path) -> None:
-    """Unreadable pickle bytes should not abort resume."""
+    """Unreadable pickle bytes should not abort resume; file is quarantined."""
     helix_dir = tmp_path / ".helix"
     helix_dir.mkdir(parents=True)
-    (helix_dir / "eval_cache.pkl").write_bytes(b"not a pickle")
+    target = helix_dir / "eval_cache.pkl"
+    target.write_bytes(b"not a pickle")
 
     with pytest.warns(RuntimeWarning, match="Ignoring unreadable eval cache"):
         assert load_eval_cache(tmp_path) is None
+
+    assert not target.exists()
+    quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == b"not a pickle"
 
 
 # ---------------------------------------------------------------------------
