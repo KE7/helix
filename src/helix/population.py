@@ -72,17 +72,21 @@ class EvalResult:
     #
     # Reserved-key convention
     # -----------------------
-    # Keys starting with an underscore (``_<name>``) are HELIX-internal
-    # sentinels written by ``executor._collect_asi`` and consumed
-    # elsewhere in HELIX (e.g. the mutation prompt builder).  They are:
+    # Inside this otherwise GEPA-shaped result, keys starting with an
+    # underscore (``_<name>``) are HELIX-internal sentinels: written by
+    # ``executor._collect_asi``, consumed elsewhere in HELIX (e.g. the
+    # mutation prompt builder), and *not* part of the evaluator-facing
+    # surface.  They are:
     #
     # * stringified (``asi[k]`` is always ``str`` — callers must parse);
     # * filtered out of any catch-all rendering surface (the mutation
     #   prompt's "Extra Evaluator Info" section in
     #   :func:`helix.mutator.build_mutation_prompt` is the canonical
     #   example);
-    # * not part of the GEPA O.A. contract — third-party evaluators
-    #   must never set or read them.
+    # * HELIX-internal, not evaluator-facing — evaluator code (the
+    #   user's ``evaluate.py`` or any GEPA-style downstream consumer)
+    #   must never set or read these keys.  HELIX owns them and may
+    #   rename them or change their string format without notice.
     #
     # Currently reserved:
     #
@@ -91,9 +95,11 @@ class EvalResult:
     #
     # Add new sentinels here (and to the mutator's filter list at
     # ``mutator.build_mutation_prompt``) when introducing more.
+    #
     # Non-underscore keys (``stdout``, ``stderr``, ``log``, ``extra_N``,
-    # arbitrary evaluator-emitted notes) are NOT reserved and round-trip
-    # to the GEPA O.A. consumer unchanged.
+    # arbitrary evaluator-emitted notes) ARE the evaluator-facing
+    # surface — they round-trip unchanged to GEPA-style consumers and
+    # are stable for evaluator authors to depend on.
     asi: dict[str, str]
     instance_scores: dict[str, float] # per-instance scores, keyed by HELIX example-id
     # Legacy batch-level diagnostics dict.  No longer populated by the
