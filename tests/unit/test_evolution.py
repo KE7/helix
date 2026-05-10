@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -38,6 +39,7 @@ from helix.evolution import (
     run_evolution,
 )
 from helix.lineage import LineageEntry
+from helix.mutator import generate_seed as _real_generate_seed
 from helix.population import Candidate, EvalResult
 from helix.state import BudgetState, EvolutionState
 
@@ -515,7 +517,28 @@ class TestGatingInEvolutionLoop:
         assert best.id == "g1-s1"
 
 
+def _filter_charge_calls(spy, *, source: str, candidate_id: str) -> list:
+    """Return the spy invocations whose kwargs match (source, candidate_id)."""
+    return [
+        call
+        for call in spy.call_args_list
+        if call.kwargs.get("source") == source
+        and call.kwargs.get("candidate_id") == candidate_id
+    ]
+
+
 class TestLlmUsageBudgetIntegration:
+    """Verify ``run_evolution`` charges LLM usage through the central budget API.
+
+    Each test mocks the LLM-producing step (``generate_seed``, ``mutate``,
+    ``merge``) to return a synthetic usage payload, spies on
+    ``budget_api.charge_llm_usage`` (preserving its real side effects), and
+    asserts that the spy was invoked exactly once for the candidate of
+    interest with the expected ``source`` tag and resulting BudgetState
+    delta.  Exactly-once is important because a future double-charge bug
+    would otherwise inflate the budget silently.
+    """
+
     def test_seedless_generation_usage_charged_through_budget_api(
         self, mocker, tmp_path, all_mocks
     ):
@@ -548,16 +571,85 @@ class TestLlmUsageBudgetIntegration:
             tmp_path / ".helix",
         )
 
-        seed_call = next(
-            call
-            for call in spy.call_args_list
-            if call.kwargs.get("source") == "seed_generation"
+        seed_calls = _filter_charge_calls(
+            spy, source="seed_generation", candidate_id="g0-s0"
         )
-        state = seed_call.args[0]
-        assert seed_call.kwargs["candidate_id"] == "g0-s0"
+        assert len(seed_calls) == 1, (
+            "expected exactly one seed_generation charge for g0-s0, "
+            f"got {len(seed_calls)}: {seed_calls!r}"
+        )
+        state = seed_calls[0].args[0]
         assert state.budget.input_tokens == 21
         assert state.budget.output_tokens == 12
         assert state.budget.cost_usd == pytest.approx(0.41)
+
+    def test_seedless_generation_usage_flows_through_real_parser(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """End-to-end seedless coverage that exercises ``_normalise_usage_stats``.
+
+        The sibling test stubs out ``generate_seed`` entirely, so a regression
+        in the backend output parser would not surface there.  This variant
+        keeps the real ``generate_seed`` → ``invoke_claude_code`` → parser
+        chain intact (only ``subprocess.run`` is mocked), then asserts the
+        parsed usage dict is what reaches ``charge_llm_usage``.
+        """
+        seed = make_candidate("g0-s0")
+        seed.worktree_path = str(tmp_path / "seed-worktree")
+        Path(seed.worktree_path).mkdir(parents=True, exist_ok=True)
+        mocker.patch("helix.evolution.create_empty_seed_worktree", return_value=seed)
+        mocker.patch(
+            "helix.evolution.build_seed_generation_prompt", return_value="<seed prompt>"
+        )
+        # Restore the real ``generate_seed`` so it dispatches through
+        # ``invoke_claude_code`` and hits the production parser pipeline.
+        all_mocks["generate_seed"].side_effect = _real_generate_seed
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "session_id": "seedless-session",
+                "usage": {"input_tokens": 31, "output_tokens": 19},
+                "total_cost_usd": 0.51,
+            }
+        )
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout=stdout, stderr=""
+        )
+        all_mocks["run_evaluator"].return_value = make_eval_result("g0-s0", {"i1": 0.5})
+        all_mocks["mutate"].return_value = None
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            HelixConfig(
+                objective="Optimise the solver",
+                seedless=SeedlessConfig(enabled=True),
+                evaluator=EvaluatorConfig(command="pytest -q"),
+                evolution=EvolutionConfig(
+                    max_generations=1,
+                    max_evaluations=1000,
+                    perfect_score_threshold=None,
+                ),
+            ),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        # The real backend dispatch must have been hit exactly once.
+        assert mock_run.call_count == 1
+        assert mock_run.call_args.args[0][0] == "claude"
+
+        seed_calls = _filter_charge_calls(
+            spy, source="seed_generation", candidate_id="g0-s0"
+        )
+        assert len(seed_calls) == 1
+        state = seed_calls[0].args[0]
+        assert state.budget.input_tokens == 31
+        assert state.budget.output_tokens == 19
+        assert state.budget.cost_usd == pytest.approx(0.51)
 
     def test_mutation_usage_charged_through_budget_api(
         self, mocker, tmp_path, all_mocks
@@ -585,11 +677,14 @@ class TestLlmUsageBudgetIntegration:
             tmp_path / ".helix",
         )
 
-        mutation_call = next(
-            call for call in spy.call_args_list if call.kwargs.get("source") == "mutation"
+        mutation_calls = _filter_charge_calls(
+            spy, source="mutation", candidate_id="g1-s1"
         )
-        state = mutation_call.args[0]
-        assert mutation_call.kwargs["candidate_id"] == "g1-s1"
+        assert len(mutation_calls) == 1, (
+            "expected exactly one mutation charge for g1-s1, "
+            f"got {len(mutation_calls)}: {mutation_calls!r}"
+        )
+        state = mutation_calls[0].args[0]
         assert state.budget.input_tokens == 22
         assert state.budget.output_tokens == 13
         assert state.budget.cost_usd == pytest.approx(0.42)
@@ -632,11 +727,12 @@ class TestLlmUsageBudgetIntegration:
             tmp_path / ".helix",
         )
 
-        merge_call = next(
-            call for call in spy.call_args_list if call.kwargs.get("source") == "merge"
+        merge_calls = _filter_charge_calls(spy, source="merge", candidate_id="g2-m1")
+        assert len(merge_calls) == 1, (
+            "expected exactly one merge charge for g2-m1, "
+            f"got {len(merge_calls)}: {merge_calls!r}"
         )
-        state = merge_call.args[0]
-        assert merge_call.kwargs["candidate_id"] == "g2-m1"
+        state = merge_calls[0].args[0]
         assert state.budget.input_tokens == 23
         assert state.budget.output_tokens == 14
         assert state.budget.cost_usd == pytest.approx(0.43)
