@@ -91,6 +91,45 @@ def test_detects_modified_and_deleted_evaluator_files(tmp_path):
     assert violations == ["evaluate.py", "fixtures/goldens.json"]
 
 
+def test_manifest_recurses_protected_directories_and_ignores_cache_files(tmp_path):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "evaluate.py").write_text("print('ok')\n")
+    (baseline / "datasets" / "nested").mkdir(parents=True)
+    (baseline / "datasets" / "train.jsonl").write_text('{"id": 1}\n')
+    (baseline / "datasets" / "nested" / "eval.jsonl").write_text('{"id": 2}\n')
+    (baseline / "datasets" / "__pycache__").mkdir()
+    (baseline / "datasets" / "__pycache__" / "ignored.pyc").write_bytes(b"cache")
+    (baseline / "datasets" / ".pytest_cache").mkdir()
+    (baseline / "datasets" / ".pytest_cache" / "ignored").write_text("cache\n")
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python evaluate.py",
+            protected_files=["datasets"],
+        ),
+    )
+
+    manifest = _build_evaluator_integrity_manifest(config, baseline, baseline)
+
+    assert sorted(manifest) == [
+        "datasets/nested/eval.jsonl",
+        "datasets/train.jsonl",
+        "evaluate.py",
+    ]
+
+    candidate_dir = tmp_path / "candidate"
+    shutil.copytree(baseline, candidate_dir)
+    (candidate_dir / "datasets" / "train.jsonl").write_text('{"id": 99}\n')
+    (candidate_dir / "datasets" / "__pycache__" / "ignored.pyc").write_bytes(
+        b"changed cache"
+    )
+
+    violations = _detect_evaluator_tamper(_candidate(str(candidate_dir)), manifest)
+    assert violations == ["datasets/train.jsonl"]
+
+
 def test_manifest_roundtrip(tmp_path):
     manifest = {"evaluate.py": "abc123", "fixtures/goldens.json": "def456"}
     _write_evaluator_integrity_manifest(tmp_path, manifest)
@@ -104,15 +143,15 @@ def test_refreshes_protected_files_and_directories_from_current_root(tmp_path):
     (project / "evaluate.py").write_text("fixed evaluator\n")
     (project / "splits" / "instance_ids").mkdir(parents=True)
     (project / "splits" / "train.yaml").write_text("seeds: [0, 1]\n")
-    (project / "splits" / "instance_ids" / "cube_lifting__0.json").write_text("{}\n")
-    (project / "splits" / "instance_ids" / "cube_lifting__1.json").write_text("{}\n")
+    (project / "splits" / "instance_ids" / "case_0.json").write_text("{}\n")
+    (project / "splits" / "instance_ids" / "case_1.json").write_text("{}\n")
 
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     (worktree / "evaluate.py").write_text("stale evaluator\n")
     (worktree / "splits" / "instance_ids").mkdir(parents=True)
     (worktree / "splits" / "train.yaml").write_text("trials_per_task: 1\n")
-    (worktree / "splits" / "instance_ids" / "cube_lifting__0.json").write_text("{}\n")
+    (worktree / "splits" / "instance_ids" / "case_0.json").write_text("{}\n")
 
     config = HelixConfig(
         objective="test",
@@ -128,15 +167,15 @@ def test_refreshes_protected_files_and_directories_from_current_root(tmp_path):
     assert (worktree / "splits" / "train.yaml").read_text() == "seeds: [0, 1]\n"
     instance_ids = sorted((worktree / "splits" / "instance_ids").glob("*.json"))
     assert [path.name for path in instance_ids] == [
-        "cube_lifting__0.json",
-        "cube_lifting__1.json",
+        "case_0.json",
+        "case_1.json",
     ]
 
 
 def test_copy_protected_path_noops_when_source_and_destination_match(tmp_path, monkeypatch):
     source = tmp_path / "splits" / "instance_ids"
     source.mkdir(parents=True)
-    (source / "cube_lifting__0.json").write_text("{}\n")
+    (source / "case_0.json").write_text("{}\n")
 
     calls: list[Path] = []
 
@@ -149,7 +188,7 @@ def test_copy_protected_path_noops_when_source_and_destination_match(tmp_path, m
     _copy_protected_path(source, source)
 
     assert calls == []
-    assert (source / "cube_lifting__0.json").read_text() == "{}\n"
+    assert (source / "case_0.json").read_text() == "{}\n"
 
 
 def test_refresh_snapshot_normalizes_protected_file_baseline(tmp_path):
