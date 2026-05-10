@@ -130,6 +130,102 @@ def test_manifest_recurses_protected_directories_and_ignores_cache_files(tmp_pat
     assert violations == ["datasets/train.jsonl"]
 
 
+def test_detects_new_files_added_under_protected_directory(tmp_path):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "evaluate.py").write_text("print('ok')\n")
+    (baseline / "datasets").mkdir()
+    (baseline / "datasets" / "train.jsonl").write_text('{"id": 1}\n')
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python evaluate.py",
+            protected_files=["datasets"],
+        ),
+    )
+
+    manifest = _build_evaluator_integrity_manifest(config, baseline, baseline)
+
+    candidate_dir = tmp_path / "candidate"
+    shutil.copytree(baseline, candidate_dir)
+    # Inject a brand-new file the manifest doesn't know about, plus an
+    # ignored cache file that should NOT count as a violation.
+    (candidate_dir / "datasets" / "leak.jsonl").write_text('{"leak": true}\n')
+    (candidate_dir / "datasets" / "__pycache__").mkdir()
+    (candidate_dir / "datasets" / "__pycache__" / "x.pyc").write_bytes(b"cache")
+
+    # Without config + project_root the legacy contract holds: only
+    # modifications/deletions are reported.
+    assert _detect_evaluator_tamper(_candidate(str(candidate_dir)), manifest) == []
+
+    # With config + project_root the new file is flagged; ignored caches
+    # are not.
+    violations = _detect_evaluator_tamper(
+        _candidate(str(candidate_dir)), manifest, config, baseline
+    )
+    assert violations == ["datasets/leak.jsonl"]
+
+
+def test_build_manifest_warns_for_directory_with_only_ignored_files(
+    tmp_path, caplog
+):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "evaluate.py").write_text("print('ok')\n")
+    (baseline / "datasets" / "__pycache__").mkdir(parents=True)
+    (baseline / "datasets" / "__pycache__" / "ignored.pyc").write_bytes(b"cache")
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python evaluate.py",
+            protected_files=["datasets"],
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="helix.evolution"):
+        manifest = _build_evaluator_integrity_manifest(config, baseline, baseline)
+
+    assert "datasets" in caplog.text
+    assert "0 manifest entries" in caplog.text
+    assert sorted(manifest) == ["evaluate.py"]
+
+
+def test_build_manifest_fails_closed_on_unreadable_protected_file(tmp_path):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "evaluate.py").write_text("print('ok')\n")
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python evaluate.py",
+            protected_files=["evaluate.py"],
+        ),
+    )
+
+    # Make the file unreadable; on POSIX this triggers ``PermissionError``
+    # (a subclass of ``OSError``) inside ``_sha256_file``.
+    target = baseline / "evaluate.py"
+    original_mode = target.stat().st_mode
+    target.chmod(0)
+    try:
+        if target.read_bytes() == b"":
+            pytest.skip("filesystem ignores chmod 0 (e.g. running as root)")
+    except PermissionError:
+        pass
+    else:
+        target.chmod(original_mode)
+        pytest.skip("filesystem ignores chmod 0 (e.g. running as root)")
+
+    try:
+        with pytest.raises(HelixError):
+            _build_evaluator_integrity_manifest(config, baseline, baseline)
+    finally:
+        target.chmod(original_mode)
+
+
 def test_manifest_roundtrip(tmp_path):
     manifest = {"evaluate.py": "abc123", "fixtures/goldens.json": "def456"}
     _write_evaluator_integrity_manifest(tmp_path, manifest)

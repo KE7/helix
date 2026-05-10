@@ -74,6 +74,10 @@ from helix.worktree import (
 
 logger = logging.getLogger(__name__)
 
+# NOTE: ``shutil.ignore_patterns`` uses ``fnmatch`` *basename* matching, not
+# gitignore semantics.  Add basename globs here only -- patterns like
+# ``**/build/`` or ``cache/**`` will not match.  If we ever need gitignore
+# semantics, switch to ``pathspec`` rather than extending this tuple.
 _PROTECTED_DIRECTORY_IGNORE_PATTERNS = (
     ".git",
     "__pycache__",
@@ -81,6 +85,10 @@ _PROTECTED_DIRECTORY_IGNORE_PATTERNS = (
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+)
+# Reusable matcher; the patterns are constant so we build it once.
+_PROTECTED_DIRECTORY_IGNORE_MATCHER = shutil.ignore_patterns(
+    *_PROTECTED_DIRECTORY_IGNORE_PATTERNS
 )
 
 
@@ -263,7 +271,7 @@ def _copy_protected_path(source: Path, destination: Path) -> None:
         shutil.copytree(
             source,
             destination,
-            ignore=shutil.ignore_patterns(*_PROTECTED_DIRECTORY_IGNORE_PATTERNS),
+            ignore=_PROTECTED_DIRECTORY_IGNORE_MATCHER,
         )
     elif source.is_symlink():
         os.symlink(os.readlink(source), destination)
@@ -296,26 +304,41 @@ def _refresh_and_snapshot_protected_evaluator_files(
 
 
 def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Streamed SHA-256 of ``path``.
+
+    Uses ``hashlib.file_digest`` (Python 3.11+) so large protected files
+    (e.g., evaluator dataset ``.jsonl`` files) are not buffered in memory.
+    """
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def _iter_protected_manifest_files(
     source_path: Path,
     rel_path: str,
 ) -> list[tuple[str, Path]]:
-    """Return manifest entries under one protected file/directory."""
+    """Return manifest entries under one protected file/directory.
+
+    ``source_path`` is expected to already be a real path (callers resolve
+    symlinks before calling).  ``os.walk`` is used with ``followlinks=False``
+    (the default) so symlinks inside the directory are not traversed.
+    """
     if source_path.is_file():
         return [(rel_path, source_path)]
-    if not source_path.is_dir() or source_path.is_symlink():
+    if not source_path.is_dir():
         return []
 
-    ignore = shutil.ignore_patterns(*_PROTECTED_DIRECTORY_IGNORE_PATTERNS)
     entries: list[tuple[str, Path]] = []
     for dirpath_str, dirnames, filenames in os.walk(source_path):
-        ignored = ignore(dirpath_str, [*dirnames, *filenames])
+        ignored = _PROTECTED_DIRECTORY_IGNORE_MATCHER(
+            dirpath_str, [*dirnames, *filenames]
+        )
         dirnames[:] = sorted(name for name in dirnames if name not in ignored)
         for filename in sorted(name for name in filenames if name not in ignored):
             file_path = Path(dirpath_str) / filename
+            # Defensive against TOCTOU: ``os.walk`` already separated files
+            # from directories, but a concurrent unlink/rename could leave a
+            # stale name behind.
             if not file_path.is_file():
                 continue
             entry_path = Path(rel_path) / file_path.relative_to(source_path)
@@ -332,7 +355,12 @@ def _build_evaluator_integrity_manifest(
     baseline_root: Path,
     project_root: Path,
 ) -> dict[str, str]:
-    """Build {repo_relative_path: sha256} for protected evaluator files."""
+    """Build {repo_relative_path: sha256} for protected evaluator files.
+
+    Fails closed: an unreadable protected file raises ``HelixError`` rather
+    than silently being omitted from the manifest -- otherwise tamper
+    detection would not flag changes to that file on resume.
+    """
     manifest: dict[str, str] = {}
     for rel_path in _collect_protected_evaluator_paths(config, project_root):
         source_path = (baseline_root / rel_path).resolve()
@@ -343,14 +371,27 @@ def _build_evaluator_integrity_manifest(
                 baseline_root,
             )
             continue
-        for manifest_rel_path, file_path in _iter_protected_manifest_files(
-            source_path,
-            rel_path,
-        ):
+        entries = _iter_protected_manifest_files(source_path, rel_path)
+        if not entries and source_path.is_dir():
+            # Surface likely misconfigurations (e.g., a protected directory
+            # whose only contents match the ignore list).
+            logger.warning(
+                "Protected evaluator directory %s contributed 0 manifest "
+                "entries (every file matched the ignore list).",
+                rel_path,
+            )
+        for manifest_rel_path, file_path in entries:
             try:
                 manifest[manifest_rel_path] = _sha256_file(file_path)
-            except OSError:
-                logger.exception("Failed hashing protected evaluator file: %s", file_path)
+            except OSError as exc:
+                raise HelixError(
+                    f"Failed hashing protected evaluator file: {file_path}",
+                    operation="build evaluator integrity manifest",
+                    suggestion=(
+                        "Ensure the file is readable and not held open by "
+                        "another process before retrying."
+                    ),
+                ) from exc
     return manifest
 
 
@@ -387,22 +428,50 @@ def _load_evaluator_integrity_manifest(base_dir: Path) -> dict[str, str] | None:
 def _detect_evaluator_tamper(
     candidate: Candidate,
     manifest: dict[str, str],
+    config: HelixConfig | None = None,
+    project_root: Path | None = None,
 ) -> list[str]:
-    """Return protected paths that diverge from the frozen evaluator manifest."""
+    """Return protected paths that diverge from the frozen evaluator manifest.
+
+    Detects three classes of tamper:
+
+    1. Modification of a baseline-listed file (hash mismatch).
+    2. Deletion of a baseline-listed file.
+    3. *Addition* of a previously-unknown file inside a protected directory,
+       when ``config`` and ``project_root`` are supplied.  Without these
+       arguments only the first two classes are reported, preserving the
+       legacy contract for callers that don't have config in scope.
+    """
     if not manifest:
         return []
-    violations: list[str] = []
+    violations: set[str] = set()
     worktree_root = Path(candidate.worktree_path)
     for rel_path, expected_hash in manifest.items():
         candidate_path = worktree_root / rel_path
         if not candidate_path.exists() or not candidate_path.is_file():
-            violations.append(rel_path)
+            violations.add(rel_path)
             continue
         try:
             if _sha256_file(candidate_path) != expected_hash:
-                violations.append(rel_path)
+                violations.add(rel_path)
         except OSError:
-            violations.append(rel_path)
+            violations.add(rel_path)
+
+    if config is not None and project_root is not None:
+        known = set(manifest)
+        for protected_rel in _collect_protected_evaluator_paths(
+            config, project_root
+        ):
+            candidate_path = worktree_root / protected_rel
+            # Only directories can hold *new* files; single-file protected
+            # paths are fully covered by the manifest loop above.
+            if not candidate_path.is_dir() or candidate_path.is_symlink():
+                continue
+            for entry_rel, _ in _iter_protected_manifest_files(
+                candidate_path, protected_rel
+            ):
+                if entry_rel not in known:
+                    violations.add(entry_rel)
     return sorted(violations)
 
 
@@ -1576,7 +1645,10 @@ def _run_evolution_impl(
                             )
 
                         merge_tamper = _detect_evaluator_tamper(
-                            merged, evaluator_manifest
+                            merged,
+                            evaluator_manifest,
+                            config,
+                            project_root,
                         )
                         if merge_tamper:
                             # Evaluator-tamper reject happens PRE-eval — no
@@ -2218,7 +2290,9 @@ def _run_evolution_impl(
                 mutations_attempted += 1
                 live.update(mutations_attempted=mutations_attempted)
 
-                tampered_paths = _detect_evaluator_tamper(child, evaluator_manifest)
+                tampered_paths = _detect_evaluator_tamper(
+                    child, evaluator_manifest, config, project_root
+                )
                 if tampered_paths:
                     print_warning(
                         f"Mutation {child.id} touched protected evaluator files "
