@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tomllib
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
@@ -586,33 +587,35 @@ def _validate_agent_effort(agent: AgentConfig) -> None:
     if agent.effort is None:
         return
 
-    import warnings as _warnings  # local import to keep config import-light
-
     backend = agent.backend
     display = backend_display_name(backend)
 
     if backend not in EFFORT_AWARE_BACKENDS:
-        _warnings.warn(
-            f"agent.effort={agent.effort!r} is set, but the {display!r} "
-            f"backend does not propagate an effort/reasoning level — the "
-            "value will be silently ignored. Either remove the setting or "
-            "switch to an effort-aware backend "
-            f"({', '.join(sorted(EFFORT_AWARE_BACKENDS))}).",
+        aware = ", ".join(sorted(EFFORT_AWARE_BACKENDS))
+        warnings.warn(
+            (
+                f"agent.effort={agent.effort!r} is set, but the {display!r} "
+                f"backend does not propagate an effort/reasoning level; "
+                f"the value will be silently ignored. Either remove the "
+                f"setting or switch to an effort-aware backend ({aware})."
+            ),
             UserWarning,
-            stacklevel=3,
+            stacklevel=2,
         )
         return
 
     valid = EFFORT_VALID_VALUES.get(backend)
     if valid is not None and agent.effort not in valid:
-        _warnings.warn(
-            f"agent.effort={agent.effort!r} is not a recognized value for "
-            f"the {display!r} backend (known values: "
-            f"{', '.join(sorted(valid))}). The value will still be passed "
-            "through to the CLI, but you may see an opaque subprocess "
-            "error if it's a typo.",
+        known = ", ".join(sorted(valid))
+        warnings.warn(
+            (
+                f"agent.effort={agent.effort!r} is not a recognized value "
+                f"for the {display!r} backend (known values: {known}). The "
+                f"value will still be passed through to the CLI, but you "
+                f"may see an opaque subprocess error if it's a typo."
+            ),
             UserWarning,
-            stacklevel=3,
+            stacklevel=2,
         )
 
 

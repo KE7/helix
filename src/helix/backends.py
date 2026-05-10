@@ -28,9 +28,14 @@ BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "ope
 EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset({"claude", "opencode"})
 """Backends that propagate ``agent.effort`` to their underlying CLI."""
 
-# ``None`` here means "any non-empty string accepted" — we still let a
-# strange value through and let the backend CLI decide, but a known set of
-# values lets HELIX warn early on obvious typos like ``effrot = "high"``.
+# ``None`` here means "any string accepted" — we still let strange values
+# through and let the backend CLI decide, but a known set of values lets
+# HELIX warn early on obvious typos like ``effrot = "high"``.
+#
+# NOTE: this allowlist is best-effort and may lag the upstream CLI.  When
+# a backend ships a new tier (e.g. Anthropic's ``"minimal"`` on some
+# surfaces), users will see a non-fatal "not a recognized value" warning
+# until this map is updated; the value still passes through to the CLI.
 EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
     "claude": frozenset({"low", "medium", "high"}),
     "opencode": None,  # variant strings are model-specific; opencode validates them.
