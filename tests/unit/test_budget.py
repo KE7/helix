@@ -2,19 +2,38 @@
 
 from __future__ import annotations
 
-import re
 import json
+import re
+import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from helix.backends import BACKENDS
 from helix import budget
-from helix.config import AgentConfig, EvolutionConfig, EvaluatorConfig, HelixConfig
+from helix.backends import BACKENDS
+from helix.config import (
+    AgentConfig,
+    EvaluatorConfig,
+    EvolutionConfig,
+    HelixConfig,
+    SandboxConfig,
+)
 from helix.mutator import invoke_claude_code
 from helix.state import BudgetState, EvolutionState
 from helix.trace import TRACE, EventType
+
+
+# Mapping from backend name to the executable that ``_build_backend_args``
+# emits as args[0].  Used by parser-coverage tests to assert that
+# ``invoke_claude_code`` actually dispatched to the requested backend CLI
+# (rather than short-circuiting via the differential-testing override).
+_BACKEND_EXECUTABLE = {
+    "claude": "claude",
+    "codex": "codex",
+    "cursor": "cursor",
+    "gemini": "gemini",
+    "opencode": "opencode",
+}
 
 
 def make_state(evaluations: int = 0) -> EvolutionState:
@@ -76,7 +95,7 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
 @pytest.mark.parametrize(
     ("backend", "stdout", "expected"),
     [
-        (
+        pytest.param(
             "claude",
             json.dumps(
                 {
@@ -87,8 +106,9 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
                 }
             ),
             (11, 7, 0.31),
+            id="claude",
         ),
-        (
+        pytest.param(
             "codex",
             "\n".join(
                 [
@@ -100,8 +120,9 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
                 ]
             ),
             (12, 8, 0.32),
+            id="codex",
         ),
-        (
+        pytest.param(
             "cursor",
             "\n".join(
                 [
@@ -113,8 +134,9 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
                 ]
             ),
             (13, 9, 0.33),
+            id="cursor",
         ),
-        (
+        pytest.param(
             "gemini",
             "\n".join(
                 [
@@ -127,8 +149,9 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
                 ]
             ),
             (14, 10, 0.34),
+            id="gemini",
         ),
-        (
+        pytest.param(
             "opencode",
             "\n".join(
                 [
@@ -140,6 +163,7 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
                 ]
             ),
             (15, 11, 0.35),
+            id="opencode",
         ),
     ],
 )
@@ -154,7 +178,15 @@ def test_backend_usage_parsing_charges_llm_budget(
     worktree = tmp_path / backend
     worktree.mkdir()
     mock_run = mocker.patch("helix.mutator.subprocess.run")
-    mock_run.return_value = MagicMock(stdout=stdout, stderr="", returncode=0)
+    # Use the real CompletedProcess type so attribute typos in the production
+    # path (e.g. ``result.exit_code`` vs ``returncode``) surface as test
+    # failures rather than being silently absorbed by ``MagicMock``.
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[_BACKEND_EXECUTABLE[backend]],
+        returncode=0,
+        stdout=stdout,
+        stderr="",
+    )
     state = make_state()
 
     _parsed, usage = invoke_claude_code(
@@ -162,6 +194,14 @@ def test_backend_usage_parsing_charges_llm_budget(
         "read the prompt artifact",
         AgentConfig(backend=backend),
     )
+
+    # Guard against future refactors that bypass ``_build_backend_args`` or
+    # leave ``_MUTATOR_OVERRIDE`` set globally — the test must observe the
+    # real backend dispatch, not a short-circuited override.
+    assert mock_run.call_count == 1
+    invoked_args = mock_run.call_args.args[0]
+    assert invoked_args[0] == _BACKEND_EXECUTABLE[backend]
+
     budget.charge_llm_usage(
         state,
         usage,
@@ -173,6 +213,160 @@ def test_backend_usage_parsing_charges_llm_budget(
     assert state.budget.input_tokens == expected_input
     assert state.budget.output_tokens == expected_output
     assert state.budget.cost_usd == pytest.approx(expected_cost)
+
+
+def test_backend_usage_parsing_under_sandbox_charges_llm_budget(
+    tmp_path: Path, mocker
+) -> None:
+    """Cover the ``run_sandboxed_command`` branch of ``invoke_claude_code``.
+
+    The parametrized test above exercises the direct ``subprocess.run`` path.
+    This variant flips ``SandboxConfig.enabled=True`` so the dispatch goes
+    through ``run_sandboxed_command`` instead, ensuring sandboxed invocations
+    still produce a usage payload that flows into ``charge_llm_usage``.
+    """
+    worktree = tmp_path / "claude"
+    worktree.mkdir()
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "session_id": "sandbox-session",
+            "usage": {"input_tokens": 17, "output_tokens": 9},
+            "total_cost_usd": 0.45,
+        }
+    )
+    mock_sandboxed = mocker.patch("helix.mutator.run_sandboxed_command")
+    mock_sandboxed.return_value = subprocess.CompletedProcess(
+        args=["claude"], returncode=0, stdout=stdout, stderr=""
+    )
+    mocker.patch(
+        "helix.mutator.resolve_sandbox_image",
+        return_value="ghcr.io/example/image:latest",
+    )
+    # Belt-and-suspenders: the direct path must NOT be exercised when sandbox
+    # is enabled, so leave ``subprocess.run`` patched to fail loudly.
+    mock_run = mocker.patch(
+        "helix.mutator.subprocess.run",
+        side_effect=AssertionError(
+            "subprocess.run must not be called when sandbox is enabled"
+        ),
+    )
+    state = make_state()
+
+    _parsed, usage = invoke_claude_code(
+        str(worktree),
+        "read the prompt artifact",
+        AgentConfig(backend="claude"),
+        sandbox=SandboxConfig(enabled=True),
+    )
+
+    assert mock_sandboxed.call_count == 1
+    assert mock_run.call_count == 0
+
+    budget.charge_llm_usage(
+        state, usage, candidate_id="claude-candidate", source="claude"
+    )
+
+    assert state.budget.input_tokens == 17
+    assert state.budget.output_tokens == 9
+    assert state.budget.cost_usd == pytest.approx(0.45)
+
+
+def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
+    tmp_path: Path, mocker
+) -> None:
+    """Lock in parser support for cached_input_tokens and reasoning_tokens.
+
+    ``charge_llm_usage`` does not yet sum these into ``BudgetState``, but the
+    backend output parser exposes them via ``_normalise_usage_stats`` so a
+    future budget-API extension can rely on the alias map remaining intact.
+    """
+    worktree = tmp_path / "claude"
+    worktree.mkdir()
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "session_id": "claude-session",
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                # ``cacheReadInputTokens`` is the alias the parser actually
+                # recognises (see ``_normalise_usage_stats`` aliases).
+                "cacheReadInputTokens": 3,
+            },
+            "reasoning_tokens": 5,
+            "total_cost_usd": 0.31,
+        }
+    )
+    mock_run = mocker.patch("helix.mutator.subprocess.run")
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["claude"], returncode=0, stdout=stdout, stderr=""
+    )
+
+    _parsed, usage = invoke_claude_code(
+        str(worktree),
+        "read the prompt artifact",
+        AgentConfig(backend="claude"),
+    )
+
+    assert usage["input_tokens"] == 11
+    assert usage["output_tokens"] == 7
+    assert usage["cached_input_tokens"] == 3
+    assert usage["reasoning_tokens"] == 5
+    assert usage["cost_usd"] == pytest.approx(0.31)
+
+
+def test_charge_llm_usage_handles_empty_and_partial_payloads() -> None:
+    """Regression guard for the early-return / default-zero paths."""
+    state = make_state()
+
+    # ``None`` usage: short-circuit, no mutation.
+    budget.charge_llm_usage(state, None, candidate_id="c", source="x")
+    assert state.budget.input_tokens == 0
+    assert state.budget.output_tokens == 0
+    assert state.budget.cost_usd == 0.0
+
+    # Empty dict: short-circuit (falsy), no mutation.
+    budget.charge_llm_usage(state, {}, candidate_id="c", source="x")
+    assert state.budget.input_tokens == 0
+    assert state.budget.output_tokens == 0
+    assert state.budget.cost_usd == 0.0
+
+    # Partial payload: only present keys are summed; absent keys default to 0.
+    budget.charge_llm_usage(
+        state,
+        {"input_tokens": 7},
+        candidate_id="c",
+        source="x",
+    )
+    assert state.budget.input_tokens == 7
+    assert state.budget.output_tokens == 0
+    assert state.budget.cost_usd == 0.0
+
+
+def test_charge_llm_usage_emits_budget_update_event() -> None:
+    """Lock in the BUDGET_UPDATE trace contract for charge_llm_usage."""
+    state = make_state()
+
+    with TRACE.record() as events:
+        budget.charge_llm_usage(
+            state,
+            {"input_tokens": 11, "output_tokens": 7, "cost_usd": 0.31},
+            candidate_id="g1-s1",
+            source="mutation",
+        )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.type is EventType.BUDGET_UPDATE
+    assert event.candidate_id == "g1-s1"
+    assert event.decision == "mutation"
+    assert event.input_tokens_delta == 11
+    assert event.output_tokens_delta == 7
+    assert event.cost_usd_delta == pytest.approx(0.31)
+    assert event.input_tokens == 11
+    assert event.output_tokens == 7
+    assert event.cost_usd == pytest.approx(0.31)
 
 
 def test_progress_counters_update_through_budget_api() -> None:
