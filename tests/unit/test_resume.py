@@ -330,6 +330,117 @@ def test_resume_allows_cache_toggle_without_semantic_rejection() -> None:
     _validate_resume_semantics(state, current_config)
 
 
+def test_resume_rejects_evaluator_stdout_capture_change() -> None:
+    """Toggling ``evaluator.include_stdout`` reinterprets parser input.
+
+    GEPA Optimize Anything parity: any field that changes which bytes
+    the score parser sees is hard-rejected on resume.  Saved scores
+    were computed against one capture policy; a different policy can
+    silently flip results without the user knowing.
+    """
+    from helix.config import EvaluatorConfig, EvolutionConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    saved_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1", include_stdout=True),
+        evolution=EvolutionConfig(frontier_type="instance"),
+    )
+    current_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1", include_stdout=False),
+        evolution=EvolutionConfig(frontier_type="instance"),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "instance"
+    state.resume_semantics = _resume_semantics(saved_config)
+
+    with pytest.raises(ResumeIncompatibleError, match="include_stdout"):
+        _validate_resume_semantics(state, current_config)
+
+
+def test_resume_rejects_evaluator_sidecar_change() -> None:
+    """Sidecar swap implies a different evaluator runtime entirely.
+
+    Resuming under a different sidecar would compare scores produced
+    by different evaluator binaries — the strict-equality stance GEPA
+    gets implicitly by pickling its full config alongside state.
+    """
+    from helix.config import (
+        EvaluatorConfig,
+        EvaluatorSidecarConfig,
+        EvolutionConfig,
+        HelixConfig,
+    )
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    saved_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python /runner/eval.py",
+            sidecar=EvaluatorSidecarConfig(
+                image="my-eval:v1",
+                command="python -m bench",
+                endpoint="http://eval:8080/run",
+            ),
+        ),
+        evolution=EvolutionConfig(frontier_type="instance"),
+    )
+    current_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(
+            command="python /runner/eval.py",
+            sidecar=EvaluatorSidecarConfig(
+                image="my-eval:v2",  # bumped image version
+                command="python -m bench",
+                endpoint="http://eval:8080/run",
+            ),
+        ),
+        evolution=EvolutionConfig(frontier_type="instance"),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "instance"
+    state.resume_semantics = _resume_semantics(saved_config)
+
+    with pytest.raises(ResumeIncompatibleError, match="sidecar"):
+        _validate_resume_semantics(state, current_config)
+
+
+def test_resume_allows_agent_backend_change() -> None:
+    """Mutation-backend swaps are intentionally NOT in resume_semantics.
+
+    Changing ``agent.backend`` / ``model`` / ``effort`` affects only
+    future proposals — saved frontier scores stay valid.  GEPA likewise
+    treats the LM client as out-of-band of the persisted state.
+    """
+    from helix.config import (
+        AgentConfig,
+        EvaluatorConfig,
+        EvolutionConfig,
+        HelixConfig,
+    )
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    saved_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="instance"),
+        agent=AgentConfig(backend="claude", model="sonnet"),
+    )
+    current_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="instance"),
+        agent=AgentConfig(backend="codex", model="gpt-5"),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "instance"
+    state.resume_semantics = _resume_semantics(saved_config)
+
+    # Should not raise — agent.* lives outside the resume contract.
+    _validate_resume_semantics(state, current_config)
+
+
 def test_resume_legacy_state_with_empty_resume_semantics_does_not_raise() -> None:
     """Legacy states predating the resume_semantics guard short-circuit cleanly.
 
