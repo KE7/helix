@@ -87,7 +87,7 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
     assert event.type is EventType.BUDGET_UPDATE
     assert event.candidate_id == "g1-s1"
     assert event.split == "train"
-    assert event.decision == "mutation_minibatch_gate"
+    assert event.reason == "mutation_minibatch_gate"
     assert event.budget_delta == 2
     assert event.budget_evaluations == 5
 
@@ -360,7 +360,7 @@ def test_charge_llm_usage_emits_budget_update_event() -> None:
     event = events[0]
     assert event.type is EventType.BUDGET_UPDATE
     assert event.candidate_id == "g1-s1"
-    assert event.decision == "mutation"
+    assert event.reason == "mutation"
     assert event.input_tokens_delta == 11
     assert event.output_tokens_delta == 7
     assert event.cost_usd_delta == pytest.approx(0.31)
@@ -372,7 +372,7 @@ def test_charge_llm_usage_emits_budget_update_event() -> None:
 def test_progress_counters_update_through_budget_api() -> None:
     state = make_state()
 
-    budget.start_generation(state, 4)
+    budget.set_generation(state, 4)
     first_i = budget.advance_proposal_counter(state, source="iteration")
     mutation_id = budget.next_mutation_id(state, 4)
     merge_id = budget.next_merge_id(state, 4)
@@ -427,29 +427,67 @@ def test_charge_llm_usage_zero_delta_still_emits_event() -> None:
     assert len(events) == 1
     event = events[0]
     assert event.type is EventType.BUDGET_UPDATE
-    assert event.decision == "mutation"
+    assert event.reason == "mutation"
     assert event.input_tokens_delta == 0
     assert event.output_tokens_delta == 0
     assert event.cost_usd_delta == 0.0
 
 
 def test_cached_charge_at_cap_does_not_overshoot_budget_exhausted() -> None:
-    """A ``was_cached=True`` charge adds 0 units; the cap predicate must agree."""
+    """A ``was_cached=True`` charge adds 0 units; the cap predicate must agree.
+
+    Also pins the new "skip emit on units==0" behavior: a cached charge
+    must not produce a ``BUDGET_UPDATE`` event, since no budget was
+    actually consumed.
+    """
     config = make_config(max_evaluations=100)
 
-    # One unit shy of the cap: cached charge keeps us shy, not exhausted.
+    # One unit shy of the cap: cached charge keeps us shy, not exhausted,
+    # and emits no trace event.
     state = make_state(99)
-    charged = budget.charge_evaluation(state, was_cached=True, source="test")
+    with TRACE.record() as events:
+        charged = budget.charge_evaluation(state, was_cached=True, source="test")
     assert charged == 0
     assert state.budget.evaluations == 99
+    assert events == []
     assert budget.budget_exhausted(state, config) is False
 
     # Exactly at the cap: cached charge keeps us at the cap, exhausted.
     state = make_state(100)
-    charged = budget.charge_evaluation(state, was_cached=True, source="test")
+    with TRACE.record() as events:
+        charged = budget.charge_evaluation(state, was_cached=True, source="test")
     assert charged == 0
     assert state.budget.evaluations == 100
+    assert events == []
     assert budget.budget_exhausted(state, config) is True
+
+    # Zero-example minibatch is the same units==0 short-circuit.
+    state = make_state(50)
+    with TRACE.record() as events:
+        charged = budget.charge_evaluation(
+            state, num_actual_examples=0, source="empty_minibatch"
+        )
+    assert charged == 0
+    assert state.budget.evaluations == 50
+    assert events == []
+
+
+def test_record_discovery_budget_warns_on_duplicate_id() -> None:
+    """Duplicate stamps overwrite but emit a warning so bugs are visible."""
+    import warnings as _warnings
+
+    state = make_state(5)
+    budget.record_discovery_budget(state, "g1-s1")
+    assert state.num_metric_calls_by_discovery == {"g1-s1": 5}
+
+    state.budget.evaluations = 9
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        budget.record_discovery_budget(state, "g1-s1")
+
+    assert len(caught) == 1
+    assert "g1-s1" in str(caught[0].message)
+    assert state.num_metric_calls_by_discovery == {"g1-s1": 9}
 
 
 def test_advance_proposal_counter_increments_monotonically() -> None:

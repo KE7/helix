@@ -80,31 +80,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
-    """Return True if evaluation budget is exhausted.
-
-    Uses only the ``evaluations`` counter.  In dataset/minibatch mode HELIX
-    counts per-example evaluations, i.e. the number of examples actually sent
-    to the evaluator after per-example cache hits are removed.  Legacy
-    single-task/no-example evaluator calls still count as one metric call
-    unless served from cache (no per-example ids exist in this path).
-    When ``max_evaluations`` is the sentinel ``-1`` (the default), the cap is
-    disabled and this always returns False; HELIX then runs until
-    ``max_generations`` alone.
-    """
-    return budget_api.budget_exhausted(state, config)
-
-
-def _evaluation_budget_units(
-    *, num_actual_examples: int | None = None, was_cached: bool = False
-) -> int:
-    """Return evaluation budget units for an evaluation attempt."""
-    return budget_api.evaluation_budget_units(
-        num_actual_examples=num_actual_examples,
-        was_cached=was_cached,
-    )
-
-
 def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> bool:
     """Return True if the new result regresses below baseline by more than threshold."""
     return new_result.sum_score() < baseline.sum_score() - threshold
@@ -1399,7 +1374,7 @@ def _run_evolution_impl(
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
 
-            budget_api.start_generation(state, gen)
+            budget_api.set_generation(state, gen)
             # GEPA parity (engine.py:649): bump ``state.i`` unconditionally at
             # the top of every iteration so the proposal counter — used by the
             # batch sampler and as a tiebreaker elsewhere — advances regardless
@@ -1407,7 +1382,7 @@ def _run_evolution_impl(
             budget_api.advance_proposal_counter(state, source="iteration")
             TRACE.emit(EventType.ITER_START, decision=str(gen))
 
-            if budget_exhausted(state, config):
+            if budget_api.budget_exhausted(state, config):
                 print_warning("Budget exhausted -- stopping early.")
                 break
 
@@ -1675,7 +1650,7 @@ def _run_evolution_impl(
                             _save_evaluation(base_dir, merge_result)
 
                             # GEPA parity (Fix 13): mid-generation budget check.
-                            if budget_exhausted(state, config):
+                            if budget_api.budget_exhausted(state, config):
                                 print_warning(
                                     "Budget exhausted mid-generation -- stopping."
                                 )
@@ -1778,7 +1753,7 @@ def _run_evolution_impl(
                                     )
                                 _save_evaluation(base_dir, full_val_result)
 
-                                if budget_exhausted(state, config):
+                                if budget_api.budget_exhausted(state, config):
                                     print_warning(
                                         "Budget exhausted during merge full-val eval -- stopping."
                                     )
@@ -1862,7 +1837,7 @@ def _run_evolution_impl(
             _budget_break = False
 
             for _p_idx in range(n_proposals):
-                if budget_exhausted(state, config):
+                if budget_api.budget_exhausted(state, config):
                     _budget_break = True
                     break
 
@@ -2024,7 +1999,7 @@ def _run_evolution_impl(
                         source="parent_minibatch",
                     )
 
-                if budget_exhausted(state, config):
+                if budget_api.budget_exhausted(state, config):
                     _budget_break = True
                     break
 
@@ -2280,7 +2255,7 @@ def _run_evolution_impl(
                         source="mutation_minibatch_gate",
                     )
 
-                    if budget_exhausted(state, config):
+                    if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
@@ -2367,7 +2342,7 @@ def _run_evolution_impl(
                         source="mutation_train_gate",
                     )
 
-                    if budget_exhausted(state, config):
+                    if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
@@ -2436,7 +2411,7 @@ def _run_evolution_impl(
                         source="mutation_val_stage",
                     )
 
-                    if budget_exhausted(state, config):
+                    if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
@@ -2537,7 +2512,7 @@ def _run_evolution_impl(
                         source="mutation_full_val",
                     )
 
-                if budget_exhausted(state, config):
+                if budget_api.budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
