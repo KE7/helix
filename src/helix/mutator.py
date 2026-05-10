@@ -72,15 +72,7 @@ MUTATION_PROMPT_TEMPLATE = """\
 ## Current Evaluation Scores
 {scores}
 
-## Evaluator Output
-
-### stdout
-{asi_stdout}
-
-### stderr
-{asi_stderr}
-
-{extra_asi_section}{diagnostics_section}## Background / Context
+{diagnostics_section}{evaluator_notes_section}{evaluator_output_section}{extra_asi_section}## Background / Context
 {background}
 
 ## Your Task
@@ -107,6 +99,65 @@ def _turn_budget_section(max_turns: int | None) -> str:
         f"accordingly — prioritize the highest-impact changes first and be "
         f"efficient with your tool usage.\n"
     )
+
+
+def _strip_machine_protocol_from_evaluator_stream(text: str) -> str:
+    """Remove evaluator machine-contract lines before showing stdout/stderr.
+
+    The raw evaluator stdout/stderr remains stored in ASI artifacts for
+    debugging and parsing.  This helper only affects mutation prompts.
+    ``HELIX_RESULT=`` is a machine protocol consumed by HELIX, never human
+    reflection context for the mutator.
+    """
+    if not text:
+        return ""
+
+    kept: list[str] = []
+    for line in text.splitlines():
+        if line.strip().startswith("HELIX_RESULT="):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _has_structured_diagnostics(eval_result: EvalResult) -> bool:
+    return (
+        eval_result.per_example_side_info is not None
+        or eval_result.side_info is not None
+    )
+
+
+def _evaluator_failed(eval_result: EvalResult) -> bool:
+    return eval_result.asi.get("_returncode") not in (None, "0", 0)
+
+
+def _render_evaluator_notes(eval_result: EvalResult) -> str:
+    notes = eval_result.asi.get("log", "").strip()
+    if not notes:
+        return ""
+    return f"## Evaluator Notes\n{notes}\n\n"
+
+
+def _render_evaluator_output_fallback(eval_result: EvalResult) -> str:
+    """Render stdout/stderr only when they are useful fallback diagnostics."""
+    has_notes = bool(eval_result.asi.get("log", "").strip())
+    include_streams = _evaluator_failed(eval_result) or (
+        not _has_structured_diagnostics(eval_result) and not has_notes
+    )
+    if not include_streams:
+        return ""
+
+    stdout = _strip_machine_protocol_from_evaluator_stream(
+        eval_result.asi.get("stdout", "")
+    )
+    stderr = _strip_machine_protocol_from_evaluator_stream(
+        eval_result.asi.get("stderr", "")
+    )
+    if not stdout:
+        stdout = "(no stdout)"
+    if not stderr:
+        stderr = "(no stderr)"
+    return f"## Evaluator Output\n\n### stdout\n{stdout}\n\n### stderr\n{stderr}\n\n"
 
 
 def build_seed_generation_prompt(
@@ -344,14 +395,11 @@ def build_mutation_prompt(
     if not scores_text:
         scores_text = "  (no scores recorded)"
 
-    asi_stdout = eval_result.asi.get("stdout", "(no stdout)")
-    asi_stderr = eval_result.asi.get("stderr", "(no stderr)")
-
     # Collect any extra_N entries from ASI
     extra_entries = {
         k: v
         for k, v in sorted(eval_result.asi.items())
-        if k not in ("stdout", "stderr", "error")
+        if k not in ("stdout", "stderr", "error", "log", "_returncode")
     }
     if extra_entries:
         extra_lines = "\n".join(f"### {k}\n{v}" for k, v in extra_entries.items())
@@ -398,8 +446,8 @@ def build_mutation_prompt(
         system_prompt=AUTONOMOUS_SYSTEM_PROMPT,
         objective=objective,
         scores=scores_text,
-        asi_stdout=asi_stdout,
-        asi_stderr=asi_stderr,
+        evaluator_notes_section=_render_evaluator_notes(eval_result),
+        evaluator_output_section=_render_evaluator_output_fallback(eval_result),
         extra_asi_section=extra_asi_section,
         diagnostics_section=diagnostics_section,
         background=bg,
