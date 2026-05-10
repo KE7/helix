@@ -460,7 +460,35 @@ class ParetoFrontier:
         self._update_cartesian(candidate.id, result)
 
     def _validate_objective_scores(self, cid: str, result: EvalResult) -> None:
-        """Reject non-instance frontier modes with no usable objective axes."""
+        """Reject non-instance frontier modes with no usable objective axes.
+
+        Mirrors GEPA's seed-time check at ``state.py:213-219`` and the
+        per-update check at ``state.py:564-569`` (both raise plain
+        ``ValueError`` when ``valset_evaluation.objective_scores_by_val_id``
+        is missing/empty).  HELIX raises a typed
+        :class:`MissingObjectiveScoresError(ValueError)` for catchability
+        and, in two narrow places, is *very slightly* stricter than
+        upstream GEPA (both are minor improvements that should never
+        trigger for a well-formed evaluator):
+
+        * **Length parity with ``instance_scores``.** GEPA stores
+          objective scores as ``dict[val_id, ObjectiveScores]`` keyed
+          parallel to ``scores_by_val_id``, so the cardinality match is
+          a structural impossibility.  HELIX uses a *positional* list
+          against ``instance_scores.keys()`` order, so the length check
+          here is the necessary structural guard — not a real
+          divergence, just the correct invariant for a list-shaped
+          field.
+        * **All-empty inner slots.**  GEPA tolerates the case where
+          every per-val_id objective dict is ``{}`` (its
+          ``_update_objective_pareto_front`` has ``if not
+          objective_scores: return``).  HELIX rejects it: a candidate
+          with literally zero objective signal cannot contribute to any
+          objective frontier, and failing here surfaces the empty-axis
+          condition with a per-candidate error message rather than as a
+          downstream "empty active frontier" raise three call sites
+          later.
+        """
         if self._frontier_type == "instance":
             return
         if result.objective_scores is None:
