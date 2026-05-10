@@ -6,12 +6,18 @@ import json
 import os
 import sys
 import tomllib
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from helix.backends import BackendName
+from helix.backends import (
+    BackendName,
+    EFFORT_AWARE_BACKENDS,
+    EFFORT_VALID_VALUES,
+    backend_display_name,
+)
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -557,6 +563,60 @@ class HelixConfig(BaseModel):
                     "Docker sandboxing requires [evaluator.sidecar] with image, "
                     "command, and endpoint."
                 )
+        _validate_agent_effort(self.agent)
+
+
+def _validate_agent_effort(agent: AgentConfig) -> None:
+    """Warn on ``agent.effort`` settings that the active backend ignores or rejects.
+
+    Two cases are surfaced:
+
+    1. **Backend ignores the field** (``codex`` / ``cursor`` / ``gemini``):
+       ``effort`` is silently dropped by ``helix.mutator`` because those CLIs
+       don't expose an equivalent flag.  Without a warning, users assume the
+       knob is taking effect.
+    2. **Effort-aware backend, but unknown value** (e.g. ``claude`` with
+       ``effort = "extreme"``): the subprocess will fail with an opaque error
+       buried in stderr.  Surfacing the typo at config load gives a far
+       clearer signal.
+
+    Both cases are warnings (not errors) so users can override / try forward-
+    compatible values; the underlying CLI remains the source of truth for
+    what's actually accepted.
+    """
+    if agent.effort is None:
+        return
+
+    backend = agent.backend
+    display = backend_display_name(backend)
+
+    if backend not in EFFORT_AWARE_BACKENDS:
+        aware = ", ".join(sorted(EFFORT_AWARE_BACKENDS))
+        warnings.warn(
+            (
+                f"agent.effort={agent.effort!r} is set, but the {display!r} "
+                f"backend does not propagate an effort/reasoning level; "
+                f"the value will be silently ignored. Either remove the "
+                f"setting or switch to an effort-aware backend ({aware})."
+            ),
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+
+    valid = EFFORT_VALID_VALUES.get(backend)
+    if valid is not None and agent.effort not in valid:
+        known = ", ".join(sorted(valid))
+        warnings.warn(
+            (
+                f"agent.effort={agent.effort!r} is not a recognized value "
+                f"for the {display!r} backend (known values: {known}). The "
+                f"value will still be passed through to the CLI, but you "
+                f"may see an opaque subprocess error if it's a typo."
+            ),
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def load_config(path: Path) -> HelixConfig:

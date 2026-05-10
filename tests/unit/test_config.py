@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+import warnings
 from pathlib import Path
 
 import pytest
@@ -251,3 +252,145 @@ class TestDirectModelConstruction:
         cfg = WorktreeConfig()
         assert cfg.base_dir == ".helix/worktrees"
         assert cfg.cleanup_dominated is False  # deprecated: GEPA append-only
+
+
+# ---------------------------------------------------------------------------
+# agent.effort validation (per-backend allowlist + ignored-backend warning)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentEffortValidation:
+    """Surface obvious mismatches between ``agent.effort`` and ``agent.backend``.
+
+    HELIX forwards ``agent.effort`` to a backend-native CLI flag in
+    ``helix.mutator`` (``claude --effort``, ``opencode --variant``).  The
+    other backends silently ignore the field — without a warning the
+    setting looks like it's taking effect when it isn't.
+    """
+
+    def _base_kwargs(self):
+        return {
+            "objective": "test",
+            "evaluator": EvaluatorConfig(command="echo 1"),
+        }
+
+    def test_effort_unset_is_silent(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="claude"),
+        )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warns_on_ignoring_backend_codex(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="codex", effort="high"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("does not propagate" in w and "Codex" in w for w in warnings), warnings
+
+    def test_effort_warns_on_ignoring_backend_gemini(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="gemini", effort="high"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("does not propagate" in w for w in warnings), warnings
+
+    def test_effort_warns_on_ignoring_backend_cursor(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="cursor", effort="medium"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("does not propagate" in w for w in warnings), warnings
+
+    def test_effort_accepts_valid_value_on_claude(self, recwarn):
+        for value in ("low", "medium", "high"):
+            HelixConfig(
+                **self._base_kwargs(),
+                agent=AgentConfig(backend="claude", effort=value),
+            )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warns_on_unknown_value_for_claude(self, recwarn):
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="claude", effort="extreme"),
+        )
+        warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
+        assert any("not a recognized value" in w and "extreme" in w for w in warnings), warnings
+
+    def test_effort_does_not_warn_on_unrestricted_backend(self, recwarn):
+        """opencode accepts arbitrary --variant strings; HELIX must not warn."""
+        HelixConfig(
+            **self._base_kwargs(),
+            agent=AgentConfig(backend="opencode", effort="qwen-coder-plus"),
+        )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warning_is_warning_not_error(self):
+        """The validation must emit a warning (not raise) on unsupported combos."""
+        # ``pytest.warns`` makes both invariants explicit at once: HelixConfig
+        # must construct successfully *and* a UserWarning must be emitted.
+        with pytest.warns(UserWarning, match="does not propagate"):
+            HelixConfig(
+                **self._base_kwargs(),
+                agent=AgentConfig(backend="codex", effort="high"),
+            )
+
+    def test_every_backend_has_effort_metadata(self):
+        """Every entry in ``BACKENDS`` must be classified by the validator.
+
+        Guards against drift: when a new backend is added to ``BACKENDS``
+        without anyone updating ``EFFORT_AWARE_BACKENDS`` /
+        ``EFFORT_VALID_VALUES``, this test surfaces it immediately rather
+        than letting the validator silently emit the wrong message (or no
+        message) for the new backend.
+        """
+        from helix.backends import (
+            BACKENDS,
+            EFFORT_AWARE_BACKENDS,
+            EFFORT_VALID_VALUES,
+        )
+
+        # Every effort-aware backend must appear in EFFORT_VALID_VALUES so
+        # the "is this a known value?" branch can fire.
+        for backend in EFFORT_AWARE_BACKENDS:
+            assert backend in EFFORT_VALID_VALUES, (
+                f"{backend!r} is in EFFORT_AWARE_BACKENDS but missing from "
+                "EFFORT_VALID_VALUES; the validator can't decide whether "
+                "values are typos."
+            )
+
+        # Every BACKENDS entry must produce a predictable signal under a
+        # sentinel ``effort`` value:
+        #   - ignoring backends            -> "does not propagate" warning
+        #   - aware + restricted allowlist -> "not a recognized value" warning
+        #   - aware + unrestricted (None)  -> silent (any string is allowed)
+        # Using a sentinel guaranteed not to be in any restricted allowlist
+        # forces aware-restricted backends to warn too.
+        sentinel = "__helix_effort_sentinel__"
+        for backend in BACKENDS:
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter("always")
+                HelixConfig(
+                    **self._base_kwargs(),
+                    agent=AgentConfig(backend=backend, effort=sentinel),
+                )
+            messages = [
+                str(w.message) for w in captured if w.category is UserWarning
+            ]
+            if backend not in EFFORT_AWARE_BACKENDS:
+                assert any(
+                    "does not propagate" in m for m in messages
+                ), f"{backend!r} produced no 'does not propagate' warning: {messages}"
+            elif EFFORT_VALID_VALUES.get(backend) is not None:
+                assert any(
+                    "not a recognized value" in m for m in messages
+                ), f"{backend!r} produced no 'not a recognized value' warning: {messages}"
+            else:
+                # Unrestricted aware backend (e.g. opencode): silent is correct.
+                assert messages == [], (
+                    f"{backend!r} is unrestricted but emitted warnings: {messages}"
+                )
