@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock
 
 
@@ -148,6 +149,30 @@ class TestRunEvaluatorSuccess:
         result = run_evaluator(candidate, config)
 
         assert "stderr" not in result.asi
+
+    def test_sets_helix_asi_log_env(self, mocker):
+        mock_run = mocker.patch("helix.executor.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+        candidate = make_candidate()
+        config = make_config(score_parser="exitcode")
+
+        run_evaluator(candidate, config)
+
+        env = mock_run.call_args.kwargs["env"]
+        assert "HELIX_ASI_LOG" in env
+
+    def test_captures_helix_log_in_asi(self, tmp_path):
+        command = (
+            f"{sys.executable} -c "
+            "\"from helix import log; log('unique evaluator note', score=0.7)\""
+        )
+        candidate = make_candidate(str(tmp_path))
+        config = make_config(command=command, score_parser="exitcode")
+
+        result = run_evaluator(candidate, config)
+
+        assert "unique evaluator note" in result.asi["log"]
+        assert "score: 0.7" in result.asi["log"]
 
 
 # ---------------------------------------------------------------------------

@@ -14,11 +14,13 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from helix import budget as budget_api
 from helix.config import (
     DatasetConfig,
     EvolutionConfig,
@@ -26,16 +28,20 @@ from helix.config import (
     EvaluatorSidecarConfig,
     HelixConfig,
     SandboxConfig,
+    SeedlessConfig,
     WorktreeConfig,
 )
-from helix.evolution import (
-    _evaluation_budget_units,
-    _load_evaluation,
+from helix.budget import (
     budget_exhausted,
+    evaluation_budget_units as _evaluation_budget_units,
+)
+from helix.evolution import (
+    _load_evaluation,
     degrades,
     run_evolution,
 )
 from helix.lineage import LineageEntry
+from helix.mutator import generate_seed as _real_generate_seed
 from helix.population import Candidate, EvalResult
 from helix.state import BudgetState, EvolutionState
 
@@ -514,12 +520,250 @@ class TestGatingInEvolutionLoop:
         assert best.id == "g1-s1"
 
 
+def _filter_charge_calls(spy, *, source: str, candidate_id: str) -> list:
+    """Return the spy invocations whose kwargs match (source, candidate_id)."""
+    return [
+        call
+        for call in spy.call_args_list
+        if call.kwargs.get("source") == source
+        and call.kwargs.get("candidate_id") == candidate_id
+    ]
+
+
+class TestLlmUsageBudgetIntegration:
+    """Verify ``run_evolution`` charges LLM usage through the central budget API.
+
+    Each test mocks the LLM-producing step (``generate_seed``, ``mutate``,
+    ``merge``) to return a synthetic usage payload, spies on
+    ``budget_api.charge_llm_usage`` (preserving its real side effects), and
+    asserts that the spy was invoked exactly once for the candidate of
+    interest with the expected ``source`` tag and resulting BudgetState
+    delta.  Exactly-once is important because a future double-charge bug
+    would otherwise inflate the budget silently.
+    """
+
+    def test_seedless_generation_usage_charged_through_budget_api(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        usage = {"input_tokens": 21, "output_tokens": 12, "cost_usd": 0.41}
+        mocker.patch("helix.evolution.create_empty_seed_worktree", return_value=seed)
+        mocker.patch(
+            "helix.evolution.build_seed_generation_prompt", return_value="<seed prompt>"
+        )
+        all_mocks["generate_seed"].return_value = usage
+        all_mocks["run_evaluator"].return_value = make_eval_result("g0-s0", {"i1": 0.5})
+        all_mocks["mutate"].return_value = None
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            HelixConfig(
+                objective="Optimise the solver",
+                seedless=SeedlessConfig(enabled=True),
+                evaluator=EvaluatorConfig(command="pytest -q"),
+                evolution=EvolutionConfig(
+                    max_generations=1,
+                    max_evaluations=1000,
+                    perfect_score_threshold=None,
+                    # Pin instance frontier: this test's EvalResult has
+                    # no per-example objective_scores, so the default
+                    # GEPA-O.A. ``"hybrid"`` frontier would (correctly)
+                    # raise ``MissingObjectiveScoresError``.
+                    frontier_type="instance",
+                ),
+            ),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        seed_calls = _filter_charge_calls(
+            spy, source="seed_generation", candidate_id="g0-s0"
+        )
+        assert len(seed_calls) == 1, (
+            "expected exactly one seed_generation charge for g0-s0, "
+            f"got {len(seed_calls)}: {seed_calls!r}"
+        )
+        state = seed_calls[0].args[0]
+        assert state.budget.input_tokens == 21
+        assert state.budget.output_tokens == 12
+        assert state.budget.cost_usd == pytest.approx(0.41)
+
+    def test_seedless_generation_usage_flows_through_real_parser(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """End-to-end seedless coverage that exercises ``_normalise_usage_stats``.
+
+        The sibling test stubs out ``generate_seed`` entirely, so a regression
+        in the backend output parser would not surface there.  This variant
+        keeps the real ``generate_seed`` → ``invoke_claude_code`` → parser
+        chain intact (only ``subprocess.run`` is mocked), then asserts the
+        parsed usage dict is what reaches ``charge_llm_usage``.
+        """
+        seed = make_candidate("g0-s0")
+        seed.worktree_path = str(tmp_path / "seed-worktree")
+        Path(seed.worktree_path).mkdir(parents=True, exist_ok=True)
+        mocker.patch("helix.evolution.create_empty_seed_worktree", return_value=seed)
+        mocker.patch(
+            "helix.evolution.build_seed_generation_prompt", return_value="<seed prompt>"
+        )
+        # Restore the real ``generate_seed`` so it dispatches through
+        # ``invoke_claude_code`` and hits the production parser pipeline.
+        all_mocks["generate_seed"].side_effect = _real_generate_seed
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "session_id": "seedless-session",
+                "usage": {"input_tokens": 31, "output_tokens": 19},
+                "total_cost_usd": 0.51,
+            }
+        )
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude"], returncode=0, stdout=stdout, stderr=""
+        )
+        all_mocks["run_evaluator"].return_value = make_eval_result("g0-s0", {"i1": 0.5})
+        all_mocks["mutate"].return_value = None
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            HelixConfig(
+                objective="Optimise the solver",
+                seedless=SeedlessConfig(enabled=True),
+                evaluator=EvaluatorConfig(command="pytest -q"),
+                evolution=EvolutionConfig(
+                    max_generations=1,
+                    max_evaluations=1000,
+                    perfect_score_threshold=None,
+                    # See sibling test: pin instance frontier so the
+                    # objectiveless EvalResult doesn't trip the default
+                    # GEPA-O.A. ``"hybrid"`` validator.
+                    frontier_type="instance",
+                ),
+            ),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        # The real backend dispatch must have been hit exactly once.
+        assert mock_run.call_count == 1
+        assert mock_run.call_args.args[0][0] == "claude"
+
+        seed_calls = _filter_charge_calls(
+            spy, source="seed_generation", candidate_id="g0-s0"
+        )
+        assert len(seed_calls) == 1
+        state = seed_calls[0].args[0]
+        assert state.budget.input_tokens == 31
+        assert state.budget.output_tokens == 19
+        assert state.budget.cost_usd == pytest.approx(0.51)
+
+    def test_mutation_usage_charged_through_budget_api(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        child.usage = {"input_tokens": 22, "output_tokens": 13, "cost_usd": 0.42}
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9})
+            return make_eval_result(candidate.id, {"i1": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        mutation_calls = _filter_charge_calls(
+            spy, source="mutation", candidate_id="g1-s1"
+        )
+        assert len(mutation_calls) == 1, (
+            "expected exactly one mutation charge for g1-s1, "
+            f"got {len(mutation_calls)}: {mutation_calls!r}"
+        )
+        state = mutation_calls[0].args[0]
+        assert state.budget.input_tokens == 22
+        assert state.budget.output_tokens == 13
+        assert state.budget.cost_usd == pytest.approx(0.42)
+
+    def test_merge_usage_charged_through_budget_api(self, mocker, tmp_path, all_mocks):
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        merged.operation = "merge"
+        merged.parent_ids = ["g0-s0", "g1-s1"]
+        merged.usage = {"input_tokens": 23, "output_tokens": 14, "cost_usd": 0.43}
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"1": 0.9, "2": 0.9})
+            if candidate.id == "g2-m1":
+                return make_eval_result("g2-m1", {"1": 1.0, "2": 1.0})
+            return make_eval_result(candidate.id, {"1": 0.3, "2": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(
+                max_generations=2,
+                perfect_score_threshold=None,
+                merge_enabled=True,
+                max_merge_invocations=5,
+                merge_val_overlap_floor=1,
+                merge_subsample_size=2,
+            ),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        merge_calls = _filter_charge_calls(spy, source="merge", candidate_id="g2-m1")
+        assert len(merge_calls) == 1, (
+            "expected exactly one merge charge for g2-m1, "
+            f"got {len(merge_calls)}: {merge_calls!r}"
+        )
+        state = merge_calls[0].args[0]
+        assert state.budget.input_tokens == 23
+        assert state.budget.output_tokens == 14
+        assert state.budget.cost_usd == pytest.approx(0.43)
+
+
 # ---------------------------------------------------------------------------
 # run_evolution — merge behavior
 # ---------------------------------------------------------------------------
 
 
 class TestMergeBehavior:
+    # ``mutate`` is mocked to return the same ``child`` candidate on every
+    # call, so its id (``g1-s1``) gets re-recorded across generations.  In
+    # production ``next_mutation_id`` allocates a fresh id per gen, so the
+    # duplicate-discovery warning would never fire there.  Filter it here
+    # to keep the suite quiet without weakening the production guard.
+    @pytest.mark.filterwarnings(
+        "ignore:discovery budget already recorded:UserWarning"
+    )
     def test_merge_fires_when_new_program_accepted(self, mocker, tmp_path, all_mocks):
         """Merge is triggered in the NEXT generation after acceptance (GEPA parity).
 

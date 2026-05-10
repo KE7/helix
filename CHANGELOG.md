@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scalar / instance-axis behaviour.  `select_parent()` likewise raises
   rather than falling back to all-candidate sampling on objective-bearing
   modes.  The `"instance"` path keeps its existing fallback semantics.
+- **BREAKING**: `evolution.cache_evaluation` now defaults to `False`
+  (previously `True`).  Matches GEPA Optimize Anything's conservative
+  cache_evaluation default
+  (`src/gepa/optimize_anything.py:476`).  When the cache *is* enabled,
+  entries are now keyed by candidate **content** (the worktree's
+  `HEAD^{tree}` SHA, with a clean-state guard) rather than HELIX's
+  lineage `candidate.id`, so equivalent candidates can reuse results
+  across re-derivations.  Configs that previously relied on cache hits
+  (e.g. resume scenarios that re-evaluate the seed) should set
+  `cache_evaluation = true` explicitly.
 - **BREAKING**: `score_parser = "helix_result"` now takes a **per-example**
   `HELIX_RESULT=[[score_0, side_info_0], [score_1, side_info_1], ...]`
   payload — one `[score, side_info]` pair per id in `helix_batch.json`.

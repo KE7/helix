@@ -9,6 +9,7 @@ mock all I/O and mock ``run_evaluator`` with controlled score sequences.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,13 @@ from helix.config import (
     SeedlessConfig,
     WorktreeConfig,
 )
-from helix.evolution import HelixDataLoader, _make_data_loader, run_evolution
-from helix.population import Candidate, EvalResult
+from helix.evolution import (
+    HelixDataLoader,
+    _inject_top_k_best_example_history,
+    _make_data_loader,
+    run_evolution,
+)
+from helix.population import Candidate, EvalResult, ParetoFrontier
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +65,116 @@ def _write_train_jsonl(path: Path, n: int = 6) -> Path:
         for i in range(n):
             f.write(json.dumps({"idx": i, "x": i}) + "\n")
     return p
+
+
+def _git(args: list[str], cwd: Path) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _init_repo(path: Path) -> None:
+    path.mkdir(exist_ok=True)
+    _git(["init"], path)
+    _git(["config", "user.name", "HELIX Test"], path)
+    _git(["config", "user.email", "helix-test@noreply"], path)
+
+
+def test_top_k_best_example_history_injection_preserves_side_info() -> None:
+    """Reflection evals expose top-K per-example frontier history."""
+    frontier = ParetoFrontier()
+    cand_a = _make_candidate("cand-a")
+    cand_b = _make_candidate("cand-b")
+    frontier.add(cand_a, _make_result("cand-a", {"0": 0.2, "1": 0.9}))
+    frontier.add(cand_b, _make_result("cand-b", {"0": 0.8, "1": 0.4}))
+
+    current = EvalResult(
+        candidate_id="cand-current",
+        scores={},
+        asi={},
+        instance_scores={"0": 0.1, "1": 0.1},
+        per_example_side_info=[{"trace": "keep-0"}, {"trace": "keep-1"}],
+    )
+
+    updated = _inject_top_k_best_example_history(current, frontier, k=1)
+
+    assert updated.per_example_side_info == [
+        {
+            "trace": "keep-0",
+            "top_k_best_example_history": [
+                {"candidate_id": "cand-b", "score": 0.8}
+            ],
+        },
+        {
+            "trace": "keep-1",
+            "top_k_best_example_history": [
+                {"candidate_id": "cand-a", "score": 0.9}
+            ],
+        },
+    ]
+
+
+def test_top_k_best_example_history_warns_on_side_info_length_skew(
+    caplog: Any,
+) -> None:
+    """A length mismatch between instance_scores and per_example_side_info
+    indicates an upstream bug; injection must warn (not silently drop the
+    user's diagnostics) before rebuilding empty.
+    """
+    import logging
+
+    frontier = ParetoFrontier()
+    cand_a = _make_candidate("cand-a")
+    frontier.add(cand_a, _make_result("cand-a", {"0": 0.5, "1": 0.7}))
+
+    # 2 examples but only 1 side_info dict — clearly skewed.
+    current = EvalResult(
+        candidate_id="cand-skewed",
+        scores={},
+        asi={},
+        instance_scores={"0": 0.0, "1": 0.0},
+        per_example_side_info=[{"trace": "lonely"}],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="helix.evolution"):
+        updated = _inject_top_k_best_example_history(current, frontier, k=1)
+
+    assert any(
+        "per_example_side_info length" in rec.message for rec in caplog.records
+    ), f"expected length-skew warning, got: {[r.message for r in caplog.records]}"
+    assert updated.per_example_side_info == [
+        {"top_k_best_example_history": [{"candidate_id": "cand-a", "score": 0.5}]},
+        {"top_k_best_example_history": [{"candidate_id": "cand-a", "score": 0.7}]},
+    ]
+
+
+def test_pareto_frontier_public_accessors_match_internal_state() -> None:
+    """``iter_results`` / ``get_result`` / ``has_results`` are the public
+    surface used by ``_inject_top_k_best_example_history``; pin their
+    contract so we don't regress to ``_results`` poking.
+    """
+    frontier = ParetoFrontier()
+    assert frontier.has_results() is False
+    assert frontier.get_result("missing") is None
+    assert list(frontier.iter_results()) == []
+
+    cand_a = _make_candidate("cand-a")
+    cand_b = _make_candidate("cand-b")
+    res_a = _make_result("cand-a", {"0": 0.1})
+    res_b = _make_result("cand-b", {"0": 0.9})
+    frontier.add(cand_a, res_a)
+    frontier.add(cand_b, res_b)
+
+    assert frontier.has_results() is True
+    assert frontier.get_result("cand-a") is res_a
+    assert frontier.get_result("cand-b") is res_b
+    # Insertion order preserved → diagnostics get a stable replay.
+    assert [cid for cid, _ in frontier.iter_results()] == ["cand-a", "cand-b"]
 
 
 def _make_minibatch_config(
@@ -630,7 +746,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-A")
-        cand_dict = {"id": cand.id, "split": "train"}
+        cand_dict = {"content_key": cand.id, "split": "train"}
         cache.put_batch(
             cand_dict,
             ["0", "1", "2"],
@@ -653,6 +769,173 @@ class TestCachedEvaluateBatch:
         )
         assert num_actual == 0
         assert result.instance_scores == {"0": 0.1, "1": 0.2, "2": 0.3}
+
+    def test_content_key_reuses_cache_across_candidate_ids(self, mocker: Any) -> None:
+        """Equivalent candidate content should reuse per-example cache entries."""
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cand_b = self._make_cand("cand-B")
+        mocker.patch(
+            "helix.evolution._candidate_content_key",
+            side_effect=lambda candidate: "same-content",
+        )
+
+        cache.put_batch(
+            {"content_key": "same-content", "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.7, 0.8],
+        )
+
+        run_eval_mock = mocker.patch("helix.evolution.run_evaluator")
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", Path("/tmp"),
+        )
+
+        assert num_actual == 0
+        assert run_eval_mock.call_count == 0
+        assert result.candidate_id == cand_b.id
+        assert result.instance_scores == {"0": 0.7, "1": 0.8}
+
+    def test_tree_key_reuses_cache_across_different_commits_with_same_tree(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Commit metadata/history changes must not invalidate content cache."""
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch, _candidate_content_key
+
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "prompt.md").write_text("same tracked content\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "initial content"], repo)
+
+        cand_a = self._make_cand("cand-A")
+        cand_a.worktree_path = str(repo)
+        commit_a = _git(["rev-parse", "HEAD"], repo)
+        tree_a = _git(["rev-parse", "HEAD^{tree}"], repo)
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cache.put_batch(
+            {"content_key": _candidate_content_key(cand_a), "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.7, 0.8],
+        )
+
+        _git(["commit", "--allow-empty", "-m", "metadata only"], repo)
+        cand_b = self._make_cand("cand-B")
+        cand_b.worktree_path = str(repo)
+        commit_b = _git(["rev-parse", "HEAD"], repo)
+        tree_b = _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert commit_a != commit_b
+        assert tree_a == tree_b
+
+        # Pin the contract directly: equivalent trees ⇒ equal content keys.
+        assert _candidate_content_key(cand_a) == _candidate_content_key(cand_b)
+
+        run_eval_mock = mocker.patch("helix.evolution.run_evaluator")
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", tmp_path,
+        )
+
+        assert num_actual == 0
+        assert run_eval_mock.call_count == 0
+        assert result.candidate_id == cand_b.id
+        assert result.instance_scores == {"0": 0.7, "1": 0.8}
+
+    def test_tree_key_misses_cache_when_tracked_content_changes(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Tracked file changes must produce a different cache identity."""
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch, _candidate_content_key
+
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "prompt.md").write_text("v1\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "initial content"], repo)
+
+        cand_a = self._make_cand("cand-A")
+        cand_a.worktree_path = str(repo)
+        tree_a = _git(["rev-parse", "HEAD^{tree}"], repo)
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cache.put_batch(
+            {"content_key": _candidate_content_key(cand_a), "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.7, 0.8],
+        )
+
+        (repo / "prompt.md").write_text("v2\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "changed tracked content"], repo)
+        cand_b = self._make_cand("cand-B")
+        cand_b.worktree_path = str(repo)
+        tree_b = _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert tree_a != tree_b
+
+        seen_instance_ids: list[list[str] | None] = []
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            seen_instance_ids.append(instance_ids)
+            return _make_result(
+                candidate.id, {eid: 0.5 for eid in (instance_ids or [])}
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        result, num_actual = _cached_evaluate_batch(
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", tmp_path,
+        )
+
+        assert seen_instance_ids == [["0", "1"]]
+        assert num_actual == 2
+        assert result.candidate_id == cand_b.id
+        assert result.instance_scores == {"0": 0.5, "1": 0.5}
+
+    def test_content_key_falls_back_when_worktree_is_dirty(
+        self, tmp_path: Path
+    ) -> None:
+        """Dirty / untracked worktree must NOT key by tree SHA (avoid stale hits)."""
+        from helix.evolution import _candidate_content_key
+
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "prompt.md").write_text("v1\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "initial content"], repo)
+
+        cand = self._make_cand("cand-dirty")
+        cand.worktree_path = str(repo)
+        clean_key = _candidate_content_key(cand)
+        tree_sha = _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert clean_key == tree_sha  # sanity: clean repo keys by tree SHA
+
+        # Modify a tracked file without committing → key must fall back to id.
+        (repo / "prompt.md").write_text("v1-uncommitted\n")
+        assert _candidate_content_key(cand) == cand.id
+
+        # Reset and try untracked file → still falls back to id.
+        _git(["checkout", "--", "prompt.md"], repo)
+        assert _candidate_content_key(cand) == tree_sha
+        (repo / "scratch.txt").write_text("untracked\n")
+        assert _candidate_content_key(cand) == cand.id
 
     def test_cache_miss_invokes_full_evaluator(self, mocker: Any) -> None:
         """Empty cache → evaluator is invoked with ALL requested ids."""
@@ -689,6 +972,40 @@ class TestCachedEvaluateBatch:
         assert num_actual == 3
         assert result.instance_scores == {"0": 0.5, "1": 0.5, "2": 0.5}
 
+    def test_cache_disabled_invokes_evaluator_every_time(self, mocker: Any) -> None:
+        """cache=None is the strict off mode behind cache_evaluation=False."""
+        from helix.evolution import _cached_evaluate_batch
+
+        cand = self._make_cand("cand-no-cache")
+        seen_instance_ids: list[list[str] | None] = []
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            seen_instance_ids.append(instance_ids)
+            return _make_result(
+                candidate.id, {eid: 0.4 for eid in (instance_ids or [])}
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        first, first_actual = _cached_evaluate_batch(
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+        )
+        second, second_actual = _cached_evaluate_batch(
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+        )
+
+        assert seen_instance_ids == [["0", "1"], ["0", "1"]]
+        assert first_actual == 2
+        assert second_actual == 2
+        assert first.instance_scores == second.instance_scores == {"0": 0.4, "1": 0.4}
+
     def test_partial_cache_hit(self, mocker: Any) -> None:
         """2-of-3 cached → evaluator runs with ONLY the 1 uncached id."""
         from helix.eval_cache import EvaluationCache as MBCache
@@ -696,7 +1013,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-C")
-        cand_dict = {"id": cand.id, "split": "train"}
+        cand_dict = {"content_key": cand.id, "split": "train"}
         # Pre-populate 0 and 2; leave 1 uncached.
         cache.put_batch(
             cand_dict,
@@ -768,7 +1085,7 @@ class TestCachedEvaluateBatch:
 
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-pcfm")
-        cand_dict = {"id": cand.id, "split": "train"}
+        cand_dict = {"content_key": cand.id, "split": "train"}
         # Pre-populate ids "0" and "2" with both score AND
         # objective_scores (the cache stores these natively).
         cache.put_batch(
