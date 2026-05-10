@@ -2019,8 +2019,12 @@ def _run_evolution_impl(
                         parent, config, "train", eval_cache
                     )
                     eval_for_mutate.candidate_id = parent.id
-                    state.budget.evaluations += _evaluation_budget_units(
-                        was_cached=_train_cached
+                    budget_api.charge_evaluation(
+                        state,
+                        was_cached=_train_cached,
+                        candidate_id=parent.id,
+                        split="train",
+                        source="parent_train_no_minibatch",
                     )
 
                 eval_for_mutate = _inject_top_k_best_example_history(
