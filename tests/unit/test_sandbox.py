@@ -355,6 +355,48 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
     assert not (source / ".helix_backend_stdout.txt").exists()
 
 
+def test_agent_sync_tolerates_inaccessible_workspace_paths(
+    tmp_path: Path, mocker, monkeypatch
+):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "keep.py").write_text("old\n")
+    (source / ".gitignore").write_text("*.tmp\n")
+
+    workspace_ready = False
+    real_exists = Path.exists
+
+    def fake_exists(path: Path) -> bool:
+        if workspace_ready and path.name == ".gitignore" and "/workspace/" in str(path):
+            raise PermissionError("permission denied")
+        return real_exists(path)
+
+    def fake_run(args, **kwargs):
+        nonlocal workspace_ready
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            (workspace / "keep.py").write_text("new\n")
+            workspace_ready = True
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert (source / "keep.py").read_text() == "new\n"
+    assert (source / ".gitignore").read_text() == "*.tmp\n"
+
+
 def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
