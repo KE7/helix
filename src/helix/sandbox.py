@@ -472,32 +472,67 @@ def _init_synthetic_git_repo(workspace: Path) -> None:
     )
 
 
-def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--workdir",
-            "/workspace",
-            "--user",
-            "root",
-            "--network",
-            "none",
-            "--security-opt",
-            "no-new-privileges",
-            "-v",
-            f"{workspace}:/workspace:rw",
-            image,
-            "sh",
-            "-c",
-            'find /workspace -path /workspace/.git -prune -o -exec chown -h "$0" {} +',
-            owner,
-        ],
+def _run_workspace_helper(
+    workspace: Path,
+    image: str,
+    sh_command: str,
+    extra_args: list[str] | None = None,
+    *,
+    helper_name: str,
+) -> None:
+    """Run a one-shot ``docker run`` helper bind-mounting ``workspace``.
+
+    All workspace-recovery helpers share the same security flags (root user,
+    no network, no-new-privileges) and the same bind-mount, so factor the
+    boilerplate here. Failures are logged but never raised: callers want
+    best-effort recovery, and surfacing the exit status helps diagnose
+    otherwise-confusing downstream sync/cleanup errors.
+    """
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--workdir",
+        "/workspace",
+        "--user",
+        "root",
+        "--network",
+        "none",
+        "--security-opt",
+        "no-new-privileges",
+        "-v",
+        f"{workspace}:/workspace:rw",
+        image,
+        "sh",
+        "-c",
+        sh_command,
+    ]
+    if extra_args:
+        args.extend(extra_args)
+    result = subprocess.run(
+        args,
         check=False,
         capture_output=True,
         text=True,
         env=_docker_host_env(),
+    )
+    if result.returncode != 0:
+        logger.warning(
+            "docker workspace helper %s failed for %s: rc=%s stderr=%s",
+            helper_name,
+            workspace,
+            result.returncode,
+            (result.stderr or "").strip(),
+        )
+
+
+def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
+    _run_workspace_helper(
+        workspace,
+        image,
+        'find /workspace -path /workspace/.git -prune -o -exec chown -h "$0" {} +',
+        extra_args=[owner],
+        helper_name="chown",
     )
 
 
@@ -508,37 +543,15 @@ def _docker_relax_workspace_permissions(workspace: Path, image: str) -> None:
     appear on the host as unmapped high UIDs. In that mode chowning to the host
     UID from inside the container is not meaningful, but a root helper in the
     same namespace can still relax mode bits on the bind mount before host-side
-    sync and cleanup.
+    sync and cleanup. ``a+rwX`` (capital ``X``) preserves existing executable
+    bits on regular files and keeps directories traversable, unlike a flat
+    ``0666``/``0777`` pair.
     """
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--workdir",
-            "/workspace",
-            "--user",
-            "root",
-            "--network",
-            "none",
-            "--security-opt",
-            "no-new-privileges",
-            "-v",
-            f"{workspace}:/workspace:rw",
-            image,
-            "sh",
-            "-c",
-            (
-                "find /workspace -path /workspace/.git -prune -o "
-                "-type d -exec chmod 0777 {} +; "
-                "find /workspace -path /workspace/.git -prune -o "
-                "-type f -exec chmod 0666 {} +"
-            ),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_docker_host_env(),
+    _run_workspace_helper(
+        workspace,
+        image,
+        "find /workspace -path /workspace/.git -prune -o -exec chmod a+rwX {} +",
+        helper_name="relax",
     )
 
 
