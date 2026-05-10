@@ -21,6 +21,7 @@ from helix.batch_sampler import (
     EpochShuffledBatchSampler,
     StratifiedBatchSampler,
 )
+from helix import budget as budget_api
 from helix.config import HelixConfig, load_dataset_examples
 from helix.eval_cache import EvaluationCache as MinibatchEvalCache
 from helix.eval_policy import (
@@ -77,33 +78,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
-    """Return True if evaluation budget is exhausted.
-
-    Uses only the ``evaluations`` counter.  In dataset/minibatch mode HELIX
-    counts per-example evaluations, i.e. the number of examples actually sent
-    to the evaluator after per-example cache hits are removed.  Legacy
-    single-task/no-example evaluator calls still count as one metric call
-    unless served from cache (no per-example ids exist in this path).
-    When ``max_evaluations`` is the sentinel ``-1`` (the default), the cap is
-    disabled and this always returns False; HELIX then runs until
-    ``max_generations`` alone.
-    """
-    cap = config.evolution.max_evaluations
-    return cap > 0 and state.budget.evaluations >= cap
-
-
-def _evaluation_budget_units(
-    *, num_actual_examples: int | None = None, was_cached: bool = False
-) -> int:
-    """Return evaluation budget units for an evaluation attempt."""
-    if was_cached:
-        return 0
-    if num_actual_examples is not None:
-        return max(0, int(num_actual_examples))
-    return 1
 
 
 def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> bool:
@@ -1270,9 +1244,12 @@ def _run_evolution_impl(
             try:
                 usage = generate_seed(seed.worktree_path, seed_prompt, config)
                 seed.usage = usage
-                state.budget.input_tokens += int(usage.get("input_tokens", 0))
-                state.budget.output_tokens += int(usage.get("output_tokens", 0))
-                state.budget.cost_usd += float(usage.get("cost_usd", 0.0))
+                budget_api.charge_llm_usage(
+                    state,
+                    usage,
+                    candidate_id=seed.id,
+                    source="seed_generation",
+                )
             except Exception:
                 remove_worktree(seed)
                 raise
@@ -1313,15 +1290,23 @@ def _run_evolution_impl(
                 project_root,
             )
             seed_result.candidate_id = seed.id
-            state.budget.evaluations += _evaluation_budget_units(
-                num_actual_examples=_seed_num_actual
+            budget_api.charge_evaluation(
+                state,
+                num_actual_examples=_seed_num_actual,
+                candidate_id=seed.id,
+                split="val",
+                source="seed_val_batch",
             )
         else:
             _refresh_protected_evaluator_files(seed, config, project_root)
             seed_result, _seed_cached = _cached_eval(seed, config, "val", eval_cache)
             seed_result.candidate_id = seed.id
-            state.budget.evaluations += _evaluation_budget_units(
-                was_cached=_seed_cached
+            budget_api.charge_evaluation(
+                state,
+                was_cached=_seed_cached,
+                candidate_id=seed.id,
+                split="val",
+                source="seed_val",
             )
 
         _save_evaluation(base_dir, seed_result)
@@ -1333,7 +1318,7 @@ def _run_evolution_impl(
         # Mirrors GEPA core/state.py:537 (``num_metric_calls_by_discovery
         # .append(num_metric_calls_by_discovery_of_new_program)`` inside
         # ``update_state_with_new_program``).
-        state.num_metric_calls_by_discovery[seed.id] = state.budget.evaluations
+        budget_api.record_discovery_budget(state, seed.id)
         _save_state(state)
 
         record_entry(
@@ -1389,15 +1374,15 @@ def _run_evolution_impl(
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
 
-            state.generation = gen
+            budget_api.set_generation(state, gen)
             # GEPA parity (engine.py:649): bump ``state.i`` unconditionally at
             # the top of every iteration so the proposal counter — used by the
             # batch sampler and as a tiebreaker elsewhere — advances regardless
             # of whether we sampled from the frontier or skipped.
-            state.i += 1
+            budget_api.advance_proposal_counter(state, source="iteration")
             TRACE.emit(EventType.ITER_START, decision=str(gen))
 
-            if budget_exhausted(state, config):
+            if budget_api.budget_exhausted(state, config):
                 print_warning("Budget exhausted -- stopping early.")
                 break
 
@@ -1523,8 +1508,7 @@ def _run_evolution_impl(
                     a = frontier._candidates[cid_i]
                     b = frontier._candidates[cid_j]
 
-                    state.merge_counter += 1
-                    merge_id = f"g{gen}-m{state.merge_counter}"
+                    merge_id = budget_api.next_merge_id(state, gen)
 
                     merged = merge(
                         candidate_a=a,
@@ -1554,14 +1538,11 @@ def _run_evolution_impl(
                     else:
                         if merged.usage:
                             live.update(usage=merged.usage)
-                            state.budget.input_tokens += int(
-                                merged.usage.get("input_tokens", 0)
-                            )
-                            state.budget.output_tokens += int(
-                                merged.usage.get("output_tokens", 0)
-                            )
-                            state.budget.cost_usd += float(
-                                merged.usage.get("cost_usd", 0.0)
+                            budget_api.charge_llm_usage(
+                                state,
+                                merged.usage,
+                                candidate_id=merged.id,
+                                source="merge",
                             )
 
                         merge_tamper = _detect_evaluator_tamper(
@@ -1659,13 +1640,17 @@ def _run_evolution_impl(
                                 project_root,
                             )
                             merge_result.candidate_id = merged.id
-                            state.budget.evaluations += _evaluation_budget_units(
-                                num_actual_examples=_merge_evals
+                            budget_api.charge_evaluation(
+                                state,
+                                num_actual_examples=_merge_evals,
+                                candidate_id=merged.id,
+                                split="val",
+                                source="merge_subsample",
                             )
                             _save_evaluation(base_dir, merge_result)
 
                             # GEPA parity (Fix 13): mid-generation budget check.
-                            if budget_exhausted(state, config):
+                            if budget_api.budget_exhausted(state, config):
                                 print_warning(
                                     "Budget exhausted mid-generation -- stopping."
                                 )
@@ -1744,10 +1729,12 @@ def _run_evolution_impl(
                                         project_root,
                                     )
                                     full_val_result.candidate_id = merged.id
-                                    state.budget.evaluations += (
-                                        _evaluation_budget_units(
-                                            num_actual_examples=_full_n
-                                        )
+                                    budget_api.charge_evaluation(
+                                        state,
+                                        num_actual_examples=_full_n,
+                                        candidate_id=merged.id,
+                                        split="val",
+                                        source="merge_full_val_batch",
                                     )
                                 else:
                                     full_val_result, _full_val_cached = _cached_eval(
@@ -1757,14 +1744,16 @@ def _run_evolution_impl(
                                         eval_cache,
                                     )
                                     full_val_result.candidate_id = merged.id
-                                    state.budget.evaluations += (
-                                        _evaluation_budget_units(
-                                            was_cached=_full_val_cached
-                                        )
+                                    budget_api.charge_evaluation(
+                                        state,
+                                        was_cached=_full_val_cached,
+                                        candidate_id=merged.id,
+                                        split="val",
+                                        source="merge_full_val",
                                     )
                                 _save_evaluation(base_dir, full_val_result)
 
-                                if budget_exhausted(state, config):
+                                if budget_api.budget_exhausted(state, config):
                                     print_warning(
                                         "Budget exhausted during merge full-val eval -- stopping."
                                     )
@@ -1772,7 +1761,7 @@ def _run_evolution_impl(
                                     break
 
                                 merges_due -= 1
-                                state.total_merge_invocations += 1
+                                budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
                                 state.frontier = list(frontier._candidates.keys())
                                 state.instance_scores[merged.id] = (
@@ -1782,9 +1771,7 @@ def _run_evolution_impl(
                                 # record per-program discovery budget at the
                                 # moment the merged program enters the
                                 # frontier.  GEPA core/state.py:537.
-                                state.num_metric_calls_by_discovery[merged.id] = (
-                                    state.budget.evaluations
-                                )
+                                budget_api.record_discovery_budget(state, merged.id)
                             else:
                                 print_warning(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
@@ -1850,7 +1837,7 @@ def _run_evolution_impl(
             _budget_break = False
 
             for _p_idx in range(n_proposals):
-                if budget_exhausted(state, config):
+                if budget_api.budget_exhausted(state, config):
                     _budget_break = True
                     break
 
@@ -1861,7 +1848,9 @@ def _run_evolution_impl(
                 # the per-proposal counter advances independently of the
                 # outer loop.  The bump is unconditional (no minibatch gate).
                 if _p_idx > 0:
-                    state.i += 1
+                    budget_api.advance_proposal_counter(
+                        state, source="parallel_proposal"
+                    )
 
                 parent = frontier.select_parent()
                 parent_frontier_result = frontier._results.get(parent.id)
@@ -1890,8 +1879,7 @@ def _run_evolution_impl(
                         split="train",
                     )
 
-                state.mutation_counter += 1
-                new_id = f"g{gen}-s{state.mutation_counter}"
+                new_id = budget_api.next_mutation_id(state, gen)
                 presample_contexts.append(
                     (parent, parent_frontier_result, subsample_ids, new_id)
                 )
@@ -2003,11 +1991,15 @@ def _run_evolution_impl(
                     continue
 
                 if subsample_ids is not None:
-                    state.budget.evaluations += _evaluation_budget_units(
-                        num_actual_examples=_n_uncached
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=_n_uncached,
+                        candidate_id=parent.id,
+                        split="train",
+                        source="parent_minibatch",
                     )
 
-                if budget_exhausted(state, config):
+                if budget_api.budget_exhausted(state, config):
                     _budget_break = True
                     break
 
@@ -2027,8 +2019,12 @@ def _run_evolution_impl(
                         parent, config, "train", eval_cache
                     )
                     eval_for_mutate.candidate_id = parent.id
-                    state.budget.evaluations += _evaluation_budget_units(
-                        was_cached=_train_cached
+                    budget_api.charge_evaluation(
+                        state,
+                        was_cached=_train_cached,
+                        candidate_id=parent.id,
+                        split="train",
+                        source="parent_train_no_minibatch",
                     )
 
                 eval_for_mutate = _inject_top_k_best_example_history(
@@ -2118,14 +2114,11 @@ def _run_evolution_impl(
                             mutation_results[idx] = child
                             if child and child.usage:
                                 live.update(usage=child.usage)
-                                state.budget.input_tokens += int(
-                                    child.usage.get("input_tokens", 0)
-                                )
-                                state.budget.output_tokens += int(
-                                    child.usage.get("output_tokens", 0)
-                                )
-                                state.budget.cost_usd += float(
-                                    child.usage.get("cost_usd", 0.0)
+                                budget_api.charge_llm_usage(
+                                    state,
+                                    child.usage,
+                                    candidate_id=child.id,
+                                    source="mutation",
                                 )
                         except Exception as exc:
                             _ctx = proposal_contexts[idx]
@@ -2169,13 +2162,12 @@ def _run_evolution_impl(
                     mutation_results.append(child)
                     if child and child.usage:
                         live.update(usage=child.usage)
-                        state.budget.input_tokens += int(
-                            child.usage.get("input_tokens", 0)
+                        budget_api.charge_llm_usage(
+                            state,
+                            child.usage,
+                            candidate_id=child.id,
+                            source="mutation",
                         )
-                        state.budget.output_tokens += int(
-                            child.usage.get("output_tokens", 0)
-                        )
-                        state.budget.cost_usd += float(child.usage.get("cost_usd", 0.0))
 
             # ---- Step 3: Process acceptances SEQUENTIALLY ----
             # Each accepted mutation's full val eval updates state before
@@ -2259,11 +2251,15 @@ def _run_evolution_impl(
                     )
                     gating_result.candidate_id = child.id
                     _last_eval_result = gating_result
-                    state.budget.evaluations += _evaluation_budget_units(
-                        num_actual_examples=_n
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=_n,
+                        candidate_id=child.id,
+                        split="train",
+                        source="mutation_minibatch_gate",
                     )
 
-                    if budget_exhausted(state, config):
+                    if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
@@ -2342,11 +2338,15 @@ def _run_evolution_impl(
                     # must come from the same train eval that was passed into the mutator,
                     # not the parent's stored val frontier result.
                     parent_acceptance_result = _eval_for_mutate
-                    state.budget.evaluations += _evaluation_budget_units(
-                        was_cached=_gating_cached
+                    budget_api.charge_evaluation(
+                        state,
+                        was_cached=_gating_cached,
+                        candidate_id=child.id,
+                        split="train",
+                        source="mutation_train_gate",
                     )
 
-                    if budget_exhausted(state, config):
+                    if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
@@ -2407,11 +2407,15 @@ def _run_evolution_impl(
                     )
                     stage_result.candidate_id = child.id
                     _last_eval_result = stage_result
-                    state.budget.evaluations += _evaluation_budget_units(
-                        num_actual_examples=_n
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=_n,
+                        candidate_id=child.id,
+                        split="val",
+                        source="mutation_val_stage",
                     )
 
-                    if budget_exhausted(state, config):
+                    if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
@@ -2491,8 +2495,12 @@ def _run_evolution_impl(
                     )
                     val_result.candidate_id = child.id
                     _last_eval_result = val_result
-                    state.budget.evaluations += _evaluation_budget_units(
-                        num_actual_examples=_n
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=_n,
+                        candidate_id=child.id,
+                        split="val",
+                        source="mutation_full_val_batch",
                     )
                 else:
                     val_result, _val_cached = _cached_eval(
@@ -2500,11 +2508,15 @@ def _run_evolution_impl(
                     )
                     val_result.candidate_id = child.id
                     _last_eval_result = val_result
-                    state.budget.evaluations += _evaluation_budget_units(
-                        was_cached=_val_cached
+                    budget_api.charge_evaluation(
+                        state,
+                        was_cached=_val_cached,
+                        candidate_id=child.id,
+                        split="val",
+                        source="mutation_full_val",
                     )
 
-                if budget_exhausted(state, config):
+                if budget_api.budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
@@ -2519,7 +2531,7 @@ def _run_evolution_impl(
                 # GEPA parity (audit-rng-state-persist C/§3): record per-program
                 # discovery budget at the moment the child enters the frontier.
                 # GEPA core/state.py:537.
-                state.num_metric_calls_by_discovery[child.id] = state.budget.evaluations
+                budget_api.record_discovery_budget(state, child.id)
                 TRACE.emit(
                     EventType.FRONTIER_UPDATE,
                     candidate_id=child.id,
