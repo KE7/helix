@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import random
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
@@ -19,10 +18,20 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from helix.state import BudgetState
 
-logger = logging.getLogger(__name__)
-
 
 FrontierType = Literal["instance", "objective", "hybrid", "cartesian"]
+
+
+class MissingObjectiveScoresError(ValueError):
+    """Raised by ``ParetoFrontier`` when an objective-bearing frontier mode
+    cannot consume the supplied ``EvalResult.objective_scores``.
+
+    Covers all "the objective axis is unusable" shapes — absent
+    (``None``), length-mismatched against ``instance_scores``, all-empty
+    slots, or no active per-key entries left at parent-selection time.
+    Subclassing :class:`ValueError` keeps callers that catch ``ValueError``
+    working unchanged.
+    """
 
 
 @dataclass
@@ -440,6 +449,7 @@ class ParetoFrontier:
 
     def add(self, candidate: Candidate, result: EvalResult) -> None:
         """Add a candidate and its evaluation result.  Population is append-only."""
+        self._validate_objective_scores(candidate.id, result)
         self._candidates[candidate.id] = candidate
         self._results[candidate.id] = result
         self._update_per_key(candidate.id, result)
@@ -448,6 +458,57 @@ class ParetoFrontier:
         # lets a caller inspect any axis post-hoc.
         self._update_objective(candidate.id, result)
         self._update_cartesian(candidate.id, result)
+
+    def _validate_objective_scores(self, cid: str, result: EvalResult) -> None:
+        """Reject non-instance frontier modes with no usable objective axes.
+
+        Mirrors GEPA's seed-time check at ``state.py:213-219`` and the
+        per-update check at ``state.py:564-569`` (both raise plain
+        ``ValueError`` when ``valset_evaluation.objective_scores_by_val_id``
+        is missing/empty).  HELIX raises a typed
+        :class:`MissingObjectiveScoresError(ValueError)` for catchability
+        and, in two narrow places, is *very slightly* stricter than
+        upstream GEPA (both are minor improvements that should never
+        trigger for a well-formed evaluator):
+
+        * **Length parity with ``instance_scores``.** GEPA stores
+          objective scores as ``dict[val_id, ObjectiveScores]`` keyed
+          parallel to ``scores_by_val_id``, so the cardinality match is
+          a structural impossibility.  HELIX uses a *positional* list
+          against ``instance_scores.keys()`` order, so the length check
+          here is the necessary structural guard — not a real
+          divergence, just the correct invariant for a list-shaped
+          field.
+        * **All-empty inner slots.**  GEPA tolerates the case where
+          every per-val_id objective dict is ``{}`` (its
+          ``_update_objective_pareto_front`` has ``if not
+          objective_scores: return``).  HELIX rejects it: a candidate
+          with literally zero objective signal cannot contribute to any
+          objective frontier, and failing here surfaces the empty-axis
+          condition with a per-candidate error message rather than as a
+          downstream "empty active frontier" raise three call sites
+          later.
+        """
+        if self._frontier_type == "instance":
+            return
+        if result.objective_scores is None:
+            raise MissingObjectiveScoresError(
+                f"frontier_type={self._frontier_type!r} requires per-example "
+                f"objective_scores for candidate {cid!r}; use the helix_result "
+                'parser and emit side_info["scores"] for each example.'
+            )
+        if len(result.objective_scores) != len(result.instance_scores):
+            raise MissingObjectiveScoresError(
+                f"frontier_type={self._frontier_type!r} requires objective_scores "
+                f"length to match instance_scores for candidate {cid!r} "
+                f"({len(result.objective_scores)} != {len(result.instance_scores)})."
+            )
+        if not any(slot for slot in result.objective_scores):
+            raise MissingObjectiveScoresError(
+                f"frontier_type={self._frontier_type!r} requires at least one "
+                f"objective score for candidate {cid!r}; all objective_scores "
+                "slots were empty."
+            )
 
     def _update_per_key(self, cid: str, result: EvalResult) -> None:
         """Incrementally update per-key best tracking for a single candidate.
@@ -472,6 +533,10 @@ class ParetoFrontier:
         in any per-example slot, take the mean of that objective's
         scores across the entire ``objective_scores`` list.
         """
+        # Early-return covers the ``frontier_type == "instance"`` path,
+        # where objective_scores is intentionally optional.  Objective-
+        # bearing modes never reach here with a missing/empty list
+        # because ``_validate_objective_scores`` rejects them first.
         if result.objective_scores is None or not result.objective_scores:
             return
         aggregated: dict[str, list[float]] = {}
@@ -506,17 +571,18 @@ class ParetoFrontier:
         # is positional to the same id list.  Zip together.
         val_ids = list(result.instance_scores.keys())
         if len(val_ids) != len(result.objective_scores):
-            # Defensive: skip cartesian updates when lengths disagree
-            # (should not happen on the helix_result path but could on
-            # hand-constructed EvalResults in tests).  Log at DEBUG so
-            # the skip is traceable without polluting the default log.
-            logger.debug(
-                "ParetoFrontier._update_cartesian: skipping cid=%r — "
-                "objective_scores length %d does not match "
-                "instance_scores length %d",
-                cid, len(result.objective_scores), len(val_ids),
+            # Defense-in-depth: ``add()`` already calls
+            # ``_validate_objective_scores`` which rejects this same
+            # mismatch up front, so on the normal path this branch is
+            # unreachable.  It still fires from ``_rebuild_axes`` after
+            # ``update_scores`` if a caller swapped in a malformed
+            # ``EvalResult`` — keep the raise so the invariant survives
+            # both entry points.
+            raise MissingObjectiveScoresError(
+                f"cartesian frontier requires objective_scores length to match "
+                f"instance_scores for candidate {cid!r} "
+                f"({len(result.objective_scores)} != {len(val_ids)})."
             )
-            return
         for val_id, slot in zip(val_ids, result.objective_scores):
             for obj_name, score in slot.items():
                 key = f"{val_id}::{obj_name}"
@@ -529,8 +595,18 @@ class ParetoFrontier:
 
     def update_scores(self, result: EvalResult) -> None:
         """Update the evaluation result for an existing candidate and rebuild tracking."""
+        self._validate_objective_scores(result.candidate_id, result)
         self._results[result.candidate_id] = result
         self._rebuild_axes()
+
+    def candidate_ids(self) -> list[str]:
+        """Return all evaluated candidate ids in insertion order.
+
+        Stable, JSON-serializable view used by callers (e.g.
+        ``evolution._sync_frontier_state``) that need to mirror the
+        append-only candidate set without reaching into ``_candidates``.
+        """
+        return list(self._candidates.keys())
 
     def _rebuild_axes(self) -> None:
         """Rebuild all per-axis best tracking from scratch.
@@ -581,6 +657,13 @@ class ParetoFrontier:
         for k, v in self._objective_best.items():
             merged[f"obj::{k}"] = v
         return merged
+
+    def active_frontier_snapshot(self) -> dict[str, list[str]]:
+        """Return a JSON-ready copy of the active fronts by frontier key."""
+        return {
+            key: sorted(front)
+            for key, front in sorted(self._active_frontier().items())
+        }
 
     # ------------------------------------------------------------------
     # GEPA coverage-based dominance
@@ -746,11 +829,16 @@ class ParetoFrontier:
             cid for cid, freq in program_frequency.items() for _ in range(freq)
         ]
 
-        # GEPA-parity fix for score-only evaluators: if no instance scores
-        # were recorded (e.g. evaluator uses aggregate scores only), the cleaned
-        # per-key frontier is empty and sampling_list would be empty.  Fall back
-        # to selecting uniformly from all candidates so evolution can continue.
+        # Instance mode keeps HELIX's score-only fallback.  Objective-bearing
+        # modes validate objective_scores at add/update time, so an empty
+        # active frontier there is a state invariant failure rather than a
+        # reason to silently use scalar/all-candidate semantics.
         if not sampling_list:
+            if self._frontier_type != "instance":
+                raise MissingObjectiveScoresError(
+                    f"frontier_type={self._frontier_type!r} has no active "
+                    "objective frontier entries; cannot select a parent."
+                )
             sampling_list = list(self._candidates.keys())
         return self._candidates[self._rng.choice(sampling_list)]
 

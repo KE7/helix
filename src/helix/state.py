@@ -18,9 +18,9 @@ from helix.population import FrontierType
 # GEPA parity (audit-rng-state-persist D1):
 # GEPA core/state.py:153 declares ``_VALIDATION_SCHEMA_VERSION: ClassVar[int] = 5``
 # and migrates older state dicts on load (state.py:355-376).  HELIX previously
-# had no schema version on ``state.json``; bumping to 1 marks the first
-# versioned schema (the unversioned predecessor is treated as v0 on load).
-SCHEMA_VERSION: int = 1
+# had no schema version on ``state.json``; newer bumps mark explicit
+# JSON-native schema additions.
+SCHEMA_VERSION: int = 2
 
 
 @dataclass
@@ -102,6 +102,11 @@ class EvolutionState:
     # the frontier.  Empty by default; populated at every accept site (seed,
     # mutation, merge) in evolution.py.
     num_metric_calls_by_discovery: dict[str, int] = field(default_factory=dict)
+    # Active Pareto-front snapshot for the selected ``frontier_type``.
+    # ``frontier`` remains HELIX's append-only candidate id list; this
+    # separate JSON-native field makes the retained fronts visible without
+    # conflating them with all evaluated candidates.
+    active_frontier: dict[str, list[str]] = field(default_factory=dict)
     # Persisted ``evolution.frontier_type`` (GEPA ``FrontierType`` parity
     # — ``src/gepa/core/state.py:22-23``).  Captured at evolve-time so
     # read-only CLI commands (``helix frontier``, ``helix best``,
@@ -159,6 +164,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "merge_description_triplets": state.merge_description_triplets,
         "i": state.i,
         "num_metric_calls_by_discovery": state.num_metric_calls_by_discovery,
+        "active_frontier": state.active_frontier,
         "frontier_type": state.frontier_type,
     }
 
@@ -229,6 +235,7 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         merge_description_triplets=data.get("merge_description_triplets", []),
         i=data.get("i", -1),
         num_metric_calls_by_discovery=data.get("num_metric_calls_by_discovery", {}),
+        active_frontier=data.get("active_frontier", {}),
         frontier_type=frontier_type,
         schema_version=SCHEMA_VERSION,
     )

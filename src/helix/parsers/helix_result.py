@@ -143,24 +143,59 @@ def _harvest_objective_scores(side_info: dict[str, Any]) -> dict[str, float]:
     (``optimize_anything_adapter.py:260-272``): the reserved
     ``"scores"`` key carries a dict of ``{objective_name: float}`` that
     becomes the per-example ``objective_scores`` slot feeding the
-    multi-axis Pareto frontier.  Non-dict values and non-numeric /
-    non-finite entries are silently dropped so evaluators can stuff
-    arbitrary diagnostics under ``"scores"`` without the parser
-    rejecting well-formed payloads elsewhere (the primary per-example
-    score is what the minibatch gate depends on; the objective axis
-    is best-effort).
+    multi-axis Pareto frontier.  Pairwise / Bradley-Terry payloads are
+    not implemented in HELIX yet, so non-scalar objective values fail
+    loudly instead of being dropped and misread as scalar objective
+    semantics.
+
+    Stricter than upstream GEPA (a very minor improvement)
+    ------------------------------------------------------
+    GEPA's adapter does ``objective_score.update(side_info["scores"])``
+    blindly, so non-finite / non-numeric / non-string-keyed entries
+    sail through the parser and only blow up later inside
+    ``_aggregate_objective_scores`` (``state.py:432``) where the error
+    message is far less actionable.  HELIX validates at parse time and
+    raises :class:`EvaluatorError` with the offending key/value type.
+    Practical consequence: an evaluator built against upstream GEPA
+    that legitimately emits finite numeric scalars under ``"scores"``
+    is unaffected; only payloads that would break GEPA later are
+    rejected here earlier.
+
+    Per-predictor namespacing (``param_name + "_specific_info"``,
+    ``optimize_anything_adapter.py:266-270``) is intentionally not
+    replicated: HELIX evolves whole git worktrees rather than
+    multi-component named-predictor programs.  See the tracking issue
+    on ``KE7/helix`` for the architectural gap.
     """
     raw = side_info.get("scores")
-    if not isinstance(raw, dict):
+    if raw is None:
         return {}
+    if not isinstance(raw, dict):
+        raise EvaluatorError(
+            'helix_result side_info["scores"] must be a dict of '
+            "{objective_name: numeric_score}; pairwise/Bradley-Terry "
+            "objective payloads are not supported.",
+            operation="parse_helix_result",
+        )
     out: dict[str, float] = {}
     for k, v in raw.items():
         if not isinstance(k, str):
-            continue
+            raise EvaluatorError(
+                'helix_result side_info["scores"] objective names must be strings; '
+                f"got {type(k).__name__}.",
+                operation="parse_helix_result",
+            )
         if isinstance(v, bool):
             out[k] = 1.0 if v else 0.0
         elif isinstance(v, (int, float)) and math.isfinite(float(v)):
             out[k] = float(v)
+        else:
+            raise EvaluatorError(
+                'helix_result side_info["scores"] values must be finite numeric '
+                f"scalars; objective {k!r} had {type(v).__name__}. "
+                "Pairwise/Bradley-Terry objective payloads are not supported.",
+                operation="parse_helix_result",
+            )
     return out
 
 

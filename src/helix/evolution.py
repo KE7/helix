@@ -1260,6 +1260,11 @@ def _run_evolution_impl(
         if minibatch_cache is not None:
             save_eval_cache(minibatch_cache._cache, project_root)
 
+    def _sync_frontier_state() -> None:
+        assert state is not None
+        state.frontier = frontier.candidate_ids()
+        state.active_frontier = frontier.active_frontier_snapshot()
+
     if state is None:
         state = EvolutionState(
             generation=0,
@@ -1304,6 +1309,7 @@ def _run_evolution_impl(
                 )
                 candidates[cid] = cand
                 frontier.add(cand, result)
+        _sync_frontier_state()
 
     # ------------------------------------------------------------------
     # Seed evaluation
@@ -1411,7 +1417,7 @@ def _run_evolution_impl(
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
-        state.frontier = list(frontier._candidates.keys())
+        _sync_frontier_state()
         state.instance_scores[seed.id] = seed_result.instance_scores
         # GEPA parity (audit-rng-state-persist C/§3): record per-program
         # discovery budget at the moment the program enters the frontier.
@@ -1863,7 +1869,7 @@ def _run_evolution_impl(
                                 merges_due -= 1
                                 budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
-                                state.frontier = list(frontier._candidates.keys())
+                                _sync_frontier_state()
                                 state.instance_scores[merged.id] = (
                                     full_val_result.instance_scores
                                 )
@@ -2626,7 +2632,7 @@ def _run_evolution_impl(
                 set_phase(HelixPhase.PARETO_UPDATE)
                 _save_evaluation(base_dir, val_result)
                 frontier.add(child, val_result)
-                state.frontier = list(frontier._candidates.keys())
+                _sync_frontier_state()
                 state.instance_scores[child.id] = val_result.instance_scores
                 # GEPA parity (audit-rng-state-persist C/§3): record per-program
                 # discovery budget at the moment the child enters the frontier.
