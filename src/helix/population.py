@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import random
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -215,6 +216,28 @@ class ParetoFrontier:
     def frontier_type(self) -> FrontierType:
         """Selected Pareto dimensionality (GEPA parity)."""
         return self._frontier_type
+
+    # ------------------------------------------------------------------
+    # Read-only accessors — public surface over the append-only result
+    # store so callers don't need to reach into ``_results``.
+    # ------------------------------------------------------------------
+
+    def get_result(self, candidate_id: str) -> EvalResult | None:
+        """Return the stored EvalResult for ``candidate_id`` or None."""
+        return self._results.get(candidate_id)
+
+    def iter_results(self) -> Iterator[tuple[str, EvalResult]]:
+        """Yield ``(candidate_id, EvalResult)`` pairs for all known candidates.
+
+        Iteration order matches the underlying dict's insertion order, which
+        in turn mirrors the order in which candidates were ``add``-ed — useful
+        for diagnostics that want a stable replay of population history.
+        """
+        return iter(self._results.items())
+
+    def has_results(self) -> bool:
+        """True iff at least one candidate has been added with a result."""
+        return bool(self._results)
 
     # ------------------------------------------------------------------
     # Mutation helpers — mirrors GEPAState._update_pareto_front_for_val_id

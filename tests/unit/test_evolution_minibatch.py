@@ -119,6 +119,64 @@ def test_top_k_best_example_history_injection_preserves_side_info() -> None:
     ]
 
 
+def test_top_k_best_example_history_warns_on_side_info_length_skew(
+    caplog: Any,
+) -> None:
+    """A length mismatch between instance_scores and per_example_side_info
+    indicates an upstream bug; injection must warn (not silently drop the
+    user's diagnostics) before rebuilding empty.
+    """
+    import logging
+
+    frontier = ParetoFrontier()
+    cand_a = _make_candidate("cand-a")
+    frontier.add(cand_a, _make_result("cand-a", {"0": 0.5, "1": 0.7}))
+
+    # 2 examples but only 1 side_info dict — clearly skewed.
+    current = EvalResult(
+        candidate_id="cand-skewed",
+        scores={},
+        asi={},
+        instance_scores={"0": 0.0, "1": 0.0},
+        per_example_side_info=[{"trace": "lonely"}],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="helix.evolution"):
+        updated = _inject_top_k_best_example_history(current, frontier, k=1)
+
+    assert any(
+        "per_example_side_info length" in rec.message for rec in caplog.records
+    ), f"expected length-skew warning, got: {[r.message for r in caplog.records]}"
+    assert updated.per_example_side_info == [
+        {"top_k_best_example_history": [{"candidate_id": "cand-a", "score": 0.5}]},
+        {"top_k_best_example_history": [{"candidate_id": "cand-a", "score": 0.7}]},
+    ]
+
+
+def test_pareto_frontier_public_accessors_match_internal_state() -> None:
+    """``iter_results`` / ``get_result`` / ``has_results`` are the public
+    surface used by ``_inject_top_k_best_example_history``; pin their
+    contract so we don't regress to ``_results`` poking.
+    """
+    frontier = ParetoFrontier()
+    assert frontier.has_results() is False
+    assert frontier.get_result("missing") is None
+    assert list(frontier.iter_results()) == []
+
+    cand_a = _make_candidate("cand-a")
+    cand_b = _make_candidate("cand-b")
+    res_a = _make_result("cand-a", {"0": 0.1})
+    res_b = _make_result("cand-b", {"0": 0.9})
+    frontier.add(cand_a, res_a)
+    frontier.add(cand_b, res_b)
+
+    assert frontier.has_results() is True
+    assert frontier.get_result("cand-a") is res_a
+    assert frontier.get_result("cand-b") is res_b
+    # Insertion order preserved → diagnostics get a stable replay.
+    assert [cid for cid, _ in frontier.iter_results()] == ["cand-a", "cand-b"]
+
+
 def _make_minibatch_config(
     train_path: Path,
     *,
