@@ -208,6 +208,11 @@ class HelixResult:
     seed: int | None
     config_hash: str
 
+    @property
+    def id(self) -> str:
+        """Compatibility alias for callers that previously received Candidate."""
+        return self.best_candidate.id
+
     @cached_property
     def parents(self) -> dict[str, list[str]]:
         """Lineage parent ids per candidate, derived from ``candidate_summaries``."""
