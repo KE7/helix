@@ -23,8 +23,28 @@ from helix.sandbox import (
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
+    """True for either workspace-recovery helper (chown or permission-relax).
+
+    Existing call sites use this predicate to filter out housekeeping
+    containers from the primary agent ``docker run``; both helpers share the
+    same ``find /workspace`` boilerplate. Use :func:`_is_workspace_chown_only`
+    or :func:`_is_workspace_permission_relax` when you need to distinguish
+    them.
+    """
     return args[:2] == ["docker", "run"] and any(
         "find /workspace -path /workspace/.git -prune" in item for item in args
+    )
+
+
+def _is_workspace_chown_only(args: list[str]) -> bool:
+    return args[:2] == ["docker", "run"] and any(
+        "chown" in item and "find /workspace" in item for item in args
+    )
+
+
+def _is_workspace_permission_relax(args: list[str]) -> bool:
+    return args[:2] == ["docker", "run"] and any(
+        "chmod a+rwX" in item for item in args
     )
 
 
@@ -507,6 +527,135 @@ def test_agent_sync_tolerates_inaccessible_backend_transcripts(
 
     assert (source / "main.py").read_text() == "new\n"
     assert not (source / ".helix_artifacts" / "backend_transcripts").exists()
+
+
+def test_agent_sync_recovers_rootless_workspace_permissions(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+
+    calls: list[list[str]] = []
+    workspace_root: Path | None = None
+
+    def fake_run(args, **kwargs):
+        nonlocal workspace_root
+        calls.append(args)
+        if (
+            args[:2] == ["docker", "run"]
+            and not _is_workspace_chown(args)
+            and not _is_workspace_permission_relax(args)
+        ):
+            workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            (workspace_root / "main.py").write_text("new\n")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert workspace_root is not None
+    assert (source / "main.py").read_text() == "new\n"
+    relax_calls = [call for call in calls if _is_workspace_permission_relax(call)]
+    assert relax_calls
+    # The relax helper must run after the agent container exits and before
+    # host-side sync-back reads the workspace; verify ordering relative to the
+    # primary agent docker run.
+    agent_run_idx = next(
+        i
+        for i, call in enumerate(calls)
+        if call[:2] == ["docker", "run"]
+        and not _is_workspace_chown(call)
+        and not _is_workspace_permission_relax(call)
+    )
+    assert calls.index(relax_calls[0]) > agent_run_idx
+
+
+def test_agent_sync_skips_relax_when_host_owner_available(tmp_path: Path, mocker):
+    """When ``_host_owner`` returns a value, the chown path runs and the relax
+    helper must NOT be invoked (the two recovery branches are mutually
+    exclusive)."""
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if (
+            args[:2] == ["docker", "run"]
+            and not _is_workspace_chown(args)
+            and not _is_workspace_permission_relax(args)
+        ):
+            workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            (workspace_root / "main.py").write_text("new\n")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value="1000:1000")
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert (source / "main.py").read_text() == "new\n"
+    assert not [call for call in calls if _is_workspace_permission_relax(call)]
+    assert [call for call in calls if _is_workspace_chown_only(call)]
+
+
+def test_safe_rmtree_uses_relax_helper_when_host_owner_missing(
+    tmp_path: Path, mocker
+):
+    """``_safe_rmtree`` must invoke the relax helper (not chown) when the host
+    owner is unavailable, then retry the rmtree."""
+    from helix.sandbox import _safe_rmtree
+
+    target = tmp_path / "doomed"
+    target.mkdir()
+    (target / "f").write_text("x")
+
+    rmtree_calls: list[Path] = []
+    original_rmtree = __import__("shutil").rmtree
+
+    def fake_rmtree(path, *args, **kwargs):
+        rmtree_calls.append(Path(path))
+        if len(rmtree_calls) == 1:
+            raise OSError("permission denied")
+        return original_rmtree(path, *args, **kwargs)
+
+    mocker.patch("helix.sandbox.shutil.rmtree", side_effect=fake_rmtree)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    docker_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        docker_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    _safe_rmtree(target, docker_image="helix-test:latest")
+
+    assert any(_is_workspace_permission_relax(call) for call in docker_calls)
+    assert not any(_is_workspace_chown_only(call) for call in docker_calls)
+    assert len(rmtree_calls) == 2  # initial failure + retry
 
 
 def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
