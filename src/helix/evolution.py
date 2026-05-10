@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import threading
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,13 @@ from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
-from helix.population import Candidate, EvalResult, ParetoFrontier
+from helix.population import (
+    Candidate,
+    CandidateSummary,
+    EvalResult,
+    HelixResult,
+    ParetoFrontier,
+)
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
@@ -957,6 +964,99 @@ def _has_example_scores(result: EvalResult | None, example_ids: list[str]) -> bo
     return all(eid in result.instance_scores for eid in example_ids)
 
 
+def _build_helix_result(
+    *,
+    best: Candidate,
+    frontier: ParetoFrontier,
+    state: EvolutionState,
+    base_dir: Path,
+    config: HelixConfig,
+    lineage_path: Path,
+) -> HelixResult:
+    """Build the structured programmatic result for a completed run.
+
+    Reads the lineage JSON once at end-of-run.  ``record_entry`` flushes
+    every accept-time mutation/merge to disk synchronously, so the file
+    is the authoritative source by the time we get here.  Falls back to
+    each candidate's in-memory ``parent_ids`` / ``operation`` /
+    ``generation`` when no lineage entry is present (defensive — every
+    real accept site writes one).
+
+    Per-candidate data is materialized once on each
+    :class:`CandidateSummary`; :class:`HelixResult` exposes
+    ``aggregate_scores`` / ``sum_scores`` / ``instance_scores`` /
+    ``objective_scores`` / ``parents`` as cached views over that list,
+    so there is a single source of truth.
+    """
+    lineage = load_lineage(lineage_path)
+    non_dominated_ids = sorted(frontier.get_non_dominated())
+    non_dominated = set(non_dominated_ids)
+    summaries: list[CandidateSummary] = []
+
+    for cid, candidate in frontier.candidates.items():
+        entry = lineage.get(cid)
+        # Parent resolution priority:
+        #   1. ``LineageEntry.parents`` — multi-parent (merge) source of truth.
+        #   2. ``Candidate.parent_ids`` — populated at construction for both
+        #      mutations and merges, used when lineage has nothing.
+        #   3. ``LineageEntry.parent`` — legacy single-parent fallback.
+        candidate_parents = (
+            list(entry.parents)
+            if entry is not None and entry.parents
+            else list(candidate.parent_ids)
+        )
+        if not candidate_parents and entry is not None and entry.parent is not None:
+            candidate_parents = [entry.parent]
+
+        result = frontier.get_result(cid)
+        aggregate_score = result.aggregate_score() if result is not None else 0.0
+        sum_score = result.sum_score() if result is not None else 0.0
+        summaries.append(
+            CandidateSummary(
+                candidate=candidate,
+                aggregate_score=aggregate_score,
+                sum_score=sum_score,
+                scores=dict(result.scores) if result is not None else {},
+                instance_scores=(
+                    dict(result.instance_scores) if result is not None else {}
+                ),
+                objective_scores=(
+                    list(result.objective_scores)
+                    if result is not None and result.objective_scores is not None
+                    else None
+                ),
+                parents=candidate_parents,
+                operation=entry.operation if entry is not None else candidate.operation,
+                generation=entry.generation if entry is not None else candidate.generation,
+                discovered_at_evaluation=state.num_metric_calls_by_discovery.get(cid),
+                is_non_dominated=cid in non_dominated,
+            )
+        )
+
+    summaries.sort(key=lambda s: (s.generation, s.id))
+    return HelixResult(
+        best_candidate=best,
+        best_result=frontier.get_result(best.id),
+        candidates=list(frontier.candidates.values()),
+        candidate_summaries=summaries,
+        # Insertion-order copy of state.frontier — preserves accept order
+        # so callers can replay ``frontier_ids`` in chronological order.
+        # ``non_dominated_ids`` is sorted (above) for stable diffing.
+        frontier_ids=list(state.frontier),
+        non_dominated_ids=non_dominated_ids,
+        frontier_type=state.frontier_type,
+        # Defensive shallow copy — ``state.budget`` is mutated by the
+        # budget-accounting code throughout the run; the snapshot must
+        # not alias it (GEPA parity: ``GEPAResult.from_state`` shallow-
+        # copies every collection coming off the live state).
+        budget=replace(state.budget),
+        discovery_counts=dict(state.num_metric_calls_by_discovery),
+        run_dir=str(base_dir),
+        seed=config.rng_seed,
+        config_hash=state.config_hash,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -966,7 +1066,7 @@ def run_evolution(
     config: HelixConfig,
     project_root: Path,
     base_dir: Path,
-) -> Candidate:
+) -> HelixResult:
     """Run the HELIX evolutionary loop."""
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
@@ -989,7 +1089,7 @@ def _run_evolution_impl(
     config: HelixConfig,
     project_root: Path,
     base_dir: Path,
-) -> Candidate:
+) -> HelixResult:
     """Run the HELIX evolutionary loop.
 
     Parameters
@@ -1004,8 +1104,8 @@ def _run_evolution_impl(
 
     Returns
     -------
-    Candidate
-        The best candidate from the final frontier.
+    HelixResult
+        Structured result for the completed run, including the best candidate.
     """
     TRACE.emit(EventType.OPT_START)
     init_base_dir(base_dir, config)
@@ -2579,4 +2679,11 @@ def _run_evolution_impl(
 
     print_success(f"Evolution complete.  Best candidate: {best.id}")
     TRACE.emit(EventType.OPT_END, candidate_id=best.id)
-    return best
+    return _build_helix_result(
+        best=best,
+        frontier=frontier,
+        state=state,
+        base_dir=base_dir,
+        config=config,
+        lineage_path=lineage_path,
+    )

@@ -343,10 +343,10 @@ class TestLegacyGatingUsesSumOnly:
             max_generations=1,
             max_evaluations=100_000,
         )
-        best = run_evolution(config, tmp_path, tmp_path / ".helix")
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # Strict sum-score acceptance: 0.55 > 0.5 → child becomes best.
-        assert best.id == "g1-s1", (
+        assert result.best_candidate.id == "g1-s1", (
             f"Expected child to be accepted under GEPA strict-sum "
-            f"acceptance; got best={best.id}."
+            f"acceptance; got best={result.best_candidate.id}."
         )
