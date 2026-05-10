@@ -10,10 +10,14 @@ import hashlib
 import json
 import logging
 import random
-from collections.abc import Iterator
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from collections.abc import Iterator, Mapping
+from dataclasses import asdict, dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal
 
+
+if TYPE_CHECKING:
+    from helix.state import BudgetState
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +171,147 @@ class EvalResult:
         )
 
 
+@dataclass
+class CandidateSummary:
+    """Programmatic summary of one evolved candidate in a HELIX result."""
+
+    candidate: Candidate
+    aggregate_score: float
+    sum_score: float
+    scores: dict[str, float]
+    instance_scores: dict[str, float]
+    objective_scores: list[dict[str, float]] | None
+    parents: list[str]
+    operation: str
+    generation: int
+    discovered_at_evaluation: int | None = None
+    is_non_dominated: bool = False
+
+    @property
+    def id(self) -> str:
+        """Candidate id convenience alias."""
+        return self.candidate.id
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dict."""
+        return {
+            "id": self.candidate.id,
+            "worktree_path": self.candidate.worktree_path,
+            "branch_name": self.candidate.branch_name,
+            "generation": self.generation,
+            "parents": self.parents,
+            "operation": self.operation,
+            "usage": self.candidate.usage,
+            "aggregate_score": self.aggregate_score,
+            "sum_score": self.sum_score,
+            "scores": self.scores,
+            "instance_scores": self.instance_scores,
+            "objective_scores": self.objective_scores,
+            "discovered_at_evaluation": self.discovered_at_evaluation,
+            "is_non_dominated": self.is_non_dominated,
+        }
+
+
+@dataclass(frozen=True)
+class HelixResult:
+    """Immutable snapshot returned by a HELIX evolution run.
+
+    Mirrors GEPA-style programmatic access without changing the on-disk
+    worktree/state model: callers can inspect the best candidate, every
+    accepted candidate, lineage, scores, budgets, frontier axes, and
+    run identity without scraping CLI output or JSON files.
+
+    GEPA parity: matches the immutability shape of ``GEPAResult``
+    (``src/gepa/core/result.py``) — top-level ``frozen=True`` with plain
+    list/dict fields and ``@property`` views recomputed on each access.
+    The ``frozen=True`` dataclass blocks attribute reassignment; the
+    construction site (``_build_helix_result``) takes shallow defensive
+    copies of every collection so no field aliases the live
+    :class:`EvolutionState`.
+
+    Canonical per-candidate data lives on :attr:`candidate_summaries`
+    (sorted by ``(generation, id)``).  ``parents``, ``aggregate_scores``,
+    ``sum_scores``, ``instance_scores``, and ``objective_scores`` are
+    plain ``@property`` views (not cached) — they recompute from
+    ``candidate_summaries`` on every access, so they cannot drift out of
+    sync with the canonical list.
+    """
+
+    best_candidate: Candidate
+    best_result: EvalResult | None
+    candidates: list[Candidate]
+    candidate_summaries: list[CandidateSummary]
+    # ``frontier_ids`` preserves insertion order from
+    # ``EvolutionState.frontier``; ``non_dominated_ids`` is sorted for
+    # stable diffing across runs.  Both intentional.
+    frontier_ids: list[str]
+    non_dominated_ids: list[str]
+    frontier_type: FrontierType
+    budget: "BudgetState"
+    discovery_counts: dict[str, int]
+    run_dir: str
+    seed: int | None
+    config_hash: str
+
+    @property
+    def id(self) -> str:
+        """Compatibility alias for callers that previously received Candidate."""
+        return self.best_candidate.id
+
+    @property
+    def parents(self) -> dict[str, list[str]]:
+        """Lineage parent ids per candidate, derived from ``candidate_summaries``."""
+        return {s.id: list(s.parents) for s in self.candidate_summaries}
+
+    @property
+    def aggregate_scores(self) -> dict[str, float]:
+        """Per-candidate mean instance score (GEPA aggregate semantics)."""
+        return {s.id: s.aggregate_score for s in self.candidate_summaries}
+
+    @property
+    def sum_scores(self) -> dict[str, float]:
+        """Per-candidate sum of instance scores (GEPA acceptance semantics)."""
+        return {s.id: s.sum_score for s in self.candidate_summaries}
+
+    @property
+    def instance_scores(self) -> dict[str, dict[str, float]]:
+        """Per-candidate per-instance score map."""
+        return {s.id: dict(s.instance_scores) for s in self.candidate_summaries}
+
+    @property
+    def objective_scores(self) -> dict[str, list[dict[str, float]] | None]:
+        """Per-candidate per-example objective slots (None when not harvested)."""
+        return {
+            s.id: (list(s.objective_scores) if s.objective_scores is not None else None)
+            for s in self.candidate_summaries
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dict.
+
+        ``budget`` is rendered via :func:`dataclasses.asdict` so any new
+        :class:`helix.state.BudgetState` field shows up automatically.
+        """
+        return {
+            "best_candidate_id": self.best_candidate.id,
+            "best_result": self.best_result.to_dict() if self.best_result else None,
+            "candidates": [summary.to_dict() for summary in self.candidate_summaries],
+            "parents": self.parents,
+            "aggregate_scores": self.aggregate_scores,
+            "sum_scores": self.sum_scores,
+            "instance_scores": self.instance_scores,
+            "objective_scores": self.objective_scores,
+            "frontier_ids": list(self.frontier_ids),
+            "non_dominated_ids": list(self.non_dominated_ids),
+            "frontier_type": self.frontier_type,
+            "budget": asdict(self.budget),
+            "discovery_counts": dict(self.discovery_counts),
+            "run_dir": self.run_dir,
+            "seed": self.seed,
+            "config_hash": self.config_hash,
+        }
+
+
 class ParetoFrontier:
     """GEPA-style unbounded frontier with coverage-based dominance.
 
@@ -255,12 +400,25 @@ class ParetoFrontier:
         return self._frontier_type
 
     # ------------------------------------------------------------------
-    # Read-only accessors — public surface over the append-only result
-    # store so callers don't need to reach into ``_results``.
+    # Public read-only accessors
     # ------------------------------------------------------------------
+    # ``_candidates`` and ``_results`` are append-only internal storage;
+    # external callers (e.g. ``_build_helix_result``, ``render_frontier_table``,
+    # diagnostics replays) use these read-only views so the storage
+    # layout can change without breaking them.
+
+    @property
+    def candidates(self) -> Mapping[str, Candidate]:
+        """Read-only view of all stored candidates keyed by id."""
+        return MappingProxyType(self._candidates)
+
+    @property
+    def results(self) -> Mapping[str, EvalResult]:
+        """Read-only view of stored evaluation results keyed by candidate id."""
+        return MappingProxyType(self._results)
 
     def get_result(self, candidate_id: str) -> EvalResult | None:
-        """Return the stored EvalResult for ``candidate_id`` or None."""
+        """Return the stored ``EvalResult`` for *candidate_id* or ``None``."""
         return self._results.get(candidate_id)
 
     def iter_results(self) -> Iterator[tuple[str, EvalResult]]:

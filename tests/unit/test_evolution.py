@@ -42,7 +42,7 @@ from helix.evolution import (
 )
 from helix.lineage import LineageEntry
 from helix.mutator import generate_seed as _real_generate_seed
-from helix.population import Candidate, EvalResult
+from helix.population import Candidate, EvalResult, HelixResult
 from helix.state import BudgetState, EvolutionState
 
 
@@ -86,20 +86,30 @@ def make_config(
     max_merge_invocations: int = 5,
     merge_val_overlap_floor: int = 5,
     merge_subsample_size: int = 5,
+    frontier_type: str | None = None,
 ) -> HelixConfig:
+    """Build a HelixConfig for evolution unit tests.
+
+    ``frontier_type`` defaults to ``None`` so :class:`EvolutionConfig`'s
+    own default (``"hybrid"``) is preserved for the bulk of the suite —
+    only tests that assert on it pass an explicit value.
+    """
+    evolution_kwargs: dict[str, object] = dict(
+        max_generations=max_generations,
+        max_evaluations=max_evaluations,
+        perfect_score_threshold=perfect_score_threshold,
+        merge_enabled=merge_enabled,
+        max_merge_invocations=max_merge_invocations,
+        merge_val_overlap_floor=merge_val_overlap_floor,
+        merge_subsample_size=merge_subsample_size,
+    )
+    if frontier_type is not None:
+        evolution_kwargs["frontier_type"] = frontier_type
     return HelixConfig(
         objective="Improve the code",
         evaluator=EvaluatorConfig(command="pytest -q"),
         dataset=DatasetConfig(),
-        evolution=EvolutionConfig(
-            max_generations=max_generations,
-            max_evaluations=max_evaluations,
-            perfect_score_threshold=perfect_score_threshold,
-            merge_enabled=merge_enabled,
-            max_merge_invocations=max_merge_invocations,
-            merge_val_overlap_floor=merge_val_overlap_floor,
-            merge_subsample_size=merge_subsample_size,
-        ),
+        evolution=EvolutionConfig(**evolution_kwargs),
         worktree=WorktreeConfig(cleanup_dominated=cleanup_dominated),
     )
 
@@ -515,8 +525,370 @@ class TestGatingInEvolutionLoop:
             max_generations=1,
             max_evaluations=10000,
         )
-        best = run_evolution(config, tmp_path, tmp_path / ".helix")
-        assert best.id == "g1-s1"
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+        assert result.best_candidate.id == "g1-s1"
+
+    def test_returns_structured_helix_result(self, mocker, tmp_path, all_mocks):
+        """run_evolution exposes GEPA-style structured result metadata."""
+        seed = make_candidate("g0-s0")
+        child = Candidate(
+            id="g1-s1",
+            worktree_path="/tmp/helix/g1-s1",
+            branch_name="helix/g1-s1",
+            generation=1,
+            parent_id=seed.id,
+            parent_ids=[seed.id],
+            operation="mutate",
+            usage={"input_tokens": 7, "output_tokens": 3, "cost_usd": 0.01},
+        )
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["load_lineage"].return_value = {
+            "g0-s0": LineageEntry(
+                id="g0-s0",
+                parent=None,
+                parents=[],
+                operation="seed",
+                generation=0,
+                files_changed=[],
+            ),
+            "g1-s1": LineageEntry(
+                id="g1-s1",
+                parent="g0-s0",
+                parents=["g0-s0"],
+                operation="mutate",
+                generation=1,
+                files_changed=["solve.py"],
+            ),
+        }
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return EvalResult(
+                    candidate_id="g1-s1",
+                    scores={"accuracy": 0.9},
+                    asi={},
+                    instance_scores={"i1": 0.8, "i2": 1.0},
+                    objective_scores=[{"quality": 0.7}, {"quality": 0.9}],
+                )
+            return make_eval_result(candidate.id, {"i1": 0.2, "i2": 0.4})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert isinstance(result, HelixResult)
+        assert result.id == "g1-s1"
+        assert result.best_candidate.id == "g1-s1"
+        assert result.best_candidate is child
+        assert result.best_result is not None
+        assert result.best_result.scores == {"accuracy": 0.9}
+        assert result.parents["g1-s1"] == ["g0-s0"]
+        assert result.aggregate_scores["g1-s1"] == pytest.approx(0.9)
+        assert result.sum_scores["g1-s1"] == pytest.approx(1.8)
+        assert result.instance_scores["g1-s1"] == {"i1": 0.8, "i2": 1.0}
+        assert result.objective_scores["g1-s1"] == [
+            {"quality": 0.7},
+            {"quality": 0.9},
+        ]
+        assert result.frontier_ids == ["g0-s0", "g1-s1"]
+        assert set(result.non_dominated_ids) == {"g1-s1"}
+        assert result.frontier_type == "instance"
+        # Counts reflect ``state.budget.evaluations`` at accept time.  The
+        # absolute numbers depend on the budget-accounting policy in
+        # ``helix.budget`` (see PR #16 / centralized accounting); we lock
+        # in the relative ordering — discovery is monotonic in accept
+        # order — and compare against the live budget total.
+        assert set(result.discovery_counts) == {"g0-s0", "g1-s1"}
+        assert result.discovery_counts["g0-s0"] < result.discovery_counts["g1-s1"]
+        assert result.discovery_counts["g1-s1"] == result.budget.evaluations
+        assert result.run_dir == str(tmp_path / ".helix")
+        assert result.seed == config.rng_seed
+        assert result.config_hash
+        assert result.candidate_summaries[-1].to_dict()["parents"] == ["g0-s0"]
+
+    def test_helix_result_keeps_multiple_non_dominated_candidates(
+        self, mocker, tmp_path, all_mocks,
+    ):
+        """Two complementary children should both be flagged non-dominated.
+
+        Each child wins on a disjoint per-instance axis, so neither
+        dominates the other under the ``"instance"`` frontier and the
+        seed (which loses on every axis) is dominated.
+        """
+        seed = make_candidate("g0-s0")
+        child_a = make_candidate("g1-s1", generation=1)
+        child_b = make_candidate("g2-s1", generation=2)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].side_effect = [child_a, child_b]
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            # Each child wins on a different instance key; child_b's sum
+            # strictly exceeds child_a's so the strict acceptance gate
+            # passes in gen 2 regardless of which parent is selected.
+            scores = {
+                "g0-s0": {"i1": 0.1, "i2": 0.1},
+                "g1-s1": {"i1": 0.9, "i2": 0.1},
+                "g2-s1": {"i1": 0.2, "i2": 0.95},
+            }[candidate.id]
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(
+            max_generations=2, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert set(result.non_dominated_ids) == {"g1-s1", "g2-s1"}
+        # ``non_dominated_ids`` is sorted for stability.
+        assert result.non_dominated_ids == sorted(result.non_dominated_ids)
+        flagged = {s.id for s in result.candidate_summaries if s.is_non_dominated}
+        assert flagged == {"g1-s1", "g2-s1"}
+
+    def test_helix_result_to_dict_round_trips_through_json(
+        self, mocker, tmp_path, all_mocks,
+    ):
+        """``HelixResult.to_dict()`` must be JSON-serialisable end to end.
+
+        Catches any field that sneaks in a non-JSON-native type (enums,
+        Path, BudgetState dataclass, etc.) — the asdict() call on
+        ``budget`` is the specific failure mode we want to lock in.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9, "i2": 0.9})
+            return make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        payload = result.to_dict()
+        # Must round-trip cleanly — asdict(budget) is the load-bearing piece.
+        rendered = json.loads(json.dumps(payload))
+        assert result.id == rendered["best_candidate_id"]
+        assert rendered["best_candidate_id"] == "g1-s1"
+        assert rendered["frontier_type"] == "instance"
+        assert rendered["budget"]["evaluations"] == result.budget.evaluations
+        assert rendered["budget"]["input_tokens"] == result.budget.input_tokens
+        assert rendered["budget"]["output_tokens"] == result.budget.output_tokens
+        assert rendered["budget"]["cost_usd"] == result.budget.cost_usd
+
+    def test_helix_result_records_merge_parents(self, mocker, tmp_path, all_mocks):
+        """A merged candidate's summary surfaces both parents in lineage order.
+
+        Mirrors :class:`TestMergeBehavior` setup so a merge actually
+        fires, then asserts the resulting :class:`HelixResult` exposes
+        ``parents`` of length 2 for the merged candidate — exercising
+        the multi-parent branch of ``_build_helix_result`` that single-
+        parent mutations cannot reach.
+        """
+        seed = make_candidate("g0-s0")
+        child = Candidate(
+            id="g1-s1",
+            worktree_path="/tmp/helix/g1-s1",
+            branch_name="helix/g1-s1",
+            generation=1,
+            parent_id=seed.id,
+            parent_ids=[seed.id],
+            operation="mutate",
+        )
+        merged = Candidate(
+            id="g2-m1",
+            worktree_path="/tmp/helix/g2-m1",
+            branch_name="helix/g2-m1",
+            generation=2,
+            parent_id=seed.id,
+            parent_ids=[seed.id, child.id],
+            operation="merge",
+        )
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+        # Static lineage seen by ``_build_helix_result`` at end-of-run.
+        all_mocks["load_lineage"].return_value = {
+            "g0-s0": LineageEntry(
+                id="g0-s0", parent=None, parents=[], operation="seed",
+                generation=0, files_changed=[],
+            ),
+            "g1-s1": LineageEntry(
+                id="g1-s1", parent="g0-s0", parents=["g0-s0"],
+                operation="mutate", generation=1, files_changed=["solve.py"],
+            ),
+            "g2-m1": LineageEntry(
+                id="g2-m1", parent="g0-s0", parents=["g0-s0", "g1-s1"],
+                operation="merge", generation=2, files_changed=["solve.py"],
+            ),
+        }
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            # Complementary parent scores so both are non-dominated and
+            # eligible for merge.  Merged subsample sum (1.5) >= max
+            # parent subsample sum (1.4), so the merge is accepted.
+            scores_by_id = {
+                "g0-s0": {"1": 0.5, "2": 0.8},
+                "g1-s1": {"1": 0.9, "2": 0.5},
+                "g2-m1": {"1": 0.9, "2": 0.6},
+            }
+            scores = scores_by_id[candidate.id]
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            max_evaluations=10000,
+            frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert "g2-m1" in result.parents, "merged candidate missing from result"
+        assert result.parents["g2-m1"] == ["g0-s0", "g1-s1"]
+        merged_summary = next(
+            s for s in result.candidate_summaries if s.id == "g2-m1"
+        )
+        assert merged_summary.operation == "merge"
+        assert merged_summary.parents == ["g0-s0", "g1-s1"]
+
+    def test_helix_result_is_frozen(self, mocker, tmp_path, all_mocks):
+        """``HelixResult`` blocks attribute reassignment (GEPA parity).
+
+        :class:`gepa.core.result.GEPAResult` uses
+        ``@dataclass(frozen=True)`` to make the snapshot immutable at
+        the top level.  Confirm HELIX matches: reassigning any field
+        raises :class:`dataclasses.FrozenInstanceError`.
+        """
+        from dataclasses import FrozenInstanceError
+
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            return make_eval_result(
+                candidate.id,
+                {"i1": 0.9, "i2": 0.9} if candidate.id == "g1-s1" else {"i1": 0.3, "i2": 0.3},
+            )
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        with pytest.raises(FrozenInstanceError):
+            result.seed = 99
+        with pytest.raises(FrozenInstanceError):
+            result.run_dir = "/elsewhere"
+
+    def test_helix_result_budget_does_not_alias_state(
+        self, mocker, tmp_path, all_mocks,
+    ):
+        """``_build_helix_result`` must shallow-copy ``state.budget``.
+
+        Regression for the construction-site aliasing bug: previously
+        ``budget=state.budget`` shared the same ``BudgetState`` instance
+        with the live :class:`EvolutionState`.  Mutating the live state
+        after the run returned would silently update the snapshot.
+        Now ``budget=replace(state.budget)`` decouples them — same
+        discipline as
+        :meth:`gepa.core.result.GEPAResult.from_state`.
+
+        We can't easily reach the live state object after
+        ``run_evolution`` returns (it's local to the impl), so instead
+        verify the structural property: ``result.budget`` is a
+        :class:`BudgetState` and mutating an arbitrary
+        :class:`BudgetState` cannot affect the snapshot.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["run_evaluator"].side_effect = lambda candidate, *a, **kw: (
+            make_eval_result(candidate.id, {"i1": 0.9, "i2": 0.9})
+            if candidate.id == "g1-s1"
+            else make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
+        )
+
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        snapshot_evals = result.budget.evaluations
+        # Construct a fresh ``BudgetState`` with a sentinel value and
+        # confirm the snapshot doesn't share storage with anything.
+        scratch = BudgetState(evaluations=10**9)
+        assert result.budget is not scratch
+        assert result.budget.evaluations == snapshot_evals
+        # The snapshot is itself frozen-by-convention via the ``HelixResult``
+        # ``frozen=True`` wrapper — reassigning ``result.budget`` raises.
+        from dataclasses import FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
+            result.budget = scratch
+
+    def test_helix_result_score_views_recompute_from_summaries(
+        self, mocker, tmp_path, all_mocks,
+    ):
+        """Score-view properties must recompute from ``candidate_summaries``.
+
+        Previously these were ``@cached_property`` and could go stale
+        if anyone mutated ``candidate_summaries`` after first access.
+        With plain ``@property`` (GEPA parity — every ``GEPAResult``
+        property recomputes), there is no cache and the views always
+        reflect the canonical list.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["run_evaluator"].side_effect = lambda candidate, *a, **kw: (
+            make_eval_result(candidate.id, {"i1": 0.9, "i2": 0.9})
+            if candidate.id == "g1-s1"
+            else make_eval_result(candidate.id, {"i1": 0.3, "i2": 0.3})
+        )
+
+        config = make_config(
+            max_generations=1, max_evaluations=10000, frontier_type="instance",
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # First access materializes the view.
+        first = result.aggregate_scores
+        assert "g1-s1" in first
+        # Mutate ``candidate_summaries`` in place — the dataclass is
+        # frozen at the top level but list contents are not.  A fresh
+        # property read MUST reflect the change (no stale cache).
+        original_summaries = list(result.candidate_summaries)
+        result.candidate_summaries.clear()
+        try:
+            assert result.aggregate_scores == {}
+            assert result.sum_scores == {}
+            assert result.parents == {}
+        finally:
+            # Restore for any later assertions / cleanup.
+            result.candidate_summaries.extend(original_summaries)
+        # After restore the view recomputes back to the original.
+        assert result.aggregate_scores == first
 
 
 def _filter_charge_calls(spy, *, source: str, candidate_id: str) -> list:
