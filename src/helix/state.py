@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import tempfile
+import time
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -275,18 +276,41 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
         with open(target, "rb") as f:
             loaded = pickle.load(f)
     except Exception as exc:
+        quarantined = _quarantine_corrupt_cache(target, reason="unreadable")
         warnings.warn(
-            f"Ignoring unreadable eval cache at {target}: {type(exc).__name__}: {exc}",
+            f"Ignoring unreadable eval cache at {target}: "
+            f"{type(exc).__name__}: {exc}. Quarantined to {quarantined}.",
             RuntimeWarning,
             stacklevel=2,
         )
         return None
     if not isinstance(loaded, dict):
+        quarantined = _quarantine_corrupt_cache(target, reason="non-dict")
         warnings.warn(
             f"Ignoring eval cache at {target}: expected dict, got "
-            f"{type(loaded).__name__}.",
+            f"{type(loaded).__name__}. Quarantined to {quarantined}.",
             RuntimeWarning,
             stacklevel=2,
         )
         return None
     return loaded
+
+
+def _quarantine_corrupt_cache(target: Path, *, reason: str) -> Path:
+    """Move a corrupt eval cache file aside so the next save doesn't overwrite it.
+
+    Returns the destination path (or the original if rename failed — in which
+    case the file is left in place; the caller's warning will still surface
+    the underlying error).  We use a unique timestamped suffix so repeated
+    failed loads don't collide.
+    """
+    suffix = f".corrupt-{reason}-{int(time.time() * 1000)}"
+    dest = target.with_name(target.name + suffix)
+    try:
+        os.replace(target, dest)
+        return dest
+    except OSError:
+        # Best-effort: if we can't rename (e.g. cross-device, perms), leave
+        # the file in place.  The save path uses ``os.replace`` to overwrite
+        # atomically, so a future successful save still wins.
+        return target
