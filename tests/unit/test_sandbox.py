@@ -458,6 +458,57 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
     assert "helix-auth-claude:/home/node:ro" in copy_call
 
 
+def test_agent_sync_tolerates_inaccessible_backend_transcripts(
+    tmp_path: Path, mocker, monkeypatch
+):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+
+    workspace_root: Path | None = None
+    real_exists = Path.exists
+
+    def fake_exists(path: Path) -> bool:
+        if (
+            workspace_root is not None
+            and path == workspace_root / ".helix_artifacts" / "backend_transcripts"
+        ):
+            raise PermissionError("permission denied")
+        return real_exists(path)
+
+    def fake_run(args, **kwargs):
+        nonlocal workspace_root
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            (workspace_root / "main.py").write_text("new\n")
+            blocked = workspace_root / ".helix_artifacts" / "backend_transcripts"
+            blocked.mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='{"type":"result","session_id":"sess_123"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert (source / "main.py").read_text() == "new\n"
+    assert not (source / ".helix_artifacts" / "backend_transcripts").exists()
+
+
 def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
