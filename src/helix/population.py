@@ -17,7 +17,15 @@ FrontierType = Literal["instance", "objective", "hybrid", "cartesian"]
 
 
 class MissingObjectiveScoresError(ValueError):
-    """Raised when an objective-bearing frontier mode lacks objective scores."""
+    """Raised by ``ParetoFrontier`` when an objective-bearing frontier mode
+    cannot consume the supplied ``EvalResult.objective_scores``.
+
+    Covers all "the objective axis is unusable" shapes — absent
+    (``None``), length-mismatched against ``instance_scores``, all-empty
+    slots, or no active per-key entries left at parent-selection time.
+    Subclassing :class:`ValueError` keeps callers that catch ``ValueError``
+    working unchanged.
+    """
 
 
 @dataclass
@@ -278,6 +286,10 @@ class ParetoFrontier:
         in any per-example slot, take the mean of that objective's
         scores across the entire ``objective_scores`` list.
         """
+        # Early-return covers the ``frontier_type == "instance"`` path,
+        # where objective_scores is intentionally optional.  Objective-
+        # bearing modes never reach here with a missing/empty list
+        # because ``_validate_objective_scores`` rejects them first.
         if result.objective_scores is None or not result.objective_scores:
             return
         aggregated: dict[str, list[float]] = {}
@@ -312,6 +324,13 @@ class ParetoFrontier:
         # is positional to the same id list.  Zip together.
         val_ids = list(result.instance_scores.keys())
         if len(val_ids) != len(result.objective_scores):
+            # Defense-in-depth: ``add()`` already calls
+            # ``_validate_objective_scores`` which rejects this same
+            # mismatch up front, so on the normal path this branch is
+            # unreachable.  It still fires from ``_rebuild_axes`` after
+            # ``update_scores`` if a caller swapped in a malformed
+            # ``EvalResult`` — keep the raise so the invariant survives
+            # both entry points.
             raise MissingObjectiveScoresError(
                 f"cartesian frontier requires objective_scores length to match "
                 f"instance_scores for candidate {cid!r} "
@@ -329,8 +348,18 @@ class ParetoFrontier:
 
     def update_scores(self, result: EvalResult) -> None:
         """Update the evaluation result for an existing candidate and rebuild tracking."""
+        self._validate_objective_scores(result.candidate_id, result)
         self._results[result.candidate_id] = result
         self._rebuild_axes()
+
+    def candidate_ids(self) -> list[str]:
+        """Return all evaluated candidate ids in insertion order.
+
+        Stable, JSON-serializable view used by callers (e.g.
+        ``evolution._sync_frontier_state``) that need to mirror the
+        append-only candidate set without reaching into ``_candidates``.
+        """
+        return list(self._candidates.keys())
 
     def _rebuild_axes(self) -> None:
         """Rebuild all per-axis best tracking from scratch.
