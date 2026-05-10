@@ -707,6 +707,12 @@ def _build_backend_args(
         if config.model:
             args.extend(["--model", config.model])
         if config.effort:
+            # Codex CLI accepts runtime config overrides via ``-c key=value``
+            # where the value must be a valid TOML literal.  ``json.dumps``
+            # produces a JSON string (double-quoted, with ``\"`` escapes) which
+            # is valid TOML basic-string syntax for all printable ASCII — safe
+            # for any realistic effort value.  See ``codex exec --help`` for
+            # the full ``-c`` interface.
             args.extend(
                 ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
             )
