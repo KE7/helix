@@ -128,7 +128,25 @@ def _has_structured_diagnostics(eval_result: EvalResult) -> bool:
 
 
 def _evaluator_failed(eval_result: EvalResult) -> bool:
+    """Return True iff the evaluator subprocess exited non-zero.
+
+    ``_returncode`` rides inside ``asi`` (rather than as a typed field
+    on :class:`EvalResult`) to preserve the GEPA O.A. EvaluationBatch
+    interface — every HELIX-specific signal that downstream tooling
+    might want to inspect lives in the same string-keyed bag.
+    ``executor._collect_asi`` writes ``str(returncode)``; absent or
+    unparseable values are treated as success so we never spuriously
+    promote stdout/stderr into the prompt for archived records.
+    """
     return eval_result.asi.get("_returncode") not in (None, "0", 0)
+
+
+# All ``_render_*`` helpers below share a strict invariant: they return
+# either the empty string (the section is suppressed) or a block of
+# text that ends with a single trailing blank line (``"\n\n"``).  The
+# ``MUTATION_PROMPT_TEMPLATE`` chains them together verbatim and relies
+# on this convention to keep section spacing consistent.  Update both
+# the helper and the template if you change it.
 
 
 def _render_evaluator_notes(eval_result: EvalResult) -> str:
@@ -395,7 +413,11 @@ def build_mutation_prompt(
     if not scores_text:
         scores_text = "  (no scores recorded)"
 
-    # Collect any extra_N entries from ASI
+    # Collect any extra_N entries from ASI.  The reserved keys here
+    # are surfaced through dedicated prompt sections (or the
+    # ``EvalResult.evaluator_returncode`` typed field, in the case of
+    # the historical ``_returncode`` legacy key) and must never leak
+    # into the catch-all "extra" rendering.
     extra_entries = {
         k: v
         for k, v in sorted(eval_result.asi.items())

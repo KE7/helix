@@ -183,6 +183,29 @@ class TestBuildMutationPrompt:
         assert "debug stdout" in prompt
         assert "debug stderr" in prompt
 
+    def test_returncode_sentinel_does_not_leak_into_prompt(self):
+        """``_returncode`` is a HELIX-internal sentinel inside ``asi``
+        (kept there to preserve the GEPA O.A. EvaluationBatch
+        interface).  The mutation prompt builder must filter it out of
+        the catch-all "Extra Evaluator Info" rendering — surfacing the
+        literal ``_returncode: 0`` would leak HELIX implementation
+        detail into the LLM's reflection context."""
+        er = EvalResult(
+            candidate_id="g0-s0",
+            scores={"pass_rate": 1.0},
+            asi={
+                "stdout": "",
+                "stderr": "",
+                "_returncode": "0",
+                "extra_0": "real-extra",
+            },
+            instance_scores={"ex_0": 1.0},
+        )
+        prompt = build_mutation_prompt("goal", er)
+        assert "_returncode" not in prompt
+        # Sanity: the genuine extra_N entry still renders.
+        assert "real-extra" in prompt
+
 
 class TestPerExampleDiagnostics:
     """``build_mutation_prompt`` renders ``eval_result.per_example_side_info``

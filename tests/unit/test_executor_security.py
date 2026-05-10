@@ -344,6 +344,58 @@ class TestRunEvaluator:
         assert commands[:2] == [["python", "/runner/evaluate.py"], ["python", "extra.py"]]
         assert commands[2][:2] == ["sh", "-c"]
         assert ".helix_asi_log_" in commands[2][2]
+        # Capture command must use the absolute ``/workspace/...`` path
+        # so the cwd assumption inside the sidecar does not affect what
+        # the ``cat`` resolves.
+        assert "/workspace/.helix_asi_log_" in commands[2][2]
+
+    def test_sandboxed_evaluator_parses_helix_log_capture_into_asi(self, mocker):
+        """The trailing ``cat`` capture command's stdout is JSONL from
+        the evaluator's ``helix.log()`` calls.  The executor must run
+        it through :func:`helix.asi.read_text` and surface the
+        rendered notes under ``asi["log"]`` — this end-to-end check
+        protects against accidentally treating the capture stdout as
+        an ``extra_N`` entry or dropping it."""
+        mock_run = mocker.patch("helix.executor.run_sandboxed_commands")
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
+        # Two records simulating an evaluator that called
+        # ``helix.log("starting", phase="warmup")`` then
+        # ``helix.log(score=0.7)``.
+        capture_stdout = (
+            '{"message": "starting", "phase": "warmup"}\n'
+            '{"score": 0.7}\n'
+        )
+        mock_run.return_value = [
+            MagicMock(stdout="HELIX_RESULT=[]\n", stderr="", returncode=0),
+            MagicMock(stdout=capture_stdout, stderr="", returncode=0),
+        ]
+
+        candidate = make_candidate()
+        config = make_config(command="python /runner/evaluate.py")
+        config.evaluator.sidecar = EvaluatorSidecarConfig(
+            image="eval:latest",
+            runner_image="eval-runner:latest",
+            command="python -m server",
+            endpoint="http://helix-evaluator:8080/evaluate",
+        )
+        config = config.model_copy(
+            update={"sandbox": SandboxConfig(enabled=True, evaluator=True)}
+        )
+
+        result = run_evaluator(candidate, config)
+
+        # Notes were captured via the ``cat`` command and routed to
+        # ``asi["log"]`` (NOT exposed as ``extra_0``, which would
+        # mistakenly treat the capture as a user-provided extra
+        # command).
+        assert "log" in result.asi
+        assert "starting" in result.asi["log"]
+        assert "phase: warmup" in result.asi["log"]
+        assert "score: 0.7" in result.asi["log"]
+        assert "extra_0" not in result.asi
 
     def test_run_evaluator_uses_host_when_sandbox_enabled_but_evaluator_disabled(self, mocker):
         mock_host_run = mocker.patch("helix.executor.subprocess.run")
