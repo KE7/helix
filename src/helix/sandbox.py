@@ -402,11 +402,18 @@ def _sync_back_workspace(
 def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
     """Preserve HELIX-owned transcript artifacts while hiding .helix* from agents."""
     source = src / ".helix_artifacts" / "backend_transcripts"
-    if not source.exists():
+    try:
+        if not source.exists():
+            return
+    except OSError as exc:
+        logger.warning("skipping inaccessible backend transcript artifacts %s: %s", source, exc)
         return
     target = dst / ".helix_artifacts" / "backend_transcripts"
     target.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, dirs_exist_ok=True)
+    try:
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    except OSError as exc:
+        logger.warning("skipping backend transcript artifact copy from %s: %s", source, exc)
 
 
 def _init_synthetic_git_repo(workspace: Path) -> None:
