@@ -63,7 +63,38 @@ class EvalResult:
     """
     candidate_id: str
     scores: dict[str, float]          # aggregate/summary scores
-    asi: dict[str, str]               # arbitrary string info (metadata)
+    # Arbitrary string info (metadata) collected from the evaluator.
+    # Mirrors GEPA O.A. ``EvaluationBatch``'s side-info bag — every
+    # HELIX-specific signal that downstream tooling might want to
+    # inspect lives here in the same string-keyed dict rather than as
+    # a typed field on this dataclass.  That keeps the cross-language
+    # GEPA contract intact.
+    #
+    # Reserved-key convention
+    # -----------------------
+    # Keys starting with an underscore (``_<name>``) are HELIX-internal
+    # sentinels written by ``executor._collect_asi`` and consumed
+    # elsewhere in HELIX (e.g. the mutation prompt builder).  They are:
+    #
+    # * stringified (``asi[k]`` is always ``str`` — callers must parse);
+    # * filtered out of any catch-all rendering surface (the mutation
+    #   prompt's "Extra Evaluator Info" section in
+    #   :func:`helix.mutator.build_mutation_prompt` is the canonical
+    #   example);
+    # * not part of the GEPA O.A. contract — third-party evaluators
+    #   must never set or read them.
+    #
+    # Currently reserved:
+    #
+    # * ``_returncode`` — evaluator subprocess exit code (str), used by
+    #   the mutator to gate stdout/stderr fallback rendering.
+    #
+    # Add new sentinels here (and to the mutator's filter list at
+    # ``mutator.build_mutation_prompt``) when introducing more.
+    # Non-underscore keys (``stdout``, ``stderr``, ``log``, ``extra_N``,
+    # arbitrary evaluator-emitted notes) are NOT reserved and round-trip
+    # to the GEPA O.A. consumer unchanged.
+    asi: dict[str, str]
     instance_scores: dict[str, float] # per-instance scores, keyed by HELIX example-id
     # Legacy batch-level diagnostics dict.  No longer populated by the
     # ``helix_result`` parser (which uses ``per_example_side_info``);
