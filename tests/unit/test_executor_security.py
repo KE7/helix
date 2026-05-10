@@ -173,12 +173,12 @@ class TestEnvironmentScrubbing:
         env = _scrub_environment(
             passthrough_env=["ANTHROPIC_BASE_URL"],
             fixed_env={
-                "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+                "ANTHROPIC_BASE_URL": "https://model-service.example.invalid/v1",
                 "ANTHROPIC_API_KEY": "dummy",
             },
         )
 
-        assert env["ANTHROPIC_BASE_URL"] == "http://qwen-vllm-endpoint:8003"
+        assert env["ANTHROPIC_BASE_URL"] == "https://model-service.example.invalid/v1"
         assert env["ANTHROPIC_API_KEY"] == "dummy"
 
     def test_passthrough_env_missing_var_is_ignored(self, monkeypatch):

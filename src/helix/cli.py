@@ -79,7 +79,7 @@ command = "uv run python evaluate.py"
 [env]
 # Fixed non-secret env values injected into evaluator and agent subprocesses
 # after passthrough_env. Useful for repeatable run-local service endpoints.
-# ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+# ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1"
 # ANTHROPIC_API_KEY = "dummy"
 
 [evolution]

@@ -227,7 +227,7 @@ class TestPerExampleDiagnostics:
             scores={"pass_rate": 0.5},
             asi={"stdout": "", "stderr": ""},
             instance_scores=instance_scores
-            or {"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+            or {"group_alpha__case_0": 1.0, "group_alpha__case_1": 0.0},
             side_info=side_info,
             per_example_side_info=per_example_side_info,
         )
@@ -241,15 +241,15 @@ class TestPerExampleDiagnostics:
                 },
                 {"trajectory": "stuck", "scores": {"success": 0.0, "affordance": 0.2}},
             ],
-            instance_scores={"cube_lifting__0": 1.0, "cube_lifting__1": 0.0},
+            instance_scores={"group_alpha__case_0": 1.0, "group_alpha__case_1": 0.0},
         )
         prompt = build_mutation_prompt("goal", er)
         # Per-example ids render as ``### Example <id>`` (h3 under the
         # surrounding ``## Diagnostics`` h2).  Line-anchored check —
         # a substring match would also accept ``# Example`` or
         # ``#### Example`` and miss the header-level change.
-        assert "\n### Example cube_lifting__0\n" in prompt
-        assert "\n### Example cube_lifting__1\n" in prompt
+        assert "\n### Example group_alpha__case_0\n" in prompt
+        assert "\n### Example group_alpha__case_1\n" in prompt
 
     def test_reserved_scores_key_renamed_for_mutator(self):
         er = self._make(
@@ -923,13 +923,13 @@ class TestInvokeClaudeCode:
             AgentConfig(),
             passthrough_env=["ANTHROPIC_BASE_URL"],
             fixed_env={
-                "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+                "ANTHROPIC_BASE_URL": "https://model-service.example.invalid/v1",
                 "ANTHROPIC_API_KEY": "dummy",
             },
         )
 
         env = mock_run.call_args.kwargs["env"]
-        assert env["ANTHROPIC_BASE_URL"] == "http://qwen-vllm-endpoint:8003"
+        assert env["ANTHROPIC_BASE_URL"] == "https://model-service.example.invalid/v1"
         assert env["ANTHROPIC_API_KEY"] == "dummy"
 
 

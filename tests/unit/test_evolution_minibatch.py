@@ -1278,8 +1278,8 @@ class TestCachedEvaluateBatch:
 # Prior to the fix, ``_write_helix_batch`` silently cast every element through
 # ``int()`` at the JSON serialization boundary.  That made
 # :class:`helix.batch_sampler.StratifiedBatchSampler` (which emits opaque ids
-# of shape ``"group__N"`` like ``"cube_stack__3"``) unusable on Architecture A:
-# ``int("cube_stack__3")`` raises ``ValueError``.  The fix passes ids through
+# of shape ``"group__N"`` like ``"group_alpha__case_3"``) unusable on Architecture A:
+# ``int("group_alpha__case_3")`` raises ``ValueError``.  The fix passes ids through
 # opaquely as strings.
 # ---------------------------------------------------------------------------
 
@@ -1291,7 +1291,7 @@ class TestWriteHelixBatchStringIds:
         sampler — without attempting to cast them to int."""
         from helix.evolution import _write_helix_batch
 
-        ids = ["cube_lifting__0", "cube_stack__3", "door_open__7"]
+        ids = ["group_alpha__case_0", "group_alpha__case_3", "group_beta__case_7"]
         _write_helix_batch(tmp_path, ids)
 
         written = json.loads((tmp_path / "helix_batch.json").read_text())

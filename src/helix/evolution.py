@@ -844,7 +844,7 @@ def _write_helix_batch(worktree_path: str | Path, example_ids: list[str]) -> Non
     responsible for whatever interpretation its dataset requires
     (stringified integer indices, composite ``group__N`` task ids, etc.).
     Historically this function coerced every id to ``int`` which made
-    structured ids like ``"cube_stack__3"`` — required by
+    structured ids like ``"group_alpha__case_3"`` — required by
     :class:`helix.batch_sampler.StratifiedBatchSampler` — raise
     ``ValueError`` at the serialization boundary.
     """
@@ -1452,7 +1452,7 @@ def _run_evolution_impl(
         if config.evolution.batch_sampler == "stratified":
             # Derive group key from instance id by splitting on the
             # configured separator and taking the first part.  E.g.
-            # 'cube_stack__s3' -> 'cube_stack' with separator='__'.
+            # 'group_alpha__case_3' -> 'group_alpha' with separator='__'.
             sep = config.evolution.group_key_separator
 
             def _group_fn(example_id: str) -> str:
