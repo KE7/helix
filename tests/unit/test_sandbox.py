@@ -28,6 +28,10 @@ def _is_workspace_chown(args: list[str]) -> bool:
     )
 
 
+def _is_workspace_permission_relax(args: list[str]) -> bool:
+    return args[:2] == ["docker", "run"] and any("chmod 0777" in item for item in args)
+
+
 def test_resolve_sandbox_image_defaults_from_backend():
     cfg = SandboxConfig(enabled=True)
     assert (
@@ -507,6 +511,53 @@ def test_agent_sync_tolerates_inaccessible_backend_transcripts(
 
     assert (source / "main.py").read_text() == "new\n"
     assert not (source / ".helix_artifacts" / "backend_transcripts").exists()
+
+
+def test_agent_sync_recovers_rootless_workspace_permissions(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+
+    calls: list[list[str]] = []
+    workspace_root: Path | None = None
+
+    def fake_run(args, **kwargs):
+        nonlocal workspace_root
+        calls.append(args)
+        if (
+            args[:2] == ["docker", "run"]
+            and not _is_workspace_chown(args)
+            and not _is_workspace_permission_relax(args)
+        ):
+            workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            (workspace_root / "main.py").write_text("new\n")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert workspace_root is not None
+    assert (source / "main.py").read_text() == "new\n"
+    relax_calls = [call for call in calls if _is_workspace_permission_relax(call)]
+    assert relax_calls
+    assert calls.index(relax_calls[0]) > next(
+        i
+        for i, call in enumerate(calls)
+        if call[:2] == ["docker", "run"]
+        and not _is_workspace_chown(call)
+        and not _is_workspace_permission_relax(call)
+    )
 
 
 def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):

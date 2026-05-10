@@ -362,14 +362,17 @@ def _safe_rmtree(path: Path, *, docker_image: str | None = None) -> None:
     except FileNotFoundError:
         return
     except OSError as first_exc:
-        if docker_image and (host_owner := _host_owner()):
-            _docker_chown_workspace(path, docker_image, host_owner)
+        if docker_image:
+            if host_owner := _host_owner():
+                _docker_chown_workspace(path, docker_image, host_owner)
+            else:
+                _docker_relax_workspace_permissions(path, docker_image)
             try:
                 shutil.rmtree(path)
                 return
             except OSError as second_exc:
                 logger.warning(
-                    "failed to clean sandbox temp dir %s after chown: %s",
+                    "failed to clean sandbox temp dir %s after permission recovery: %s",
                     path,
                     second_exc,
                 )
@@ -490,6 +493,47 @@ def _docker_chown_workspace(workspace: Path, image: str, owner: str) -> None:
             "-c",
             'find /workspace -path /workspace/.git -prune -o -exec chown -h "$0" {} +',
             owner,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_docker_host_env(),
+    )
+
+
+def _docker_relax_workspace_permissions(workspace: Path, image: str) -> None:
+    """Make a sandbox workspace readable/writable by the host after userns runs.
+
+    Rootless Docker and user-namespace remapping can make container-owned files
+    appear on the host as unmapped high UIDs. In that mode chowning to the host
+    UID from inside the container is not meaningful, but a root helper in the
+    same namespace can still relax mode bits on the bind mount before host-side
+    sync and cleanup.
+    """
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--workdir",
+            "/workspace",
+            "--user",
+            "root",
+            "--network",
+            "none",
+            "--security-opt",
+            "no-new-privileges",
+            "-v",
+            f"{workspace}:/workspace:rw",
+            image,
+            "sh",
+            "-c",
+            (
+                "find /workspace -path /workspace/.git -prune -o "
+                "-type d -exec chmod 0777 {} +; "
+                "find /workspace -path /workspace/.git -prune -o "
+                "-type f -exec chmod 0666 {} +"
+            ),
         ],
         check=False,
         capture_output=True,
@@ -927,6 +971,8 @@ def run_sandboxed_commands(
         finally:
             if host_owner := _host_owner():
                 _docker_chown_workspace(workspace, docker_image, host_owner)
+            else:
+                _docker_relax_workspace_permissions(workspace, docker_image)
         if sync_back:
             _sync_back_workspace(
                 workspace,
