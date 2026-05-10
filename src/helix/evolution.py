@@ -74,6 +74,15 @@ from helix.worktree import (
 
 logger = logging.getLogger(__name__)
 
+_PROTECTED_DIRECTORY_IGNORE_PATTERNS = (
+    ".git",
+    "__pycache__",
+    "*.pyc",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -254,14 +263,7 @@ def _copy_protected_path(source: Path, destination: Path) -> None:
         shutil.copytree(
             source,
             destination,
-            ignore=shutil.ignore_patterns(
-                ".git",
-                "__pycache__",
-                "*.pyc",
-                ".pytest_cache",
-                ".mypy_cache",
-                ".ruff_cache",
-            ),
+            ignore=shutil.ignore_patterns(*_PROTECTED_DIRECTORY_IGNORE_PATTERNS),
         )
     elif source.is_symlink():
         os.symlink(os.readlink(source), destination)
@@ -297,6 +299,30 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _iter_protected_manifest_files(
+    source_path: Path,
+    rel_path: str,
+) -> list[tuple[str, Path]]:
+    """Return manifest entries under one protected file/directory."""
+    if source_path.is_file():
+        return [(rel_path, source_path)]
+    if not source_path.is_dir() or source_path.is_symlink():
+        return []
+
+    ignore = shutil.ignore_patterns(*_PROTECTED_DIRECTORY_IGNORE_PATTERNS)
+    entries: list[tuple[str, Path]] = []
+    for dirpath_str, dirnames, filenames in os.walk(source_path):
+        ignored = ignore(dirpath_str, [*dirnames, *filenames])
+        dirnames[:] = sorted(name for name in dirnames if name not in ignored)
+        for filename in sorted(name for name in filenames if name not in ignored):
+            file_path = Path(dirpath_str) / filename
+            if not file_path.is_file():
+                continue
+            entry_path = Path(rel_path) / file_path.relative_to(source_path)
+            entries.append((entry_path.as_posix(), file_path))
+    return entries
+
+
 def _evaluator_manifest_path(base_dir: Path) -> Path:
     return base_dir / _EVALUATOR_MANIFEST_FILENAME
 
@@ -310,17 +336,21 @@ def _build_evaluator_integrity_manifest(
     manifest: dict[str, str] = {}
     for rel_path in _collect_protected_evaluator_paths(config, project_root):
         source_path = (baseline_root / rel_path).resolve()
-        if not source_path.exists() or not source_path.is_file():
+        if not source_path.exists():
             logger.warning(
-                "Skipping protected evaluator file %s: missing from baseline %s",
+                "Skipping protected evaluator path %s: missing from baseline %s",
                 rel_path,
                 baseline_root,
             )
             continue
-        try:
-            manifest[rel_path] = _sha256_file(source_path)
-        except OSError:
-            logger.exception("Failed hashing protected evaluator file: %s", source_path)
+        for manifest_rel_path, file_path in _iter_protected_manifest_files(
+            source_path,
+            rel_path,
+        ):
+            try:
+                manifest[manifest_rel_path] = _sha256_file(file_path)
+            except OSError:
+                logger.exception("Failed hashing protected evaluator file: %s", file_path)
     return manifest
 
 
