@@ -334,7 +334,7 @@ class TestAgentEffortValidation:
         """opencode accepts arbitrary --variant strings; HELIX must not warn."""
         HelixConfig(
             **self._base_kwargs(),
-            agent=AgentConfig(backend="opencode", effort="qwen-coder-plus"),
+            agent=AgentConfig(backend="opencode", effort="custom-coder-plus"),
         )
         assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
 

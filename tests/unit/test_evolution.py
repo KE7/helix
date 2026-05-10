@@ -2338,7 +2338,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
 
     config = HelixConfig(
         objective="Improve",
-        env={"EVALUATOR_BASE_URL": "http://qwen-vllm-endpoint:8003"},
+        env={"EVALUATOR_BASE_URL": "https://model-service.example.invalid/v1"},
         evaluator=EvaluatorConfig(
             command="python /runner/evaluate.py",
             score_parser="helix_result",

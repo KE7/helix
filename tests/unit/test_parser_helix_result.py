@@ -52,7 +52,7 @@ def _pairs(
 
 class TestHelixResultHappyPath:
     def test_zips_ids_with_per_example_scores(self, tmp_path: Path) -> None:
-        ids = ["cube_lifting__0", "cube_stack__1", "nut_assembly__2"]
+        ids = ["group_alpha__case_0", "group_beta__case_1", "group_gamma__case_2"]
         _write_batch(tmp_path, ids)
         payload = _pairs([1.0, 0.0, 0.5])
         line = f"HELIX_RESULT={json.dumps(payload)}"
@@ -63,9 +63,9 @@ class TestHelixResultHappyPath:
         )
 
         assert instance_scores == {
-            "cube_lifting__0": 1.0,
-            "cube_stack__1": 0.0,
-            "nut_assembly__2": 0.5,
+            "group_alpha__case_0": 1.0,
+            "group_beta__case_1": 0.0,
+            "group_gamma__case_2": 0.5,
         }
         # mean of [1.0, 0.0, 0.5] == 0.5
         assert scores["success"] == pytest.approx(0.5)

@@ -316,7 +316,7 @@ rng_seed = 0
 [env]
 # Fixed non-secret env values injected into evaluator and agent subprocesses
 # after passthrough_env. Useful for repeatable run-local service endpoints.
-# ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+# ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1"
 # ANTHROPIC_API_KEY = "dummy"
 
 [evaluator]
@@ -483,7 +483,7 @@ HELIX splits dataset concerns across two TOML sections:
 | Mode | Config | Description |
 |---|---|---|
 | **Single-task / no-example** | neither set | GEPA O.A. Single-Task Search (`dataset=None`, `valset=None`): evaluator runs without example-id handoff; uncached eval calls count as 1 metric call. |
-| **Example-id handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples example ids — stringified indices into `range(train_size)` by default, or opaque task-prefixed ids like `"cube_stack__3"` under `evolution.batch_sampler = "stratified"`; the evaluator reads them from `helix_batch.json` (a JSON `list[str]`) in cwd and filters its own dataset. |
+| **Example-id handoff** | `dataset.train_size` / `dataset.val_size` set | HELIX samples example ids — stringified indices into `range(train_size)` by default, or opaque task-prefixed ids like `"group_alpha__case_3"` under `evolution.batch_sampler = "stratified"`; the evaluator reads them from `helix_batch.json` (a JSON `list[str]`) in cwd and filters its own dataset. |
 | **Seedless multi-task** | `seedless.enabled = true`, `seedless.train_path` set | Seed generation prompt includes the first 3 training examples for grounding. |
 
 HELIX does not own separate dataset files for train/val; your evaluator remains

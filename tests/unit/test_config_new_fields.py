@@ -257,7 +257,7 @@ class TestSandboxConfig:
             objective = "Test"
 
             [env]
-            ANTHROPIC_BASE_URL = "http://qwen-vllm-endpoint:8003"
+            ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1"
             ANTHROPIC_API_KEY = "dummy"
 
             [evaluator]
@@ -269,7 +269,7 @@ class TestSandboxConfig:
         cfg = load_config(toml)
 
         assert cfg.env == {
-            "ANTHROPIC_BASE_URL": "http://qwen-vllm-endpoint:8003",
+            "ANTHROPIC_BASE_URL": "https://model-service.example.invalid/v1",
             "ANTHROPIC_API_KEY": "dummy",
         }
 

@@ -96,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `list[int]`.  Example ids flow through the Architecture A evaluator
   handoff as opaque strings — the default `_RangeDataLoader` emits `"0"`,
   `"1"`, …, and `StratifiedBatchSampler` emits task-prefixed ids like
-  `"cube_stack__3"`.  Evaluators that previously read the handoff as
+  `"group_alpha__case_3"`.  Evaluators that previously read the handoff as
   `list[int]` must cast on their side
   (`[int(s) for s in json.loads(Path("helix_batch.json").read_text())]`)
   or switch to string-keyed lookup.  Unblocks the stratified sampler on

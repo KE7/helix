@@ -133,7 +133,7 @@ class DatasetConfig(BaseModel):
     evaluator owns the actual dataset.  Architecture A (example-id
     handoff): HELIX samples example ids — stringified indices into
     ``range(train_size)`` by default, or opaque structured ids like
-    ``"cube_stack__3"`` when ``evolution.batch_sampler = "stratified"``
+    ``"group_alpha__case_3"`` when ``evolution.batch_sampler = "stratified"``
     — and writes them to ``{worktree}/helix_batch.json``; the evaluator
     reads that file (from its cwd) and filters its own loaded dataset
     by those ids.  Ids are opaque at the HELIX/evaluator boundary:
@@ -388,7 +388,7 @@ class EvolutionConfig(BaseModel):
             "Separator used to derive a group key from each instance id for "
             "the stratified batch sampler: the id is split on this separator "
             "and the first part is taken as the group key (e.g. "
-            "'cube_stack__s3' -> 'cube_stack' when separator='__')."
+            "'group_alpha__case_3' -> 'group_alpha' when separator='__')."
         ),
     )
     frontier_type: Literal["instance", "objective", "hybrid", "cartesian"] = Field(

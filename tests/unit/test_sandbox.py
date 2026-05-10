@@ -304,12 +304,12 @@ def test_start_evaluator_sidecar_injects_fixed_env(mocker):
 
     with start_evaluator_sidecar(
         sidecar,
-        fixed_env={"EVALUATOR_BASE_URL": "http://qwen-vllm-endpoint:8003"},
+        fixed_env={"EVALUATOR_BASE_URL": "https://model-service.example.invalid/v1"},
     ):
         pass
 
     docker_run = next(call for call in calls if call[:3] == ["docker", "run", "-d"])
-    assert "EVALUATOR_BASE_URL=http://qwen-vllm-endpoint:8003" in docker_run
+    assert "EVALUATOR_BASE_URL=https://model-service.example.invalid/v1" in docker_run
 
 
 def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
