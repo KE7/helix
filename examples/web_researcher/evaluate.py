@@ -245,7 +245,7 @@ def evaluate():
             got = agent.solve(question_text)
             if not isinstance(got, str):
                 got = str(got) if got is not None else ""
-        except Exception as ex:
+        except Exception:
             got = ""
 
         # Score

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from helix.exceptions import RateLimitError
+from helix.exceptions import RateLimitError, ResumeIncompatibleError
 from helix.mutator import MutationError, invoke_claude_code, _looks_like_rate_limit
 from helix.state import BudgetState, EvolutionState, load_state, save_state
 
@@ -281,7 +281,7 @@ def test_resume_rejects_frontier_type_change() -> None:
     state.resume_semantics = _resume_semantics(config)
     state.resume_semantics["evolution"]["frontier_type"] = "instance"
 
-    with pytest.raises(ValueError, match="frontier_type"):
+    with pytest.raises(ResumeIncompatibleError, match="frontier_type"):
         _validate_resume_semantics(state, config)
 
 
@@ -304,7 +304,7 @@ def test_resume_rejects_semantic_config_change() -> None:
     state.frontier_type = "hybrid"
     state.resume_semantics = _resume_semantics(saved_config)
 
-    with pytest.raises(ValueError, match="minibatch_size"):
+    with pytest.raises(ResumeIncompatibleError, match="minibatch_size"):
         _validate_resume_semantics(state, current_config)
 
 
@@ -328,6 +328,150 @@ def test_resume_allows_cache_toggle_without_semantic_rejection() -> None:
     state.resume_semantics = _resume_semantics(saved_config)
 
     _validate_resume_semantics(state, current_config)
+
+
+def test_resume_legacy_state_with_empty_resume_semantics_does_not_raise() -> None:
+    """Legacy states predating the resume_semantics guard short-circuit cleanly.
+
+    The frontier_type attribute IS still checked (it has been persisted
+    since v1) — only the broader semantic comparison short-circuits when
+    ``resume_semantics`` is empty.
+    """
+    from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig
+    from helix.evolution import _validate_resume_semantics
+
+    config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(frontier_type="instance", minibatch_size=11),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = "instance"
+    state.resume_semantics = {}  # legacy: no semantics persisted yet
+
+    # Should not raise — the early-return path is the documented migration
+    # behaviour for v0/v1 state.json payloads.
+    _validate_resume_semantics(state, config)
+
+
+def test_resume_rejection_preserves_persisted_eval_cache(tmp_path: Path) -> None:
+    """A rejected resume must NOT delete the on-disk eval cache pickle.
+
+    Regression guard: the ordering bug previously cleared
+    ``.helix/eval_cache.pkl`` at startup whenever ``cache_evaluation`` was
+    disabled, even if the run was about to be rejected by
+    ``_validate_resume_semantics``.  After the fix, the pickle survives a
+    rejected resume so the user can correct the config and resume with
+    cache state intact.
+    """
+    from helix.config import (
+        AgentConfig,
+        DatasetConfig,
+        EvolutionConfig,
+        EvaluatorConfig,
+        HelixConfig,
+        WorktreeConfig,
+    )
+    from helix.eval_cache import EvaluationCache as MinibatchEvalCache
+    from helix.evolution import _resume_semantics, run_evolution
+    from helix.state import (
+        BudgetState,
+        EvolutionState,
+        load_eval_cache,
+        save_eval_cache,
+        save_state,
+    )
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    base_dir = project_root / ".helix"
+    base_dir.mkdir()
+
+    # Saved run: cache_evaluation was True, frontier_type=instance.
+    saved_config = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(
+            frontier_type="instance",
+            cache_evaluation=True,
+            max_generations=1,
+        ),
+        agent=AgentConfig(),
+        dataset=DatasetConfig(),
+        worktree=WorktreeConfig(),
+    )
+    state = EvolutionState(
+        generation=0,
+        frontier=[],
+        instance_scores={},
+        budget=BudgetState(),
+        config_hash="cafef00d",
+        frontier_type="instance",
+        resume_semantics=_resume_semantics(saved_config),
+    )
+    save_state(state, project_root)
+
+    # Persist a non-trivial eval cache.
+    cache: MinibatchEvalCache[object, str] = MinibatchEvalCache[object, str]()
+    cache.put({"prompt.md": "v1"}, "task_a", output="out-a", score=0.7)
+    save_eval_cache(cache._cache, project_root)
+    assert load_eval_cache(project_root) is not None
+
+    # Resume with frontier_type=hybrid AND cache_evaluation=False — under the
+    # old code the cache would be wiped at startup before the rejection.
+    current_config = saved_config.model_copy(
+        update={
+            "evolution": saved_config.evolution.model_copy(
+                update={"frontier_type": "hybrid", "cache_evaluation": False}
+            )
+        }
+    )
+
+    with pytest.raises(ResumeIncompatibleError, match="frontier_type"):
+        run_evolution(current_config, project_root, base_dir)
+
+    # The persisted cache MUST still be on disk so the user can correct
+    # the config and resume without losing cache state.
+    assert load_eval_cache(project_root) is not None, (
+        "eval_cache.pkl must survive a rejected resume; the destructive "
+        "clear_eval_cache() call should not run before validation."
+    )
+
+
+def test_resume_cli_emits_friendly_error_on_incompatible_config(tmp_path: Path) -> None:
+    """`helix resume` should never surface a raw Python traceback.
+
+    When ``_validate_resume_semantics`` raises ``ResumeIncompatibleError``
+    the CLI catches it and routes through ``print_helix_error`` for a
+    Rich-formatted panel + ``SystemExit(2)``.
+    """
+    from click.testing import CliRunner
+    from helix.cli import cli
+    from helix.exceptions import ResumeIncompatibleError
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    (project_root / "helix.toml").write_text(
+        'objective = "test"\n\n[evaluator]\ncommand = "echo 1"\n'
+    )
+
+    incompat = ResumeIncompatibleError(
+        "Cannot resume with a different evolution.frontier_type: "
+        "saved='instance', current='hybrid'.",
+        operation="resume",
+        phase="validate_resume_semantics",
+        suggestion="Restore the original config or run `helix clean`.",
+    )
+
+    with patch("helix.evolution.run_evolution", side_effect=incompat):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["resume", "--dir", str(project_root)])
+
+    assert result.exit_code == 2, (result.exit_code, result.output)
+    # No traceback from a bare ValueError; the friendly panel is rendered
+    # via ``print_helix_error``.
+    assert "Traceback" not in result.output, result.output
+    assert "frontier_type" in result.output, result.output
 
 
 def test_evolve_success_prints_clean_hint(tmp_path: Path) -> None:

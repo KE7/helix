@@ -48,6 +48,7 @@ from helix.exceptions import (
     HelixError,
     PromptArtifactCollisionError,
     RateLimitError,
+    ResumeIncompatibleError,
     print_helix_error,
 )
 from helix.executor import run_evaluator
@@ -99,7 +100,24 @@ def _config_hash(config: HelixConfig) -> str:
 
 
 def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
-    """Return config fields that define resume-compatible optimization semantics."""
+    """Return config fields that define resume-compatible optimization semantics.
+
+    The returned shape is the authoritative resume-compatibility contract.
+    Any field present here is hard-rejected on resume if it changes; fields
+    deliberately omitted (notably ``evolution.cache_evaluation``) may be
+    toggled freely between runs.
+
+    Top-level keys:
+      * ``objective``: changes the optimization target outright.
+      * ``rng_seed``: pinned for full determinism parity with the prior run.
+      * ``evaluator``: command, parser, extra commands, protected files —
+        all influence what saved scores actually mean.
+      * ``dataset``: full pydantic dump; train/val splits and grouping
+        affect which examples saved scores were computed against.
+      * ``seedless``: enabled flag and external train/val paths.
+      * ``evolution``: frontier dimensionality, acceptance, minibatch /
+        sampler shape, val-stage size, and merge policy.
+    """
     return {
         "objective": config.objective,
         "rng_seed": config.rng_seed,
@@ -138,6 +156,24 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
     }
 
 
+_DIFF_VALUE_PREVIEW_CHARS = 80
+
+
+def _format_diff_value(value: Any) -> str:
+    """Render a single value in a diff message, truncating long reprs.
+
+    List-shaped fields (e.g. ``evaluator.extra_commands``,
+    ``evaluator.protected_files``) can otherwise overwhelm the rejection
+    message with full file/path dumps; clamp to a fixed character budget
+    with an explicit ellipsis so the structural shape stays visible but
+    long bodies don't drown the user.
+    """
+    rendered = repr(value)
+    if len(rendered) > _DIFF_VALUE_PREVIEW_CHARS:
+        return rendered[: _DIFF_VALUE_PREVIEW_CHARS - 3] + "..."
+    return rendered
+
+
 def _semantic_diffs(
     saved: dict[str, Any],
     current: dict[str, Any],
@@ -147,28 +183,48 @@ def _semantic_diffs(
     for key in sorted(set(saved) | set(current)):
         path = f"{prefix}.{key}" if prefix else key
         if key not in saved:
-            diffs.append(f"{path}: missing in saved state, current={current[key]!r}")
+            diffs.append(
+                f"{path}: missing in saved state, current={_format_diff_value(current[key])}"
+            )
             continue
         if key not in current:
-            diffs.append(f"{path}: saved={saved[key]!r}, missing in current config")
+            diffs.append(
+                f"{path}: saved={_format_diff_value(saved[key])}, missing in current config"
+            )
             continue
         saved_value = saved[key]
         current_value = current[key]
         if isinstance(saved_value, dict) and isinstance(current_value, dict):
             diffs.extend(_semantic_diffs(saved_value, current_value, path))
         elif saved_value != current_value:
-            diffs.append(f"{path}: saved={saved_value!r}, current={current_value!r}")
+            diffs.append(
+                f"{path}: saved={_format_diff_value(saved_value)}, "
+                f"current={_format_diff_value(current_value)}"
+            )
     return diffs
 
 
+_RESUME_REMEDIATION_SUGGESTION = (
+    "Restore the original config to keep resuming, or run `helix clean` and "
+    "start a fresh run to use the new config."
+)
+
+
 def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> None:
-    """Reject resume when current config would reinterpret persisted state."""
+    """Reject resume when current config would reinterpret persisted state.
+
+    Raises :class:`ResumeIncompatibleError` (a :class:`HelixError`) so the
+    CLI can route through ``print_helix_error`` instead of letting the
+    user see a raw Python traceback.
+    """
     current = _resume_semantics(config)
     if state.frontier_type != config.evolution.frontier_type:
-        raise ValueError(
+        raise ResumeIncompatibleError(
             "Cannot resume with a different evolution.frontier_type: "
-            f"saved={state.frontier_type!r}, current={config.evolution.frontier_type!r}. "
-            "Start a fresh run or restore the original config."
+            f"saved={state.frontier_type!r}, current={config.evolution.frontier_type!r}.",
+            operation="resume",
+            phase="validate_resume_semantics",
+            suggestion=_RESUME_REMEDIATION_SUGGESTION,
         )
 
     if not state.resume_semantics:
@@ -179,9 +235,12 @@ def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> No
         preview = "; ".join(diffs[:5])
         if len(diffs) > 5:
             preview += f"; ... {len(diffs) - 5} more"
-        raise ValueError(
+        raise ResumeIncompatibleError(
             "Cannot resume because the current config changes optimization "
-            f"semantics: {preview}. Start a fresh run or restore the original config."
+            f"semantics: {preview}.",
+            operation="resume",
+            phase="validate_resume_semantics",
+            suggestion=_RESUME_REMEDIATION_SUGGESTION,
         )
 
 
@@ -1303,8 +1362,13 @@ def _run_evolution_impl(
         _persisted_cache = load_eval_cache(project_root)
         if _persisted_cache is not None:
             minibatch_cache._cache.update(_persisted_cache)
-    else:
-        clear_eval_cache(project_root)
+    # NOTE: when cache_evaluation is disabled we DO NOT eagerly delete the
+    # persisted ``eval_cache.pkl`` here.  Doing so before ``load_state`` +
+    # ``_validate_resume_semantics`` could destroy the cache on a resume
+    # that we are about to reject (e.g. wrong frontier_type), leaving the
+    # user with no way to fall back to the original config.  The first
+    # ``_save_state`` call below performs the delete once we have decided
+    # the run is actually proceeding under this config.
 
     # Acceptance criterion (GEPA §5.1).
     acceptance = (
@@ -1345,12 +1409,21 @@ def _run_evolution_impl(
     # the cache atomically alongside everything else (state.py:306-340); HELIX
     # routes the (candidate_id, example_id)-keyed companion pickle through
     # this helper so every save site stays consistent without rewriting them.
+    # One-shot guard for the disabled-cache cleanup: ``clear_eval_cache``
+    # is idempotent but on every save invocation we'd otherwise issue a
+    # fresh ``unlink()`` that always raises FileNotFoundError after the
+    # first successful delete.  A flag avoids that noise while still
+    # guaranteeing the stale on-disk pickle is cleared at least once per
+    # run.
+    _eval_cache_cleared = [False]
+
     def _save_state(s: EvolutionState) -> None:
         save_state(s, project_root)
         if minibatch_cache is not None:
             save_eval_cache(minibatch_cache._cache, project_root)
-        else:
+        elif not _eval_cache_cleared[0]:
             clear_eval_cache(project_root)
+            _eval_cache_cleared[0] = True
 
     def _sync_frontier_state() -> None:
         assert state is not None
@@ -1376,6 +1449,13 @@ def _run_evolution_impl(
         needs_seed = False
         _validate_resume_semantics(state, config)
         if not state.resume_semantics:
+            # Legacy state predating the resume_semantics guard: validation
+            # short-circuits, so surface that the guard is dormant for THIS
+            # resume but will be active on the next save and onward.
+            print_info(
+                "No persisted resume_semantics found on this state (legacy run); "
+                "the current config will be pinned for future resumes."
+            )
             state.resume_semantics = _resume_semantics(config)
         # Keep ``state.frontier_type`` pinned to whatever was stored;
         # it already matches the frontier that was built.  On a legacy
