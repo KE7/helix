@@ -597,7 +597,12 @@ def sandbox_logout(
 @click.option(
     "--effort",
     default=None,
-    help="Override backend effort / reasoning level when supported.",
+    help=(
+        "Override backend reasoning-effort level. Forwarded as --effort to "
+        "the 'claude' backend (low|medium|high) and as --variant to the "
+        "'opencode' backend; ignored by codex/cursor/gemini (a warning is "
+        "emitted when set on a backend that does not support it)."
+    ),
 )
 def evolve(
     config_path: str,
@@ -917,6 +922,12 @@ def log_cmd(project_dir: Path | None) -> None:
 )
 def resume(config_path: str, project_dir: Path | None) -> None:
     """Resume a previously started evolution run."""
+    # NOTE: ``resume`` deliberately does NOT expose ``--effort`` (or other
+    # agent-config overrides). Switching reasoning effort mid-run would
+    # mix candidates produced under different sampling regimes, breaking
+    # the comparability assumption that frontier acceptance and GEPA-parity
+    # accounting depend on. Effort is set once for the whole run via
+    # ``helix evolve --effort`` or the ``[agent]`` section of helix.toml.
     from helix.evolution import run_evolution
 
     project_root = project_dir if project_dir is not None else Path.cwd()
