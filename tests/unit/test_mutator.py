@@ -701,7 +701,12 @@ class TestInvokeClaudeCode:
         assert "input" not in mock_run.call_args[1]
         assert result["events"][0]["thread_id"] == "thr_123"
 
-    def test_codex_effort_config_value_is_toml_escaped(self, mocker):
+    def test_codex_effort_config_value_is_json_quoted(self, mocker):
+        # Codex's -c flag accepts key=value pairs where the value must be a
+        # valid TOML literal.  We use json.dumps() to produce a JSON string
+        # (e.g. "high\"quoted"), which is also valid TOML basic-string syntax
+        # for any input that does not contain TOML-only escapes — safe for all
+        # realistic effort values.
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"thread.started","thread_id":"thr_123"}\n',
