@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "helix-evo"
-version = "0.2.0"
+version = "0.2.1"
 description = "Hierarchical Evolution via LLM-Informed eXploration"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -51,6 +51,21 @@ helix = "helix.cli:cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/helix"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/helix",
+    "/pyproject.toml",
+    "/uv.lock",
+    "/README.md",
+    "/LICENSE",
+]
+exclude = [
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.DS_Store",
+    "**/.helix",
+]
 
 [dependency-groups]
 dev = [

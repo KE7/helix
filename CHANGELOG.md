@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-10
+
+> Note: 0.2.0 was published from a broken build and is superseded by this
+> release. Do not install 0.2.0; use 0.2.1 or later.
+
+### Removed
+- Orphan `helix.toml` template at the repository root.  The runtime
+  template that `helix init` writes lives inline in
+  `src/helix/cli.py::_HELIX_TOML_TEMPLATE`; the repo-root file was a
+  stale stub no docs or code referenced.
+
+### Packaging
+- Tightened the sdist via `[tool.hatch.build.targets.sdist]`.  The
+  source distribution now ships only `src/helix`, `pyproject.toml`,
+  `uv.lock`, `README.md`, and `LICENSE` (mirrors GEPA's lean PyPI
+  layout, minus `tests/`).  Wheel contents unchanged.
+
 ### Added
 - Multi-axis Pareto frontier (GEPA `FrontierType` parity,
   `src/gepa/core/state.py:22-23`).  New
