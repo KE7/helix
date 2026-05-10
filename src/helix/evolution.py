@@ -625,22 +625,58 @@ def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
 
 
 def _candidate_content_key(candidate: Candidate) -> str:
-    """Return a stable content key for cache reuse across equivalent candidates."""
+    """Return a stable content key for cache reuse across equivalent candidates.
+
+    Contract: the caller is responsible for ensuring the candidate's worktree
+    has its evaluation-relevant content committed (clean working tree, no
+    untracked files). The key is derived from ``HEAD^{tree}``, which is
+    content-addressable over the *committed* tracked tree only — it does not
+    reflect uncommitted modifications, the staged index, or untracked files.
+
+    Defensive behavior: if the worktree is detected to be dirty (modified
+    tracked files or untracked, non-ignored files present), we fall back to
+    ``candidate.id`` so that two candidates with identical HEAD trees but
+    differing dirty state cannot collide on the same cache key. Submodule
+    contents are summarized as gitlinks inside the parent tree, so changing
+    the submodule pointer changes the key but in-place edits inside an
+    uncommitted submodule do not — keep submodule state committed for
+    reliable reuse.
+    """
     try:
-        result = subprocess.run(
+        tree_proc = subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"],
             cwd=candidate.worktree_path,
             check=True,
             capture_output=True,
             text=True,
         )
-        sha = result.stdout.strip()
-        if sha:
-            return sha
-    except Exception:
+        sha = tree_proc.stdout.strip()
+        if not sha:
+            return candidate.id
+
+        # Reject the tree SHA if the worktree is dirty or has untracked
+        # (non-ignored) files; otherwise we'd risk a false cache hit.
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+            cwd=candidate.worktree_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if status_proc.stdout.strip():
+            logger.warning(
+                "Candidate %s worktree is not clean; falling back to id cache "
+                "key to avoid stale-content cache hits.",
+                candidate.id,
+            )
+            return candidate.id
+        return sha
+    except Exception as exc:
         logger.warning(
-            "Could not resolve git tree for candidate %s; falling back to id cache key.",
+            "Could not resolve git tree for candidate %s (%s); falling back "
+            "to id cache key.",
             candidate.id,
+            exc,
         )
     return candidate.id
 

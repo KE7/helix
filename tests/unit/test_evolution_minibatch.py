@@ -79,7 +79,7 @@ def _git(args: list[str], cwd: Path) -> str:
 
 
 def _init_repo(path: Path) -> None:
-    path.mkdir()
+    path.mkdir(exist_ok=True)
     _git(["init"], path)
     _git(["config", "user.name", "HELIX Test"], path)
     _git(["config", "user.email", "helix-test@noreply"], path)
@@ -774,6 +774,9 @@ class TestCachedEvaluateBatch:
         assert commit_a != commit_b
         assert tree_a == tree_b
 
+        # Pin the contract directly: equivalent trees ⇒ equal content keys.
+        assert _candidate_content_key(cand_a) == _candidate_content_key(cand_b)
+
         run_eval_mock = mocker.patch("helix.evolution.run_evaluator")
         mocker.patch("helix.evolution._write_helix_batch")
 
@@ -844,6 +847,34 @@ class TestCachedEvaluateBatch:
         assert num_actual == 2
         assert result.candidate_id == cand_b.id
         assert result.instance_scores == {"0": 0.5, "1": 0.5}
+
+    def test_content_key_falls_back_when_worktree_is_dirty(
+        self, tmp_path: Path
+    ) -> None:
+        """Dirty / untracked worktree must NOT key by tree SHA (avoid stale hits)."""
+        from helix.evolution import _candidate_content_key
+
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "prompt.md").write_text("v1\n")
+        _git(["add", "prompt.md"], repo)
+        _git(["commit", "-m", "initial content"], repo)
+
+        cand = self._make_cand("cand-dirty")
+        cand.worktree_path = str(repo)
+        clean_key = _candidate_content_key(cand)
+        tree_sha = _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert clean_key == tree_sha  # sanity: clean repo keys by tree SHA
+
+        # Modify a tracked file without committing → key must fall back to id.
+        (repo / "prompt.md").write_text("v1-uncommitted\n")
+        assert _candidate_content_key(cand) == cand.id
+
+        # Reset and try untracked file → still falls back to id.
+        _git(["checkout", "--", "prompt.md"], repo)
+        assert _candidate_content_key(cand) == tree_sha
+        (repo / "scratch.txt").write_text("untracked\n")
+        assert _candidate_content_key(cand) == cand.id
 
     def test_cache_miss_invokes_full_evaluator(self, mocker: Any) -> None:
         """Empty cache → evaluator is invoked with ALL requested ids."""
