@@ -882,14 +882,14 @@ def _inject_top_k_best_example_history(
     ``top_k_best_example_history``; it is rendered by the existing diagnostics
     prompt path without changing candidate/worktree semantics.
     """
-    if k <= 0 or not eval_result.instance_scores or not frontier._results:
+    if k <= 0 or not eval_result.instance_scores or not frontier.has_results():
         return eval_result
 
     example_ids = list(eval_result.instance_scores.keys())
     history_by_id: dict[str, list[dict[str, Any]]] = {}
     for eid in example_ids:
         rows: list[dict[str, Any]] = []
-        for cid, result in frontier._results.items():
+        for cid, result in frontier.iter_results():
             if eid in result.instance_scores:
                 rows.append(
                     {
@@ -904,13 +904,25 @@ def _inject_top_k_best_example_history(
     if not history_by_id:
         return eval_result
 
-    per_example = (
-        [dict(item) for item in eval_result.per_example_side_info]
-        if eval_result.per_example_side_info is not None
-        else [{} for _ in example_ids]
-    )
-    if len(per_example) != len(example_ids):
-        per_example = [{} for _ in example_ids]
+    if eval_result.per_example_side_info is None:
+        per_example: list[dict[str, Any]] = [{} for _ in example_ids]
+    else:
+        per_example = [dict(item) for item in eval_result.per_example_side_info]
+        if len(per_example) != len(example_ids):
+            # Length skew between ``instance_scores`` and ``per_example_side_info``
+            # almost certainly indicates an upstream bug (the two are positional
+            # over the same example id list).  Don't silently throw away the
+            # caller's diagnostics — warn loudly and rebuild empty so reflection
+            # still gets the top-K history rather than crashing.
+            logger.warning(
+                "per_example_side_info length (%d) does not match "
+                "instance_scores length (%d) for candidate %s; rebuilding "
+                "side_info from empty before injecting top_k history.",
+                len(per_example),
+                len(example_ids),
+                eval_result.candidate_id,
+            )
+            per_example = [{} for _ in example_ids]
 
     for idx, eid in enumerate(example_ids):
         history_rows = history_by_id.get(eid)
