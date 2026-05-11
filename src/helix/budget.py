@@ -39,6 +39,10 @@ class UsageDict(TypedDict, total=False):
 
     input_tokens: int
     output_tokens: int
+    cached_input_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+    reasoning_tokens: int
     cost_usd: float
 
 
@@ -125,9 +129,17 @@ def charge_llm_usage(
         return
     input_delta = int(usage.get("input_tokens", 0))
     output_delta = int(usage.get("output_tokens", 0))
+    cached_input_delta = int(usage.get("cached_input_tokens", 0))
+    cache_creation_delta = int(usage.get("cache_creation_input_tokens", 0))
+    cache_read_delta = int(usage.get("cache_read_input_tokens", 0))
+    reasoning_delta = int(usage.get("reasoning_tokens", 0))
     cost_delta = float(usage.get("cost_usd", 0.0))
     state.budget.input_tokens += input_delta
     state.budget.output_tokens += output_delta
+    state.budget.cached_input_tokens += cached_input_delta
+    state.budget.cache_creation_input_tokens += cache_creation_delta
+    state.budget.cache_read_input_tokens += cache_read_delta
+    state.budget.reasoning_tokens += reasoning_delta
     state.budget.cost_usd += cost_delta
     TRACE.emit(
         EventType.BUDGET_UPDATE,

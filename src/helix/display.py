@@ -27,6 +27,10 @@ class UsageStats:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    reasoning_tokens: int = 0
     num_turns: int = 0
     tool_event_count: int = 0
     tool_names: list[str] = field(default_factory=list)
@@ -36,6 +40,12 @@ class UsageStats:
         if isinstance(other, dict):
             self.input_tokens += int(other.get("input_tokens", 0))
             self.output_tokens += int(other.get("output_tokens", 0))
+            self.cached_input_tokens += int(other.get("cached_input_tokens", 0))
+            self.cache_creation_input_tokens += int(
+                other.get("cache_creation_input_tokens", 0)
+            )
+            self.cache_read_input_tokens += int(other.get("cache_read_input_tokens", 0))
+            self.reasoning_tokens += int(other.get("reasoning_tokens", 0))
             self.num_turns += int(other.get("num_turns", 0))
             self.tool_event_count += int(other.get("tool_event_count", 0))
             self.cost_usd += float(other.get("cost_usd", 0.0))
@@ -46,6 +56,10 @@ class UsageStats:
         else:
             self.input_tokens += other.input_tokens
             self.output_tokens += other.output_tokens
+            self.cached_input_tokens += other.cached_input_tokens
+            self.cache_creation_input_tokens += other.cache_creation_input_tokens
+            self.cache_read_input_tokens += other.cache_read_input_tokens
+            self.reasoning_tokens += other.reasoning_tokens
             self.num_turns += other.num_turns
             self.tool_event_count += other.tool_event_count
             self.cost_usd += other.cost_usd
@@ -136,9 +150,18 @@ def render_status_panel(
         [
             "[bold]Current Generation Usage:[/bold]",
             f"  Tokens: {current_usage.input_tokens:,} in / {current_usage.output_tokens:,} out",
-            f"  Turns : {current_usage.num_turns}",
         ]
     )
+    current_cache_tokens = (
+        current_usage.cached_input_tokens
+        + current_usage.cache_creation_input_tokens
+        + current_usage.cache_read_input_tokens
+    )
+    if current_cache_tokens:
+        lines.append(f"  Cache : {current_cache_tokens:,} input tokens")
+    if current_usage.reasoning_tokens:
+        lines.append(f"  Think : {current_usage.reasoning_tokens:,} tokens")
+    lines.append(f"  Turns : {current_usage.num_turns}")
 
     tools_str = f"{current_usage.tool_event_count}"
     if current_usage.tool_names:
@@ -157,9 +180,18 @@ def render_status_panel(
             "",
             "[bold]Cumulative Evolution Total:[/bold]",
             f"  Tokens: {cumulative_budget.input_tokens:,} in / {cumulative_budget.output_tokens:,} out",
-            f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]",
         ]
     )
+    cumulative_cache_tokens = (
+        cumulative_budget.cached_input_tokens
+        + cumulative_budget.cache_creation_input_tokens
+        + cumulative_budget.cache_read_input_tokens
+    )
+    if cumulative_cache_tokens:
+        lines.append(f"  Cache : {cumulative_cache_tokens:,} input tokens")
+    if cumulative_budget.reasoning_tokens:
+        lines.append(f"  Think : {cumulative_budget.reasoning_tokens:,} tokens")
+    lines.append(f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]")
 
     if config_evolution:
         cap = config_evolution.max_evaluations

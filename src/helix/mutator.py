@@ -994,6 +994,22 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
                     "cached",
                 ),
             ),
+            (
+                "cache_creation_input_tokens",
+                (
+                    "cache_creation_input_tokens",
+                    "cacheCreationInputTokens",
+                    "cacheCreation",
+                ),
+            ),
+            (
+                "cache_read_input_tokens",
+                (
+                    "cache_read_input_tokens",
+                    "cacheReadInputTokens",
+                    "cacheRead",
+                ),
+            ),
             ("reasoning_tokens", ("reasoning_tokens", "reasoningTokens", "thoughts")),
             (
                 "cost_usd",
