@@ -2054,7 +2054,7 @@ class TestResumeAttemptReconciliation:
                         "id": "g1-s1",
                         "parent": "g0-s0",
                         "parents": ["g0-s0"],
-                        "operation": "mutation",
+                        "operation": "mutate",
                         "generation": 1,
                         "files_changed": ["solver.py"],
                     },
@@ -2096,6 +2096,55 @@ class TestResumeAttemptReconciliation:
         remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
         assert remaining_ids == {"g0-s0", "g1-s1"}
 
+    def test_orphan_worktree_without_lineage_is_removed(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (worktrees_dir / "g5-s5").mkdir()
+        (evaluations_dir / "g1-s1.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g1-s1",
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutate",
+                        "generation": 1,
+                        "files_changed": ["solver.py"],
+                    }
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=4,
+            frontier=["g1-s1"],
+            instance_scores={"g1-s1": {"x": 0.2}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=4,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 4
+        assert state.mutation_counter == 4
+        remove_mock.assert_called_once()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g1-s1"}
+
     def test_historical_missing_worktree_entries_are_left_intact(
         self, tmp_path: Path, mocker: Any
     ) -> None:
@@ -2121,7 +2170,7 @@ class TestResumeAttemptReconciliation:
                         "id": "g2-s2",
                         "parent": "g0-s0",
                         "parents": ["g0-s0"],
-                        "operation": "mutation",
+                        "operation": "mutate",
                         "generation": 2,
                         "files_changed": ["solver.py"],
                     },

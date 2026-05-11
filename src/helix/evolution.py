@@ -449,9 +449,16 @@ def _reconcile_incomplete_attempts_on_resume(
     for candidate_id, entry in lineage.items():
         if candidate_id in completed_ids:
             continue
-        if entry.operation not in {"mutation", "merge"}:
+        if entry.operation not in {"mutate", "mutation", "merge"}:
             continue
         if (worktrees_dir / candidate_id).exists():
+            incomplete_ids.add(candidate_id)
+
+    for wt_path in worktrees_dir.glob("g*-s*"):
+        candidate_id = wt_path.name
+        if candidate_id in completed_ids or candidate_id in lineage:
+            continue
+        if wt_path.is_dir():
             incomplete_ids.add(candidate_id)
 
     if not incomplete_ids:
