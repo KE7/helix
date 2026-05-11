@@ -325,6 +325,65 @@ def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
     )
 
 
+def _save_attempt_result(
+    base_dir: Path,
+    result: EvalResult,
+    *,
+    status: str,
+    reason: str,
+    parent_id: str | None,
+    generation: int,
+    stage: str,
+    example_ids: list[str] | None = None,
+) -> None:
+    """Persist a non-frontier attempt result without polluting evaluations/.
+
+    ``evaluations/`` is the accepted/full-evaluation surface used for frontier
+    reporting.  Rejected mutations can still consume a generation and useful
+    evaluator work, so keep their gating/stage results under ``attempts/`` for
+    resume/debugging instead of leaving lineage entries with no result artifact.
+    """
+    attempts_dir = base_dir / "attempts"
+    attempts_dir.mkdir(parents=True, exist_ok=True)
+    payload = result.to_dict()
+    payload["attempt"] = {
+        "status": status,
+        "reason": reason,
+        "parent_id": parent_id,
+        "generation": generation,
+        "stage": stage,
+        "example_ids": example_ids,
+    }
+    (attempts_dir / f"{result.candidate_id}.json").write_text(
+        json.dumps(payload, indent=2)
+    )
+
+
+def _save_skip_record(
+    base_dir: Path,
+    *,
+    generation: int,
+    parent_id: str,
+    reason: str,
+    eval_result: EvalResult,
+) -> None:
+    """Persist a skip-only iteration record.
+
+    Skip records are intentionally separate from candidate attempts: no child
+    program exists, but the run should still explain why a generation has no
+    candidate result.
+    """
+    skips_dir = base_dir / "skips"
+    skips_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "generation": generation,
+        "parent_id": parent_id,
+        "reason": reason,
+        "parent_eval": eval_result.to_dict(),
+    }
+    (skips_dir / f"g{generation}.json").write_text(json.dumps(payload, indent=2))
+
+
 def _load_evaluation(base_dir: Path, candidate_id: str) -> EvalResult | None:
     """Load a saved EvalResult, or None if the file is absent."""
     path = base_dir / "evaluations" / f"{candidate_id}.json"
@@ -1780,11 +1839,14 @@ def _run_evolution_impl(
         mutations_attempted = 0
         mutations_accepted = 0
 
-        for gen in range(start_gen, config.evolution.max_generations + 1):
+        gen = start_gen
+        while gen <= config.evolution.max_generations:
             live.gen = gen
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
 
+            _iteration_start_generation = state.generation
+            _iteration_start_mutation_counter = state.mutation_counter
             budget_api.set_generation(state, gen)
             # GEPA parity (engine.py:649): bump ``state.i`` unconditionally at
             # the top of every iteration so the proposal counter — used by the
@@ -2021,6 +2083,7 @@ def _run_evolution_impl(
                                 if merged.id in candidates:
                                     del candidates[merged.id]
                                 _save_state(state)
+                                gen += 1
                                 continue
                             state.merge_description_triplets.append(_desc_triplet)
                             # GEPA parity (M5): merge acceptance evaluates merged on a
@@ -2206,6 +2269,7 @@ def _run_evolution_impl(
                 # failure, tamper reject) we drop into reflective mutation below.
                 if merge_attempted:
                     _save_state(state)
+                    gen += 1
                     continue
 
             elif config.evolution.merge_enabled:
@@ -2381,6 +2445,8 @@ def _run_evolution_impl(
             ] = []
             proposal_subsamples: list[list[str] | None] = []
             proposal_parent_mb_results: list[EvalResult | None] = []
+            semantic_skip_count = 0
+            retryable_semantic_skip_count = 0
 
             for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
                 zip(presample_contexts, parent_eval_results)
@@ -2460,11 +2526,21 @@ def _run_evolution_impl(
                     s >= config.evolution.perfect_score_threshold
                     for s in eval_for_mutate.instance_scores.values()
                 ):
+                    _save_skip_record(
+                        base_dir,
+                        generation=gen,
+                        parent_id=parent.id,
+                        reason="perfect_subsample",
+                        eval_result=eval_for_mutate,
+                    )
                     print_info(
                         f"Iteration {gen}: all subsample scores perfect for "
                         f"parent {parent.id}; skipping proposal "
                         f"(GEPA reflective_mutation.py:308-327)."
                     )
+                    semantic_skip_count += 1
+                    if subsample_ids is not None:
+                        retryable_semantic_skip_count += 1
                     continue
 
                 proposal_contexts.append(
@@ -2477,6 +2553,22 @@ def _run_evolution_impl(
                 print_warning("Budget exhausted mid-generation -- stopping.")
                 _save_state(state)
                 break
+            if (
+                not proposal_contexts
+                and semantic_skip_count
+                and retryable_semantic_skip_count == semantic_skip_count
+            ):
+                # A perfect-subsample skip is not a candidate attempt.  Do not
+                # consume the visible generation/candidate slot; keep metric
+                # budget charges and the proposal counter from the parent eval,
+                # but roll back visible progress counters so resume/in-process
+                # continuation tries this generation again with a fresh
+                # parent/minibatch.
+                state.generation = _iteration_start_generation
+                state.mutation_counter = _iteration_start_mutation_counter
+                _save_state(state)
+                TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
+                continue
 
             # ---- Step 2: Execute mutations (parallel if N > 1) ----
             set_phase(HelixPhase.MUTATION)
@@ -2716,6 +2808,16 @@ def _run_evolution_impl(
                         subsample_scores_after=_after,
                     )
                     if not acceptance.should_accept(_proposal):
+                        _save_attempt_result(
+                            base_dir,
+                            gating_result,
+                            status="rejected",
+                            reason="minibatch_gate",
+                            parent_id=_parent.id,
+                            generation=gen,
+                            stage="train_minibatch",
+                            example_ids=list(_subsample_ids),
+                        )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION,
                             candidate_id=child.id,
@@ -2794,6 +2896,16 @@ def _run_evolution_impl(
                     if not acceptance.should_accept(_legacy_proposal):
                         parent_sum = sum(_legacy_before)
                         child_sum = sum(_legacy_after)
+                        _save_attempt_result(
+                            base_dir,
+                            gating_result,
+                            status="rejected",
+                            reason="train_gate",
+                            parent_id=_parent.id,
+                            generation=gen,
+                            stage="train",
+                            example_ids=None,
+                        )
                         print_warning(
                             f"Acceptance: {child.id} does not improve "
                             f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
@@ -2854,6 +2966,16 @@ def _run_evolution_impl(
                         subsample_scores_after=_stage_after,
                     )
                     if not acceptance.should_accept(_proposal):
+                        _save_attempt_result(
+                            base_dir,
+                            stage_result,
+                            status="rejected",
+                            reason="val_stage",
+                            parent_id=_parent.id,
+                            generation=gen,
+                            stage="val_stage",
+                            example_ids=list(stage_val_example_ids),
+                        )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION,
                             candidate_id=child.id,
@@ -2977,6 +3099,7 @@ def _run_evolution_impl(
 
             _save_state(state)
             TRACE.emit(EventType.ITER_END, decision=str(gen))
+            gen += 1
 
     # ------------------------------------------------------------------
     # Return best

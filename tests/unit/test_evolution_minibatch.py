@@ -382,6 +382,76 @@ class TestMinibatchGateIntegration:
         )
         # Remove worktree was called (rejection cleanup).
         assert all_mocks["remove_worktree"].called
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        assert attempt_path.exists()
+        attempt = json.loads(attempt_path.read_text())
+        child_train_ids = [
+            c[2] for c in calls if c[0] == "g1-s1" and c[1] == "train"
+        ][0]
+        assert attempt["candidate_id"] == "g1-s1"
+        assert attempt["attempt"] == {
+            "status": "rejected",
+            "reason": "minibatch_gate",
+            "parent_id": "g0-s0",
+            "generation": 1,
+            "stage": "train_minibatch",
+            "example_ids": child_train_ids,
+        }
+        assert set(attempt["instance_scores"]) == set(child_train_ids)
+
+    def test_perfect_minibatch_skip_retries_same_generation_slot(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Perfect minibatch skips do not burn a visible generation/candidate id."""
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        child = _make_candidate("g1-s1")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        parent_train_calls = 0
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            nonlocal parent_train_calls
+            if split == "train" and instance_ids is not None:
+                if candidate.id == seed.id:
+                    parent_train_calls += 1
+                    if parent_train_calls == 1:
+                        return _make_result(
+                            candidate.id, {i: 1.0 for i in instance_ids}
+                        )
+                    return _make_result(candidate.id, {i: 0.4 for i in instance_ids})
+                return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.9})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            val_size=2,
+            max_generations=1,
+            max_evaluations=100,
+        )
+        config.evolution.perfect_score_threshold = 1.0
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert parent_train_calls == 2
+        all_mocks["mutate"].assert_called_once()
+        assert all_mocks["mutate"].call_args.kwargs["new_id"] == "g1-s1"
+        skip_path = tmp_path / ".helix" / "skips" / "g1.json"
+        assert skip_path.exists()
+        skip = json.loads(skip_path.read_text())
+        assert skip["generation"] == 1
+        assert skip["reason"] == "perfect_subsample"
 
     def test_accepted_proposal_triggers_full_val_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]
