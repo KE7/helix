@@ -771,6 +771,155 @@ class TestInvokeClaudeCode:
         assert payload["usage"]["session_id"] == "sess_123"
         assert payload["usage"]["tool_event_count"] == 1
 
+    @pytest.mark.parametrize(
+        ("backend", "stdout", "expected_usage"),
+        [
+            pytest.param(
+                "claude",
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": "claude-session",
+                        "usage": {
+                            "input_tokens": 11,
+                            "output_tokens": 7,
+                            "cache_creation_input_tokens": 13,
+                            "cache_read_input_tokens": 17,
+                            "cached_input_tokens": 19,
+                        },
+                        "reasoning_tokens": 5,
+                        "total_cost_usd": 0.31,
+                    }
+                ),
+                {
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "cache_creation_input_tokens": 13,
+                    "cache_read_input_tokens": 17,
+                    "cached_input_tokens": 19,
+                    "reasoning_tokens": 5,
+                    "cost_usd": 0.31,
+                    "session_id": "claude-session",
+                },
+                id="claude",
+            ),
+            pytest.param(
+                "codex",
+                "\n".join(
+                    [
+                        '{"type":"session.started","session_id":"codex-session"}',
+                        (
+                            '{"type":"turn","usage":{"prompt_tokens":12,'
+                            '"completion_tokens":8,"cached_input_tokens":21,'
+                            '"reasoning_tokens":6,"total_cost_usd":0.32}}'
+                        ),
+                    ]
+                ),
+                {
+                    "input_tokens": 12,
+                    "output_tokens": 8,
+                    "cached_input_tokens": 21,
+                    "reasoning_tokens": 6,
+                    "cost_usd": 0.32,
+                    "session_id": "codex-session",
+                },
+                id="codex",
+            ),
+            pytest.param(
+                "cursor",
+                "\n".join(
+                    [
+                        '{"type":"system","sessionId":"cursor-session"}',
+                        (
+                            '{"type":"assistant","usage":{"inputTokens":13,'
+                            '"outputTokens":9,"cachedTokens":22,'
+                            '"reasoningTokens":7,"costUsd":0.33}}'
+                        ),
+                    ]
+                ),
+                {
+                    "input_tokens": 13,
+                    "output_tokens": 9,
+                    "cached_input_tokens": 22,
+                    "reasoning_tokens": 7,
+                    "cost_usd": 0.33,
+                    "session_id": "cursor-session",
+                },
+                id="cursor",
+            ),
+            pytest.param(
+                "gemini",
+                "\n".join(
+                    [
+                        "MCP advisory preamble tolerated by the Gemini parser.",
+                        '{"type":"init","session_id":"gemini-session"}',
+                        (
+                            '{"type":"result","usageMetadata":{"prompt_tokens":14,'
+                            '"completion_tokens":10,"cachedTokens":23},'
+                            '"thoughts":8,"cost":0.34}'
+                        ),
+                    ]
+                ),
+                {
+                    "input_tokens": 14,
+                    "output_tokens": 10,
+                    "cached_input_tokens": 23,
+                    "reasoning_tokens": 8,
+                    "cost_usd": 0.34,
+                    "session_id": "gemini-session",
+                },
+                id="gemini",
+            ),
+            pytest.param(
+                "opencode",
+                "\n".join(
+                    [
+                        '{"type":"step_start","sessionID":"opencode-session"}',
+                        (
+                            '{"type":"step_finish","part":{"tokens":{"input":15,'
+                            '"output":11,"cached":24,"thoughts":9},"cost":0.35}}'
+                        ),
+                    ]
+                ),
+                {
+                    "input_tokens": 15,
+                    "output_tokens": 11,
+                    "cached_input_tokens": 24,
+                    "reasoning_tokens": 9,
+                    "cost_usd": 0.35,
+                    "session_id": "opencode-session",
+                },
+                id="opencode",
+            ),
+        ],
+    )
+    def test_backend_result_artifact_contains_extended_usage_for_each_backend(
+        self,
+        tmp_path: Path,
+        mocker,
+        backend: str,
+        stdout: str,
+        expected_usage: dict[str, float | int | str],
+    ):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout=stdout, stderr="", returncode=0)
+
+        _parsed, returned_usage = invoke_claude_code(
+            str(tmp_path),
+            "prompt",
+            AgentConfig(backend=backend),
+        )
+
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["backend"] == backend
+        assert payload["returncode"] == 0
+        assert payload["usage"] == returned_usage
+        for key, value in expected_usage.items():
+            if isinstance(value, float):
+                assert payload["usage"][key] == pytest.approx(value)
+            else:
+                assert payload["usage"][key] == value
+
     def test_claude_backend_artifacts_copy_local_transcript(
         self, tmp_path: Path, mocker, monkeypatch
     ):
