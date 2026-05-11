@@ -643,7 +643,7 @@ class TestInvokeClaudeCode:
     def test_cli_args_include_required_flags(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-        config = AgentConfig(allowed_tools=["Read", "Edit"])
+        config = AgentConfig()
         invoke_claude_code("/tmp/wt", "the prompt", config)
 
         call_args = mock_run.call_args
@@ -654,8 +654,8 @@ class TestInvokeClaudeCode:
         assert "--print" in args_list
         assert "--output-format" in args_list
         assert "json" in args_list
-        assert "--allowedTools" in args_list
-        assert "Read,Edit" in args_list
+        assert "--allowedTools" not in args_list
+        assert "--allowed-tools" not in args_list
         assert "--model" not in args_list
         assert "--max-turns" not in args_list
         assert "the prompt" not in args_list

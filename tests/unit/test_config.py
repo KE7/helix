@@ -77,7 +77,6 @@ class TestLoadConfig:
 
             [agent]
             model = "claude-opus-4-5-20250514"
-            allowed_tools = ["Read", "Write"]
             background = "You are a coding expert."
 
             [worktree]
@@ -100,7 +99,6 @@ class TestLoadConfig:
         assert cfg.evolution.merge_enabled is False
         assert cfg.evolution.max_merge_invocations == 2
         assert cfg.agent.model == "claude-opus-4-5-20250514"
-        assert cfg.agent.allowed_tools == ["Read", "Write"]
         assert cfg.agent.background == "You are a coding expert."
 
         assert cfg.worktree.base_dir == "/tmp/worktrees"
@@ -147,7 +145,6 @@ class TestLoadConfig:
         # AgentConfig defaults
         assert cfg.agent.backend == "claude"
         assert cfg.agent.model is None
-        assert "Read" in cfg.agent.allowed_tools
         assert cfg.agent.background is None
 
         # WorktreeConfig defaults
@@ -241,12 +238,6 @@ class TestDirectModelConstruction:
             "changing this default, update this test AND the comment in "
             "config.py that cites the GEPA line."
         )
-
-    def test_claude_config_default_tools(self):
-        cfg = AgentConfig()
-        assert "Read" in cfg.allowed_tools
-        assert "Edit" in cfg.allowed_tools
-        assert "Bash" in cfg.allowed_tools
 
     def test_worktree_config_defaults(self):
         cfg = WorktreeConfig()

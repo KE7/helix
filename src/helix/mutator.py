@@ -674,15 +674,12 @@ def _build_backend_args(
 ) -> list[str]:
     backend = config.backend
     if backend == "claude":
-        tools_str = ",".join(config.allowed_tools)
         args = [
             "claude",
             "--dangerously-skip-permissions",
             "--print",
             "--output-format",
             "json",
-            "--allowedTools",
-            tools_str,
         ]
         if config.model:
             args.extend(["--model", config.model])
