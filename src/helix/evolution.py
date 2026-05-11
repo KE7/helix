@@ -401,6 +401,109 @@ def _gen_from_id(candidate_id: str) -> int:
         return 0
 
 
+def _proposal_counter_from_id(candidate_id: str) -> int:
+    """Parse the proposal counter from a candidate id like 'g3-s4'."""
+    try:
+        return int(candidate_id.split("-")[1].lstrip("s"))
+    except (IndexError, ValueError):
+        return 0
+
+
+def _remove_lineage_records(lineage_path: Path, candidate_ids: set[str]) -> None:
+    """Remove candidate ids from the raw lineage JSON array."""
+    if not lineage_path.exists() or not candidate_ids:
+        return
+    records = json.loads(lineage_path.read_text())
+    kept = [record for record in records if record.get("id") not in candidate_ids]
+    tmp_path = lineage_path.with_suffix(f"{lineage_path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(kept, indent=2))
+    tmp_path.replace(lineage_path)
+
+
+def _reconcile_incomplete_attempts_on_resume(
+    *,
+    state: EvolutionState,
+    base_dir: Path,
+    worktrees_dir: Path,
+    lineage_path: Path,
+) -> bool:
+    """Discard interrupted live attempts so resume retries their visible slot.
+
+    A completed proposal has either an evaluation artifact, an attempt artifact,
+    or frontier membership.  If a lineage entry still has a worktree but none of
+    those completion markers, HELIX likely stopped between candidate creation
+    and final result persistence.  Remove only those live incomplete worktrees;
+    historical lineage-only entries without worktrees are left untouched because
+    they may come from older completed runs that predate attempt artifacts.
+    """
+    if not lineage_path.exists():
+        return False
+
+    lineage = load_lineage(lineage_path)
+    completed_ids = set(state.frontier)
+    for artifact_dir in (base_dir / "evaluations", base_dir / "attempts"):
+        if artifact_dir.exists():
+            completed_ids.update(path.stem for path in artifact_dir.glob("*.json"))
+
+    incomplete_ids: set[str] = set()
+    for candidate_id, entry in lineage.items():
+        if candidate_id in completed_ids:
+            continue
+        if entry.operation not in {"mutation", "merge"}:
+            continue
+        if (worktrees_dir / candidate_id).exists():
+            incomplete_ids.add(candidate_id)
+
+    if not incomplete_ids:
+        return False
+
+    first_generation = min(_gen_from_id(candidate_id) for candidate_id in incomplete_ids)
+    first_counter = min(_proposal_counter_from_id(candidate_id) for candidate_id in incomplete_ids)
+
+    for candidate_id in sorted(incomplete_ids):
+        wt_path = worktrees_dir / candidate_id
+        try:
+            remove_worktree(
+                Candidate(
+                    id=candidate_id,
+                    worktree_path=str(wt_path),
+                    branch_name=f"helix/{candidate_id}",
+                    generation=_gen_from_id(candidate_id),
+                    parent_id=None,
+                    parent_ids=[],
+                    operation="interrupted",
+                )
+            )
+        except Exception as exc:
+            print_warning(
+                f"Could not remove incomplete attempt worktree {candidate_id}: {exc}"
+            )
+
+    _remove_lineage_records(lineage_path, incomplete_ids)
+    for candidate_id in incomplete_ids:
+        state.instance_scores.pop(candidate_id, None)
+    state.frontier = [cid for cid in state.frontier if cid not in incomplete_ids]
+    state.active_frontier = {
+        objective: [cid for cid in ids if cid not in incomplete_ids]
+        for objective, ids in state.active_frontier.items()
+    }
+
+    completed_counters = [
+        _proposal_counter_from_id(candidate_id)
+        for candidate_id in completed_ids
+        if _proposal_counter_from_id(candidate_id) > 0
+    ]
+    max_completed_counter = max(completed_counters, default=0)
+    state.mutation_counter = max(max_completed_counter, first_counter - 1)
+    budget_api.set_generation(state, max(0, first_generation - 1))
+    print_warning(
+        "Removed incomplete attempt(s) from prior interruption: "
+        f"{', '.join(sorted(incomplete_ids))}. The next resume will retry "
+        f"generation {first_generation}."
+    )
+    return True
+
+
 _NO_SCRIPT_COMMANDS = {"make", "pytest"}
 _INTERPRETERS = {"python", "python3", "uv", "poetry", "node", "bash", "sh"}
 _SKIP_TOKENS = {"run"}
@@ -1657,6 +1760,13 @@ def _run_evolution_impl(
                 "Config hash differs from the saved state; resuming with the current "
                 "config while keeping the existing frontier and history."
             )
+        if _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        ):
+            _save_state(state)
         # Reconstruct in-memory frontier from persisted evaluations
         for cid in state.frontier:
             result = _load_evaluation(base_dir, cid)

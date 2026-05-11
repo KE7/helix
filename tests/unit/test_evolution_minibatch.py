@@ -27,9 +27,11 @@ from helix.evolution import (
     HelixDataLoader,
     _inject_top_k_best_example_history,
     _make_data_loader,
+    _reconcile_incomplete_attempts_on_resume,
     run_evolution,
 )
 from helix.population import Candidate, EvalResult, ParetoFrontier
+from helix.state import BudgetState, EvolutionState
 
 
 # ---------------------------------------------------------------------------
@@ -2020,3 +2022,132 @@ class TestWholeCandidateBudget:
         assert budget_snapshots[0] == 1, (
             f"empty instance_scores must still charge 1, got {budget_snapshots[0]}"
         )
+
+
+class TestResumeAttemptReconciliation:
+    """Resume cleanup for attempts interrupted before result persistence."""
+
+    def test_live_incomplete_attempt_retries_same_visible_slot(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (worktrees_dir / "g4-s4").mkdir()
+        (evaluations_dir / "g0-s0.json").write_text("{}")
+        (evaluations_dir / "g1-s1.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g0-s0",
+                        "parent": None,
+                        "parents": [],
+                        "operation": "seed",
+                        "generation": 0,
+                        "files_changed": [],
+                    },
+                    {
+                        "id": "g1-s1",
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutation",
+                        "generation": 1,
+                        "files_changed": ["solver.py"],
+                    },
+                    {
+                        "id": "g4-s4",
+                        "parent": "g1-s1",
+                        "parents": ["g1-s1"],
+                        "operation": "mutation",
+                        "generation": 4,
+                        "files_changed": ["solver.py"],
+                    },
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=4,
+            frontier=["g0-s0", "g1-s1"],
+            instance_scores={"g0-s0": {"x": 0.1}, "g1-s1": {"x": 0.2}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=4,
+            active_frontier={"x": ["g1-s1"]},
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 3
+        assert state.mutation_counter == 3
+        assert state.frontier == ["g0-s0", "g1-s1"]
+        assert state.active_frontier == {"x": ["g1-s1"]}
+        remove_mock.assert_called_once()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g0-s0", "g1-s1"}
+
+    def test_historical_missing_worktree_entries_are_left_intact(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (evaluations_dir / "g0-s0.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g0-s0",
+                        "parent": None,
+                        "parents": [],
+                        "operation": "seed",
+                        "generation": 0,
+                        "files_changed": [],
+                    },
+                    {
+                        "id": "g2-s2",
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutation",
+                        "generation": 2,
+                        "files_changed": ["solver.py"],
+                    },
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=2,
+            frontier=["g0-s0"],
+            instance_scores={"g0-s0": {"x": 0.1}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=2,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is False
+        assert state.generation == 2
+        assert state.mutation_counter == 2
+        remove_mock.assert_not_called()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g0-s0", "g2-s2"}
