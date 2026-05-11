@@ -465,9 +465,6 @@ class AgentConfig(BaseModel):
     model: str | None = None
     effort: str | None = None
     max_turns: int | None = None
-    allowed_tools: list[str] = Field(
-        default_factory=lambda: ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
-    )
     background: str | None = None
 
 
