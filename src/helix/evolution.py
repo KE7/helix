@@ -2564,7 +2564,7 @@ def _run_evolution_impl(
                 # but roll back visible progress counters so resume/in-process
                 # continuation tries this generation again with a fresh
                 # parent/minibatch.
-                state.generation = _iteration_start_generation
+                budget_api.set_generation(state, _iteration_start_generation)
                 state.mutation_counter = _iteration_start_mutation_counter
                 _save_state(state)
                 TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
