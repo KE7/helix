@@ -451,9 +451,194 @@ class TestMinibatchGateIntegration:
         assert all_mocks["mutate"].call_args.kwargs["new_id"] == "g1-s1"
         skip_path = tmp_path / ".helix" / "skips" / "g1.json"
         assert skip_path.exists()
-        skip = json.loads(skip_path.read_text())
-        assert skip["generation"] == 1
-        assert skip["reason"] == "perfect_subsample"
+        skip_records = json.loads(skip_path.read_text())
+        # Since NB-1 fix, skip records are always a list (one entry per proposal).
+        assert isinstance(skip_records, list)
+        assert len(skip_records) == 1
+        assert skip_records[0]["generation"] == 1
+        assert skip_records[0]["reason"] == "perfect_subsample"
+
+    # ------------------------------------------------------------------
+    # Test A: NB-1 regression — all proposals perfect, n_proposals=3
+    # ------------------------------------------------------------------
+
+    def test_multiple_perfect_skips_all_recorded_in_single_file(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """n_proposals=3, all parents perfect → skips/g1.json is a list of 3 records.
+
+        Regression for NB-1: before the fix _save_skip_record was called once per
+        proposal, each overwriting the previous file so only the last record survived.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        # Perfect scores for every parent minibatch eval so all 3 proposals skip.
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 1.0})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=3,
+        )
+        config.evolution.perfect_score_threshold = 1.0
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        skip_path = tmp_path / ".helix" / "skips" / "g1.json"
+        assert skip_path.exists(), "skips/g1.json should be written"
+        records = json.loads(skip_path.read_text())
+        assert isinstance(records, list), "skip file must be a JSON list"
+        assert len(records) == 3, (
+            f"Expected 3 skip records (one per proposal), got {len(records)}"
+        )
+        for rec in records:
+            assert rec["generation"] == 1
+            assert rec["reason"] == "perfect_subsample"
+            assert "parent_id" in rec
+            assert "parent_eval" in rec
+
+    # ------------------------------------------------------------------
+    # Test B: train_gate rejection artifact
+    # ------------------------------------------------------------------
+
+    def test_train_gate_rejection_artifact(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Child that fails train_gate (no-minibatch mode) writes attempts/{cid}.json.
+
+        Mirrors test_rejected_minibatch_attempt_artifact but for the legacy
+        single-task train-gating path (train_path=None → subsample_ids is None).
+        """
+        # No train_path → single-task / no-minibatch mode; child goes through
+        # the full-train acceptance gate instead of the minibatch gate.
+        seed = _make_candidate("g0-s0")
+        child = _make_candidate("g1-s1")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            # In no-minibatch mode instance_ids is always None.
+            if candidate.id == seed.id:
+                return _make_result(candidate.id, {"t": 0.9})
+            # Child scores worse → train_gate rejects it.
+            return _make_result(candidate.id, {"t": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = HelixConfig(
+            objective="train gate test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),  # no train_path → no minibatch gate
+            evolution=EvolutionConfig(
+                max_generations=1,
+                max_evaluations=100,
+                perfect_score_threshold=None,
+                frontier_type="instance",
+            ),
+            worktree=WorktreeConfig(),
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        assert attempt_path.exists(), "attempts/g1-s1.json should be written on train_gate reject"
+        attempt = json.loads(attempt_path.read_text())
+        assert attempt["candidate_id"] == "g1-s1"
+        assert attempt["attempt"]["status"] == "rejected"
+        assert attempt["attempt"]["reason"] == "train_gate"
+        assert attempt["attempt"]["stage"] == "train"
+        assert attempt["attempt"]["parent_id"] == "g0-s0"
+        assert attempt["attempt"]["generation"] == 1
+        assert attempt["attempt"]["example_ids"] is None
+        # The worktree should have been removed on rejection.
+        assert all_mocks["remove_worktree"].called
+
+    # ------------------------------------------------------------------
+    # Test C: val_stage rejection artifact
+    # ------------------------------------------------------------------
+
+    def test_val_stage_rejection_artifact(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Child that passes minibatch but fails val_stage writes attempts/{cid}.json.
+
+        Mirrors test_rejected_minibatch_attempt_artifact but for the staged-val
+        gate (val_stage_size > 0) rejection path.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                if split == "train":
+                    # Parent scores low on minibatch; child scores high → passes gate.
+                    if candidate.id == seed.id:
+                        return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
+                    return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+                # val evals
+                if split == "val":
+                    if candidate.id == seed.id:
+                        # Seed full val — provides parent frontier result with val scores.
+                        return _make_result(
+                            candidate.id, {i: 0.8 for i in instance_ids}
+                        )
+                    # Child on val stage: scores worse than parent → val_stage rejects.
+                    return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            val_size=4,
+            val_stage_size=2,
+            max_generations=1,
+            max_evaluations=100,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        assert attempt_path.exists(), "attempts/g1-s1.json should be written on val_stage reject"
+        attempt = json.loads(attempt_path.read_text())
+        assert attempt["candidate_id"] == "g1-s1"
+        assert attempt["attempt"]["status"] == "rejected"
+        assert attempt["attempt"]["reason"] == "val_stage"
+        assert attempt["attempt"]["stage"] == "val_stage"
+        assert attempt["attempt"]["parent_id"] == "g0-s0"
+        assert attempt["attempt"]["generation"] == 1
+        # example_ids should be the val stage ids (first val_stage_size=2 val ids).
+        assert attempt["attempt"]["example_ids"] is not None
+        assert len(attempt["attempt"]["example_ids"]) == 2
+        # Verify worktree cleaned up.
+        assert all_mocks["remove_worktree"].called
 
     def test_accepted_proposal_triggers_full_val_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]

@@ -10,6 +10,7 @@ import random as _random
 import shutil
 import shlex
 import subprocess
+import tempfile
 import threading
 import traceback
 from dataclasses import replace
@@ -308,6 +309,29 @@ def init_base_dir(base_dir: Path, config: HelixConfig) -> None:
         config_path.write_text("".join(lines))
 
 
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Write *data* as JSON to *path* atomically using a sibling temp file.
+
+    Uses ``tempfile.mkstemp`` + ``Path.replace()`` (atomic on POSIX) to avoid
+    partial-write corruption when a concurrent reader or a crash mid-write
+    could otherwise observe a truncated file.  The temp file is created in the
+    same directory as *path* so that ``replace()`` is an intra-filesystem
+    rename rather than a cross-device copy.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        Path(tmp).replace(path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
     """Persist an EvalResult to evaluations/<candidate_id>.json.
 
@@ -319,10 +343,7 @@ def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
     pre-multi-axis shape.
     """
     eval_dir = base_dir / "evaluations"
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    (eval_dir / f"{result.candidate_id}.json").write_text(
-        json.dumps(result.to_dict(), indent=2)
-    )
+    _atomic_write_json(eval_dir / f"{result.candidate_id}.json", result.to_dict())
 
 
 def _save_attempt_result(
@@ -344,7 +365,6 @@ def _save_attempt_result(
     resume/debugging instead of leaving lineage entries with no result artifact.
     """
     attempts_dir = base_dir / "attempts"
-    attempts_dir.mkdir(parents=True, exist_ok=True)
     payload = result.to_dict()
     payload["attempt"] = {
         "status": status,
@@ -354,34 +374,26 @@ def _save_attempt_result(
         "stage": stage,
         "example_ids": example_ids,
     }
-    (attempts_dir / f"{result.candidate_id}.json").write_text(
-        json.dumps(payload, indent=2)
-    )
+    _atomic_write_json(attempts_dir / f"{result.candidate_id}.json", payload)
 
 
 def _save_skip_record(
     base_dir: Path,
     *,
     generation: int,
-    parent_id: str,
-    reason: str,
-    eval_result: EvalResult,
+    records: list[dict],
 ) -> None:
-    """Persist a skip-only iteration record.
+    """Persist all per-proposal skip records for a generation as a JSON list.
 
+    All parents that triggered the perfect-subsample gate within the same
+    generation are written as a single list so that ``n_proposals > 1`` with
+    multiple perfect parents does not silently overwrite earlier records.
     Skip records are intentionally separate from candidate attempts: no child
     program exists, but the run should still explain why a generation has no
     candidate result.
     """
     skips_dir = base_dir / "skips"
-    skips_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "generation": generation,
-        "parent_id": parent_id,
-        "reason": reason,
-        "parent_eval": eval_result.to_dict(),
-    }
-    (skips_dir / f"g{generation}.json").write_text(json.dumps(payload, indent=2))
+    _atomic_write_json(skips_dir / f"g{generation}.json", records)
 
 
 def _load_evaluation(base_dir: Path, candidate_id: str) -> EvalResult | None:
@@ -402,7 +414,14 @@ def _gen_from_id(candidate_id: str) -> int:
 
 
 def _proposal_counter_from_id(candidate_id: str) -> int:
-    """Parse the proposal counter from a candidate id like 'g3-s4'."""
+    """Parse the proposal counter from a candidate id like 'g3-s4'.
+
+    Returns 0 on parse failure (e.g., legacy or seed-only IDs that do not
+    match the ``gN-sN`` format).  Note that counter=0 is ambiguous with the
+    first valid proposal slot ``g0-s0``; callers that filter by
+    ``counter > 0`` intentionally exclude both parse failures and the zeroth
+    slot for that reason.
+    """
     try:
         return int(candidate_id.split("-")[1].lstrip("s"))
     except (IndexError, ValueError):
@@ -1962,6 +1981,8 @@ def _run_evolution_impl(
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
 
+            # Snapshot before set_generation so rollback restores the
+            # pre-iteration value (ordering matters: capture first, mutate second).
             _iteration_start_generation = state.generation
             _iteration_start_mutation_counter = state.mutation_counter
             budget_api.set_generation(state, gen)
@@ -2564,6 +2585,10 @@ def _run_evolution_impl(
             proposal_parent_mb_results: list[EvalResult | None] = []
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
+            # Accumulate per-proposal skip records; written as a single JSON list
+            # after the loop so that n_proposals > 1 with multiple perfect parents
+            # does not silently overwrite earlier records (review NB-1).
+            _gen_skip_records: list[dict] = []
 
             for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
                 zip(presample_contexts, parent_eval_results)
@@ -2643,13 +2668,12 @@ def _run_evolution_impl(
                     s >= config.evolution.perfect_score_threshold
                     for s in eval_for_mutate.instance_scores.values()
                 ):
-                    _save_skip_record(
-                        base_dir,
-                        generation=gen,
-                        parent_id=parent.id,
-                        reason="perfect_subsample",
-                        eval_result=eval_for_mutate,
-                    )
+                    _gen_skip_records.append({
+                        "generation": gen,
+                        "parent_id": parent.id,
+                        "reason": "perfect_subsample",
+                        "parent_eval": eval_for_mutate.to_dict(),
+                    })
                     print_info(
                         f"Iteration {gen}: all subsample scores perfect for "
                         f"parent {parent.id}; skipping proposal "
@@ -2666,6 +2690,11 @@ def _run_evolution_impl(
                 proposal_subsamples.append(subsample_ids)
                 proposal_parent_mb_results.append(parent_mb_result)
 
+            # Write all skip records for this generation as a single JSON list.
+            # Must come after the inner loop so every proposal's result is known.
+            if _gen_skip_records:
+                _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
+
             if _budget_break and not proposal_contexts:
                 print_warning("Budget exhausted mid-generation -- stopping.")
                 _save_state(state)
@@ -2681,6 +2710,9 @@ def _run_evolution_impl(
                 # but roll back visible progress counters so resume/in-process
                 # continuation tries this generation again with a fresh
                 # parent/minibatch.
+                # NOTE: state.i is intentionally NOT rolled back; the proposal
+                # counter advances unconditionally per GEPA engine.py:649 to
+                # give the batch sampler a fresh seed on retry.
                 budget_api.set_generation(state, _iteration_start_generation)
                 state.mutation_counter = _iteration_start_mutation_counter
                 _save_state(state)
