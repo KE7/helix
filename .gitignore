@@ -22,3 +22,4 @@ dist/
 .coverage
 htmlcov/
 .envrc
+.helix/

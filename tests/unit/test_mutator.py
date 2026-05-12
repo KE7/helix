@@ -1330,3 +1330,453 @@ def test_normalise_usage_stats_ignores_recall_and_callback(monkeypatch):
     result = _normalise_usage_stats(parsed)
     assert result.tool_event_count == 2
     assert result.tool_names == ["Read", "search"]
+
+
+# ---------------------------------------------------------------------------
+# Per-backend transcript tool-event counter tests
+# ---------------------------------------------------------------------------
+
+
+class TestCountClaudeTranscriptToolEvents:
+    """Tests for ``_count_claude_transcript_tool_events``."""
+
+    def _write_jsonl(self, path: Path, events: list[dict]) -> None:
+        path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    def test_counts_three_tool_use_events_with_two_distinct_names(
+        self, tmp_path: Path
+    ) -> None:
+        from helix.mutator import _count_claude_transcript_tool_events
+
+        transcript = tmp_path / "session.jsonl"
+        self._write_jsonl(
+            transcript,
+            [
+                # Non-assistant events are ignored
+                {"type": "user", "message": {"role": "user", "content": []}},
+                # First tool call
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": "t1", "name": "Read"},
+                        ],
+                    },
+                },
+                # Second tool call
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": "t2", "name": "Read"},
+                        ],
+                    },
+                },
+                # Third tool call (different name)
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": "t3", "name": "Edit"},
+                        ],
+                    },
+                },
+            ],
+        )
+
+        count, names = _count_claude_transcript_tool_events(transcript)
+
+        assert count == 3
+        assert names == ["Read", "Read", "Edit"]
+
+    def test_zero_events_when_no_tool_use(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_claude_transcript_tool_events
+
+        transcript = tmp_path / "session.jsonl"
+        self._write_jsonl(
+            transcript,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Done."}],
+                    },
+                }
+            ],
+        )
+
+        count, names = _count_claude_transcript_tool_events(transcript)
+
+        assert count == 0
+        assert names == []
+
+    def test_skips_malformed_lines(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_claude_transcript_tool_events
+
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(
+            "NOT_JSON\n"
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "name": "Write"}],
+                    },
+                }
+            )
+            + "\n"
+            + "{bad json\n"
+        )
+
+        count, names = _count_claude_transcript_tool_events(transcript)
+
+        assert count == 1
+        assert names == ["Write"]
+
+    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_claude_transcript_tool_events
+
+        count, names = _count_claude_transcript_tool_events(
+            tmp_path / "nonexistent.jsonl"
+        )
+
+        assert count == 0
+        assert names == []
+
+
+class TestCountCodexStdoutToolEvents:
+    """Tests for ``_count_codex_stdout_tool_events``."""
+
+    def test_counts_command_execution_and_file_change(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_codex_stdout_tool_events
+
+        stdout = tmp_path / "stdout.jsonl"
+        stdout.write_text(
+            json.dumps({"type": "thread.started", "thread_id": "abc"}) + "\n"
+            + json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "command_execution", "command": "cat solver.py"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Done"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "changes": [{"path": "solver.py"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+        count, names = _count_codex_stdout_tool_events(stdout)
+
+        assert count == 2
+        assert "exec_command" in names
+        assert "apply_patch" in names
+
+    def test_zero_when_no_tool_items(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_codex_stdout_tool_events
+
+        stdout = tmp_path / "stdout.jsonl"
+        stdout.write_text(
+            json.dumps({"type": "thread.started"}) + "\n"
+            + json.dumps({"type": "turn.completed"}) + "\n"
+        )
+
+        count, names = _count_codex_stdout_tool_events(stdout)
+
+        assert count == 0
+        assert names == []
+
+    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_codex_stdout_tool_events
+
+        count, names = _count_codex_stdout_tool_events(tmp_path / "nope.jsonl")
+
+        assert count == 0
+        assert names == []
+
+
+class TestCountCursorStdoutToolEvents:
+    """Tests for ``_count_cursor_stdout_tool_events``."""
+
+    def test_counts_only_started_events_not_completed(
+        self, tmp_path: Path
+    ) -> None:
+        from helix.mutator import _count_cursor_stdout_tool_events
+
+        stdout = tmp_path / "stdout.jsonl"
+        stdout.write_text(
+            # started → count
+            json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "started",
+                    "call_id": "c1",
+                    "tool_call": {"readToolCall": {"args": {"path": "f.py"}}},
+                }
+            )
+            + "\n"
+            # completed → skip
+            + json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "call_id": "c1",
+                    "tool_call": {"readToolCall": {}},
+                }
+            )
+            + "\n"
+            # started with editToolCall
+            + json.dumps(
+                {
+                    "type": "tool_call",
+                    "subtype": "started",
+                    "call_id": "c2",
+                    "tool_call": {"editToolCall": {"args": {}}},
+                }
+            )
+            + "\n"
+        )
+
+        count, names = _count_cursor_stdout_tool_events(stdout)
+
+        assert count == 2
+        assert names == ["read", "edit"]
+
+    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_cursor_stdout_tool_events
+
+        count, names = _count_cursor_stdout_tool_events(tmp_path / "nope.jsonl")
+
+        assert count == 0
+        assert names == []
+
+
+class TestCountGeminiStdoutToolEvents:
+    """Tests for ``_count_gemini_stdout_tool_events``."""
+
+    def test_counts_tool_use_and_extracts_tool_name(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_gemini_stdout_tool_events
+
+        stdout = tmp_path / "stdout.jsonl"
+        stdout.write_text(
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "tool_name": "read_file",
+                    "tool_id": "t1",
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "tool_result",
+                    "tool_id": "t1",
+                    "content": "...",
+                }
+            )
+            + "\n"  # tool_result → skip (not tool_use)
+            + json.dumps(
+                {
+                    "type": "tool_use",
+                    "tool_name": "write_file",
+                    "tool_id": "t2",
+                }
+            )
+            + "\n"
+        )
+
+        count, names = _count_gemini_stdout_tool_events(stdout)
+
+        assert count == 2
+        assert names == ["read_file", "write_file"]
+
+    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_gemini_stdout_tool_events
+
+        count, names = _count_gemini_stdout_tool_events(tmp_path / "nope.jsonl")
+
+        assert count == 0
+        assert names == []
+
+
+class TestCountOpencodeStdoutToolEvents:
+    """Tests for ``_count_opencode_stdout_tool_events``."""
+
+    def test_counts_tool_use_and_extracts_part_tool(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_opencode_stdout_tool_events
+
+        stdout = tmp_path / "stdout.jsonl"
+        stdout.write_text(
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "sessionID": "ses_abc",
+                    "part": {"type": "tool", "tool": "read", "callID": "c1"},
+                }
+            )
+            + "\n"
+            + json.dumps({"type": "text", "sessionID": "ses_abc"})
+            + "\n"  # text → skip
+            + json.dumps(
+                {
+                    "type": "tool_use",
+                    "sessionID": "ses_abc",
+                    "part": {"type": "tool", "tool": "write", "callID": "c2"},
+                }
+            )
+            + "\n"
+        )
+
+        count, names = _count_opencode_stdout_tool_events(stdout)
+
+        assert count == 2
+        assert names == ["read", "write"]
+
+    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_opencode_stdout_tool_events
+
+        count, names = _count_opencode_stdout_tool_events(tmp_path / "nope.jsonl")
+
+        assert count == 0
+        assert names == []
+
+
+class TestCountTranscriptToolEventsDispatcher:
+    """Tests for the ``_count_transcript_tool_events`` dispatcher."""
+
+    def test_unknown_backend_returns_zero(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_transcript_tool_events
+
+        f = tmp_path / "transcript.jsonl"
+        f.write_text("{}\n")
+
+        count, names = _count_transcript_tool_events(f, "unknown_backend")
+
+        assert count == 0
+        assert names == []
+
+    def test_missing_file_returns_zero_for_known_backend(
+        self, tmp_path: Path
+    ) -> None:
+        from helix.mutator import _count_transcript_tool_events
+
+        count, names = _count_transcript_tool_events(
+            tmp_path / "nonexistent.jsonl", "claude"
+        )
+
+        assert count == 0
+        assert names == []
+
+    def test_dispatches_to_claude_counter(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_transcript_tool_events
+
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "name": "Read"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+        count, names = _count_transcript_tool_events(transcript, "claude")
+
+        assert count == 1
+        assert names == ["Read"]
+
+    def test_dispatches_to_gemini_counter(self, tmp_path: Path) -> None:
+        from helix.mutator import _count_transcript_tool_events
+
+        stdout = tmp_path / "stdout.jsonl"
+        stdout.write_text(
+            json.dumps({"type": "tool_use", "tool_name": "grep"}) + "\n"
+        )
+
+        count, names = _count_transcript_tool_events(stdout, "gemini")
+
+        assert count == 1
+        assert names == ["grep"]
+
+
+class TestTranscriptToolPatchesUsageInArtifact:
+    """Integration: after _write_backend_artifacts, tool counts are patched."""
+
+    def test_claude_tool_counts_patched_from_transcript(
+        self, tmp_path: Path, mocker, monkeypatch
+    ) -> None:
+        """tool_event_count and tool_names are populated from Claude JSONL transcript."""
+        from helix.mutator import (
+            BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+            invoke_claude_code,
+        )
+
+        # Set up a fake transcript with 3 tool_use events
+        transcript_root = tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        transcript_root.mkdir(parents=True)
+        (transcript_root / "sess_tool.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "name": "Read"},
+                            {"type": "tool_use", "name": "Edit"},
+                        ],
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "tool_use", "name": "Write"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(transcript_root))
+
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","session_id":"sess_tool"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["usage"]["tool_event_count"] == 3, (
+            "tool_event_count should be patched from transcript (was 0 from summary JSON)"
+        )
+        assert payload["usage"]["tool_names"] == ["Read", "Edit", "Write"]
+        # Transcript artifact should also be present
+        assert len(payload["transcript_artifacts"]) == 1
+        assert payload["transcript_artifacts"][0]["available"] is True
