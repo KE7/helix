@@ -1975,16 +1975,22 @@ def _run_evolution_impl(
         mutations_attempted = 0
         mutations_accepted = 0
 
-        gen = start_gen
-        while gen <= config.evolution.max_generations:
+        gen = start_gen - 1
+        while gen < config.evolution.max_generations:
+            # GEPA parity (engine.py:649): increment generation UNCONDITIONALLY
+            # at the top of the loop body, before any proposal work.  GEPA
+            # advances ``state.i`` at line 649, before any proposal logic.
+            # Moving the increment here eliminates the helix-original rollback
+            # construct that caused the NB-2 infinite-retry scenario
+            # (always-perfect data + cached parent eval + no budget cap →
+            # gen never advances).  After this change there is no code path
+            # that skips or rewinds ``gen``; budget_api.advance_proposal_counter
+            # (which increments state.i) continues to run here unconditionally.
+            gen += 1
             live.gen = gen
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
 
-            # Snapshot before set_generation so rollback restores the
-            # pre-iteration value (ordering matters: capture first, mutate second).
-            _iteration_start_generation = state.generation
-            _iteration_start_mutation_counter = state.mutation_counter
             budget_api.set_generation(state, gen)
             # GEPA parity (engine.py:649): bump ``state.i`` unconditionally at
             # the top of every iteration so the proposal counter — used by the
@@ -2221,7 +2227,6 @@ def _run_evolution_impl(
                                 if merged.id in candidates:
                                     del candidates[merged.id]
                                 _save_state(state)
-                                gen += 1
                                 continue
                             state.merge_description_triplets.append(_desc_triplet)
                             # GEPA parity (M5): merge acceptance evaluates merged on a
@@ -2407,7 +2412,6 @@ def _run_evolution_impl(
                 # failure, tamper reject) we drop into reflective mutation below.
                 if merge_attempted:
                     _save_state(state)
-                    gen += 1
                     continue
 
             elif config.evolution.merge_enabled:
@@ -2514,10 +2518,18 @@ def _run_evolution_impl(
             ) -> tuple[EvalResult | None, int]:
                 _parent, _pfr, _sub_ids, _new_id = pre_ctx
                 if _sub_ids is not None:
+                    # GEPA parity (reflective_mutation.py:268-269): parent
+                    # minibatch evals BYPASS the cache — pass ``None`` so that
+                    # every call goes to the real evaluator and charges the full
+                    # minibatch size toward budget.  The cache is reserved for
+                    # val-set full evaluations only (GEPA engine.py:154-173).
+                    # This prevents NB-2: without this, a cache-warm parent that
+                    # always scores perfectly charges 0 toward budget while gen
+                    # keeps advancing (Change 1), making budget the only guard.
                     _mb, _n_uncached = _cached_evaluate_batch(
                         _parent,
                         list(_sub_ids),
-                        minibatch_cache,
+                        None,  # bypass minibatch_cache — mirrors GEPA line 268
                         config,
                         "train",
                         project_root,
@@ -2704,17 +2716,13 @@ def _run_evolution_impl(
                 and semantic_skip_count
                 and retryable_semantic_skip_count == semantic_skip_count
             ):
-                # A perfect-subsample skip is not a candidate attempt.  Do not
-                # consume the visible generation/candidate slot; keep metric
-                # budget charges and the proposal counter from the parent eval,
-                # but roll back visible progress counters so resume/in-process
-                # continuation tries this generation again with a fresh
-                # parent/minibatch.
-                # NOTE: state.i is intentionally NOT rolled back; the proposal
-                # counter advances unconditionally per GEPA engine.py:649 to
-                # give the batch sampler a fresh seed on retry.
-                budget_api.set_generation(state, _iteration_start_generation)
-                state.mutation_counter = _iteration_start_mutation_counter
+                # Perfect-subsample skip: all parents scored perfectly on the
+                # minibatch so no mutation was attempted.  GEPA parity
+                # (engine.py:649, reflective_mutation.py:308-327): gen was
+                # already incremented unconditionally at the top of the loop,
+                # so state.generation is now set to the *new* gen value.  On
+                # resume the next iteration will be gen+1 — no rollback, no
+                # retry-same-generation infinite loop (NB-2 fix).
                 _save_state(state)
                 TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
                 continue
@@ -3248,7 +3256,6 @@ def _run_evolution_impl(
 
             _save_state(state)
             TRACE.emit(EventType.ITER_END, decision=str(gen))
-            gen += 1
 
     # ------------------------------------------------------------------
     # Return best

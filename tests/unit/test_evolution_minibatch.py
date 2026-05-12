@@ -401,15 +401,23 @@ class TestMinibatchGateIntegration:
         }
         assert set(attempt["instance_scores"]) == set(child_train_ids)
 
-    def test_perfect_minibatch_skip_retries_same_generation_slot(
+    def test_perfect_minibatch_skip_advances_generation(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """Perfect minibatch skips do not burn a visible generation/candidate id."""
+        """Perfect minibatch skip advances gen unconditionally (GEPA engine.py:649).
+
+        After Change 1 (unconditional gen increment), a perfect-subsample skip
+        no longer rolls back to retry the same generation slot.  Gen was already
+        incremented at the top of the loop, so state.generation advances and the
+        next loop iteration starts at gen+1.  With max_generations=1, the loop
+        exits immediately after the one skip iteration — mutate is never called.
+
+        Regression for NB-2: before the fix, a perfect skip did NOT advance gen,
+        allowing an infinite retry when budget was also uncapped.
+        """
         train_path = _write_train_jsonl(tmp_path, n=4)
         seed = _make_candidate("g0-s0")
-        child = _make_candidate("g1-s1")
         all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = child
 
         parent_train_calls = 0
 
@@ -424,11 +432,8 @@ class TestMinibatchGateIntegration:
             if split == "train" and instance_ids is not None:
                 if candidate.id == seed.id:
                     parent_train_calls += 1
-                    if parent_train_calls == 1:
-                        return _make_result(
-                            candidate.id, {i: 1.0 for i in instance_ids}
-                        )
-                    return _make_result(candidate.id, {i: 0.4 for i in instance_ids})
+                    # Always perfect — ensures perfect-skip fires every time.
+                    return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
             if instance_ids is not None:
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
@@ -446,9 +451,11 @@ class TestMinibatchGateIntegration:
         config.evolution.perfect_score_threshold = 1.0
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        assert parent_train_calls == 2
-        all_mocks["mutate"].assert_called_once()
-        assert all_mocks["mutate"].call_args.kwargs["new_id"] == "g1-s1"
+        # Gen was already incremented at the top of the loop before the skip.
+        # After the skip, 1 < max_generations=1 is False → loop exits.
+        # mutate is never called because the only generation was a perfect skip.
+        assert parent_train_calls == 1
+        all_mocks["mutate"].assert_not_called()
         skip_path = tmp_path / ".helix" / "skips" / "g1.json"
         assert skip_path.exists()
         skip_records = json.loads(skip_path.read_text())
@@ -469,6 +476,12 @@ class TestMinibatchGateIntegration:
 
         Regression for NB-1: before the fix _save_skip_record was called once per
         proposal, each overwriting the previous file so only the last record survived.
+
+        After Change 1 (unconditional gen increment) and Change 2 (parent minibatch
+        bypasses cache), max_generations=1 naturally terminates after the one
+        perfect-skip iteration — no tight budget ceiling needed.  3 perfect proposals
+        in g1 produce 3 records in skips/g1.json, then gen advances to 2 which
+        exceeds max_generations=1, ending the run.
         """
         train_path = _write_train_jsonl(tmp_path, n=6)
         seed = _make_candidate("g0-s0")
@@ -488,23 +501,16 @@ class TestMinibatchGateIntegration:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # cache_evaluation=False: prevents the parallel ThreadPoolExecutor
-        # (n_proposals=3) from calling _candidate_content_key → subprocess.run
-        # on fake worktree paths, which deadlocks in CI.  Without caching,
-        # each minibatch eval charges its real example count toward the budget.
-        # max_evaluations=13: seed val (6 examples) + 3 proposals × 2 examples
-        # = 12 budget units for one full iteration; 13 allows exactly one
-        # complete perfect-skip iteration (writing all 3 records) then breaks
-        # on the first proposal of the retry (14 ≥ 13) before overwriting the
-        # file.  Without this, always-perfect mock data + caching = ∞ loop
-        # (cached evals charge 0, budget never exhausts).
+        # Change 2: parent minibatch evals bypass the cache (pass None), so no
+        # subprocess.run on fake worktree paths in the parallel ThreadPoolExecutor
+        # (n_proposals=3).  Change 1: gen advances on skip, so max_generations=1
+        # naturally terminates after the one iteration — no tight budget ceiling.
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_evaluations=13,
+            max_evaluations=100,
             num_parallel_proposals=3,
-            cache_evaluation=False,
         )
         config.evolution.perfect_score_threshold = 1.0
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -1827,12 +1833,17 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
 
 
 class TestParentMinibatchBudgetCharge:
-    def test_budget_charge_counts_parent_minibatch_examples_and_skips_cache_hit(
+    def test_budget_charge_counts_parent_minibatch_examples_always_fresh(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """Two back-to-back iterations on the same parent/minibatch overlap
-        charge N units for the fresh parent evaluator run and zero for the
-        later pure cache hit.
+        """Parent minibatch evals always charge the full minibatch size (GEPA
+        reflective_mutation.py:268-269 parity: minibatch path bypasses cache).
+
+        Change 2: ``_eval_parent`` now passes ``None`` instead of
+        ``minibatch_cache`` to ``_cached_evaluate_batch``, matching GEPA's
+        ``execute_proposal`` which calls ``adapter.evaluate(ctx.minibatch, ...)``
+        directly, never through the cache.  Both iterations therefore invoke the
+        evaluator subprocess for the parent and charge 2 budget units each.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)  # 2 ids → minibatch always [0,1]
         seed = _make_candidate("g0-s0")
@@ -1866,9 +1877,9 @@ class TestParentMinibatchBudgetCharge:
 
         all_mocks["save_state"].side_effect = capture
 
-        # max_generations=2 so the parent (seed) is evaluated on [0,1] twice.
-        # On iter 2 the cache already contains seed's scores for ids 0 and 1,
-        # so no evaluator subprocess runs and no budget unit is charged.
+        # max_generations=2: the parent (seed) is evaluated on [0,1] in BOTH
+        # iterations because Change 2 bypasses the minibatch cache for parent
+        # evals, matching GEPA reflective_mutation.py:268.
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
@@ -1877,8 +1888,8 @@ class TestParentMinibatchBudgetCharge:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # The parent evaluator is invoked once: iter 1 is fresh, iter 2 is a
-        # full cache hit.
+        # The parent evaluator is invoked TWICE: both iter 1 and iter 2 are
+        # fresh evaluator calls (cache bypassed for parent minibatch evals).
         parent_call_count = sum(
             1
             for call in all_mocks["run_evaluator"].call_args_list
@@ -1887,15 +1898,14 @@ class TestParentMinibatchBudgetCharge:
             and (call.args[0] if call.args else call.kwargs.get("candidate")).id
             == seed.id
         )
-        assert parent_call_count == 1, (
-            f"Expected parent minibatch evaluator invoked exactly once "
-            f"(iter 1 only, iter 2 full cache hit), got {parent_call_count}"
+        assert parent_call_count == 2, (
+            f"Expected parent minibatch evaluator invoked twice "
+            f"(once per generation, cache bypassed per GEPA parity), got {parent_call_count}"
         )
 
         assert len(budget_snapshots) >= 2, "expected multiple save_state calls"
-        # The snapshots capture the fresh 2-example parent eval (+2), the
-        # rejected child evals (+2 each), and no charge for the second parent
-        # cache hit.
+        # Iter 1: +2 (parent) +2 (rejected child) = 4; Iter 2: +2 (parent) +2
+        # (rejected child) = 4.  Total delta >= 8, well above the >=6 floor.
         assert budget_snapshots[-1] - budget_snapshots[0] >= 6, (
             f"Budget delta {budget_snapshots[-1] - budget_snapshots[0]} "
             f"< 6 - per-example minibatch evaluations were not charged"
@@ -2396,3 +2406,87 @@ class TestResumeAttemptReconciliation:
         remove_mock.assert_not_called()
         remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
         assert remaining_ids == {"g0-s0", "g2-s2"}
+
+
+# ---------------------------------------------------------------------------
+# NB-2 regression: always-perfect data must terminate (GEPA parity)
+# ---------------------------------------------------------------------------
+
+
+class TestAlwaysPerfectDataTerminates:
+    """Regression for NB-2: always-perfect dataset + perfect_score_threshold set
+    must not produce an infinite loop.
+
+    Three GEPA-aligned guards independently prevent NB-2:
+      1. gen advances unconditionally at top of loop (Change 1, engine.py:649)
+      2. Parent minibatch eval bypasses cache — always charges budget (Change 2)
+      3. Mandatory stopping condition check (Change 3, api.py:262-265)
+
+    This test exercises the gen-advance guard (1) and budget guard (2) together:
+    max_generations=5 must be the loop exit trigger, with 5 skip records written.
+    """
+
+    def test_always_perfect_data_terminates_at_max_generations(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """1-example always-perfect dataset with max_generations=5 terminates
+        normally and writes one skip file per generation.
+
+        NB-2 regression: before Change 1, perfect-skip rolled back gen, so
+        the loop retried the same generation indefinitely when budget was
+        uncapped.  After Change 1, gen advances each iteration and the loop
+        exits after 5 iterations.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=1)  # 1 example → always same id
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        # All evals return 1.0 → perfect-skip fires every iteration.
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 1.0})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            max_generations=5,
+            max_evaluations=1000,  # generous budget — gen advance (Change 1) stops first
+        )
+        config.evolution.perfect_score_threshold = 1.0
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        skips_dir = tmp_path / ".helix" / "skips"
+
+        # Loop must have exited via max_generations (not budget), so state.generation >= 5.
+        import json as _json
+
+        # Verify a skip file was written for each generation 1-5.
+        for g in range(1, 6):
+            skip_path = skips_dir / f"g{g}.json"
+            assert skip_path.exists(), (
+                f"skips/g{g}.json missing — generation {g} was not processed "
+                f"(NB-2 regression: loop may have exited before reaching gen {g})"
+            )
+            recs = _json.loads(skip_path.read_text())
+            assert isinstance(recs, list)
+            assert len(recs) >= 1
+            assert recs[0]["generation"] == g
+            assert recs[0]["reason"] == "perfect_subsample"
+
+        # No 6th generation — the loop stopped at max_generations=5.
+        assert not (skips_dir / "g6.json").exists(), (
+            "skips/g6.json exists — loop ran past max_generations=5"
+        )
+
+        # mutate must never have been called (every generation was a perfect skip).
+        all_mocks["mutate"].assert_not_called()
+
