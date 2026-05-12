@@ -488,12 +488,23 @@ class TestMinibatchGateIntegration:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
+        # cache_evaluation=False: prevents the parallel ThreadPoolExecutor
+        # (n_proposals=3) from calling _candidate_content_key → subprocess.run
+        # on fake worktree paths, which deadlocks in CI.  Without caching,
+        # each minibatch eval charges its real example count toward the budget.
+        # max_evaluations=13: seed val (6 examples) + 3 proposals × 2 examples
+        # = 12 budget units for one full iteration; 13 allows exactly one
+        # complete perfect-skip iteration (writing all 3 records) then breaks
+        # on the first proposal of the retry (14 ≥ 13) before overwriting the
+        # file.  Without this, always-perfect mock data + caching = ∞ loop
+        # (cached evals charge 0, budget never exhausts).
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
             max_generations=1,
-            max_evaluations=1000,
+            max_evaluations=13,
             num_parallel_proposals=3,
+            cache_evaluation=False,
         )
         config.evolution.perfect_score_threshold = 1.0
         run_evolution(config, tmp_path, tmp_path / ".helix")
