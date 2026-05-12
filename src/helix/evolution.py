@@ -381,7 +381,7 @@ def _save_skip_record(
     base_dir: Path,
     *,
     generation: int,
-    records: list[dict],
+    records: list[dict[str, Any]],
 ) -> None:
     """Persist all per-proposal skip records for a generation as a JSON list.
 
@@ -2588,7 +2588,7 @@ def _run_evolution_impl(
             # Accumulate per-proposal skip records; written as a single JSON list
             # after the loop so that n_proposals > 1 with multiple perfect parents
             # does not silently overwrite earlier records (review NB-1).
-            _gen_skip_records: list[dict] = []
+            _gen_skip_records: list[dict[str, Any]] = []
 
             for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
                 zip(presample_contexts, parent_eval_results)
