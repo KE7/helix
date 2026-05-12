@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ``(worktree_path, prompt, config) -> tuple[dict[str, Any], dict[str, Any]]``.
 # None (default) = unchanged production behavior.
 _MUTATOR_OVERRIDE: (
-    Callable[[str, str, AgentConfig], tuple[dict[str, Any], dict[str, Any]]] | None
+    Callable[[str, str, AgentConfig], tuple[dict[str, Any], UsageStats]] | None
 ) = None
 
 # ---------------------------------------------------------------------------
@@ -246,7 +247,7 @@ def generate_seed(
     worktree_path: str,
     prompt: str,
     config: "HelixConfig",
-) -> dict[str, Any]:
+) -> UsageStats:
     """Generate an initial seed candidate by invoking Claude Code once.
 
     Matches GEPA's ``_generate_seed_candidate`` pattern exactly:
@@ -918,17 +919,18 @@ def _coerce_number(value: Any) -> float | None:
     return None
 
 
-def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
-    usage: dict[str, Any] = {}
+def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
+    # Collect raw values into a plain dict first; construct UsageStats at the end.
+    _d: dict[str, Any] = {}
     tool_event_count = 0
     tool_names: list[str] = []
     num_turns = 0
 
     # Claude Code returns num_turns and tool_use_count in the top-level object.
     if "num_turns" in parsed:
-        usage["num_turns"] = _coerce_number(parsed["num_turns"])
+        _d["num_turns"] = _coerce_number(parsed["num_turns"])
     if "tool_use_count" in parsed:
-        usage["tool_event_count"] = _coerce_number(parsed["tool_use_count"])
+        _d["tool_event_count"] = _coerce_number(parsed["tool_use_count"])
 
     # Recognise the exact node types that backends emit for tool/function
     # invocations. Substring matching on "call" is too loose -- it also fires
@@ -991,21 +993,37 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
                     "cached",
                 ),
             ),
+            (
+                "cache_creation_input_tokens",
+                (
+                    "cache_creation_input_tokens",
+                    "cacheCreationInputTokens",
+                    "cacheCreation",
+                ),
+            ),
+            (
+                "cache_read_input_tokens",
+                (
+                    "cache_read_input_tokens",
+                    "cacheReadInputTokens",
+                    "cacheRead",
+                ),
+            ),
             ("reasoning_tokens", ("reasoning_tokens", "reasoningTokens", "thoughts")),
             (
                 "cost_usd",
                 ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total"),
             ),
         ):
-            if key in usage:
+            if key in _d:
                 continue
             for alias in aliases:
                 if alias in node:
                     value = _coerce_number(node[alias])
                     if value is not None:
-                        usage[key] = value
+                        _d[key] = value
                         break
-        if "session_id" not in usage:
+        if "session_id" not in _d:
             for alias in (
                 "session_id",
                 "sessionId",
@@ -1016,26 +1034,257 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
             ):
                 value = node.get(alias)
                 if isinstance(value, str) and value:
-                    usage["session_id"] = value
+                    _d["session_id"] = value
                     break
-            if "session_id" not in usage:
+            if "session_id" not in _d:
                 value = node.get("sessionID")
                 if isinstance(value, str) and value:
-                    usage["session_id"] = value
-        if "cost_usd" not in usage:
+                    _d["session_id"] = value
+        if "cost_usd" not in _d:
             value = node.get("cost")
             coerced = _coerce_number(value)
             if coerced is not None:
-                usage["cost_usd"] = coerced
+                _d["cost_usd"] = coerced
 
-    if tool_event_count and "tool_event_count" not in usage:
-        usage["tool_event_count"] = tool_event_count
+    if tool_event_count and "tool_event_count" not in _d:
+        _d["tool_event_count"] = tool_event_count
     if tool_names:
-        usage["tool_names"] = tool_names
-    if num_turns and "num_turns" not in usage:
-        usage["num_turns"] = num_turns
+        _d["tool_names"] = tool_names
+    if num_turns and "num_turns" not in _d:
+        _d["num_turns"] = num_turns
 
-    return usage
+    return UsageStats(
+        input_tokens=int(_d.get("input_tokens", 0)),
+        output_tokens=int(_d.get("output_tokens", 0)),
+        cached_input_tokens=int(_d.get("cached_input_tokens", 0)),
+        cache_creation_input_tokens=int(_d.get("cache_creation_input_tokens", 0)),
+        cache_read_input_tokens=int(_d.get("cache_read_input_tokens", 0)),
+        reasoning_tokens=int(_d.get("reasoning_tokens", 0)),
+        num_turns=int(_d.get("num_turns", 0)),
+        tool_event_count=int(_d.get("tool_event_count", 0)),
+        tool_names=_d.get("tool_names", []),
+        cost_usd=float(_d.get("cost_usd", 0.0)),
+        session_id=_d.get("session_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-backend transcript tool-event counters
+# ---------------------------------------------------------------------------
+# Claude's ``--output-format json`` summary omits per-turn tool invocations;
+# the other backends either emit tool events in their JSONL stream with
+# types/fields that ``_normalise_usage_stats`` doesn't fully parse (wrong
+# key names, double-counted started+completed pairs, etc.).  Each function
+# below parses the backend's native format and returns an accurate
+# ``(count, names)`` pair.  ``_count_transcript_tool_events`` dispatches to
+# the right function and is called from ``_write_backend_artifacts`` /
+# ``_collect_backend_transcript_artifacts`` to patch ``usage`` after the fact.
+
+
+def _count_claude_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from a Claude JSONL transcript file.
+
+    Claude stores tool calls as ``type='assistant'`` events whose
+    ``message.content`` list contains items with ``type='tool_use'``.
+    The top-level ``type`` is never ``'tool_use'`` — it only appears
+    inside the nested ``message.content`` array.
+
+    Returns ``(0, [])`` when the file is missing or a line is malformed.
+    """
+    count = 0
+    names: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue  # skip malformed lines
+            if not isinstance(event, dict) or event.get("type") != "assistant":
+                continue
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
+            for item in message.get("content") or []:
+                if isinstance(item, dict) and item.get("type") == "tool_use":
+                    count += 1
+                    name = item.get("name")
+                    if isinstance(name, str) and name:
+                        names.append(name)
+    except OSError:
+        return 0, []
+    return count, names
+
+
+def _count_codex_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from a Codex ``exec --json`` stdout artifact.
+
+    Codex emits ``item.completed`` events whose ``item.type`` is one of
+    ``command_execution`` (shell commands) or ``file_change`` (edits).
+    These types are not in ``_normalise_usage_stats``'s ``_TOOL_NODE_TYPES``
+    set, so the initial count is 0; this function provides the correct value.
+    """
+    count = 0
+    names: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "item.completed":
+                continue
+            item = event.get("item", {})
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type", "")
+            if itype == "command_execution":
+                count += 1
+                names.append("exec_command")
+            elif itype == "file_change":
+                count += 1
+                names.append("apply_patch")
+    except OSError:
+        return 0, []
+    return count, names
+
+
+def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from a Cursor stream-json stdout artifact.
+
+    Cursor emits ``tool_call`` events with ``subtype`` values ``started``
+    and ``completed``.  Counting both would double the true count, so only
+    ``started`` events are counted.  The tool name is the first key of the
+    nested ``tool_call`` object (e.g. ``readToolCall``, ``editToolCall``).
+    """
+    count = 0
+    names: list[str] = []
+    _NAME_MAP: dict[str, str] = {
+        "readToolCall": "read",
+        "editToolCall": "edit",
+        "shellToolCall": "shell",
+        "writeToolCall": "write",
+        "searchToolCall": "search",
+        "deleteToolCall": "delete",
+        "listToolCall": "list",
+        "grepToolCall": "grep",
+    }
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "tool_call" or event.get("subtype") != "started":
+                continue
+            count += 1
+            tool_call = event.get("tool_call", {})
+            if isinstance(tool_call, dict):
+                for key in tool_call:
+                    key_str = str(key)
+                    names.append(_NAME_MAP.get(key_str, key_str))
+                    break
+            else:
+                names.append("unknown")
+    except OSError:
+        return 0, []
+    return count, names
+
+
+def _count_gemini_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from a Gemini stream-json stdout artifact.
+
+    Gemini emits ``tool_use`` events (correctly counted by
+    ``_normalise_usage_stats``) but stores the tool name in ``tool_name``
+    rather than ``name``, so ``tool_names`` remains empty after the initial
+    parse.  This function provides both the count and the names.
+    """
+    count = 0
+    names: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "tool_use":
+                continue
+            count += 1
+            name = event.get("tool_name")
+            if isinstance(name, str) and name:
+                names.append(name)
+    except OSError:
+        return 0, []
+    return count, names
+
+
+def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from an OpenCode ``--format json`` stdout artifact.
+
+    OpenCode emits ``tool_use`` events with the tool name in ``part.tool``
+    rather than a top-level ``name`` field.  This function extracts both
+    the accurate count and the tool names.
+    """
+    count = 0
+    names: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "tool_use":
+                continue
+            count += 1
+            part = event.get("part", {})
+            if isinstance(part, dict):
+                name = part.get("tool")
+                if isinstance(name, str) and name:
+                    names.append(name)
+    except OSError:
+        return 0, []
+    return count, names
+
+
+# Dispatcher: maps backend name → per-backend counter function.
+_TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = {
+    "claude": _count_claude_transcript_tool_events,
+    "codex": _count_codex_stdout_tool_events,
+    "cursor": _count_cursor_stdout_tool_events,
+    "gemini": _count_gemini_stdout_tool_events,
+    "opencode": _count_opencode_stdout_tool_events,
+}
+
+
+def _count_transcript_tool_events(path: Path, backend: str) -> tuple[int, list[str]]:
+    """Dispatch to the per-backend transcript tool-event counter.
+
+    Returns ``(0, [])`` for unknown backends or when the file is missing /
+    corrupt.  Never raises.
+    """
+    counter = _TRANSCRIPT_TOOL_COUNTERS.get(backend)
+    if counter is None or not path.is_file():
+        return 0, []
+    try:
+        return counter(path)
+    except Exception:  # noqa: BLE001
+        return 0, []
 
 
 def _copy_local_claude_transcript(
@@ -1114,14 +1363,14 @@ def _collect_backend_transcript_artifacts(
     worktree_path: str,
     *,
     backend: str,
-    usage: dict[str, Any],
+    usage: UsageStats,
     sandbox: SandboxConfig | None,
 ) -> list[dict[str, Any]]:
     if backend != "claude":
         return []
     if sandbox is not None and not sandbox.preserve_backend_transcripts:
         return []
-    session_id = usage.get("session_id")
+    session_id = usage.session_id
     if not isinstance(session_id, str) or not session_id:
         return []
     artifact_dir = (
@@ -1142,6 +1391,17 @@ def _collect_backend_transcript_artifacts(
         artifact_dir=artifact_dir,
         transcript_root=transcript_root,
     )
+    if artifact is not None and artifact.get("available"):
+        # Claude's ``--output-format json`` summary omits per-turn tool
+        # invocations.  Now that the transcript is on disk, read it and
+        # patch the ``usage`` object with the accurate counts.  Only
+        # applied when the summary gave 0 tool events to avoid overriding
+        # a non-zero value that a future Claude version might expose.
+        dst = Path(worktree_path) / Path(artifact["path"])
+        tc, tn = _count_transcript_tool_events(dst, "claude")
+        if tc > 0 and usage.tool_event_count == 0:
+            usage.tool_event_count = tc
+            usage.tool_names = list(tn)
     return [artifact] if artifact is not None else []
 
 
@@ -1160,6 +1420,17 @@ def _write_backend_artifacts(
         (wt / BACKEND_STDOUT_ARTIFACT_NAME).write_text(result.stdout or "")
         (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
         usage = _normalise_usage_stats(parsed or {})
+        # For non-Claude backends the stdout JSONL IS the transcript; patch
+        # ``usage`` with backend-specific tool-event counts now that the
+        # stdout artifact is on disk.  Claude is handled separately inside
+        # ``_collect_backend_transcript_artifacts`` where the external
+        # transcript file is copied first.
+        if backend != "claude":
+            stdout_path = wt / BACKEND_STDOUT_ARTIFACT_NAME
+            tc, tn = _count_transcript_tool_events(stdout_path, backend)
+            if tc > 0:
+                usage.tool_event_count = tc
+                usage.tool_names = list(tn)
         transcript_artifacts = _collect_backend_transcript_artifacts(
             worktree_path,
             backend=backend,
@@ -1174,7 +1445,7 @@ def _write_backend_artifacts(
             "returncode": result.returncode,
             "stdout_artifact": BACKEND_STDOUT_ARTIFACT_NAME,
             "stderr_artifact": BACKEND_STDERR_ARTIFACT_NAME,
-            "usage": usage,
+            "usage": usage.to_dict(),
             "transcript_artifacts": transcript_artifacts,
             "parsed": parsed,
         }
@@ -1195,7 +1466,7 @@ def invoke_claude_code(
     fixed_env: dict[str, str] | None = None,
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], UsageStats]:
     """Invoke the configured backend CLI in *worktree_path*.
 
     Parameters

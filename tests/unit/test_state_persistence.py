@@ -52,7 +52,16 @@ def _make_full_state() -> EvolutionState:
             "g1-s1": {"task_a": 0.6, "task_b": 0.7},
             "g2-m1": {"task_a": 0.65, "task_b": 0.75},
         },
-        budget=BudgetState(evaluations=42),
+        budget=BudgetState(
+            evaluations=42,
+            input_tokens=100,
+            output_tokens=40,
+            cached_input_tokens=30,
+            cache_creation_input_tokens=20,
+            cache_read_input_tokens=10,
+            reasoning_tokens=5,
+            cost_usd=1.23,
+        ),
         config_hash="cfg-deadbeef",
         mutation_counter=2,
         merge_counter=1,
@@ -144,6 +153,10 @@ def test_load_legacy_state_populates_defaults(tmp_path: Path) -> None:
     assert loaded.generation == 1
     assert loaded.frontier == ["g0-s0"]
     assert loaded.budget.evaluations == 1
+    assert loaded.budget.cached_input_tokens == 0
+    assert loaded.budget.cache_creation_input_tokens == 0
+    assert loaded.budget.cache_read_input_tokens == 0
+    assert loaded.budget.reasoning_tokens == 0
 
 
 def test_load_state_rejects_newer_schema_version(tmp_path: Path) -> None:

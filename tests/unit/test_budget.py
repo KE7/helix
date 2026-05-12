@@ -18,6 +18,7 @@ from helix.config import (
     HelixConfig,
     SandboxConfig,
 )
+from helix.display import UsageStats
 from helix.mutator import invoke_claude_code
 from helix.state import BudgetState, EvolutionState
 from helix.trace import TRACE, EventType
@@ -215,6 +216,152 @@ def test_backend_usage_parsing_charges_llm_budget(
     assert state.budget.cost_usd == pytest.approx(expected_cost)
 
 
+@pytest.mark.parametrize(
+    ("backend", "stdout", "expected"),
+    [
+        pytest.param(
+            "claude",
+            json.dumps(
+                {
+                    "type": "result",
+                    "session_id": "claude-session",
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 7,
+                        "cache_creation_input_tokens": 13,
+                        "cache_read_input_tokens": 17,
+                        "cached_input_tokens": 19,
+                    },
+                    "reasoning_tokens": 5,
+                    "total_cost_usd": 0.31,
+                }
+            ),
+            {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "cache_creation_input_tokens": 13,
+                "cache_read_input_tokens": 17,
+                "cached_input_tokens": 19,
+                "reasoning_tokens": 5,
+            },
+            id="claude",
+        ),
+        pytest.param(
+            "codex",
+            "\n".join(
+                [
+                    '{"type":"session.started","session_id":"codex-session"}',
+                    (
+                        '{"type":"turn","usage":{"prompt_tokens":12,'
+                        '"completion_tokens":8,"cached_input_tokens":21,'
+                        '"reasoning_tokens":6,"total_cost_usd":0.32}}'
+                    ),
+                ]
+            ),
+            {
+                "input_tokens": 12,
+                "output_tokens": 8,
+                "cached_input_tokens": 21,
+                "reasoning_tokens": 6,
+            },
+            id="codex",
+        ),
+        pytest.param(
+            "cursor",
+            "\n".join(
+                [
+                    '{"type":"system","sessionId":"cursor-session"}',
+                    (
+                        '{"type":"assistant","usage":{"inputTokens":13,'
+                        '"outputTokens":9,"cachedTokens":22,'
+                        '"reasoningTokens":7,"costUsd":0.33}}'
+                    ),
+                ]
+            ),
+            {
+                "input_tokens": 13,
+                "output_tokens": 9,
+                "cached_input_tokens": 22,
+                "reasoning_tokens": 7,
+            },
+            id="cursor",
+        ),
+        pytest.param(
+            "gemini",
+            "\n".join(
+                [
+                    '{"type":"init","session_id":"gemini-session"}',
+                    (
+                        '{"type":"result","usageMetadata":{"prompt_tokens":14,'
+                        '"completion_tokens":10,"cachedTokens":23},'
+                        '"thoughts":8,"cost":0.34}'
+                    ),
+                ]
+            ),
+            {
+                "input_tokens": 14,
+                "output_tokens": 10,
+                "cached_input_tokens": 23,
+                "reasoning_tokens": 8,
+            },
+            id="gemini",
+        ),
+        pytest.param(
+            "opencode",
+            "\n".join(
+                [
+                    '{"type":"step_start","sessionID":"opencode-session"}',
+                    (
+                        '{"type":"step_finish","part":{"tokens":{"input":15,'
+                        '"output":11,"cached":24,"thoughts":9},"cost":0.35}}'
+                    ),
+                ]
+            ),
+            {
+                "input_tokens": 15,
+                "output_tokens": 11,
+                "cached_input_tokens": 24,
+                "reasoning_tokens": 9,
+            },
+            id="opencode",
+        ),
+    ],
+)
+def test_backend_usage_parsing_charges_extended_llm_budget(
+    backend: str,
+    stdout: str,
+    expected: dict[str, int],
+    tmp_path: Path,
+    mocker,
+) -> None:
+    assert backend in BACKENDS
+    worktree = tmp_path / backend
+    worktree.mkdir()
+    mock_run = mocker.patch("helix.mutator.subprocess.run")
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[_BACKEND_EXECUTABLE[backend]],
+        returncode=0,
+        stdout=stdout,
+        stderr="",
+    )
+    state = make_state()
+
+    _parsed, usage = invoke_claude_code(
+        str(worktree),
+        "read the prompt artifact",
+        AgentConfig(backend=backend),
+    )
+    budget.charge_llm_usage(
+        state,
+        usage,
+        candidate_id=f"{backend}-candidate",
+        source=backend,
+    )
+
+    for key, value in expected.items():
+        assert getattr(state.budget, key) == value
+
+
 def test_backend_usage_parsing_under_sandbox_charges_llm_budget(
     tmp_path: Path, mocker
 ) -> None:
@@ -275,12 +422,7 @@ def test_backend_usage_parsing_under_sandbox_charges_llm_budget(
 def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
     tmp_path: Path, mocker
 ) -> None:
-    """Lock in parser support for cached_input_tokens and reasoning_tokens.
-
-    ``charge_llm_usage`` does not yet sum these into ``BudgetState``, but the
-    backend output parser exposes them via ``_normalise_usage_stats`` so a
-    future budget-API extension can rely on the alias map remaining intact.
-    """
+    """Lock in parser support for cached_input_tokens and reasoning_tokens."""
     worktree = tmp_path / "claude"
     worktree.mkdir()
     stdout = json.dumps(
@@ -309,38 +451,40 @@ def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
         AgentConfig(backend="claude"),
     )
 
-    assert usage["input_tokens"] == 11
-    assert usage["output_tokens"] == 7
-    assert usage["cached_input_tokens"] == 3
-    assert usage["reasoning_tokens"] == 5
-    assert usage["cost_usd"] == pytest.approx(0.31)
+    assert usage.input_tokens == 11
+    assert usage.output_tokens == 7
+    assert usage.cached_input_tokens == 3
+    assert usage.reasoning_tokens == 5
+    assert usage.cost_usd == pytest.approx(0.31)
+    state = make_state()
+    budget.charge_llm_usage(state, usage, candidate_id="c", source="claude")
+    assert state.budget.cached_input_tokens == 3
+    assert state.budget.reasoning_tokens == 5
 
 
-def test_charge_llm_usage_handles_empty_and_partial_payloads() -> None:
-    """Regression guard for the early-return / default-zero paths."""
+def test_charge_llm_usage_handles_none_and_partial_payloads() -> None:
+    """Regression guard for the None short-circuit and partial UsageStats paths."""
     state = make_state()
 
-    # ``None`` usage: short-circuit, no mutation.
+    # ``None`` usage: short-circuit, no mutation, no trace event.
     budget.charge_llm_usage(state, None, candidate_id="c", source="x")
     assert state.budget.input_tokens == 0
     assert state.budget.output_tokens == 0
     assert state.budget.cost_usd == 0.0
 
-    # Empty dict: short-circuit (falsy), no mutation.
-    budget.charge_llm_usage(state, {}, candidate_id="c", source="x")
-    assert state.budget.input_tokens == 0
-    assert state.budget.output_tokens == 0
-    assert state.budget.cost_usd == 0.0
-
-    # Partial payload: only present keys are summed; absent keys default to 0.
+    # Partial payload: only provided fields matter; absent fields default to 0.
     budget.charge_llm_usage(
         state,
-        {"input_tokens": 7},
+        UsageStats(input_tokens=7),
         candidate_id="c",
         source="x",
     )
     assert state.budget.input_tokens == 7
     assert state.budget.output_tokens == 0
+    assert state.budget.cached_input_tokens == 0
+    assert state.budget.cache_creation_input_tokens == 0
+    assert state.budget.cache_read_input_tokens == 0
+    assert state.budget.reasoning_tokens == 0
     assert state.budget.cost_usd == 0.0
 
 
@@ -351,7 +495,15 @@ def test_charge_llm_usage_emits_budget_update_event() -> None:
     with TRACE.record() as events:
         budget.charge_llm_usage(
             state,
-            {"input_tokens": 11, "output_tokens": 7, "cost_usd": 0.31},
+            UsageStats(
+                input_tokens=11,
+                output_tokens=7,
+                cached_input_tokens=3,
+                cache_creation_input_tokens=5,
+                cache_read_input_tokens=7,
+                reasoning_tokens=13,
+                cost_usd=0.31,
+            ),
             candidate_id="g1-s1",
             source="mutation",
         )
@@ -366,6 +518,10 @@ def test_charge_llm_usage_emits_budget_update_event() -> None:
     assert event.cost_usd_delta == pytest.approx(0.31)
     assert event.input_tokens == 11
     assert event.output_tokens == 7
+    assert state.budget.cached_input_tokens == 3
+    assert state.budget.cache_creation_input_tokens == 5
+    assert state.budget.cache_read_input_tokens == 7
+    assert state.budget.reasoning_tokens == 13
     assert event.cost_usd == pytest.approx(0.31)
 
 
@@ -400,8 +556,6 @@ def test_charge_llm_usage_none_is_silent_noop() -> None:
 
     with TRACE.record() as events:
         budget.charge_llm_usage(state, None, candidate_id="c", source="s")
-        # The empty-dict case is the same falsy short-circuit; pin it too.
-        budget.charge_llm_usage(state, {}, candidate_id="c", source="s")
 
     assert state.budget.input_tokens == 7
     assert state.budget.output_tokens == 11
@@ -410,13 +564,13 @@ def test_charge_llm_usage_none_is_silent_noop() -> None:
 
 
 def test_charge_llm_usage_zero_delta_still_emits_event() -> None:
-    """A non-empty usage dict with all-zero deltas should still emit one event.
+    """A UsageStats with all-zero deltas should still emit one event.
 
     Pins current behavior so a future "skip on zero" optimization is a
     deliberate, test-visible decision rather than an accidental change.
     """
     state = make_state()
-    usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    usage = UsageStats(input_tokens=0, output_tokens=0, cost_usd=0.0)
 
     with TRACE.record() as events:
         budget.charge_llm_usage(state, usage, candidate_id="c", source="mutation")

@@ -12,6 +12,7 @@ from helix.config import (
     HelixConfig,
     WorktreeConfig,
 )
+from helix.display import UsageStats
 from helix.evolution import run_evolution
 from helix.exceptions import MutationError
 from helix.population import Candidate, EvalResult
@@ -107,7 +108,7 @@ def seedless_mocks(mocker):
             "helix.evolution.build_seed_generation_prompt",
             return_value="<seed prompt>",
         ),
-        "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value={}),
+        "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value=UsageStats()),
         "run_evaluator": mocker.patch(
             "helix.evolution.run_evaluator",
             return_value=seed_result,

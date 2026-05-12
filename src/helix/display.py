@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 import threading
 from typing import TYPE_CHECKING, Any
@@ -27,30 +28,73 @@ class UsageStats:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    reasoning_tokens: int = 0
     num_turns: int = 0
     tool_event_count: int = 0
     tool_names: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
+    session_id: str | None = None
 
-    def add(self, other: UsageStats | dict[str, Any]) -> None:
-        if isinstance(other, dict):
-            self.input_tokens += int(other.get("input_tokens", 0))
-            self.output_tokens += int(other.get("output_tokens", 0))
-            self.num_turns += int(other.get("num_turns", 0))
-            self.tool_event_count += int(other.get("tool_event_count", 0))
-            self.cost_usd += float(other.get("cost_usd", 0.0))
-            new_tools = other.get("tool_names", [])
-            if isinstance(new_tools, list):
-                for t in new_tools:
-                    self.tool_names.append(t)
-        else:
-            self.input_tokens += other.input_tokens
-            self.output_tokens += other.output_tokens
-            self.num_turns += other.num_turns
-            self.tool_event_count += other.tool_event_count
-            self.cost_usd += other.cost_usd
-            for t in other.tool_names:
-                self.tool_names.append(t)
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable plain dict of all UsageStats fields.
+
+        ``tool_names`` is returned as a fresh list copy to prevent external
+        mutation of the live list reference.
+        """
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "num_turns": self.num_turns,
+            "tool_event_count": self.tool_event_count,
+            "tool_names": list(self.tool_names),
+            "cost_usd": self.cost_usd,
+            "session_id": self.session_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> UsageStats:
+        """Construct a ``UsageStats`` from a plain dict, tolerating missing keys.
+
+        Coerces numeric fields defensively (mirrors the dict branch of
+        ``add``).  ``tool_names`` defaults to ``[]`` when absent or
+        non-list.  ``session_id`` is ``None`` when absent.
+        """
+        tool_names = d.get("tool_names", [])
+        if not isinstance(tool_names, list):
+            tool_names = []
+        return cls(
+            input_tokens=int(d.get("input_tokens", 0)),
+            output_tokens=int(d.get("output_tokens", 0)),
+            cached_input_tokens=int(d.get("cached_input_tokens", 0)),
+            cache_creation_input_tokens=int(d.get("cache_creation_input_tokens", 0)),
+            cache_read_input_tokens=int(d.get("cache_read_input_tokens", 0)),
+            reasoning_tokens=int(d.get("reasoning_tokens", 0)),
+            num_turns=int(d.get("num_turns", 0)),
+            tool_event_count=int(d.get("tool_event_count", 0)),
+            tool_names=list(tool_names),
+            cost_usd=float(d.get("cost_usd", 0.0)),
+            session_id=d.get("session_id"),
+        )
+
+    def add(self, other: UsageStats) -> None:
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.cached_input_tokens += other.cached_input_tokens
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens
+        self.cache_read_input_tokens += other.cache_read_input_tokens
+        self.reasoning_tokens += other.reasoning_tokens
+        self.num_turns += other.num_turns
+        self.tool_event_count += other.tool_event_count
+        self.cost_usd += other.cost_usd
+        for t in other.tool_names:
+            self.tool_names.append(t)
 
 
 class HelixPhase(Enum):
@@ -136,9 +180,18 @@ def render_status_panel(
         [
             "[bold]Current Generation Usage:[/bold]",
             f"  Tokens: {current_usage.input_tokens:,} in / {current_usage.output_tokens:,} out",
-            f"  Turns : {current_usage.num_turns}",
         ]
     )
+    current_cache_tokens = (
+        current_usage.cached_input_tokens
+        + current_usage.cache_creation_input_tokens
+        + current_usage.cache_read_input_tokens
+    )
+    if current_cache_tokens:
+        lines.append(f"  Cache : {current_cache_tokens:,} input tokens")
+    if current_usage.reasoning_tokens:
+        lines.append(f"  Think : {current_usage.reasoning_tokens:,} tokens")
+    lines.append(f"  Turns : {current_usage.num_turns}")
 
     tools_str = f"{current_usage.tool_event_count}"
     if current_usage.tool_names:
@@ -157,9 +210,18 @@ def render_status_panel(
             "",
             "[bold]Cumulative Evolution Total:[/bold]",
             f"  Tokens: {cumulative_budget.input_tokens:,} in / {cumulative_budget.output_tokens:,} out",
-            f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]",
         ]
     )
+    cumulative_cache_tokens = (
+        cumulative_budget.cached_input_tokens
+        + cumulative_budget.cache_creation_input_tokens
+        + cumulative_budget.cache_read_input_tokens
+    )
+    if cumulative_cache_tokens:
+        lines.append(f"  Cache : {cumulative_cache_tokens:,} input tokens")
+    if cumulative_budget.reasoning_tokens:
+        lines.append(f"  Think : {cumulative_budget.reasoning_tokens:,} tokens")
+    lines.append(f"  Cost  : [green]${cumulative_budget.cost_usd:.4f}[/green]")
 
     if config_evolution:
         cap = config_evolution.max_evaluations
@@ -236,7 +298,7 @@ class HelixLiveDisplay:
     def update(
         self,
         phase: HelixPhase | str | None = None,
-        usage: UsageStats | dict[str, Any] | None = None,
+        usage: UsageStats | None = None,
         mutations_attempted: int | None = None,
         mutations_accepted: int | None = None,
     ) -> None:

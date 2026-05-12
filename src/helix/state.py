@@ -35,6 +35,10 @@ class BudgetState:
     evaluations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    reasoning_tokens: int = 0
     cost_usd: float = 0.0
 
 
@@ -215,6 +219,10 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         evaluations=budget_data.get("evaluations", 0),
         input_tokens=budget_data.get("input_tokens", 0),
         output_tokens=budget_data.get("output_tokens", 0),
+        cached_input_tokens=budget_data.get("cached_input_tokens", 0),
+        cache_creation_input_tokens=budget_data.get("cache_creation_input_tokens", 0),
+        cache_read_input_tokens=budget_data.get("cache_read_input_tokens", 0),
+        reasoning_tokens=budget_data.get("reasoning_tokens", 0),
         cost_usd=budget_data.get("cost_usd", 0.0),
     )
 
