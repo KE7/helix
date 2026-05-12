@@ -1532,6 +1532,23 @@ def run_evolution(
     base_dir: Path,
 ) -> HelixResult:
     """Run the HELIX evolutionary loop."""
+    # Mirror GEPA api.py:262-265: at least one stopping condition is required.
+    # Without this, perfect-skip + always-perfect data + no effective bound =
+    # a run that terminates only by the OS.  In HELIX, max_generations (loop
+    # bound) and max_evaluations (budget cap, <= 0 disables) are the two
+    # supported stopping conditions.  max_generations defaults to 10 and is
+    # always a positive int; this guard fires only if a caller explicitly sets
+    # it to <= 0 while leaving max_evaluations disabled.
+    if (
+        config.evolution.max_generations <= 0
+        and config.evolution.max_evaluations <= 0
+    ):
+        raise ValueError(
+            "At least one stopping condition is required: set "
+            "config.evolution.max_generations to a positive integer, or "
+            "config.evolution.max_evaluations > 0. "
+            "See GEPA api.py:262-265 for the upstream equivalent check."
+        )
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
             raise HelixError(

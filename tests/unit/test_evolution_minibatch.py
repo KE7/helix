@@ -2490,3 +2490,82 @@ class TestAlwaysPerfectDataTerminates:
         # mutate must never have been called (every generation was a perfect skip).
         all_mocks["mutate"].assert_not_called()
 
+
+# ---------------------------------------------------------------------------
+# Change 3: mandatory stopping condition validation (GEPA api.py:262-265)
+# ---------------------------------------------------------------------------
+
+
+class TestStoppingConditionValidation:
+    """Mirror GEPA api.py:262-265: run_evolution must raise ValueError when
+    no effective stopping condition is configured.
+
+    In helix, max_generations (loop bound, default 10) is the primary stop
+    and max_evaluations (budget cap, -1 = disabled) is secondary.  The guard
+    fires when both are ineffective (max_generations <= 0 AND
+    max_evaluations <= 0), preventing a run that terminates only by the OS.
+    """
+
+    def test_no_stop_condition_raises_value_error(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """max_generations=0 and max_evaluations=-1 → ValueError before loop."""
+        config = HelixConfig(
+            objective="no stop condition test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=0,   # loop bound disabled
+                max_evaluations=-1,  # budget cap disabled
+            ),
+        )
+        with pytest.raises(ValueError, match="stopping condition"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+    def test_negative_max_generations_raises_value_error(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """max_generations=-1 and max_evaluations=0 → ValueError before loop."""
+        config = HelixConfig(
+            objective="no stop condition test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=-1,  # loop bound disabled
+                max_evaluations=0,   # also disabled
+            ),
+        )
+        with pytest.raises(ValueError, match="stopping condition"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+    def test_valid_max_generations_does_not_raise(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """max_generations=1 with max_evaluations=-1 is valid — loop bound set."""
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None  # no children; single iteration
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=-1,  # disabled — max_generations alone suffices
+        )
+        # Must NOT raise — max_generations=1 is a valid stopping condition.
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+

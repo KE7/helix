@@ -2353,7 +2353,13 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        evolution=EvolutionConfig(max_generations=0),
+        # max_evaluations=1: Change 3 guard requires at least one effective
+        # stopping condition.  max_generations=0 means the loop runs 0
+        # iterations (while gen < 0 is immediately False), but the guard
+        # requires max_evaluations > 0 when max_generations <= 0.
+        # max_evaluations=1 satisfies the guard; budget exhausts immediately
+        # at the first budget check if any iteration were to start.
+        evolution=EvolutionConfig(max_generations=0, max_evaluations=1),
     )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
