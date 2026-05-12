@@ -410,44 +410,55 @@ def run_evaluator(
     # that ignore HELIX_INSTANCE_IDS will still have returned the whole
     # split, but the minibatch gate only looks at the requested subset.
     if instance_ids is not None:
-        filtered: dict[str, float] = {}
-        missing: list[str] = []
-        for eid in instance_ids:
-            eid_s = str(eid)
-            if eid_s in instance_scores:
-                filtered[eid_s] = instance_scores[eid_s]
-            else:
-                # Evaluator produced no result for this id → 0.0
-                filtered[eid_s] = 0.0
-                missing.append(eid_s)
-        if missing:
-            # Diagnostic: the silent zero-fill above used to hide evaluator
-            # bugs — most infamously an ``instance_scores`` dict keyed by
-            # aggregate metric names (``task__metric``) instead of the
-            # per-example ids HELIX writes to ``helix_batch.json``
-            # (``task__trialN``).  That mismatch made strict-improvement
-            # acceptance compare ``0.0 vs 0.0`` for 113 straight generations
-            # in one real run.  The per-example ``helix_result`` contract
-            # removes that class of bug at the parser level, but this
-            # warning is still useful defense in depth: e.g. when a user
-            # picks ``score_parser="exitcode"`` and then asks for a
-            # minibatch subset, every requested id lands here.
-            sample = missing[:5]
-            logger.warning(
-                "evaluator returned %d/%d missing instance_scores for "
-                "requested ids (sample: %r%s); these were filled with 0.0. "
-                "If you need per-id scores for the minibatch gate, use "
-                "score_parser='helix_result' (per-example contract — "
-                "HELIX reads helix_batch.json and zips it with your list "
-                "of [score, side_info] pairs).",
-                len(missing),
-                len(instance_ids),
-                sample,
-                ""
-                if len(missing) <= len(sample)
-                else f" ... +{len(missing) - len(sample)} more",
-            )
-        instance_scores = filtered
+        # ``exitcode`` is a global pass/fail parser: it returns
+        # ``{"success": score}`` as instance_scores rather than per-example
+        # ids.  Broadcasting the global result to all requested ids is
+        # correct here — a process that exits 0 passed for all examples; one
+        # that exits non-zero failed for all examples.  Without this
+        # broadcast every requested id lands in ``missing`` and gets filled
+        # with 0.0, causing spurious rejections when the evaluator exited 0.
+        if evaluator.score_parser == "exitcode":
+            global_score = instance_scores.get("success", 0.0)
+            instance_scores = {str(eid): global_score for eid in instance_ids}
+        else:
+            filtered: dict[str, float] = {}
+            missing: list[str] = []
+            for eid in instance_ids:
+                eid_s = str(eid)
+                if eid_s in instance_scores:
+                    filtered[eid_s] = instance_scores[eid_s]
+                else:
+                    # Evaluator produced no result for this id → 0.0
+                    filtered[eid_s] = 0.0
+                    missing.append(eid_s)
+            if missing:
+                # Diagnostic: the silent zero-fill above used to hide evaluator
+                # bugs — most infamously an ``instance_scores`` dict keyed by
+                # aggregate metric names (``task__metric``) instead of the
+                # per-example ids HELIX writes to ``helix_batch.json``
+                # (``task__trialN``).  That mismatch made strict-improvement
+                # acceptance compare ``0.0 vs 0.0`` for 113 straight generations
+                # in one real run.  The per-example ``helix_result`` contract
+                # removes that class of bug at the parser level, but this
+                # warning is still useful defense in depth: e.g. when a user
+                # picks ``score_parser="exitcode"`` and then asks for a
+                # minibatch subset, every requested id lands here.
+                sample = missing[:5]
+                logger.warning(
+                    "evaluator returned %d/%d missing instance_scores for "
+                    "requested ids (sample: %r%s); these were filled with 0.0. "
+                    "If you need per-id scores for the minibatch gate, use "
+                    "score_parser='helix_result' (per-example contract — "
+                    "HELIX reads helix_batch.json and zips it with your list "
+                    "of [score, side_info] pairs).",
+                    len(missing),
+                    len(instance_ids),
+                    sample,
+                    ""
+                    if len(missing) <= len(sample)
+                    else f" ... +{len(missing) - len(sample)} more",
+                )
+            instance_scores = filtered
 
     _result = EvalResult(
         candidate_id=candidate.id,
