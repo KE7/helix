@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
+from helix.display import UsageStats
 
 if TYPE_CHECKING:
     from helix.state import BudgetState
@@ -48,7 +49,7 @@ class Candidate:
     parent_id: str | None
     parent_ids: list[str]
     operation: str
-    usage: dict[str, Any] = field(default_factory=dict)
+    usage: UsageStats = field(default_factory=UsageStats)
 
 
 @dataclass
@@ -210,7 +211,7 @@ class CandidateSummary:
             "generation": self.generation,
             "parents": self.parents,
             "operation": self.operation,
-            "usage": self.candidate.usage,
+            "usage": self.candidate.usage.to_dict(),
             "aggregate_score": self.aggregate_score,
             "sum_score": self.sum_score,
             "scores": self.scores,

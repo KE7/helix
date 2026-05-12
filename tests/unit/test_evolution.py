@@ -36,6 +36,7 @@ from helix.budget import (
     budget_exhausted,
     evaluation_budget_units as _evaluation_budget_units,
 )
+from helix.display import UsageStats
 from helix.evolution import (
     _load_evaluation,
     degrades,
@@ -566,7 +567,7 @@ class TestGatingInEvolutionLoop:
             parent_id=seed.id,
             parent_ids=[seed.id],
             operation="mutate",
-            usage={"input_tokens": 7, "output_tokens": 3, "cost_usd": 0.01},
+            usage=UsageStats(input_tokens=7, output_tokens=3, cost_usd=0.01),
         )
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = child
@@ -933,7 +934,7 @@ class TestLlmUsageBudgetIntegration:
         self, mocker, tmp_path, all_mocks
     ):
         seed = make_candidate("g0-s0")
-        usage = {"input_tokens": 21, "output_tokens": 12, "cost_usd": 0.41}
+        usage = UsageStats(input_tokens=21, output_tokens=12, cost_usd=0.41)
         mocker.patch("helix.evolution.create_empty_seed_worktree", return_value=seed)
         mocker.patch(
             "helix.evolution.build_seed_generation_prompt", return_value="<seed prompt>"
@@ -1046,7 +1047,7 @@ class TestLlmUsageBudgetIntegration:
     ):
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
-        child.usage = {"input_tokens": 22, "output_tokens": 13, "cost_usd": 0.42}
+        child.usage = UsageStats(input_tokens=22, output_tokens=13, cost_usd=0.42)
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = child
 
@@ -1085,7 +1086,7 @@ class TestLlmUsageBudgetIntegration:
         merged = make_candidate("g2-m1", generation=2)
         merged.operation = "merge"
         merged.parent_ids = ["g0-s0", "g1-s1"]
-        merged.usage = {"input_tokens": 23, "output_tokens": 14, "cost_usd": 0.43}
+        merged.usage = UsageStats(input_tokens=23, output_tokens=14, cost_usd=0.43)
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = child
         all_mocks["merge"].return_value = merged

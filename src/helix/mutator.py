@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ``(worktree_path, prompt, config) -> tuple[dict[str, Any], dict[str, Any]]``.
 # None (default) = unchanged production behavior.
 _MUTATOR_OVERRIDE: (
-    Callable[[str, str, AgentConfig], tuple[dict[str, Any], dict[str, Any]]] | None
+    Callable[[str, str, AgentConfig], tuple[dict[str, Any], UsageStats]] | None
 ) = None
 
 # ---------------------------------------------------------------------------
@@ -246,7 +247,7 @@ def generate_seed(
     worktree_path: str,
     prompt: str,
     config: "HelixConfig",
-) -> dict[str, Any]:
+) -> UsageStats:
     """Generate an initial seed candidate by invoking Claude Code once.
 
     Matches GEPA's ``_generate_seed_candidate`` pattern exactly:
@@ -921,17 +922,18 @@ def _coerce_number(value: Any) -> float | None:
     return None
 
 
-def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
-    usage: dict[str, Any] = {}
+def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
+    # Collect raw values into a plain dict first; construct UsageStats at the end.
+    _d: dict[str, Any] = {}
     tool_event_count = 0
     tool_names: list[str] = []
     num_turns = 0
 
     # Claude Code returns num_turns and tool_use_count in the top-level object.
     if "num_turns" in parsed:
-        usage["num_turns"] = _coerce_number(parsed["num_turns"])
+        _d["num_turns"] = _coerce_number(parsed["num_turns"])
     if "tool_use_count" in parsed:
-        usage["tool_event_count"] = _coerce_number(parsed["tool_use_count"])
+        _d["tool_event_count"] = _coerce_number(parsed["tool_use_count"])
 
     # Recognise the exact node types that backends emit for tool/function
     # invocations. Substring matching on "call" is too loose -- it also fires
@@ -1016,15 +1018,15 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
                 ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total"),
             ),
         ):
-            if key in usage:
+            if key in _d:
                 continue
             for alias in aliases:
                 if alias in node:
                     value = _coerce_number(node[alias])
                     if value is not None:
-                        usage[key] = value
+                        _d[key] = value
                         break
-        if "session_id" not in usage:
+        if "session_id" not in _d:
             for alias in (
                 "session_id",
                 "sessionId",
@@ -1035,26 +1037,38 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> dict[str, Any]:
             ):
                 value = node.get(alias)
                 if isinstance(value, str) and value:
-                    usage["session_id"] = value
+                    _d["session_id"] = value
                     break
-            if "session_id" not in usage:
+            if "session_id" not in _d:
                 value = node.get("sessionID")
                 if isinstance(value, str) and value:
-                    usage["session_id"] = value
-        if "cost_usd" not in usage:
+                    _d["session_id"] = value
+        if "cost_usd" not in _d:
             value = node.get("cost")
             coerced = _coerce_number(value)
             if coerced is not None:
-                usage["cost_usd"] = coerced
+                _d["cost_usd"] = coerced
 
-    if tool_event_count and "tool_event_count" not in usage:
-        usage["tool_event_count"] = tool_event_count
+    if tool_event_count and "tool_event_count" not in _d:
+        _d["tool_event_count"] = tool_event_count
     if tool_names:
-        usage["tool_names"] = tool_names
-    if num_turns and "num_turns" not in usage:
-        usage["num_turns"] = num_turns
+        _d["tool_names"] = tool_names
+    if num_turns and "num_turns" not in _d:
+        _d["num_turns"] = num_turns
 
-    return usage
+    return UsageStats(
+        input_tokens=int(_d.get("input_tokens", 0)),
+        output_tokens=int(_d.get("output_tokens", 0)),
+        cached_input_tokens=int(_d.get("cached_input_tokens", 0)),
+        cache_creation_input_tokens=int(_d.get("cache_creation_input_tokens", 0)),
+        cache_read_input_tokens=int(_d.get("cache_read_input_tokens", 0)),
+        reasoning_tokens=int(_d.get("reasoning_tokens", 0)),
+        num_turns=int(_d.get("num_turns", 0)),
+        tool_event_count=int(_d.get("tool_event_count", 0)),
+        tool_names=_d.get("tool_names", []),
+        cost_usd=float(_d.get("cost_usd", 0.0)),
+        session_id=_d.get("session_id"),
+    )
 
 
 def _copy_local_claude_transcript(
@@ -1133,14 +1147,14 @@ def _collect_backend_transcript_artifacts(
     worktree_path: str,
     *,
     backend: str,
-    usage: dict[str, Any],
+    usage: UsageStats,
     sandbox: SandboxConfig | None,
 ) -> list[dict[str, Any]]:
     if backend != "claude":
         return []
     if sandbox is not None and not sandbox.preserve_backend_transcripts:
         return []
-    session_id = usage.get("session_id")
+    session_id = usage.session_id
     if not isinstance(session_id, str) or not session_id:
         return []
     artifact_dir = (
@@ -1193,7 +1207,7 @@ def _write_backend_artifacts(
             "returncode": result.returncode,
             "stdout_artifact": BACKEND_STDOUT_ARTIFACT_NAME,
             "stderr_artifact": BACKEND_STDERR_ARTIFACT_NAME,
-            "usage": usage,
+            "usage": usage.to_dict(),
             "transcript_artifacts": transcript_artifacts,
             "parsed": parsed,
         }
@@ -1214,7 +1228,7 @@ def invoke_claude_code(
     fixed_env: dict[str, str] | None = None,
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], UsageStats]:
     """Invoke the configured backend CLI in *worktree_path*.
 
     Parameters

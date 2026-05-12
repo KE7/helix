@@ -20,30 +20,11 @@ introduce a ``threading.Lock`` here first; otherwise concurrent
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping
-from typing import Any, TypedDict
 
 from helix.config import HelixConfig
+from helix.display import UsageStats
 from helix.state import EvolutionState
 from helix.trace import TRACE, EventType
-
-
-class UsageDict(TypedDict, total=False):
-    """Subset of backend usage-payload fields read by ``charge_llm_usage``.
-
-    Pinning the keys makes the contract explicit at type-check time
-    without requiring callers to convert their existing
-    ``Candidate.usage: dict[str, Any]`` payloads.  ``charge_llm_usage``
-    accepts any read-only mapping so this remains backward-compatible.
-    """
-
-    input_tokens: int
-    output_tokens: int
-    cached_input_tokens: int
-    cache_creation_input_tokens: int
-    cache_read_input_tokens: int
-    reasoning_tokens: int
-    cost_usd: float
 
 
 def budget_exhausted(state: EvolutionState, config: HelixConfig) -> bool:
@@ -113,27 +94,27 @@ def charge_evaluation(
 
 def charge_llm_usage(
     state: EvolutionState,
-    usage: UsageDict | Mapping[str, Any] | None,
+    usage: UsageStats | None,
     *,
     candidate_id: str | None = None,
     source: str | None = None,
 ) -> None:
-    """Charge token and cost counters from a backend usage payload.
+    """Charge token and cost counters from a ``UsageStats`` payload.
 
-    Safe to call with ``None`` or an empty mapping; both short-circuit
-    without touching counters or emitting a trace event.  A non-empty
-    mapping with all-zero deltas still emits one ``BUDGET_UPDATE`` event
-    (the call indicates a real backend response was processed).
+    Safe to call with ``None``; short-circuits without touching counters
+    or emitting a trace event.  A non-None ``UsageStats`` with all-zero
+    deltas still emits one ``BUDGET_UPDATE`` event (the call indicates a
+    real backend response was processed).
     """
-    if not usage:
+    if usage is None:
         return
-    input_delta = int(usage.get("input_tokens", 0))
-    output_delta = int(usage.get("output_tokens", 0))
-    cached_input_delta = int(usage.get("cached_input_tokens", 0))
-    cache_creation_delta = int(usage.get("cache_creation_input_tokens", 0))
-    cache_read_delta = int(usage.get("cache_read_input_tokens", 0))
-    reasoning_delta = int(usage.get("reasoning_tokens", 0))
-    cost_delta = float(usage.get("cost_usd", 0.0))
+    input_delta = usage.input_tokens
+    output_delta = usage.output_tokens
+    cached_input_delta = usage.cached_input_tokens
+    cache_creation_delta = usage.cache_creation_input_tokens
+    cache_read_delta = usage.cache_read_input_tokens
+    reasoning_delta = usage.reasoning_tokens
+    cost_delta = usage.cost_usd
     state.budget.input_tokens += input_delta
     state.budget.output_tokens += output_delta
     state.budget.cached_input_tokens += cached_input_delta

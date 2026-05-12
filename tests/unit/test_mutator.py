@@ -913,7 +913,8 @@ class TestInvokeClaudeCode:
         payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
         assert payload["backend"] == backend
         assert payload["returncode"] == 0
-        assert payload["usage"] == returned_usage
+        # payload["usage"] is the serialized dict; returned_usage is a UsageStats
+        assert payload["usage"] == returned_usage.to_dict()
         for key, value in expected_usage.items():
             if isinstance(value, float):
                 assert payload["usage"][key] == pytest.approx(value)
@@ -1327,5 +1328,5 @@ def test_normalise_usage_stats_ignores_recall_and_callback(monkeypatch):
         ],
     }
     result = _normalise_usage_stats(parsed)
-    assert result.get("tool_event_count") == 2
-    assert result.get("tool_names") == ["Read", "search"]
+    assert result.tool_event_count == 2
+    assert result.tool_names == ["Read", "search"]

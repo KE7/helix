@@ -18,6 +18,7 @@ from helix.config import (
     HelixConfig,
     SandboxConfig,
 )
+from helix.display import UsageStats
 from helix.mutator import invoke_claude_code
 from helix.state import BudgetState, EvolutionState
 from helix.trace import TRACE, EventType
@@ -450,37 +451,31 @@ def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
         AgentConfig(backend="claude"),
     )
 
-    assert usage["input_tokens"] == 11
-    assert usage["output_tokens"] == 7
-    assert usage["cached_input_tokens"] == 3
-    assert usage["reasoning_tokens"] == 5
-    assert usage["cost_usd"] == pytest.approx(0.31)
+    assert usage.input_tokens == 11
+    assert usage.output_tokens == 7
+    assert usage.cached_input_tokens == 3
+    assert usage.reasoning_tokens == 5
+    assert usage.cost_usd == pytest.approx(0.31)
     state = make_state()
     budget.charge_llm_usage(state, usage, candidate_id="c", source="claude")
     assert state.budget.cached_input_tokens == 3
     assert state.budget.reasoning_tokens == 5
 
 
-def test_charge_llm_usage_handles_empty_and_partial_payloads() -> None:
-    """Regression guard for the early-return / default-zero paths."""
+def test_charge_llm_usage_handles_none_and_partial_payloads() -> None:
+    """Regression guard for the None short-circuit and partial UsageStats paths."""
     state = make_state()
 
-    # ``None`` usage: short-circuit, no mutation.
+    # ``None`` usage: short-circuit, no mutation, no trace event.
     budget.charge_llm_usage(state, None, candidate_id="c", source="x")
     assert state.budget.input_tokens == 0
     assert state.budget.output_tokens == 0
     assert state.budget.cost_usd == 0.0
 
-    # Empty dict: short-circuit (falsy), no mutation.
-    budget.charge_llm_usage(state, {}, candidate_id="c", source="x")
-    assert state.budget.input_tokens == 0
-    assert state.budget.output_tokens == 0
-    assert state.budget.cost_usd == 0.0
-
-    # Partial payload: only present keys are summed; absent keys default to 0.
+    # Partial payload: only provided fields matter; absent fields default to 0.
     budget.charge_llm_usage(
         state,
-        {"input_tokens": 7},
+        UsageStats(input_tokens=7),
         candidate_id="c",
         source="x",
     )
@@ -500,15 +495,15 @@ def test_charge_llm_usage_emits_budget_update_event() -> None:
     with TRACE.record() as events:
         budget.charge_llm_usage(
             state,
-            {
-                "input_tokens": 11,
-                "output_tokens": 7,
-                "cached_input_tokens": 3,
-                "cache_creation_input_tokens": 5,
-                "cache_read_input_tokens": 7,
-                "reasoning_tokens": 13,
-                "cost_usd": 0.31,
-            },
+            UsageStats(
+                input_tokens=11,
+                output_tokens=7,
+                cached_input_tokens=3,
+                cache_creation_input_tokens=5,
+                cache_read_input_tokens=7,
+                reasoning_tokens=13,
+                cost_usd=0.31,
+            ),
             candidate_id="g1-s1",
             source="mutation",
         )
@@ -561,8 +556,6 @@ def test_charge_llm_usage_none_is_silent_noop() -> None:
 
     with TRACE.record() as events:
         budget.charge_llm_usage(state, None, candidate_id="c", source="s")
-        # The empty-dict case is the same falsy short-circuit; pin it too.
-        budget.charge_llm_usage(state, {}, candidate_id="c", source="s")
 
     assert state.budget.input_tokens == 7
     assert state.budget.output_tokens == 11
@@ -571,13 +564,13 @@ def test_charge_llm_usage_none_is_silent_noop() -> None:
 
 
 def test_charge_llm_usage_zero_delta_still_emits_event() -> None:
-    """A non-empty usage dict with all-zero deltas should still emit one event.
+    """A UsageStats with all-zero deltas should still emit one event.
 
     Pins current behavior so a future "skip on zero" optimization is a
     deliberate, test-visible decision rather than an accidental change.
     """
     state = make_state()
-    usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+    usage = UsageStats(input_tokens=0, output_tokens=0, cost_usd=0.0)
 
     with TRACE.record() as events:
         budget.charge_llm_usage(state, usage, candidate_id="c", source="mutation")

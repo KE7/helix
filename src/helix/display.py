@@ -83,35 +83,18 @@ class UsageStats:
             session_id=d.get("session_id"),
         )
 
-    def add(self, other: UsageStats | dict[str, Any]) -> None:
-        if isinstance(other, dict):
-            self.input_tokens += int(other.get("input_tokens", 0))
-            self.output_tokens += int(other.get("output_tokens", 0))
-            self.cached_input_tokens += int(other.get("cached_input_tokens", 0))
-            self.cache_creation_input_tokens += int(
-                other.get("cache_creation_input_tokens", 0)
-            )
-            self.cache_read_input_tokens += int(other.get("cache_read_input_tokens", 0))
-            self.reasoning_tokens += int(other.get("reasoning_tokens", 0))
-            self.num_turns += int(other.get("num_turns", 0))
-            self.tool_event_count += int(other.get("tool_event_count", 0))
-            self.cost_usd += float(other.get("cost_usd", 0.0))
-            new_tools = other.get("tool_names", [])
-            if isinstance(new_tools, list):
-                for t in new_tools:
-                    self.tool_names.append(t)
-        else:
-            self.input_tokens += other.input_tokens
-            self.output_tokens += other.output_tokens
-            self.cached_input_tokens += other.cached_input_tokens
-            self.cache_creation_input_tokens += other.cache_creation_input_tokens
-            self.cache_read_input_tokens += other.cache_read_input_tokens
-            self.reasoning_tokens += other.reasoning_tokens
-            self.num_turns += other.num_turns
-            self.tool_event_count += other.tool_event_count
-            self.cost_usd += other.cost_usd
-            for t in other.tool_names:
-                self.tool_names.append(t)
+    def add(self, other: UsageStats) -> None:
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.cached_input_tokens += other.cached_input_tokens
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens
+        self.cache_read_input_tokens += other.cache_read_input_tokens
+        self.reasoning_tokens += other.reasoning_tokens
+        self.num_turns += other.num_turns
+        self.tool_event_count += other.tool_event_count
+        self.cost_usd += other.cost_usd
+        for t in other.tool_names:
+            self.tool_names.append(t)
 
 
 class HelixPhase(Enum):
@@ -315,7 +298,7 @@ class HelixLiveDisplay:
     def update(
         self,
         phase: HelixPhase | str | None = None,
-        usage: UsageStats | dict[str, Any] | None = None,
+        usage: UsageStats | None = None,
         mutations_attempted: int | None = None,
         mutations_accepted: int | None = None,
     ) -> None:
