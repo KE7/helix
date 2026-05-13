@@ -2350,12 +2350,12 @@ def _run_evolution_impl(
                     _eval_for_mutate, frontier
                 )
 
-                # ---- Step W3: Skip-perfect check (minibatch path only) ----
-                # GEPA parity (reflective_mutation.py:308-327): only gate when
-                # subsample_ids is not None (no-minibatch never fires this gate).
+                # ---- Step W3: Skip-perfect check ----
+                # GEPA parity (reflective_mutation.py:308-327): fires on both
+                # minibatch and no-minibatch paths.  _parent_eval is always set
+                # at this point (minibatch eval OR train eval above).
                 if (
                     config.evolution.perfect_score_threshold is not None
-                    and _sub_ids is not None
                     and _parent_eval is not None
                     and all(
                         s >= config.evolution.perfect_score_threshold
@@ -2556,7 +2556,7 @@ def _run_evolution_impl(
                     continue
 
                 if wr.kind == "skipped":
-                    # Charge parent eval budget
+                    # Charge parent eval budget (both paths)
                     if _subsample_ids is not None and wr.parent_eval_result is not None:
                         budget_api.charge_evaluation(
                             state,
@@ -2564,6 +2564,15 @@ def _run_evolution_impl(
                             candidate_id=_parent.id,
                             split="train",
                             source="parent_minibatch",
+                        )
+                    elif _subsample_ids is None and wr.parent_eval_result is not None:
+                        # No-minibatch path: worker ran _cached_eval; n_uncached encodes was_cached
+                        budget_api.charge_evaluation(
+                            state,
+                            was_cached=(wr.parent_n_uncached == 0),
+                            candidate_id=_parent.id,
+                            split="train",
+                            source="parent_train_no_minibatch",
                         )
                     _gen_skip_records.append({
                         "generation": gen,
