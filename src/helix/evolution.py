@@ -1782,6 +1782,15 @@ def _run_evolution_impl(
             # through to reflective mutation.  HELIX previously ``continue``d
             # on every merge-gate entry regardless of attempt outcome, cutting
             # the effective mutation count by the merge-gate failure rate.
+            # GEPA-parity note: the *merge operator itself* (helix.merger.merge,
+            # invoked below) deliberately diverges from GEPA's deterministic
+            # text-component splicing (gepa/proposer/merge.py:155-203).  GEPA
+            # candidates are dict[str, str], so a syntactic per-component swap
+            # is well-defined; helix candidates are full git worktrees, where
+            # LLM-mediated file editing is the only viable approach.  Every
+            # surrounding piece — the trigger condition, parent selection,
+            # subsample selection, acceptance criterion, full-val post-eval, and
+            # rejection control flow — mirrors GEPA verbatim.
             merge_attempted = False
             if (
                 config.evolution.merge_enabled
