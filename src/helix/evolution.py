@@ -1389,6 +1389,64 @@ def _inject_top_k_best_example_history(
     return eval_result
 
 
+def _run_full_val_eval(
+    candidate: Candidate,
+    state: EvolutionState,
+    *,
+    full_val_example_ids: list[str] | tuple[str, ...],
+    minibatch_cache: "MinibatchEvalCache[object, str] | None",
+    eval_cache: EvaluationCache | None,
+    config: HelixConfig,
+    project_root: Path,
+    source_batch: str,
+    source_single: str,
+) -> EvalResult:
+    """Full-val eval on whichever path (batch via cache OR single-task) the
+    config selects; charges the budget with the appropriate ``source`` tag.
+
+    The batch path calls :func:`_cached_evaluate_batch` (per-example cache,
+    GEPA parity).  The single-task path calls :func:`_cached_eval` (split-level
+    cache).  Charges via :func:`budget_api.charge_evaluation` with
+    ``source=source_batch`` on the batch path and ``source=source_single`` on
+    the single-task path.
+
+    The three :func:`_run_evolution_impl` / seed-eval full-val blocks are
+    structurally identical except for the candidate variable and ``source``
+    strings (§3 D3 of the scope report).  This helper eliminates that
+    duplication.  Callers are responsible for any pre-eval side effects (e.g.
+    the seed-eval path calls ``_refresh_protected_evaluator_files`` before
+    invoking this helper on the single-task branch).
+    """
+    if full_val_example_ids:
+        result, n_uncached = _cached_evaluate_batch(
+            candidate,
+            list(full_val_example_ids),
+            minibatch_cache,
+            config,
+            "val",
+            project_root,
+        )
+        result.candidate_id = candidate.id
+        budget_api.charge_evaluation(
+            state,
+            num_actual_examples=n_uncached,
+            candidate_id=candidate.id,
+            split="val",
+            source=source_batch,
+        )
+    else:
+        result, cached = _cached_eval(candidate, config, "val", eval_cache)
+        result.candidate_id = candidate.id
+        budget_api.charge_evaluation(
+            state,
+            was_cached=cached,
+            candidate_id=candidate.id,
+            split="val",
+            source=source_single,
+        )
+    return result
+
+
 def _full_val_example_ids(
     config: HelixConfig,
     val_loader: "HelixDataLoader | _RangeDataLoader | None" = None,
@@ -1914,35 +1972,23 @@ def _run_evolution_impl(
         # is None (single-task/no-example mode, e.g. circle_packing) we
         # cannot key the cache by example id, so we fall back to one evaluator
         # call (counted as one uncached metric call).
-        if full_val_example_ids:
-            _seed_example_ids = list(full_val_example_ids)
-            seed_result, _seed_num_actual = _cached_evaluate_batch(
-                seed,
-                _seed_example_ids,
-                minibatch_cache,
-                config,
-                "val",
-                project_root,
-            )
-            seed_result.candidate_id = seed.id
-            budget_api.charge_evaluation(
-                state,
-                num_actual_examples=_seed_num_actual,
-                candidate_id=seed.id,
-                split="val",
-                source="seed_val_batch",
-            )
-        else:
+        # Pre-refresh on the single-task branch (no example ids): the protected
+        # evaluator files must be current before _cached_eval reads them.  The
+        # batch branch goes through _cached_evaluate_batch which rewrites the
+        # worktree each call, so no pre-refresh is needed there.
+        if not full_val_example_ids:
             _refresh_protected_evaluator_files(seed, config, project_root)
-            seed_result, _seed_cached = _cached_eval(seed, config, "val", eval_cache)
-            seed_result.candidate_id = seed.id
-            budget_api.charge_evaluation(
-                state,
-                was_cached=_seed_cached,
-                candidate_id=seed.id,
-                split="val",
-                source="seed_val",
-            )
+        seed_result = _run_full_val_eval(
+            seed,
+            state,
+            full_val_example_ids=full_val_example_ids,
+            minibatch_cache=minibatch_cache,
+            eval_cache=eval_cache,
+            config=config,
+            project_root=project_root,
+            source_batch="seed_val_batch",
+            source_single="seed_val",
+        )
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
@@ -2357,39 +2403,17 @@ def _run_evolution_impl(
                                 # Budget accounting charges the uncached
                                 # full-val example count; single-task/no-example
                                 # evals still charge 0/1 metric calls via _cached_eval.
-                                if full_val_example_ids:
-                                    _full_val_ids = list(full_val_example_ids)
-                                    full_val_result, _full_n = _cached_evaluate_batch(
-                                        merged,
-                                        _full_val_ids,
-                                        minibatch_cache,
-                                        config,
-                                        "val",
-                                        project_root,
-                                    )
-                                    full_val_result.candidate_id = merged.id
-                                    budget_api.charge_evaluation(
-                                        state,
-                                        num_actual_examples=_full_n,
-                                        candidate_id=merged.id,
-                                        split="val",
-                                        source="merge_full_val_batch",
-                                    )
-                                else:
-                                    full_val_result, _full_val_cached = _cached_eval(
-                                        merged,
-                                        config,
-                                        "val",
-                                        eval_cache,
-                                    )
-                                    full_val_result.candidate_id = merged.id
-                                    budget_api.charge_evaluation(
-                                        state,
-                                        was_cached=_full_val_cached,
-                                        candidate_id=merged.id,
-                                        split="val",
-                                        source="merge_full_val",
-                                    )
+                                full_val_result = _run_full_val_eval(
+                                    merged,
+                                    state,
+                                    full_val_example_ids=full_val_example_ids,
+                                    minibatch_cache=minibatch_cache,
+                                    eval_cache=eval_cache,
+                                    config=config,
+                                    project_root=project_root,
+                                    source_batch="merge_full_val_batch",
+                                    source_single="merge_full_val",
+                                )
                                 _save_evaluation(base_dir, full_val_result)
 
                                 if budget_api.budget_exhausted(state, config):
@@ -3171,38 +3195,18 @@ def _run_evolution_impl(
                 # fall back to the legacy ``_cached_eval`` path keyed by
                 # ``(candidate_id, split)`` — single-task/no-example mode has no example
                 # ids to key on.
-                if full_val_example_ids:
-                    _val_example_ids = list(full_val_example_ids)
-                    val_result, _n = _cached_evaluate_batch(
-                        child,
-                        _val_example_ids,
-                        minibatch_cache,
-                        config,
-                        "val",
-                        project_root,
-                    )
-                    val_result.candidate_id = child.id
-                    _last_eval_result = val_result
-                    budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=_n,
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_full_val_batch",
-                    )
-                else:
-                    val_result, _val_cached = _cached_eval(
-                        child, config, "val", eval_cache
-                    )
-                    val_result.candidate_id = child.id
-                    _last_eval_result = val_result
-                    budget_api.charge_evaluation(
-                        state,
-                        was_cached=_val_cached,
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_full_val",
-                    )
+                val_result = _run_full_val_eval(
+                    child,
+                    state,
+                    full_val_example_ids=full_val_example_ids,
+                    minibatch_cache=minibatch_cache,
+                    eval_cache=eval_cache,
+                    config=config,
+                    project_root=project_root,
+                    source_batch="mutation_full_val_batch",
+                    source_single="mutation_full_val",
+                )
+                _last_eval_result = val_result
 
                 if budget_api.budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
