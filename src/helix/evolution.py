@@ -10,6 +10,7 @@ import random as _random
 import shutil
 import shlex
 import subprocess
+import tempfile
 import threading
 import traceback
 from dataclasses import replace
@@ -80,25 +81,29 @@ from helix.worktree import (
     remove_worktree,
     snapshot_candidate,
 )
+from helix.evaluator_manifest import (  # noqa: E402  (after helix.worktree intentionally)
+    # 14 moved symbols — re-exported for backward compatibility and internal use
+    _collect_protected_evaluator_paths,
+    _copy_protected_path,
+    _detect_evaluator_tamper,
+    _evaluator_manifest_path,
+    _extract_script_token,
+    _iter_protected_manifest_files,
+    _load_evaluator_integrity_manifest,
+    _looks_like_script_file,
+    _build_evaluator_integrity_manifest,
+    _refresh_and_snapshot_protected_evaluator_files,
+    _refresh_protected_evaluator_files,
+    _sha256_file,
+    _to_repo_relative,
+    _write_evaluator_integrity_manifest,
+    # Constants needed by _check_evaluator_script_exists (which stays in this module)
+    _NO_SCRIPT_COMMANDS,
+    _SHELL_COMMAND_FLAGS,
+    _SHELL_WRAPPERS,
+)
 
 logger = logging.getLogger(__name__)
-
-# NOTE: ``shutil.ignore_patterns`` uses ``fnmatch`` *basename* matching, not
-# gitignore semantics.  Add basename globs here only -- patterns like
-# ``**/build/`` or ``cache/**`` will not match.  If we ever need gitignore
-# semantics, switch to ``pathspec`` rather than extending this tuple.
-_PROTECTED_DIRECTORY_IGNORE_PATTERNS = (
-    ".git",
-    "__pycache__",
-    "*.pyc",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-)
-# Reusable matcher; the patterns are constant so we build it once.
-_PROTECTED_DIRECTORY_IGNORE_MATCHER = shutil.ignore_patterns(
-    *_PROTECTED_DIRECTORY_IGNORE_PATTERNS
-)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +313,29 @@ def init_base_dir(base_dir: Path, config: HelixConfig) -> None:
         config_path.write_text("".join(lines))
 
 
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Write *data* as JSON to *path* atomically using a sibling temp file.
+
+    Uses ``tempfile.mkstemp`` + ``Path.replace()`` (atomic on POSIX) to avoid
+    partial-write corruption when a concurrent reader or a crash mid-write
+    could otherwise observe a truncated file.  The temp file is created in the
+    same directory as *path* so that ``replace()`` is an intra-filesystem
+    rename rather than a cross-device copy.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        Path(tmp).replace(path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
     """Persist an EvalResult to evaluations/<candidate_id>.json.
 
@@ -319,10 +347,57 @@ def _save_evaluation(base_dir: Path, result: EvalResult) -> None:
     pre-multi-axis shape.
     """
     eval_dir = base_dir / "evaluations"
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    (eval_dir / f"{result.candidate_id}.json").write_text(
-        json.dumps(result.to_dict(), indent=2)
-    )
+    _atomic_write_json(eval_dir / f"{result.candidate_id}.json", result.to_dict())
+
+
+def _save_attempt_result(
+    base_dir: Path,
+    result: EvalResult,
+    *,
+    status: str,
+    reason: str,
+    parent_id: str | None,
+    generation: int,
+    stage: str,
+    example_ids: list[str] | None = None,
+) -> None:
+    """Persist a non-frontier attempt result without polluting evaluations/.
+
+    ``evaluations/`` is the accepted/full-evaluation surface used for frontier
+    reporting.  Rejected mutations can still consume a generation and useful
+    evaluator work, so keep their gating/stage results under ``attempts/`` for
+    resume/debugging instead of leaving lineage entries with no result artifact.
+    """
+    attempts_dir = base_dir / "attempts"
+    payload = result.to_dict()
+    payload["attempt"] = {
+        "status": status,
+        "reason": reason,
+        "parent_id": parent_id,
+        "generation": generation,
+        "stage": stage,
+        "example_ids": example_ids,
+    }
+    _atomic_write_json(attempts_dir / f"{result.candidate_id}.json", payload)
+
+
+def _save_skip_record(
+    base_dir: Path,
+    *,
+    generation: int,
+    records: list[dict[str, Any]],
+) -> None:
+    """Persist all per-proposal skip records for a generation as a JSON list.
+
+    All parents that triggered the perfect-subsample gate within the same
+    generation are written as a single list so that ``n_proposals > 1`` with
+    multiple perfect parents does not silently overwrite earlier records.
+    Skip records are intentionally separate from candidate attempts: no child
+    program exists, but the run should still explain why a generation has no
+    candidate result.
+    """
+    skips_dir = base_dir / "skips"
+    _atomic_write_json(skips_dir / f"g{generation}.json", records)
 
 
 def _load_evaluation(base_dir: Path, candidate_id: str) -> EvalResult | None:
@@ -342,321 +417,133 @@ def _gen_from_id(candidate_id: str) -> int:
         return 0
 
 
-_NO_SCRIPT_COMMANDS = {"make", "pytest"}
-_INTERPRETERS = {"python", "python3", "uv", "poetry", "node", "bash", "sh"}
-_SKIP_TOKENS = {"run"}
-_SCRIPT_SUFFIXES = (".py", ".sh", ".js", ".ts")
-# Shell wrappers whose command body (after -c/-lc/...) is opaque to path-level
-# validation — e.g. `bash -lc "cd /x && python evaluate.py"`.
-# Note: only the adjacent `{wrapper} {flag}` prefix is exempted. Forms like
-# `bash --login -c "..."` (separate tokens) fall through to the normal
-# script-path checks by design — extend _SHELL_COMMAND_FLAGS if that becomes
-# a real-world need.
-_SHELL_WRAPPERS = {"bash", "sh", "zsh", "fish", "dash"}
-_SHELL_COMMAND_FLAGS = {"-c", "-lc", "-ic", "-ilc", "-lic"}
-_EVALUATOR_MANIFEST_FILENAME = "evaluator_manifest.json"
+def _proposal_counter_from_id(candidate_id: str) -> int:
+    """Parse the proposal counter from a candidate id like 'g3-s4'.
 
-
-def _extract_script_token(tokens: list[str]) -> str | None:
-    """Return the most likely script token from a tokenized command."""
-    skip_next = False
-    for token in tokens:
-        if skip_next:
-            skip_next = False
-            continue
-        if token == "-m":
-            # `python -m module` has no script path token.
-            skip_next = True
-            continue
-        if token in _INTERPRETERS or token in _SKIP_TOKENS:
-            continue
-        if token.startswith("-"):
-            continue
-        return token
-    return None
-
-
-def _looks_like_script_file(path_token: str) -> bool:
-    """Heuristic for script-like file paths used by evaluator commands."""
-    if path_token.endswith("/"):
-        return False
-    return any(path_token.endswith(ext) for ext in _SCRIPT_SUFFIXES)
-
-
-def _to_repo_relative(path_token: str, project_root: Path) -> str | None:
-    """Normalize a path token to a repo-relative POSIX path when possible."""
-    project_root_resolved = project_root.resolve()
-    token_path = Path(path_token)
-    abs_path = (
-        token_path.resolve()
-        if token_path.is_absolute()
-        else (project_root_resolved / token_path).resolve()
-    )
+    Returns 0 on parse failure (e.g., legacy or seed-only IDs that do not
+    match the ``gN-sN`` format).  Note that counter=0 is ambiguous with the
+    first valid proposal slot ``g0-s0``; callers that filter by
+    ``counter > 0`` intentionally exclude both parse failures and the zeroth
+    slot for that reason.
+    """
     try:
-        return abs_path.relative_to(project_root_resolved).as_posix()
-    except ValueError:
-        return None
+        return int(candidate_id.split("-")[1].lstrip("s"))
+    except (IndexError, ValueError):
+        return 0
 
 
-def _collect_protected_evaluator_paths(
-    config: HelixConfig, project_root: Path
-) -> list[str]:
-    """Collect repo-relative files that should stay immutable during evolution."""
-    protected: set[str] = set()
-
-    for cmd in [config.evaluator.command, *config.evaluator.extra_commands]:
-        try:
-            tokens = shlex.split(cmd)
-        except ValueError:
-            continue
-        if not tokens or tokens[0] in _NO_SCRIPT_COMMANDS:
-            continue
-        # Shell wrappers like `bash -c "..."` hide the real command inside an
-        # opaque body string; path-level validation cannot reason about it.
-        if (
-            tokens[0] in _SHELL_WRAPPERS
-            and len(tokens) >= 2
-            and tokens[1] in _SHELL_COMMAND_FLAGS
-        ):
-            continue
-        script_token = _extract_script_token(tokens)
-        if script_token is None or not _looks_like_script_file(script_token):
-            continue
-        rel = _to_repo_relative(script_token, project_root)
-        if rel is not None:
-            protected.add(rel)
-
-    for path_str in config.evaluator.protected_files:
-        rel = _to_repo_relative(path_str, project_root)
-        if rel is None:
-            raise HelixError(
-                f"evaluator.protected_files path is outside project root: {path_str}",
-                operation="resolve protected evaluator files",
-                suggestion="Use repo-relative paths under the project root.",
-            )
-        protected.add(rel)
-
-    return sorted(protected)
-
-
-def _copy_protected_path(source: Path, destination: Path) -> None:
-    """Refresh one protected file/directory in a candidate worktree."""
-    if source.resolve(strict=False) == destination.resolve(strict=False):
+def _remove_lineage_records(lineage_path: Path, candidate_ids: set[str]) -> None:
+    """Remove candidate ids from the raw lineage JSON array."""
+    if not lineage_path.exists() or not candidate_ids:
         return
-
-    if destination.exists() or destination.is_symlink():
-        if destination.is_dir() and not destination.is_symlink():
-            shutil.rmtree(destination)
-        else:
-            destination.unlink()
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir() and not source.is_symlink():
-        shutil.copytree(
-            source,
-            destination,
-            ignore=_PROTECTED_DIRECTORY_IGNORE_MATCHER,
-        )
-    elif source.is_symlink():
-        os.symlink(os.readlink(source), destination)
-    else:
-        shutil.copy2(source, destination)
+    records = json.loads(lineage_path.read_text())
+    kept = [record for record in records if record.get("id") not in candidate_ids]
+    tmp_path = lineage_path.with_suffix(f"{lineage_path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(kept, indent=2))
+    tmp_path.replace(lineage_path)
 
 
-def _refresh_protected_evaluator_files(
-    candidate: Candidate,
-    config: HelixConfig,
-    project_root: Path,
-) -> None:
-    """Copy current root protected evaluator/runtime files into a worktree."""
-    worktree_root = Path(candidate.worktree_path)
-    for rel_path in _collect_protected_evaluator_paths(config, project_root):
-        source = project_root / rel_path
-        if not source.exists() and not source.is_symlink():
+def _reconcile_incomplete_attempts_on_resume(
+    *,
+    state: EvolutionState,
+    base_dir: Path,
+    worktrees_dir: Path,
+    lineage_path: Path,
+) -> bool:
+    """Discard interrupted live attempts so resume retries their visible slot.
+
+    A completed proposal has either an evaluation artifact, an attempt artifact,
+    or frontier membership.  If a lineage entry still has a worktree but none of
+    those completion markers, HELIX likely stopped between candidate creation
+    and final result persistence.  Remove only those live incomplete worktrees;
+    historical lineage-only entries without worktrees are left untouched because
+    they may come from older completed runs that predate attempt artifacts.
+    """
+    if not lineage_path.exists():
+        return False
+
+    lineage = load_lineage(lineage_path)
+    completed_ids = set(state.frontier)
+    for artifact_dir in (base_dir / "evaluations", base_dir / "attempts"):
+        if artifact_dir.exists():
+            completed_ids.update(path.stem for path in artifact_dir.glob("*.json"))
+
+    incomplete_ids: set[str] = set()
+    for candidate_id, entry in lineage.items():
+        if candidate_id in completed_ids:
             continue
-        _copy_protected_path(source, worktree_root / rel_path)
-
-
-def _refresh_and_snapshot_protected_evaluator_files(
-    candidate: Candidate,
-    config: HelixConfig,
-    project_root: Path,
-) -> None:
-    """Normalize HELIX-owned protected-file refresh before backend mutation."""
-    _refresh_protected_evaluator_files(candidate, config, project_root)
-    snapshot_candidate(candidate, "helix: refresh protected evaluator files")
-
-
-def _sha256_file(path: Path) -> str:
-    """Streamed SHA-256 of ``path``.
-
-    Uses ``hashlib.file_digest`` (Python 3.11+) so large protected files
-    (e.g., evaluator dataset ``.jsonl`` files) are not buffered in memory.
-    """
-    with path.open("rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
-
-
-def _iter_protected_manifest_files(
-    source_path: Path,
-    rel_path: str,
-) -> list[tuple[str, Path]]:
-    """Return manifest entries under one protected file/directory.
-
-    ``source_path`` is expected to already be a real path (callers resolve
-    symlinks before calling).  ``os.walk`` is used with ``followlinks=False``
-    (the default) so symlinks inside the directory are not traversed.
-    """
-    if source_path.is_file():
-        return [(rel_path, source_path)]
-    if not source_path.is_dir():
-        return []
-
-    entries: list[tuple[str, Path]] = []
-    for dirpath_str, dirnames, filenames in os.walk(source_path):
-        ignored = _PROTECTED_DIRECTORY_IGNORE_MATCHER(
-            dirpath_str, [*dirnames, *filenames]
-        )
-        dirnames[:] = sorted(name for name in dirnames if name not in ignored)
-        for filename in sorted(name for name in filenames if name not in ignored):
-            file_path = Path(dirpath_str) / filename
-            # Defensive against TOCTOU: ``os.walk`` already separated files
-            # from directories, but a concurrent unlink/rename could leave a
-            # stale name behind.
-            if not file_path.is_file():
-                continue
-            entry_path = Path(rel_path) / file_path.relative_to(source_path)
-            entries.append((entry_path.as_posix(), file_path))
-    return entries
-
-
-def _evaluator_manifest_path(base_dir: Path) -> Path:
-    return base_dir / _EVALUATOR_MANIFEST_FILENAME
-
-
-def _build_evaluator_integrity_manifest(
-    config: HelixConfig,
-    baseline_root: Path,
-    project_root: Path,
-) -> dict[str, str]:
-    """Build {repo_relative_path: sha256} for protected evaluator files.
-
-    Fails closed: an unreadable protected file raises ``HelixError`` rather
-    than silently being omitted from the manifest -- otherwise tamper
-    detection would not flag changes to that file on resume.
-    """
-    manifest: dict[str, str] = {}
-    for rel_path in _collect_protected_evaluator_paths(config, project_root):
-        source_path = (baseline_root / rel_path).resolve()
-        if not source_path.exists():
-            logger.warning(
-                "Skipping protected evaluator path %s: missing from baseline %s",
-                rel_path,
-                baseline_root,
-            )
+        if entry.operation not in {"mutate", "mutation", "merge"}:
             continue
-        entries = _iter_protected_manifest_files(source_path, rel_path)
-        if not entries and source_path.is_dir():
-            # Surface likely misconfigurations (e.g., a protected directory
-            # whose only contents match the ignore list).
-            logger.warning(
-                "Protected evaluator directory %s contributed 0 manifest "
-                "entries (every file matched the ignore list).",
-                rel_path,
-            )
-        for manifest_rel_path, file_path in entries:
-            try:
-                manifest[manifest_rel_path] = _sha256_file(file_path)
-            except OSError as exc:
-                raise HelixError(
-                    f"Failed hashing protected evaluator file: {file_path}",
-                    operation="build evaluator integrity manifest",
-                    suggestion=(
-                        "Ensure the file is readable and not held open by "
-                        "another process before retrying."
-                    ),
-                ) from exc
-    return manifest
+        if (worktrees_dir / candidate_id).exists():
+            incomplete_ids.add(candidate_id)
+
+    for wt_path in worktrees_dir.glob("g*-s*"):
+        candidate_id = wt_path.name
+        if candidate_id in completed_ids or candidate_id in lineage:
+            continue
+        if wt_path.is_dir():
+            incomplete_ids.add(candidate_id)
+
+    if not incomplete_ids:
+        return False
+
+    first_generation = min(_gen_from_id(candidate_id) for candidate_id in incomplete_ids)
+    first_counter = min(_proposal_counter_from_id(candidate_id) for candidate_id in incomplete_ids)
+
+    for candidate_id in sorted(incomplete_ids):
+        wt_path = worktrees_dir / candidate_id
+        _safe_remove_worktree(
+            Candidate(
+                id=candidate_id,
+                worktree_path=str(wt_path),
+                branch_name=f"helix/{candidate_id}",
+                generation=_gen_from_id(candidate_id),
+                parent_id=None,
+                parent_ids=[],
+                operation="interrupted",
+            ),
+            label="orphan worktree from prior run",
+        )
+
+    _remove_lineage_records(lineage_path, incomplete_ids)
+    for candidate_id in incomplete_ids:
+        state.instance_scores.pop(candidate_id, None)
+    state.frontier = [cid for cid in state.frontier if cid not in incomplete_ids]
+    state.active_frontier = {
+        objective: [cid for cid in ids if cid not in incomplete_ids]
+        for objective, ids in state.active_frontier.items()
+    }
+
+    completed_counters = [
+        _proposal_counter_from_id(candidate_id)
+        for candidate_id in completed_ids
+        if _proposal_counter_from_id(candidate_id) > 0
+    ]
+    max_completed_counter = max(completed_counters, default=0)
+    state.mutation_counter = max(max_completed_counter, first_counter - 1)
+    budget_api.set_generation(state, max(0, first_generation - 1))
+    print_warning(
+        "Removed incomplete attempt(s) from prior interruption: "
+        f"{', '.join(sorted(incomplete_ids))}. The next resume will retry "
+        f"generation {first_generation}."
+    )
+    return True
 
 
-def _write_evaluator_integrity_manifest(
-    base_dir: Path, manifest: dict[str, str]
-) -> None:
-    """Persist immutable evaluator manifest for resume."""
-    path = _evaluator_manifest_path(base_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "files": manifest}
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
+    """Remove ``candidate``'s worktree, warning on failure rather than raising.
 
-
-def _load_evaluator_integrity_manifest(base_dir: Path) -> dict[str, str] | None:
-    """Load persisted immutable evaluator manifest, if available."""
-    path = _evaluator_manifest_path(base_dir)
-    if not path.exists():
-        return None
+    The nine rejection / cleanup paths in :func:`_run_evolution_impl` and
+    :func:`_reconcile_incomplete_attempts_on_resume` all need the same
+    "best-effort remove + warn" behaviour.  Extracting this avoids 9× copies
+    of the same try/except.
+    """
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        logger.exception("Failed to read evaluator integrity manifest: %s", path)
-        return None
-    files = payload.get("files")
-    if not isinstance(files, dict):
-        return None
-    manifest: dict[str, str] = {}
-    for key, value in files.items():
-        if isinstance(key, str) and isinstance(value, str):
-            manifest[key] = value
-    return manifest
-
-
-def _detect_evaluator_tamper(
-    candidate: Candidate,
-    manifest: dict[str, str],
-    config: HelixConfig | None = None,
-    project_root: Path | None = None,
-) -> list[str]:
-    """Return protected paths that diverge from the frozen evaluator manifest.
-
-    Detects three classes of tamper:
-
-    1. Modification of a baseline-listed file (hash mismatch).
-    2. Deletion of a baseline-listed file.
-    3. *Addition* of a previously-unknown file inside a protected directory,
-       when ``config`` and ``project_root`` are supplied.  Without these
-       arguments only the first two classes are reported, preserving the
-       legacy contract for callers that don't have config in scope.
-    """
-    if not manifest:
-        return []
-    violations: set[str] = set()
-    worktree_root = Path(candidate.worktree_path)
-    for rel_path, expected_hash in manifest.items():
-        candidate_path = worktree_root / rel_path
-        if not candidate_path.exists() or not candidate_path.is_file():
-            violations.add(rel_path)
-            continue
-        try:
-            if _sha256_file(candidate_path) != expected_hash:
-                violations.add(rel_path)
-        except OSError:
-            violations.add(rel_path)
-
-    if config is not None and project_root is not None:
-        known = set(manifest)
-        for protected_rel in _collect_protected_evaluator_paths(
-            config, project_root
-        ):
-            candidate_path = worktree_root / protected_rel
-            # Only directories can hold *new* files; single-file protected
-            # paths are fully covered by the manifest loop above.
-            if not candidate_path.is_dir() or candidate_path.is_symlink():
-                continue
-            for entry_rel, _ in _iter_protected_manifest_files(
-                candidate_path, protected_rel
-            ):
-                if entry_rel not in known:
-                    violations.add(entry_rel)
-    return sorted(violations)
+        remove_worktree(candidate)
+    except Exception as exc:
+        print_warning(
+            f"Could not remove worktree for {label} {candidate.id}: {exc}"
+        )
 
 
 def _check_evaluator_script_exists(evaluator_command: str, project_root: Path) -> None:
@@ -1189,6 +1076,64 @@ def _inject_top_k_best_example_history(
     return eval_result
 
 
+def _run_full_val_eval(
+    candidate: Candidate,
+    state: EvolutionState,
+    *,
+    full_val_example_ids: list[str] | tuple[str, ...],
+    minibatch_cache: "MinibatchEvalCache[object, str] | None",
+    eval_cache: EvaluationCache | None,
+    config: HelixConfig,
+    project_root: Path,
+    source_batch: str,
+    source_single: str,
+) -> EvalResult:
+    """Full-val eval on whichever path (batch via cache OR single-task) the
+    config selects; charges the budget with the appropriate ``source`` tag.
+
+    The batch path calls :func:`_cached_evaluate_batch` (per-example cache,
+    GEPA parity).  The single-task path calls :func:`_cached_eval` (split-level
+    cache).  Charges via :func:`budget_api.charge_evaluation` with
+    ``source=source_batch`` on the batch path and ``source=source_single`` on
+    the single-task path.
+
+    The three :func:`_run_evolution_impl` / seed-eval full-val blocks are
+    structurally identical except for the candidate variable and ``source``
+    strings (§3 D3 of the scope report).  This helper eliminates that
+    duplication.  Callers are responsible for any pre-eval side effects (e.g.
+    the seed-eval path calls ``_refresh_protected_evaluator_files`` before
+    invoking this helper on the single-task branch).
+    """
+    if full_val_example_ids:
+        result, n_uncached = _cached_evaluate_batch(
+            candidate,
+            list(full_val_example_ids),
+            minibatch_cache,
+            config,
+            "val",
+            project_root,
+        )
+        result.candidate_id = candidate.id
+        budget_api.charge_evaluation(
+            state,
+            num_actual_examples=n_uncached,
+            candidate_id=candidate.id,
+            split="val",
+            source=source_batch,
+        )
+    else:
+        result, cached = _cached_eval(candidate, config, "val", eval_cache)
+        result.candidate_id = candidate.id
+        budget_api.charge_evaluation(
+            state,
+            was_cached=cached,
+            candidate_id=candidate.id,
+            split="val",
+            source=source_single,
+        )
+    return result
+
+
 def _full_val_example_ids(
     config: HelixConfig,
     val_loader: "HelixDataLoader | _RangeDataLoader | None" = None,
@@ -1344,6 +1289,23 @@ def run_evolution(
     base_dir: Path,
 ) -> HelixResult:
     """Run the HELIX evolutionary loop."""
+    # Mirror GEPA api.py:262-265: at least one stopping condition is required.
+    # Without this, perfect-skip + always-perfect data + no effective bound =
+    # a run that terminates only by the OS.  In HELIX, max_generations (loop
+    # bound) and max_evaluations (budget cap, <= 0 disables) are the two
+    # supported stopping conditions.  max_generations defaults to 10 and is
+    # always a positive int; this guard fires only if a caller explicitly sets
+    # it to <= 0 while leaving max_evaluations disabled.
+    if (
+        config.evolution.max_generations <= 0
+        and config.evolution.max_evaluations <= 0
+    ):
+        raise ValueError(
+            "At least one stopping condition is required: set "
+            "config.evolution.max_generations to a positive integer, or "
+            "config.evolution.max_evaluations > 0. "
+            "See GEPA api.py:262-265 for the upstream equivalent check."
+        )
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
             raise HelixError(
@@ -1598,6 +1560,13 @@ def _run_evolution_impl(
                 "Config hash differs from the saved state; resuming with the current "
                 "config while keeping the existing frontier and history."
             )
+        if _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        ):
+            _save_state(state)
         # Reconstruct in-memory frontier from persisted evaluations
         for cid in state.frontier:
             result = _load_evaluation(base_dir, cid)
@@ -1662,7 +1631,7 @@ def _run_evolution_impl(
                     source="seed_generation",
                 )
             except Exception:
-                remove_worktree(seed)
+                _safe_remove_worktree(seed, label="failed seed generation")
                 raise
             print_success("Seed generation complete.")
         else:
@@ -1690,35 +1659,23 @@ def _run_evolution_impl(
         # is None (single-task/no-example mode, e.g. circle_packing) we
         # cannot key the cache by example id, so we fall back to one evaluator
         # call (counted as one uncached metric call).
-        if full_val_example_ids:
-            _seed_example_ids = list(full_val_example_ids)
-            seed_result, _seed_num_actual = _cached_evaluate_batch(
-                seed,
-                _seed_example_ids,
-                minibatch_cache,
-                config,
-                "val",
-                project_root,
-            )
-            seed_result.candidate_id = seed.id
-            budget_api.charge_evaluation(
-                state,
-                num_actual_examples=_seed_num_actual,
-                candidate_id=seed.id,
-                split="val",
-                source="seed_val_batch",
-            )
-        else:
+        # Pre-refresh on the single-task branch (no example ids): the protected
+        # evaluator files must be current before _cached_eval reads them.  The
+        # batch branch goes through _cached_evaluate_batch which rewrites the
+        # worktree each call, so no pre-refresh is needed there.
+        if not full_val_example_ids:
             _refresh_protected_evaluator_files(seed, config, project_root)
-            seed_result, _seed_cached = _cached_eval(seed, config, "val", eval_cache)
-            seed_result.candidate_id = seed.id
-            budget_api.charge_evaluation(
-                state,
-                was_cached=_seed_cached,
-                candidate_id=seed.id,
-                split="val",
-                source="seed_val",
-            )
+        seed_result = _run_full_val_eval(
+            seed,
+            state,
+            full_val_example_ids=full_val_example_ids,
+            minibatch_cache=minibatch_cache,
+            eval_cache=eval_cache,
+            config=config,
+            project_root=project_root,
+            source_batch="seed_val_batch",
+            source_single="seed_val",
+        )
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
@@ -1780,7 +1737,18 @@ def _run_evolution_impl(
         mutations_attempted = 0
         mutations_accepted = 0
 
-        for gen in range(start_gen, config.evolution.max_generations + 1):
+        gen = start_gen - 1
+        while gen < config.evolution.max_generations:
+            # GEPA parity (engine.py:649): increment generation UNCONDITIONALLY
+            # at the top of the loop body, before any proposal work.  GEPA
+            # advances ``state.i`` at line 649, before any proposal logic.
+            # Moving the increment here eliminates the helix-original rollback
+            # construct that caused the NB-2 infinite-retry scenario
+            # (always-perfect data + cached parent eval + no budget cap →
+            # gen never advances).  After this change there is no code path
+            # that skips or rewinds ``gen``; budget_api.advance_proposal_counter
+            # (which increments state.i) continues to run here unconditionally.
+            gen += 1
             live.gen = gen
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
@@ -1970,12 +1938,7 @@ def _run_evolution_impl(
                                 f"Merge {merge_id} touched protected evaluator files "
                                 f"({', '.join(merge_tamper)}) -- rejecting."
                             )
-                            try:
-                                remove_worktree(merged)
-                            except Exception as _rm_exc:
-                                print_warning(
-                                    f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                )
+                            _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
                         else:
                             candidates[merged.id] = merged
                             record_entry(
@@ -2012,12 +1975,7 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} produced a previously-seen "
                                     f"output (desc {merged_sha[:8]}) -- skipping."
                                 )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for duplicate-desc merge {merge_id}: {_rm_exc}"
-                                    )
+                                _safe_remove_worktree(merged, label="duplicate-desc merge candidate")
                                 if merged.id in candidates:
                                     del candidates[merged.id]
                                 _save_state(state)
@@ -2132,39 +2090,17 @@ def _run_evolution_impl(
                                 # Budget accounting charges the uncached
                                 # full-val example count; single-task/no-example
                                 # evals still charge 0/1 metric calls via _cached_eval.
-                                if full_val_example_ids:
-                                    _full_val_ids = list(full_val_example_ids)
-                                    full_val_result, _full_n = _cached_evaluate_batch(
-                                        merged,
-                                        _full_val_ids,
-                                        minibatch_cache,
-                                        config,
-                                        "val",
-                                        project_root,
-                                    )
-                                    full_val_result.candidate_id = merged.id
-                                    budget_api.charge_evaluation(
-                                        state,
-                                        num_actual_examples=_full_n,
-                                        candidate_id=merged.id,
-                                        split="val",
-                                        source="merge_full_val_batch",
-                                    )
-                                else:
-                                    full_val_result, _full_val_cached = _cached_eval(
-                                        merged,
-                                        config,
-                                        "val",
-                                        eval_cache,
-                                    )
-                                    full_val_result.candidate_id = merged.id
-                                    budget_api.charge_evaluation(
-                                        state,
-                                        was_cached=_full_val_cached,
-                                        candidate_id=merged.id,
-                                        split="val",
-                                        source="merge_full_val",
-                                    )
+                                full_val_result = _run_full_val_eval(
+                                    merged,
+                                    state,
+                                    full_val_example_ids=full_val_example_ids,
+                                    minibatch_cache=minibatch_cache,
+                                    eval_cache=eval_cache,
+                                    config=config,
+                                    project_root=project_root,
+                                    source_batch="merge_full_val_batch",
+                                    source_single="merge_full_val",
+                                )
                                 _save_evaluation(base_dir, full_val_result)
 
                                 if budget_api.budget_exhausted(state, config):
@@ -2191,12 +2127,7 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
                                     f"max parent {required_score:.4f} -- rejecting."
                                 )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                    )
+                                _safe_remove_worktree(merged, label="score-rejected merge candidate")
                                 if merged.id in candidates:
                                     del candidates[merged.id]
 
@@ -2312,10 +2243,18 @@ def _run_evolution_impl(
             ) -> tuple[EvalResult | None, int]:
                 _parent, _pfr, _sub_ids, _new_id = pre_ctx
                 if _sub_ids is not None:
+                    # GEPA parity (reflective_mutation.py:268-269): parent
+                    # minibatch evals BYPASS the cache — pass ``None`` so that
+                    # every call goes to the real evaluator and charges the full
+                    # minibatch size toward budget.  The cache is reserved for
+                    # val-set full evaluations only (GEPA engine.py:154-173).
+                    # This prevents NB-2: without this, a cache-warm parent that
+                    # always scores perfectly charges 0 toward budget while gen
+                    # keeps advancing (Change 1), making budget the only guard.
                     _mb, _n_uncached = _cached_evaluate_batch(
                         _parent,
                         list(_sub_ids),
-                        minibatch_cache,
+                        None,  # bypass minibatch_cache — mirrors GEPA line 268
                         config,
                         "train",
                         project_root,
@@ -2381,6 +2320,12 @@ def _run_evolution_impl(
             ] = []
             proposal_subsamples: list[list[str] | None] = []
             proposal_parent_mb_results: list[EvalResult | None] = []
+            semantic_skip_count = 0
+            retryable_semantic_skip_count = 0
+            # Accumulate per-proposal skip records; written as a single JSON list
+            # after the loop so that n_proposals > 1 with multiple perfect parents
+            # does not silently overwrite earlier records (review NB-1).
+            _gen_skip_records: list[dict[str, Any]] = []
 
             for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
                 zip(presample_contexts, parent_eval_results)
@@ -2460,11 +2405,20 @@ def _run_evolution_impl(
                     s >= config.evolution.perfect_score_threshold
                     for s in eval_for_mutate.instance_scores.values()
                 ):
+                    _gen_skip_records.append({
+                        "generation": gen,
+                        "parent_id": parent.id,
+                        "reason": "perfect_subsample",
+                        "parent_eval": eval_for_mutate.to_dict(),
+                    })
                     print_info(
                         f"Iteration {gen}: all subsample scores perfect for "
                         f"parent {parent.id}; skipping proposal "
                         f"(GEPA reflective_mutation.py:308-327)."
                     )
+                    semantic_skip_count += 1
+                    if subsample_ids is not None:
+                        retryable_semantic_skip_count += 1
                     continue
 
                 proposal_contexts.append(
@@ -2473,10 +2427,30 @@ def _run_evolution_impl(
                 proposal_subsamples.append(subsample_ids)
                 proposal_parent_mb_results.append(parent_mb_result)
 
+            # Write all skip records for this generation as a single JSON list.
+            # Must come after the inner loop so every proposal's result is known.
+            if _gen_skip_records:
+                _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
+
             if _budget_break and not proposal_contexts:
                 print_warning("Budget exhausted mid-generation -- stopping.")
                 _save_state(state)
                 break
+            if (
+                not proposal_contexts
+                and semantic_skip_count
+                and retryable_semantic_skip_count == semantic_skip_count
+            ):
+                # Perfect-subsample skip: all parents scored perfectly on the
+                # minibatch so no mutation was attempted.  GEPA parity
+                # (engine.py:649, reflective_mutation.py:308-327): gen was
+                # already incremented unconditionally at the top of the loop,
+                # so state.generation is now set to the *new* gen value.  On
+                # resume the next iteration will be gen+1 — no rollback, no
+                # retry-same-generation infinite loop (NB-2 fix).
+                _save_state(state)
+                TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
+                continue
 
             # ---- Step 2: Execute mutations (parallel if N > 1) ----
             set_phase(HelixPhase.MUTATION)
@@ -2610,12 +2584,7 @@ def _run_evolution_impl(
                         f"Mutation {child.id} touched protected evaluator files "
                         f"({', '.join(tampered_paths)}) -- rejecting."
                     )
-                    try:
-                        remove_worktree(child)
-                    except Exception as _rm_exc:
-                        print_warning(
-                            f"Could not remove worktree for rejected candidate {child.id}: {_rm_exc}"
-                        )
+                    _safe_remove_worktree(child, label="tamper-rejected mutation candidate")
                     continue
 
                 candidates[child.id] = child
@@ -2716,6 +2685,16 @@ def _run_evolution_impl(
                         subsample_scores_after=_after,
                     )
                     if not acceptance.should_accept(_proposal):
+                        _save_attempt_result(
+                            base_dir,
+                            gating_result,
+                            status="rejected",
+                            reason="minibatch_gate",
+                            parent_id=_parent.id,
+                            generation=gen,
+                            stage="train_minibatch",
+                            example_ids=list(_subsample_ids),
+                        )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION,
                             candidate_id=child.id,
@@ -2727,12 +2706,7 @@ def _run_evolution_impl(
                             f"Minibatch gate: {child.id} rejected "
                             f"(sum {sum(_after):.4f} vs parent {sum(_before):.4f}) -- removing."
                         )
-                        try:
-                            remove_worktree(child)
-                        except Exception as _rm_exc:
-                            print_warning(
-                                f"Could not remove worktree for rejected candidate {child.id}: {_rm_exc}"
-                            )
+                        _safe_remove_worktree(child, label="minibatch-gate-rejected candidate")
                         del candidates[child.id]
                         continue
                     else:
@@ -2794,16 +2768,21 @@ def _run_evolution_impl(
                     if not acceptance.should_accept(_legacy_proposal):
                         parent_sum = sum(_legacy_before)
                         child_sum = sum(_legacy_after)
+                        _save_attempt_result(
+                            base_dir,
+                            gating_result,
+                            status="rejected",
+                            reason="train_gate",
+                            parent_id=_parent.id,
+                            generation=gen,
+                            stage="train",
+                            example_ids=None,
+                        )
                         print_warning(
                             f"Acceptance: {child.id} does not improve "
                             f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
                         )
-                        try:
-                            remove_worktree(child)
-                        except Exception as _rm_exc:
-                            print_warning(
-                                f"Could not remove worktree for rejected candidate {child.id}: {_rm_exc}"
-                            )
+                        _safe_remove_worktree(child, label="train-gate-rejected candidate")
                         del candidates[child.id]
                         continue
 
@@ -2854,6 +2833,16 @@ def _run_evolution_impl(
                         subsample_scores_after=_stage_after,
                     )
                     if not acceptance.should_accept(_proposal):
+                        _save_attempt_result(
+                            base_dir,
+                            stage_result,
+                            status="rejected",
+                            reason="val_stage",
+                            parent_id=_parent.id,
+                            generation=gen,
+                            stage="val_stage",
+                            example_ids=list(stage_val_example_ids),
+                        )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION,
                             candidate_id=child.id,
@@ -2867,13 +2856,7 @@ def _run_evolution_impl(
                             f"(sum {sum(_stage_after):.4f} vs parent "
                             f"{sum(_stage_before):.4f}) -- removing."
                         )
-                        try:
-                            remove_worktree(child)
-                        except Exception as _rm_exc:
-                            print_warning(
-                                f"Could not remove worktree for stage-rejected candidate "
-                                f"{child.id}: {_rm_exc}"
-                            )
+                        _safe_remove_worktree(child, label="val-stage-rejected candidate")
                         del candidates[child.id]
                         continue
 
@@ -2899,38 +2882,18 @@ def _run_evolution_impl(
                 # fall back to the legacy ``_cached_eval`` path keyed by
                 # ``(candidate_id, split)`` — single-task/no-example mode has no example
                 # ids to key on.
-                if full_val_example_ids:
-                    _val_example_ids = list(full_val_example_ids)
-                    val_result, _n = _cached_evaluate_batch(
-                        child,
-                        _val_example_ids,
-                        minibatch_cache,
-                        config,
-                        "val",
-                        project_root,
-                    )
-                    val_result.candidate_id = child.id
-                    _last_eval_result = val_result
-                    budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=_n,
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_full_val_batch",
-                    )
-                else:
-                    val_result, _val_cached = _cached_eval(
-                        child, config, "val", eval_cache
-                    )
-                    val_result.candidate_id = child.id
-                    _last_eval_result = val_result
-                    budget_api.charge_evaluation(
-                        state,
-                        was_cached=_val_cached,
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_full_val",
-                    )
+                val_result = _run_full_val_eval(
+                    child,
+                    state,
+                    full_val_example_ids=full_val_example_ids,
+                    minibatch_cache=minibatch_cache,
+                    eval_cache=eval_cache,
+                    config=config,
+                    project_root=project_root,
+                    source_batch="mutation_full_val_batch",
+                    source_single="mutation_full_val",
+                )
+                _last_eval_result = val_result
 
                 if budget_api.budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")

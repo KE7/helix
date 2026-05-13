@@ -27,9 +27,11 @@ from helix.evolution import (
     HelixDataLoader,
     _inject_top_k_best_example_history,
     _make_data_loader,
+    _reconcile_incomplete_attempts_on_resume,
     run_evolution,
 )
 from helix.population import Candidate, EvalResult, ParetoFrontier
+from helix.state import BudgetState, EvolutionState
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +383,278 @@ class TestMinibatchGateIntegration:
             f"Expected no child val eval for rejected proposal, got {child_val_calls}"
         )
         # Remove worktree was called (rejection cleanup).
+        assert all_mocks["remove_worktree"].called
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        assert attempt_path.exists()
+        attempt = json.loads(attempt_path.read_text())
+        child_train_ids = [
+            c[2] for c in calls if c[0] == "g1-s1" and c[1] == "train"
+        ][0]
+        assert attempt["candidate_id"] == "g1-s1"
+        assert attempt["attempt"] == {
+            "status": "rejected",
+            "reason": "minibatch_gate",
+            "parent_id": "g0-s0",
+            "generation": 1,
+            "stage": "train_minibatch",
+            "example_ids": child_train_ids,
+        }
+        assert set(attempt["instance_scores"]) == set(child_train_ids)
+
+    def test_perfect_minibatch_skip_advances_generation(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Perfect minibatch skip advances gen unconditionally (GEPA engine.py:649).
+
+        After Change 1 (unconditional gen increment), a perfect-subsample skip
+        no longer rolls back to retry the same generation slot.  Gen was already
+        incremented at the top of the loop, so state.generation advances and the
+        next loop iteration starts at gen+1.  With max_generations=1, the loop
+        exits immediately after the one skip iteration — mutate is never called.
+
+        Regression for NB-2: before the fix, a perfect skip did NOT advance gen,
+        allowing an infinite retry when budget was also uncapped.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        parent_train_calls = 0
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            nonlocal parent_train_calls
+            if split == "train" and instance_ids is not None:
+                if candidate.id == seed.id:
+                    parent_train_calls += 1
+                    # Always perfect — ensures perfect-skip fires every time.
+                    return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+                return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.9})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            val_size=2,
+            max_generations=1,
+            max_evaluations=100,
+        )
+        config.evolution.perfect_score_threshold = 1.0
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # Gen was already incremented at the top of the loop before the skip.
+        # After the skip, 1 < max_generations=1 is False → loop exits.
+        # mutate is never called because the only generation was a perfect skip.
+        assert parent_train_calls == 1
+        all_mocks["mutate"].assert_not_called()
+        skip_path = tmp_path / ".helix" / "skips" / "g1.json"
+        assert skip_path.exists()
+        skip_records = json.loads(skip_path.read_text())
+        # Since NB-1 fix, skip records are always a list (one entry per proposal).
+        assert isinstance(skip_records, list)
+        assert len(skip_records) == 1
+        assert skip_records[0]["generation"] == 1
+        assert skip_records[0]["reason"] == "perfect_subsample"
+
+    # ------------------------------------------------------------------
+    # Test A: NB-1 regression — all proposals perfect, n_proposals=3
+    # ------------------------------------------------------------------
+
+    def test_multiple_perfect_skips_all_recorded_in_single_file(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """n_proposals=3, all parents perfect → skips/g1.json is a list of 3 records.
+
+        Regression for NB-1: before the fix _save_skip_record was called once per
+        proposal, each overwriting the previous file so only the last record survived.
+
+        After Change 1 (unconditional gen increment) and Change 2 (parent minibatch
+        bypasses cache), max_generations=1 naturally terminates after the one
+        perfect-skip iteration — no tight budget ceiling needed.  3 perfect proposals
+        in g1 produce 3 records in skips/g1.json, then gen advances to 2 which
+        exceeds max_generations=1, ending the run.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        # Perfect scores for every parent minibatch eval so all 3 proposals skip.
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 1.0})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        # Change 2: parent minibatch evals bypass the cache (pass None), so no
+        # subprocess.run on fake worktree paths in the parallel ThreadPoolExecutor
+        # (n_proposals=3).  Change 1: gen advances on skip, so max_generations=1
+        # naturally terminates after the one iteration — no tight budget ceiling.
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=100,
+            num_parallel_proposals=3,
+        )
+        config.evolution.perfect_score_threshold = 1.0
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        skip_path = tmp_path / ".helix" / "skips" / "g1.json"
+        assert skip_path.exists(), "skips/g1.json should be written"
+        records = json.loads(skip_path.read_text())
+        assert isinstance(records, list), "skip file must be a JSON list"
+        assert len(records) == 3, (
+            f"Expected 3 skip records (one per proposal), got {len(records)}"
+        )
+        for rec in records:
+            assert rec["generation"] == 1
+            assert rec["reason"] == "perfect_subsample"
+            assert "parent_id" in rec
+            assert "parent_eval" in rec
+
+    # ------------------------------------------------------------------
+    # Test B: train_gate rejection artifact
+    # ------------------------------------------------------------------
+
+    def test_train_gate_rejection_artifact(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Child that fails train_gate (no-minibatch mode) writes attempts/{cid}.json.
+
+        Mirrors test_rejected_minibatch_attempt_artifact but for the legacy
+        single-task train-gating path (train_path=None → subsample_ids is None).
+        """
+        # No train_path → single-task / no-minibatch mode; child goes through
+        # the full-train acceptance gate instead of the minibatch gate.
+        seed = _make_candidate("g0-s0")
+        child = _make_candidate("g1-s1")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            # In no-minibatch mode instance_ids is always None.
+            if candidate.id == seed.id:
+                return _make_result(candidate.id, {"t": 0.9})
+            # Child scores worse → train_gate rejects it.
+            return _make_result(candidate.id, {"t": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = HelixConfig(
+            objective="train gate test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),  # no train_path → no minibatch gate
+            evolution=EvolutionConfig(
+                max_generations=1,
+                max_evaluations=100,
+                perfect_score_threshold=None,
+                frontier_type="instance",
+            ),
+            worktree=WorktreeConfig(),
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        assert attempt_path.exists(), "attempts/g1-s1.json should be written on train_gate reject"
+        attempt = json.loads(attempt_path.read_text())
+        assert attempt["candidate_id"] == "g1-s1"
+        assert attempt["attempt"]["status"] == "rejected"
+        assert attempt["attempt"]["reason"] == "train_gate"
+        assert attempt["attempt"]["stage"] == "train"
+        assert attempt["attempt"]["parent_id"] == "g0-s0"
+        assert attempt["attempt"]["generation"] == 1
+        assert attempt["attempt"]["example_ids"] is None
+        # The worktree should have been removed on rejection.
+        assert all_mocks["remove_worktree"].called
+
+    # ------------------------------------------------------------------
+    # Test C: val_stage rejection artifact
+    # ------------------------------------------------------------------
+
+    def test_val_stage_rejection_artifact(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Child that passes minibatch but fails val_stage writes attempts/{cid}.json.
+
+        Mirrors test_rejected_minibatch_attempt_artifact but for the staged-val
+        gate (val_stage_size > 0) rejection path.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                if split == "train":
+                    # Parent scores low on minibatch; child scores high → passes gate.
+                    if candidate.id == seed.id:
+                        return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
+                    return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+                # val evals
+                if split == "val":
+                    if candidate.id == seed.id:
+                        # Seed full val — provides parent frontier result with val scores.
+                        return _make_result(
+                            candidate.id, {i: 0.8 for i in instance_ids}
+                        )
+                    # Child on val stage: scores worse than parent → val_stage rejects.
+                    return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            val_size=4,
+            val_stage_size=2,
+            max_generations=1,
+            max_evaluations=100,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        assert attempt_path.exists(), "attempts/g1-s1.json should be written on val_stage reject"
+        attempt = json.loads(attempt_path.read_text())
+        assert attempt["candidate_id"] == "g1-s1"
+        assert attempt["attempt"]["status"] == "rejected"
+        assert attempt["attempt"]["reason"] == "val_stage"
+        assert attempt["attempt"]["stage"] == "val_stage"
+        assert attempt["attempt"]["parent_id"] == "g0-s0"
+        assert attempt["attempt"]["generation"] == 1
+        # example_ids should be the val stage ids (first val_stage_size=2 val ids).
+        assert attempt["attempt"]["example_ids"] is not None
+        assert len(attempt["attempt"]["example_ids"]) == 2
+        # Verify worktree cleaned up.
         assert all_mocks["remove_worktree"].called
 
     def test_accepted_proposal_triggers_full_val_eval(
@@ -1559,12 +1833,17 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
 
 
 class TestParentMinibatchBudgetCharge:
-    def test_budget_charge_counts_parent_minibatch_examples_and_skips_cache_hit(
+    def test_budget_charge_counts_parent_minibatch_examples_always_fresh(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """Two back-to-back iterations on the same parent/minibatch overlap
-        charge N units for the fresh parent evaluator run and zero for the
-        later pure cache hit.
+        """Parent minibatch evals always charge the full minibatch size (GEPA
+        reflective_mutation.py:268-269 parity: minibatch path bypasses cache).
+
+        Change 2: ``_eval_parent`` now passes ``None`` instead of
+        ``minibatch_cache`` to ``_cached_evaluate_batch``, matching GEPA's
+        ``execute_proposal`` which calls ``adapter.evaluate(ctx.minibatch, ...)``
+        directly, never through the cache.  Both iterations therefore invoke the
+        evaluator subprocess for the parent and charge 2 budget units each.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)  # 2 ids → minibatch always [0,1]
         seed = _make_candidate("g0-s0")
@@ -1598,9 +1877,9 @@ class TestParentMinibatchBudgetCharge:
 
         all_mocks["save_state"].side_effect = capture
 
-        # max_generations=2 so the parent (seed) is evaluated on [0,1] twice.
-        # On iter 2 the cache already contains seed's scores for ids 0 and 1,
-        # so no evaluator subprocess runs and no budget unit is charged.
+        # max_generations=2: the parent (seed) is evaluated on [0,1] in BOTH
+        # iterations because Change 2 bypasses the minibatch cache for parent
+        # evals, matching GEPA reflective_mutation.py:268.
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
@@ -1609,8 +1888,8 @@ class TestParentMinibatchBudgetCharge:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        # The parent evaluator is invoked once: iter 1 is fresh, iter 2 is a
-        # full cache hit.
+        # The parent evaluator is invoked TWICE: both iter 1 and iter 2 are
+        # fresh evaluator calls (cache bypassed for parent minibatch evals).
         parent_call_count = sum(
             1
             for call in all_mocks["run_evaluator"].call_args_list
@@ -1619,15 +1898,14 @@ class TestParentMinibatchBudgetCharge:
             and (call.args[0] if call.args else call.kwargs.get("candidate")).id
             == seed.id
         )
-        assert parent_call_count == 1, (
-            f"Expected parent minibatch evaluator invoked exactly once "
-            f"(iter 1 only, iter 2 full cache hit), got {parent_call_count}"
+        assert parent_call_count == 2, (
+            f"Expected parent minibatch evaluator invoked twice "
+            f"(once per generation, cache bypassed per GEPA parity), got {parent_call_count}"
         )
 
         assert len(budget_snapshots) >= 2, "expected multiple save_state calls"
-        # The snapshots capture the fresh 2-example parent eval (+2), the
-        # rejected child evals (+2 each), and no charge for the second parent
-        # cache hit.
+        # Iter 1: +2 (parent) +2 (rejected child) = 4; Iter 2: +2 (parent) +2
+        # (rejected child) = 4.  Total delta >= 8, well above the >=6 floor.
         assert budget_snapshots[-1] - budget_snapshots[0] >= 6, (
             f"Budget delta {budget_snapshots[-1] - budget_snapshots[0]} "
             f"< 6 - per-example minibatch evaluations were not charged"
@@ -1950,3 +2228,344 @@ class TestWholeCandidateBudget:
         assert budget_snapshots[0] == 1, (
             f"empty instance_scores must still charge 1, got {budget_snapshots[0]}"
         )
+
+
+class TestResumeAttemptReconciliation:
+    """Resume cleanup for attempts interrupted before result persistence."""
+
+    def test_live_incomplete_attempt_retries_same_visible_slot(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (worktrees_dir / "g4-s4").mkdir()
+        (evaluations_dir / "g0-s0.json").write_text("{}")
+        (evaluations_dir / "g1-s1.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g0-s0",
+                        "parent": None,
+                        "parents": [],
+                        "operation": "seed",
+                        "generation": 0,
+                        "files_changed": [],
+                    },
+                    {
+                        "id": "g1-s1",
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutate",
+                        "generation": 1,
+                        "files_changed": ["solver.py"],
+                    },
+                    {
+                        "id": "g4-s4",
+                        "parent": "g1-s1",
+                        "parents": ["g1-s1"],
+                        "operation": "mutation",
+                        "generation": 4,
+                        "files_changed": ["solver.py"],
+                    },
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=4,
+            frontier=["g0-s0", "g1-s1"],
+            instance_scores={"g0-s0": {"x": 0.1}, "g1-s1": {"x": 0.2}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=4,
+            active_frontier={"x": ["g1-s1"]},
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 3
+        assert state.mutation_counter == 3
+        assert state.frontier == ["g0-s0", "g1-s1"]
+        assert state.active_frontier == {"x": ["g1-s1"]}
+        remove_mock.assert_called_once()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g0-s0", "g1-s1"}
+
+    def test_orphan_worktree_without_lineage_is_removed(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (worktrees_dir / "g5-s5").mkdir()
+        (evaluations_dir / "g1-s1.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g1-s1",
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutate",
+                        "generation": 1,
+                        "files_changed": ["solver.py"],
+                    }
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=4,
+            frontier=["g1-s1"],
+            instance_scores={"g1-s1": {"x": 0.2}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=4,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 4
+        assert state.mutation_counter == 4
+        remove_mock.assert_called_once()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g1-s1"}
+
+    def test_historical_missing_worktree_entries_are_left_intact(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (evaluations_dir / "g0-s0.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g0-s0",
+                        "parent": None,
+                        "parents": [],
+                        "operation": "seed",
+                        "generation": 0,
+                        "files_changed": [],
+                    },
+                    {
+                        "id": "g2-s2",
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutate",
+                        "generation": 2,
+                        "files_changed": ["solver.py"],
+                    },
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=2,
+            frontier=["g0-s0"],
+            instance_scores={"g0-s0": {"x": 0.1}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=2,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is False
+        assert state.generation == 2
+        assert state.mutation_counter == 2
+        remove_mock.assert_not_called()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g0-s0", "g2-s2"}
+
+
+# ---------------------------------------------------------------------------
+# NB-2 regression: always-perfect data must terminate (GEPA parity)
+# ---------------------------------------------------------------------------
+
+
+class TestAlwaysPerfectDataTerminates:
+    """Regression for NB-2: always-perfect dataset + perfect_score_threshold set
+    must not produce an infinite loop.
+
+    Three GEPA-aligned guards independently prevent NB-2:
+      1. gen advances unconditionally at top of loop (Change 1, engine.py:649)
+      2. Parent minibatch eval bypasses cache — always charges budget (Change 2)
+      3. Mandatory stopping condition check (Change 3, api.py:262-265)
+
+    This test exercises the gen-advance guard (1) and budget guard (2) together:
+    max_generations=5 must be the loop exit trigger, with 5 skip records written.
+    """
+
+    def test_always_perfect_data_terminates_at_max_generations(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """1-example always-perfect dataset with max_generations=5 terminates
+        normally and writes one skip file per generation.
+
+        NB-2 regression: before Change 1, perfect-skip rolled back gen, so
+        the loop retried the same generation indefinitely when budget was
+        uncapped.  After Change 1, gen advances each iteration and the loop
+        exits after 5 iterations.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=1)  # 1 example → always same id
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        # All evals return 1.0 → perfect-skip fires every iteration.
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 1.0})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            max_generations=5,
+            max_evaluations=1000,  # generous budget — gen advance (Change 1) stops first
+        )
+        config.evolution.perfect_score_threshold = 1.0
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        skips_dir = tmp_path / ".helix" / "skips"
+
+        # Loop must have exited via max_generations (not budget), so state.generation >= 5.
+        import json as _json
+
+        # Verify a skip file was written for each generation 1-5.
+        for g in range(1, 6):
+            skip_path = skips_dir / f"g{g}.json"
+            assert skip_path.exists(), (
+                f"skips/g{g}.json missing — generation {g} was not processed "
+                f"(NB-2 regression: loop may have exited before reaching gen {g})"
+            )
+            recs = _json.loads(skip_path.read_text())
+            assert isinstance(recs, list)
+            assert len(recs) >= 1
+            assert recs[0]["generation"] == g
+            assert recs[0]["reason"] == "perfect_subsample"
+
+        # No 6th generation — the loop stopped at max_generations=5.
+        assert not (skips_dir / "g6.json").exists(), (
+            "skips/g6.json exists — loop ran past max_generations=5"
+        )
+
+        # mutate must never have been called (every generation was a perfect skip).
+        all_mocks["mutate"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Change 3: mandatory stopping condition validation (GEPA api.py:262-265)
+# ---------------------------------------------------------------------------
+
+
+class TestStoppingConditionValidation:
+    """Mirror GEPA api.py:262-265: run_evolution must raise ValueError when
+    no effective stopping condition is configured.
+
+    In helix, max_generations (loop bound, default 10) is the primary stop
+    and max_evaluations (budget cap, -1 = disabled) is secondary.  The guard
+    fires when both are ineffective (max_generations <= 0 AND
+    max_evaluations <= 0), preventing a run that terminates only by the OS.
+    """
+
+    def test_no_stop_condition_raises_value_error(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """max_generations=0 and max_evaluations=-1 → ValueError before loop."""
+        config = HelixConfig(
+            objective="no stop condition test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=0,   # loop bound disabled
+                max_evaluations=-1,  # budget cap disabled
+            ),
+        )
+        with pytest.raises(ValueError, match="stopping condition"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+    def test_negative_max_generations_raises_value_error(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """max_generations=-1 and max_evaluations=0 → ValueError before loop."""
+        config = HelixConfig(
+            objective="no stop condition test",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            dataset=DatasetConfig(),
+            evolution=EvolutionConfig(
+                max_generations=-1,  # loop bound disabled
+                max_evaluations=0,   # also disabled
+            ),
+        )
+        with pytest.raises(ValueError, match="stopping condition"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+    def test_valid_max_generations_does_not_raise(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """max_generations=1 with max_evaluations=-1 is valid — loop bound set."""
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None  # no children; single iteration
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=-1,  # disabled — max_generations alone suffices
+        )
+        # Must NOT raise — max_generations=1 is a valid stopping condition.
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+

@@ -902,6 +902,258 @@ def log_cmd(project_dir: Path | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# attempts helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_attempts(base_dir: Path) -> list[dict[str, Any]]:
+    """Load all attempt records from base_dir/attempts/*.json.
+
+    Returns a list sorted by ``(generation, candidate_id)``.
+    Malformed files are skipped with a one-line warning to stderr.
+    """
+    attempts_dir = base_dir / "attempts"
+    if not attempts_dir.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(attempts_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+            records.append(data)
+        except Exception as exc:
+            click.echo(
+                f"[helix attempts] Warning: skipping malformed file {path}: {exc}",
+                err=True,
+            )
+    records.sort(
+        key=lambda r: (
+            r.get("attempt", {}).get("generation", 0),
+            r.get("candidate_id", ""),
+        )
+    )
+    return records
+
+
+def _load_skips(base_dir: Path) -> list[dict[str, Any]]:
+    """Load all skip records from base_dir/skips/g*.json.
+
+    Each file is a JSON list (NB-1 consolidated format).  Returns a flat
+    list sorted by generation.  Malformed files are skipped with a warning.
+    """
+    skips_dir = base_dir / "skips"
+    if not skips_dir.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(skips_dir.glob("g*.json")):
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, list):
+                records.extend(data)
+            else:
+                # Pre-NB-1 single-record — wrap for uniform handling
+                records.append(data)
+        except Exception as exc:
+            click.echo(
+                f"[helix attempts] Warning: skipping malformed file {path}: {exc}",
+                err=True,
+            )
+    records.sort(key=lambda r: r.get("generation", 0))
+    return records
+
+
+# ---------------------------------------------------------------------------
+# attempts
+# ---------------------------------------------------------------------------
+
+
+@cli.command("attempts")
+@click.option(
+    "--skips",
+    "show_skips",
+    is_flag=True,
+    default=False,
+    help="Show perfect-subsample skip records from .helix/skips/ instead of rejected attempts.",
+)
+@click.option(
+    "--generation",
+    "generation",
+    default=None,
+    type=int,
+    help="Filter to a specific generation number.",
+)
+@click.option(
+    "--stage",
+    "stage",
+    default=None,
+    type=click.Choice(["minibatch_gate", "train_gate", "val_stage"]),
+    help="Filter by rejection gate (attempts view only).",
+)
+@click.option(
+    "--reason",
+    "reason_substr",
+    default=None,
+    help="Filter by reason substring (matched against the reason field).",
+)
+@click.option(
+    "--cid",
+    "cid",
+    default=None,
+    help="Show full JSON detail for one attempt by candidate ID.",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    default=False,
+    help="Emit machine-readable JSON to stdout instead of a human table.",
+)
+@click.option(
+    "--path",
+    "helix_path",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Path to the .helix/ directory (defaults to ./.helix/).",
+)
+def attempts_cmd(
+    show_skips: bool,
+    generation: int | None,
+    stage: str | None,
+    reason_substr: str | None,
+    cid: str | None,
+    output_json: bool,
+    helix_path: Path | None,
+) -> None:
+    """Show rejected attempt records and perfect-subsample skip records.
+
+    By default lists all rejected mutation attempts from .helix/attempts/,
+    sorted chronologically.  Use --skips to view the skip-record surface
+    (.helix/skips/) instead.
+
+    Examples:
+
+    \b
+      helix attempts                        # all rejected attempts
+      helix attempts --generation 12        # only generation 12
+      helix attempts --stage minibatch_gate # only minibatch rejections
+      helix attempts --skips                # perfect-subsample skips
+      helix attempts --skips --generation 12
+      helix attempts --cid g12-s4           # full JSON for one attempt
+      helix attempts --json | jq '.[].attempt.reason'
+    """
+    base_dir = (helix_path if helix_path is not None else Path.cwd() / ".helix").resolve()
+
+    # ------------------------------------------------------------------ skips
+    if show_skips:
+        skips_dir = base_dir / "skips"
+        if not skips_dir.exists():
+            print_error(
+                f"No skips directory found at {skips_dir}.\n"
+                "Has helix run produced any perfect-subsample skips yet?"
+            )
+            raise SystemExit(1)
+
+        records = _load_skips(base_dir)
+
+        if generation is not None:
+            records = [r for r in records if r.get("generation") == generation]
+        if reason_substr is not None:
+            records = [r for r in records if reason_substr in r.get("reason", "")]
+
+        if output_json:
+            click.echo(json.dumps(records, indent=2))
+            return
+
+        table = Table(title="HELIX Skip Records", show_lines=True)
+        table.add_column("Gen", style="bold cyan", justify="right")
+        table.add_column("Parent", style="cyan")
+        table.add_column("Reason", style="yellow")
+
+        for rec in records:
+            table.add_row(
+                str(rec.get("generation", "")),
+                str(rec.get("parent_id", "")),
+                str(rec.get("reason", "")),
+            )
+
+        console.print(table)
+        if not records:
+            print_warning("No skip records match the given filters.")
+        return
+
+    # --------------------------------------------------------------- attempts
+    attempts_dir = base_dir / "attempts"
+    if not attempts_dir.exists():
+        print_error(
+            f"No attempts directory found at {attempts_dir}.\n"
+            "Has helix run produced any rejected attempts yet?"
+        )
+        raise SystemExit(1)
+
+    records = _load_attempts(base_dir)
+
+    # --cid: full detail for one attempt
+    if cid is not None:
+        match = next((r for r in records if r.get("candidate_id") == cid), None)
+        if match is None:
+            print_error(f"No attempt found with candidate_id={cid!r}.")
+            raise SystemExit(1)
+        click.echo(json.dumps(match, indent=2))
+        return
+
+    # Apply filters
+    if generation is not None:
+        records = [
+            r for r in records if r.get("attempt", {}).get("generation") == generation
+        ]
+    if stage is not None:
+        records = [
+            r for r in records if r.get("attempt", {}).get("reason") == stage
+        ]
+    if reason_substr is not None:
+        records = [
+            r for r in records
+            if reason_substr in r.get("attempt", {}).get("reason", "")
+        ]
+
+    if output_json:
+        click.echo(json.dumps(records, indent=2))
+        return
+
+    table = Table(title="HELIX Rejected Attempts", show_lines=True)
+    table.add_column("Gen", style="bold cyan", justify="right")
+    table.add_column("CID", style="cyan")
+    table.add_column("Stage")
+    table.add_column("Reason", style="yellow")
+    table.add_column("Worktree")
+
+    worktrees_dir = base_dir / "worktrees"
+    for rec in records:
+        attempt = rec.get("attempt", {})
+        rec_cid = rec.get("candidate_id", "")
+        gen_val = str(attempt.get("generation", ""))
+        stage_val = str(attempt.get("stage", ""))
+        reason_val = str(attempt.get("reason", ""))
+
+        # Augment reason display with aggregate score when available
+        instance_scores = rec.get("instance_scores", {})
+        if instance_scores:
+            agg = sum(instance_scores.values()) / len(instance_scores)
+            reason_display = f"{reason_val} (score={agg:.2f})"
+        else:
+            reason_display = reason_val
+
+        # Worktree presence check
+        wt = worktrees_dir / rec_cid
+        wt_display = str(wt) if wt.exists() else "removed"
+
+        table.add_row(gen_val, rec_cid, stage_val, reason_display, wt_display)
+
+    console.print(table)
+    if not records:
+        print_warning("No attempt records match the given filters.")
+
+
+# ---------------------------------------------------------------------------
 # resume
 # ---------------------------------------------------------------------------
 

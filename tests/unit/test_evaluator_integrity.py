@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from helix.config import EvaluatorConfig, HelixConfig
-from helix.evolution import (
+from helix.evaluator_manifest import (
     _build_evaluator_integrity_manifest,
     _collect_protected_evaluator_paths,
     _detect_evaluator_tamper,
