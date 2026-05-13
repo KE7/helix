@@ -2173,33 +2173,53 @@ def _run_evolution_impl(
             assert isinstance(_np_raw, int)
             n_proposals = _np_raw
 
-            # -- Architecture D: _ProposalResult (atomic worker result type) --
+            # -- Architecture D: sealed-union result types (Option A: class hierarchy) --
+            # Using a proper class hierarchy instead of a single ``kind``-discriminated
+            # dataclass gives mypy --strict the isinstance narrowing it needs to verify
+            # field accesses in the acceptance loop without any asserts or TypeGuards.
             from dataclasses import dataclass as _dc  # noqa: PLC0415
 
+            # Convenience alias for the pre-sample context tuple shared by all result types.
+            _ProposalCtx = tuple[Candidate, EvalResult | None, list[str] | None, str]
+
             @_dc
-            class _ProposalResult:
-                """Sealed-union result from one atomic proposal worker (Architecture D).
+            class _SkippedResult:
+                """skip-perfect fired — LLM was not called."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult
+                parent_n_uncached: int = 0
 
-                Each worker thread runs: parent_eval → skip-perfect → LLM → tamper → child_eval
-                atomically (GEPA reflective_mutation.py:268,308,369,420 shape).
-                Budget charging is deferred to the sequential acceptance loop
-                (GEPA apply_proposal_output parity, reflective_mutation.py:472).
+            @_dc
+            class _LLMFailedResult:
+                """mutate() raised or returned None; parent_eval_result may be None."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult | None
+                parent_n_uncached: int = 0
 
-                kind discriminator:
-                  "success"    — all steps completed; child_eval_result may be None
-                  "skipped"    — skip-perfect fired; child is None
-                  "tampered"   — LLM call succeeded but child modified protected files
-                  "llm_failed" — mutate() returned None or raised; child is None
-                """
-                kind: str  # "success" | "skipped" | "tampered" | "llm_failed"
-                presample_ctx: object  # (parent, parent_frontier_result, subsample_ids, new_id)
-                parent_eval_result: object  # EvalResult | None
-                child: object = None  # Candidate | None
-                child_eval_result: object = None  # EvalResult | None (success+minibatch only)
-                tampered_paths: object = None  # list[str] | None
-                parent_n_uncached: int = 0  # for budget charging
-                child_n_uncached: int = 0   # for budget charging (success+minibatch only)
-                child_usage: object = None  # UsageStats | None
+            @_dc
+            class _TamperedResult:
+                """LLM produced a child that modified protected evaluator files."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult
+                child: Candidate
+                tampered_paths: list[str]
+                parent_n_uncached: int = 0
+                child_usage: UsageStats | None = None
+
+            @_dc
+            class _SuccessResult:
+                """All steps completed; child_eval_result may be None (no-minibatch path)."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult
+                child: Candidate
+                child_eval_result: EvalResult | None = None
+                parent_n_uncached: int = 0
+                child_n_uncached: int = 0
+                child_usage: UsageStats | None = None
+
+            _ProposalResult = (
+                _SkippedResult | _LLMFailedResult | _TamperedResult | _SuccessResult
+            )
 
 
             # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
@@ -2281,8 +2301,8 @@ def _run_evolution_impl(
             # Budget charging is deferred to the sequential acceptance loop
             # (apply_proposal_output parity).
             def _run_proposal_worker(
-                pre_ctx: tuple,
-            ) -> "_ProposalResult":
+                pre_ctx: _ProposalCtx,
+            ) -> "_SkippedResult | _LLMFailedResult | _TamperedResult | _SuccessResult":
                 """Atomic proposal worker — GEPA execute_proposal shape.
 
                 Runs inside a ThreadPoolExecutor. All parameters except pre_ctx
@@ -2323,8 +2343,7 @@ def _run_evolution_impl(
                             f"(parent: {_parent.id}, gen {gen}) failed: "
                             f"{type(_pe_exc).__name__}: {_pe_exc} — proposal slot skipped."
                         )
-                        return _ProposalResult(
-                            kind="llm_failed",
+                        return _LLMFailedResult(
                             presample_ctx=pre_ctx,
                             parent_eval_result=None,
                             parent_n_uncached=0,
@@ -2362,8 +2381,7 @@ def _run_evolution_impl(
                         for s in _parent_eval.instance_scores.values()
                     )
                 ):
-                    return _ProposalResult(
-                        kind="skipped",
+                    return _SkippedResult(
                         presample_ctx=pre_ctx,
                         parent_eval_result=_parent_eval,
                         parent_n_uncached=_parent_n_uncached,
@@ -2389,8 +2407,7 @@ def _run_evolution_impl(
                     if isinstance(_mu_exc, PromptArtifactCollisionError):
                         raise
                     # For HelixError / RateLimitError and other errors, log and return llm_failed
-                    _is_helix_err = isinstance(_mu_exc, HelixError)
-                    if _is_helix_err:
+                    if isinstance(_mu_exc, HelixError):
                         _mu_exc.operation = (
                             _mu_exc.operation or f"parallel mutate {_new_id}"
                         )
@@ -2412,16 +2429,14 @@ def _run_evolution_impl(
                             f"Parallel mutation {_new_id} (parent: {_parent.id}, gen {gen}) "
                             f"failed with exception:\n{traceback.format_exc()}"
                         )
-                    return _ProposalResult(
-                        kind="llm_failed",
+                    return _LLMFailedResult(
                         presample_ctx=pre_ctx,
                         parent_eval_result=_parent_eval,
                         parent_n_uncached=_parent_n_uncached,
                     )
 
                 if _child is None:
-                    return _ProposalResult(
-                        kind="llm_failed",
+                    return _LLMFailedResult(
                         presample_ctx=pre_ctx,
                         parent_eval_result=_parent_eval,
                         parent_n_uncached=_parent_n_uncached,
@@ -2432,8 +2447,7 @@ def _run_evolution_impl(
                     _child, evaluator_manifest, config, project_root
                 )
                 if _tampered:
-                    return _ProposalResult(
-                        kind="tampered",
+                    return _TamperedResult(
                         presample_ctx=pre_ctx,
                         parent_eval_result=_parent_eval,
                         child=_child,
@@ -2458,8 +2472,7 @@ def _run_evolution_impl(
                     _child_eval = _ce
                     _child_n_uncached = _cn
 
-                return _ProposalResult(
-                    kind="success",
+                return _SuccessResult(
                     presample_ctx=pre_ctx,
                     parent_eval_result=_parent_eval,
                     child=_child,
@@ -2512,8 +2525,7 @@ def _run_evolution_impl(
                                 f"raised an unexpected exception: "
                                 f"{type(_wexc).__name__}: {_wexc} — proposal slot dropped."
                             )
-                            worker_results[_widx] = _ProposalResult(
-                                kind="llm_failed",
+                            worker_results[_widx] = _LLMFailedResult(
                                 presample_ctx=_wpctx,
                                 parent_eval_result=None,
                                 parent_n_uncached=0,
@@ -2539,9 +2551,9 @@ def _run_evolution_impl(
 
                 _parent, _parent_frontier_result, _subsample_ids, _new_id = wr.presample_ctx
 
-                # --- Handle non-success kinds ---
+                # --- Handle non-success kinds (isinstance narrows wr for mypy) ---
 
-                if wr.kind == "llm_failed":
+                if isinstance(wr, _LLMFailedResult):
                     # Charge parent eval budget if the parent eval ran successfully
                     # before the LLM call failed.
                     if _subsample_ids is not None and wr.parent_eval_result is not None:
@@ -2555,9 +2567,9 @@ def _run_evolution_impl(
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
                     continue
 
-                if wr.kind == "skipped":
+                if isinstance(wr, _SkippedResult):
                     # Charge parent eval budget (both paths)
-                    if _subsample_ids is not None and wr.parent_eval_result is not None:
+                    if _subsample_ids is not None:
                         budget_api.charge_evaluation(
                             state,
                             num_actual_examples=wr.parent_n_uncached,
@@ -2565,7 +2577,7 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
-                    elif _subsample_ids is None and wr.parent_eval_result is not None:
+                    else:
                         # No-minibatch path: worker ran _cached_eval; n_uncached encodes was_cached
                         budget_api.charge_evaluation(
                             state,
@@ -2590,9 +2602,9 @@ def _run_evolution_impl(
                         retryable_semantic_skip_count += 1
                     continue
 
-                if wr.kind == "tampered":
+                if isinstance(wr, _TamperedResult):
                     # Charge parent eval budget
-                    if _subsample_ids is not None and wr.parent_eval_result is not None:
+                    if _subsample_ids is not None:
                         budget_api.charge_evaluation(
                             state,
                             num_actual_examples=wr.parent_n_uncached,
@@ -2614,7 +2626,7 @@ def _run_evolution_impl(
                     _safe_remove_worktree(wr.child, label="tamper-rejected mutation candidate")
                     continue
 
-                # kind == "success"
+                # wr is _SuccessResult at this point (mypy narrows via isinstance exhaustion)
                 child = wr.child
 
                 # Charge parent eval budget
@@ -2943,7 +2955,8 @@ def _run_evolution_impl(
             # resume the next iteration will be gen+1 — no rollback, no infinite loop.
             if (
                 not any(
-                    wr and wr.kind in ("success", "tampered") for wr in worker_results
+                    wr and isinstance(wr, (_SuccessResult, _TamperedResult))
+                    for wr in worker_results
                 )
                 and semantic_skip_count
                 and retryable_semantic_skip_count == semantic_skip_count

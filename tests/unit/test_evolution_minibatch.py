@@ -2923,3 +2923,72 @@ class TestArchitectureDAtomicWorker:
                 "never inside parallel workers) — Architecture D invariant."
             )
 
+    def test_worker_tampered_result_rejects_child_without_crash(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """When tamper-check fires inside the worker, the child is rejected and removed.
+
+        In Architecture D, Step W5 of the atomic worker calls
+        ``_detect_evaluator_tamper``.  If the child touched protected evaluator
+        files, the worker returns ``_TamperedResult`` with the tampered path
+        list.  The acceptance loop (Step 3) must:
+          1. Not raise / not crash.
+          2. Call ``remove_worktree`` to clean up the rejected child worktree.
+          3. Not add the tampered child to the frontier or candidates dict.
+
+        Config: n=1 proposal, 1 generation.  ``_detect_evaluator_tamper`` is
+        patched to return ``["evaluate.py"]`` (one tampered path).
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        child = _make_candidate("g1-s1")
+        all_mocks["mutate"].return_value = child
+
+        # Patch _detect_evaluator_tamper so the worker returns _TamperedResult.
+        mocker.patch(
+            "helix.evolution._detect_evaluator_tamper",
+            return_value=["evaluate.py"],
+        )
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=1,
+        )
+
+        # Must not raise — tamper is a rejection, not a fatal error.
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # mutate() ran (LLM was invoked before tamper check)
+        assert all_mocks["mutate"].call_count == 1, (
+            "mutate() must be called once (tamper check is Step W5, after Step W4 LLM)"
+        )
+        # Tampered child worktree must be cleaned up
+        assert all_mocks["remove_worktree"].called, (
+            "remove_worktree must be called to clean up tamper-rejected child "
+            "(Architecture D _TamperedResult acceptance-loop path)"
+        )
+        # Tampered child must NOT have been snapshot-committed to any branch
+        for call in all_mocks["snapshot_candidate"].call_args_list:
+            snapped = call.args[0] if call.args else call.kwargs.get("candidate")
+            assert snapped is None or snapped.id != child.id, (
+                f"snapshot_candidate must not be called for tampered child {child.id}"
+            )
+
