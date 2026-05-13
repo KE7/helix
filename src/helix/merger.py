@@ -162,6 +162,16 @@ def merge(
     prompt, and invokes Claude Code.  Snapshots on success; removes the
     worktree and returns ``None`` on failure.
 
+    GEPA-parity note: this is the correct domain adaptation of GEPA's
+    text-component merge (``gepa/proposer/merge.py:155-203``) for HELIX's
+    full-codebase setting.  GEPA can splice ``dict[str, str]`` programs
+    deterministically by swapping components from each parent; HELIX
+    candidates are full git worktrees, where syntactic per-component swap
+    is undefined, so an LLM-mediated edit is the only viable approach.
+    The surrounding trigger / parent-selection / subsample / acceptance /
+    full-val logic in :mod:`helix.evolution` mirrors GEPA's
+    ``MergeProposer`` and ``GEPAEngine`` verbatim.
+
     Parameters
     ----------
     candidate_a:

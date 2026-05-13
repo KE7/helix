@@ -78,60 +78,81 @@ This is why a full solver module or a shrinkwrap of an ML kernel behave qualitat
 
 ## 🔄 How It Works
 
-```
-                              ┌──────────────────────┐
-                              │   Host HELIX Engine  │
-                              │  state, frontier,    │
-                              │  worktree copies     │
-                              └──────────┬───────────┘
-                                         │
-                    starts once per run  │
-                                         ▼
-                 ┌────────────────────────────────────────┐
-                 │ Private Evaluator Sidecar              │
-                 │ Docker network: helix-eval-*           │
-                 │ • benchmark code/data stay here        │
-                 │ • no published host ports              │
-                 │ • no agent auth volume                 │
-                 └───────────────────▲────────────────────┘
-                                     │ HTTP/RPC only
-                                     │
-          ┌──────────────────────────┴──────────────────────────┐
-          │                                                     │
-          ▼                                                     ▼
- ┌──────────────────────┐                              ┌──────────────────────┐
- │ Evaluator Runner     │                              │ Evaluator Runner     │
- │ short-lived Docker   │            ...               │ short-lived Docker   │
- │ • copied /workspace  │                              │ • copied /workspace  │
- │ • private eval net   │                              │ • private eval net   │
- │ • prints HELIX_RESULT│                              │ • prints HELIX_RESULT│
- └──────────┬───────────┘                              └──────────┬───────────┘
-            │                                                     │
-            └────────────── scores / ASI / stderr ────────────────┘
-                                         │
-                                         ▼
-                              ┌──────────────────────┐
-                              │ Select Parent        │
-                              │ Pareto + train gate  │
-                              └──────────┬───────────┘
-                                         │
-                                         ▼
-                 ┌────────────────────────────────────────┐
-                 │ Mutator Agent Container                │
-                 │ Docker network: normal agent egress    │
-                 │ • copied /workspace                    │
-                 │ • backend auth volume                  │
-                 │ • no evaluator network or endpoint     │
-                 │ • edits sync back after exit           │
-                 └───────────────────┬────────────────────┘
-                                     │
-                                     ▼
-                              ┌──────────────────────┐
-                              │ Gate / Pareto Update │
-                              │ Merge / Cleanup      │
-                              └──────────┬───────────┘
-                                         │
-                                         └── repeat generations
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart TD
+    classDef host fill:#dbeafe,stroke:#0072B2,color:#1a365d
+    classDef eval fill:#d1fae5,stroke:#009E73,color:#064e3b
+    classDef agent fill:#fef3c7,stroke:#E69F00,color:#78350f
+    classDef artifact fill:#fce7f3,stroke:#CC79A7,color:#500724
+    classDef dec fill:#ffffff,stroke:#6b7280,color:#374151
+    classDef ok fill:#f0fdf4,stroke:#009E73,color:#064e3b
+
+    %% ── Phase 1: Startup ─────────────────────────────────────────────────────────
+    CFG(["📄 helix.toml"]):::host
+    LOAD["Load & validate config\n⚠ ValueError if max_gen ≤ 0\nAND max_eval ≤ 0"]:::host
+    RES{"resume?"}:::dec
+    REC["Reconcile on resume:\ncleanup partial attempts\n& orphaned worktrees"]:::host
+    SEED["Evaluate seed candidate"]:::eval
+    FRONT["🏆 Pareto Frontier"]:::host
+
+    CFG --> LOAD --> RES
+    RES -->|yes| REC --> SEED
+    RES -->|no| SEED
+    SEED --> FRONT
+
+    %% ── Phase 2: Generation loop — select parent ─────────────────────────────────
+    SEL["Select parent\n(weighted by instance wins)"]:::host
+    FRONT --> SEL
+
+    %% ── Phase 3: Docker Sandbox — isolated execution ─────────────────────────────
+    subgraph DOCKER["🐳  Docker Sandbox  —  isolated execution environment"]
+        direction LR
+        subgraph ANET["  Agent Network  (normal egress)  "]
+            AGENT["Mutation / Merge Container\n──────────────────────────\nclaude · codex · cursor\ngemini · opencode\nAuth: helix-auth-BACKEND"]:::agent
+        end
+        subgraph ENET["  Private Evaluator Network  (helix-eval-*)  "]
+            ERUN["Eval Runners\n(short-lived,\ncopied workspace)"]:::eval
+            ESVC["Evaluator Sidecar\n(benchmark data\nno host ports)"]:::eval
+            ERUN -->|"HTTP/RPC"| ESVC
+        end
+    end
+    style DOCKER fill:#f8fafc,stroke:#64748b,color:#0f172a
+
+    SEL -->|"spawn mutation/merge"| AGENT
+    AGENT -->|"edits synced back"| GATE
+
+    %% ── Phase 4: Evaluate & update ───────────────────────────────────────────────
+    GATE["Train-set gate\n(minibatch eval)"]:::eval
+    AREC["Rejected attempt\n.helix/attempts/"]:::artifact
+    VEVAL["Full val eval"]:::eval
+    PERF{"all instances\nat perfect score?"}:::dec
+    SREC["Perfect-skip event\n.helix/skips/"]:::artifact
+    PUPD["Pareto update"]:::host
+    ADV["Advance gen counter\n(unconditionally)"]:::host
+    STOPDEC{"stop?"}:::dec
+    DONE(["✅  Evolution complete"]):::ok
+
+    GATE -->|"reject"| AREC
+    GATE -->|"pass"| VEVAL --> PERF
+    PERF -->|"perfect skip"| SREC
+    PERF -->|"no"| PUPD
+
+    AREC --> ADV
+    SREC --> ADV
+    PUPD --> ADV
+    ADV --> STOPDEC
+    STOPDEC -->|"next gen"| SEL
+    STOPDEC -->|"done"| DONE
+
+    %% ── .helix/ Artifact Store ───────────────────────────────────────────────────
+    ARTS[["💾 .helix/ Artifact Store\n─────────────────────────────────────\nstate.json · lineage.json · evaluations/\nworktrees/ · attempts/ · skips/\nbackend_transcripts/‹backend›/‹session›.jsonl"]]:::artifact
+    style ARTS fill:#fdf2f8,stroke:#CC79A7,color:#500724
+
+    PUPD -.->|"persist"| ARTS
+    VEVAL -.->|"persist"| ARTS
+    AREC -.-> ARTS
+    SREC -.-> ARTS
 ```
 
 **The loop in detail:**
@@ -362,6 +383,9 @@ enabled = false
 max_generations = 20
 perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this
 max_evaluations = -1             # evaluation budget cap (-1 = no cap)
+                                 # NOTE: at least one stopping condition is required —
+                                 # max_generations must be > 0 or max_evaluations must be > 0;
+                                 # setting both to ≤ 0 raises ValueError at evolution start.
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates
@@ -384,7 +408,6 @@ backend = "claude"               # "claude" | "codex" | "cursor" | "gemini" | "o
 # model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
-allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 
 [sandbox]
@@ -596,6 +619,7 @@ stderr as fallback debug context.
 | `helix resume` | Resume a previously interrupted evolution run |
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
 | `helix log` | Show semantic mutation log — full trajectory with parent lineage |
+| `helix attempts` | Surface rejected attempt records and perfect-skip events from `.helix/attempts/` and `.helix/skips/` |
 
 ### `helix evolve` Options
 
@@ -606,7 +630,8 @@ stderr as fallback debug context.
 --evaluator TEXT     Override the evaluator command
 --generations INT   Override max_generations
 --no-merge          Disable merge operations
---model TEXT        Claude model (e.g. sonnet, opus, claude-sonnet-4-5)
+--backend BACKEND   Override the mutation backend [claude|codex|cursor|gemini|opencode]
+--model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
 
@@ -643,20 +668,23 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 │   ├── g0-s0/           # Seed
 │   ├── g1-m1/           # Gen 1 Mutation 1
 │   └── g2-x1/           # Gen 2 Merge 1
-└── evaluations/
-    └── g0-s0.json       # EvalResult per candidate
+├── evaluations/
+│   └── g0-s0.json       # EvalResult per candidate
+├── attempts/            # Per-rejected-candidate attempt records (JSON)
+└── skips/               # Per-generation perfect-skip event lists (JSON)
 ```
 
 ### Module Overview
 
 | Module | Role |
 |---|---|
-| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log |
+| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log, attempts |
 | `config.py` | TOML config parsing via Pydantic v2 |
 | `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
 | `worktree.py` | Git worktree lifecycle (create, clone, snapshot, remove) |
 | `executor.py` | Run evaluator commands |
+| `evaluator_manifest.py` | SHA-256 manifest for protected evaluator files; refresh helpers for mutation and merge candidates |
 | `mutator.py` | Backend mutation invocation with autonomous system prompt and HELIX usage artifacts |
 | `merger.py` | Backend merge/crossover between complementary candidates |
 | `lineage.py` | Ancestry graph tracking |

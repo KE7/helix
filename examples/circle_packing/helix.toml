@@ -14,9 +14,9 @@ max_generations = 30
 merge_enabled = false
 perfect_score_threshold = 100.0
 max_evaluations = 500
-max_claude_calls = 80
 
-[claude]
+[agent]
+backend = "claude"
 model = "haiku"
 effort = "low"
 max_turns = 20

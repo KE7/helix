@@ -33,10 +33,11 @@ The final score of **2.6360** was reached at **generation 14 of a 30-generation 
 >
 > *Achieved with **haiku + low reasoning effort + max_turns=20**, arguably the cheapest Claude setup available. Demonstrates HELIX can extract strong results from tiny budgets.*
 
-The exact `[claude]` block from `helix.toml` that produced the result:
+The exact `[agent]` block from `helix.toml` that produced the result:
 
 ```toml
-[claude]
+[agent]
+backend = "claude"
 model = "haiku"
 effort = "low"
 max_turns = 20
