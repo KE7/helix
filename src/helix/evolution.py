@@ -2173,7 +2173,7 @@ def _run_evolution_impl(
             assert isinstance(_np_raw, int)
             n_proposals = _np_raw
 
-            # -- Architecture D: sealed-union result types (Option A: class hierarchy) --
+            # -- Atomic-worker result types (sealed union via class hierarchy) --
             # Using a proper class hierarchy instead of a single ``kind``-discriminated
             # dataclass gives mypy --strict the isinstance narrowing it needs to verify
             # field accesses in the acceptance loop without any asserts or TypeGuards.
@@ -2291,7 +2291,7 @@ def _run_evolution_impl(
                 )
 
 
-            # -- _run_proposal_worker closure (Architecture D) --
+            # -- _run_proposal_worker closure (atomic per-proposal worker) --
             # Replaces the old _eval_parent + _do_mutate split closures with a
             # single atomic worker that runs the full GEPA execute_proposal shape:
             #   parent_eval (reflective_mutation.py:268) →

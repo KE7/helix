@@ -2571,28 +2571,29 @@ class TestStoppingConditionValidation:
 
 
 # ---------------------------------------------------------------------------
-# Architecture D: Atomic Worker Tests
+# Atomic Proposal Worker Tests
 #
-# Architecture D merges parent-eval + LLM + child-eval into one atomic worker
-# per proposal slot, all running inside a single ThreadPoolExecutor.  Budget
-# charging is deferred to the sequential acceptance loop (GEPA
-# apply_proposal_output parity, reflective_mutation.py:472).
+# The atomic-worker pattern merges parent-eval + LLM + child-eval into one
+# atomic worker per proposal slot, all running inside a single
+# ThreadPoolExecutor.  Budget charging is deferred to the sequential
+# acceptance loop (GEPA apply_proposal_output parity,
+# reflective_mutation.py:472).
 #
 # NOTE: Tests 1–4 will likely fail against the CURRENT evolution.py (before
 # W1's changes implement the atomic worker).  They are written correctly for
-# Architecture D and should pass after W1's commit is merged.
+# the atomic-worker design and should pass after W1's commit is merged.
 # ---------------------------------------------------------------------------
 
 
-class TestArchitectureDAtomicWorker:
-    """Tests for Architecture D: atomic proposal worker (GEPA execute_proposal parity)."""
+class TestAtomicProposalWorker:
+    """Tests for the atomic proposal worker (GEPA execute_proposal parity)."""
 
     def test_worker_executes_parent_eval_and_child_eval_on_same_thread(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """Parent eval and child eval both run on worker threads, not the main thread.
 
-        In Architecture D, each proposal worker executes parent_eval →
+        Under the atomic-worker design, each proposal worker executes parent_eval →
         skip-perfect → LLM → child_eval atomically in a single
         ThreadPoolExecutor worker thread (GEPA execute_proposal shape,
         reflective_mutation.py:268,308,369,420).  The child eval therefore
@@ -2652,11 +2653,11 @@ class TestArchitectureDAtomicWorker:
 
         assert main_thread_id not in parent_eval_threads, (
             "Parent eval ran on the main thread — expected worker thread "
-            "(Architecture D atomic-worker regression)"
+            "(atomic-worker regression)"
         )
         assert main_thread_id not in child_eval_threads, (
             "Child eval ran on the main thread — expected worker thread "
-            "(Architecture D regression: child eval should run in the same "
+            "(atomic-worker regression: child eval should run in the same "
             "atomic worker as parent eval, not sequentially on the main thread)"
         )
         assert len(parent_eval_threads) >= 1, (
@@ -2671,7 +2672,7 @@ class TestArchitectureDAtomicWorker:
     ) -> None:
         """When skip-perfect fires inside the worker, mutate() is never called.
 
-        In Architecture D, the skip-perfect check (Step W3) lives inside the
+        Under the atomic-worker design, the skip-perfect check (Step W3) lives inside the
         atomic worker function.  A parent whose subsample scores all reach the
         ``perfect_score_threshold`` causes the worker to return
         ``_ProposalResult(kind='skipped', ...)`` before ever reaching the LLM
@@ -2713,7 +2714,7 @@ class TestArchitectureDAtomicWorker:
 
         assert all_mocks["mutate"].call_count == 0, (
             f"mutate() must not be called when skip-perfect fires inside the "
-            f"worker (Architecture D Step W3 parity); "
+            f"worker (atomic-worker Step W3 parity); "
             f"call_count={all_mocks['mutate'].call_count}"
         )
 
@@ -2722,7 +2723,7 @@ class TestArchitectureDAtomicWorker:
     ) -> None:
         """mutate() raising RuntimeError on one slot does not crash the whole pool.
 
-        In Architecture D, each worker catches non-fatal exceptions from
+        Under the atomic-worker design, each worker catches non-fatal exceptions from
         mutate() and returns ``_ProposalResult(kind='llm_failed', ...)`` rather
         than propagating the exception out of the worker (GEPA
         reflective_mutation.py:369-420 error path).  The pool continues with
@@ -2748,7 +2749,7 @@ class TestArchitectureDAtomicWorker:
                 _call_counter[0] += 1
                 is_first = _call_counter[0] == 1
             if is_first:
-                raise RuntimeError("simulated LLM failure — Architecture D isolation test")
+                raise RuntimeError("simulated LLM failure — atomic-worker isolation test")
             return _make_candidate(next(mut_ids))
 
         all_mocks["mutate"].side_effect = _mutate_fail_first
@@ -2790,7 +2791,7 @@ class TestArchitectureDAtomicWorker:
     ) -> None:
         """With n=3, parent minibatch evals are dispatched to a thread pool.
 
-        In Architecture D, all N atomic workers run inside a single
+        Under the atomic-worker design, all N atomic workers run inside a single
         ThreadPoolExecutor (GEPA engine.py:422-443 parity).  With n=3 proposals
         and a time.sleep(0.05) inside each parent eval, the pool must spawn
         multiple worker threads simultaneously.
@@ -2848,7 +2849,7 @@ class TestArchitectureDAtomicWorker:
 
         assert main_thread_id not in parent_eval_threads, (
             "Parent eval ran on the main thread; expected worker threads "
-            "(Architecture D regression — workers not dispatched to ThreadPoolExecutor)"
+            "(atomic-worker regression — workers not dispatched to ThreadPoolExecutor)"
         )
         assert len(parent_eval_threads) >= 2, (
             f"Expected >= 2 distinct worker thread ids for n=3 parent evals "
@@ -2860,7 +2861,7 @@ class TestArchitectureDAtomicWorker:
     ) -> None:
         """budget.evaluations never decreases across consecutive save_state calls.
 
-        In Architecture D, budget mutations happen only inside the sequential
+        Under the atomic-worker design, budget mutations happen only inside the sequential
         acceptance loop (GEPA apply_proposal_output parity,
         reflective_mutation.py:472) — never inside the parallel workers.
         Capturing ``state.budget.evaluations`` at each ``save_state`` call must
@@ -2920,7 +2921,7 @@ class TestArchitectureDAtomicWorker:
                 f"{budget_snapshots[i - 1]} → {budget_snapshots[i]}; "
                 f"full sequence: {budget_snapshots}. "
                 "Budget charges must be strictly sequential (acceptance loop only, "
-                "never inside parallel workers) — Architecture D invariant."
+                "never inside parallel workers) — atomic-worker invariant."
             )
 
     def test_worker_tampered_result_rejects_child_without_crash(
@@ -2928,7 +2929,7 @@ class TestArchitectureDAtomicWorker:
     ) -> None:
         """When tamper-check fires inside the worker, the child is rejected and removed.
 
-        In Architecture D, Step W5 of the atomic worker calls
+        Under the atomic-worker design, Step W5 of the atomic worker calls
         ``_detect_evaluator_tamper``.  If the child touched protected evaluator
         files, the worker returns ``_TamperedResult`` with the tampered path
         list.  The acceptance loop (Step 3) must:
@@ -2983,7 +2984,7 @@ class TestArchitectureDAtomicWorker:
         # Tampered child worktree must be cleaned up
         assert all_mocks["remove_worktree"].called, (
             "remove_worktree must be called to clean up tamper-rejected child "
-            "(Architecture D _TamperedResult acceptance-loop path)"
+            "(_TamperedResult acceptance-loop path)"
         )
         # Tampered child must NOT have been snapshot-committed to any branch
         for call in all_mocks["snapshot_candidate"].call_args_list:
