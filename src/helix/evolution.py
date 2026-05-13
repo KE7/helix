@@ -2224,6 +2224,9 @@ def _run_evolution_impl(
                         split="train",
                     )
 
+                # g (gen) and s (mutation_counter) advance together under n_proposals=1
+                # / merge_disabled defaults. They diverge when n_proposals > 1 (multiple
+                # s-slots per gen) or when merge fires (gen advances without incrementing s).
                 new_id = budget_api.next_mutation_id(state, gen)
                 presample_contexts.append(
                     (parent, parent_frontier_result, subsample_ids, new_id)

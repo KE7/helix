@@ -1,4 +1,4 @@
-"""HELIX mutator: applies code mutations to evolutionary candidates via Claude Code."""
+"""HELIX mutator: applies code mutations via agentic coding backends (claude, codex, cursor, gemini, opencode)."""
 
 from __future__ import annotations
 

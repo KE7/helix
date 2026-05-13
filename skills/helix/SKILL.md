@@ -222,6 +222,8 @@ helix best --dir .
 helix best --export ./best-worktree --dir .
 helix history --dir .
 helix log --dir .
+helix attempts --dir .
+helix attempts --skips --dir .
 helix clean --dir .
 ```
 

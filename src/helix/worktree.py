@@ -500,7 +500,7 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
     parent:
         The candidate to clone from.
     new_id:
-        Identifier for the new candidate (e.g. ``"g1-s0"``).
+        Identifier for the new candidate (e.g. ``"g1-s1"``).
     base_dir:
         Root directory for HELIX worktrees.
 

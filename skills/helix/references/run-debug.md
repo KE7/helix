@@ -73,6 +73,8 @@ helix best
 helix best --export ./best-solution
 helix history
 helix log
+helix attempts
+helix attempts --skips
 ```
 
 Useful files:
@@ -80,10 +82,13 @@ Useful files:
 ```text
 .helix/
   config.toml
+  evaluator_manifest.json
   state.json
   helix.log
   log/*.json
   worktrees/gN-sN/
+  attempts/           (per-rejected-candidate JSON records)
+  skips/              (per-generation perfect-skip event lists)
 ```
 
 For backend diagnostics in a candidate worktree, inspect:

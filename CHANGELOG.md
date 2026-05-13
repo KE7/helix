@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-13
+
+### Added
+- New CLI subcommand `helix attempts` — surfaces rejected attempt records and
+  perfect-skip events; supports filtering by `--generation`, `--stage`,
+  `--reason`, `--cid`; `--skips` flag to show only perfect-skip entries;
+  `--json` for machine-readable output. (PR #30)
+- New artifact directories `.helix/attempts/` and `.helix/skips/` — per-rejected-candidate
+  JSON files and per-generation perfect-skip event lists persisted alongside
+  `.helix/evaluations/` and `.helix/worktrees/`. (PR #30)
+- 5-backend `tool_event_count` / `tool_names` tracking in `UsageStats` —
+  normalised tool-use metrics for claude, codex, cursor, gemini, and opencode
+  backends extracted from transcript artifacts. (PR #32)
+- `session_id`, `to_dict`, `from_dict` helpers on `UsageStats`. (PR #32)
+- New module `src/helix/evaluator_manifest.py` — SHA-256 manifest for
+  protected evaluator files; refresh helpers for mutation and merge candidates.
+  (PR #30 refactor)
+
+### Changed
+- **GEPA structural alignment**: generation counter advances unconditionally per
+  GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
+  bypassed when re-evaluating the parent's minibatch, ensuring consistent
+  parent-comparison semantics across resume scenarios. (PR #32)
+- `exitcode` score parser now broadcasts the success score to *all* instance
+  IDs in the batch, fixing a bug where only the first instance was populated
+  when using `exitcode` with multi-example runs. (PR #32)
+
+### Fixed
+- Mandatory stop-condition enforcement: `run_evolution` now raises `ValueError`
+  at startup if both `max_generations ≤ 0` and `max_evaluations ≤ 0`. Previously
+  a config with both set to negative values would loop indefinitely. (PR #32)
+- Resume reconciliation: incomplete attempts and orphaned worktrees from a
+  crashed run are cleaned up at resume time before the first new generation
+  starts. (PR #30)
+
 ## [0.2.1] - 2026-05-10
 
 > Note: 0.2.0 was published from a broken build and is superseded by this

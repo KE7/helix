@@ -362,6 +362,9 @@ enabled = false
 max_generations = 20
 perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this
 max_evaluations = -1             # evaluation budget cap (-1 = no cap)
+                                 # NOTE: at least one stopping condition is required —
+                                 # max_generations must be > 0 or max_evaluations must be > 0;
+                                 # setting both to ≤ 0 raises ValueError at evolution start.
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates
@@ -384,7 +387,6 @@ backend = "claude"               # "claude" | "codex" | "cursor" | "gemini" | "o
 # model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
-allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 
 [sandbox]
@@ -596,6 +598,7 @@ stderr as fallback debug context.
 | `helix resume` | Resume a previously interrupted evolution run |
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
 | `helix log` | Show semantic mutation log — full trajectory with parent lineage |
+| `helix attempts` | Surface rejected attempt records and perfect-skip events from `.helix/attempts/` and `.helix/skips/` |
 
 ### `helix evolve` Options
 
@@ -606,7 +609,8 @@ stderr as fallback debug context.
 --evaluator TEXT     Override the evaluator command
 --generations INT   Override max_generations
 --no-merge          Disable merge operations
---model TEXT        Claude model (e.g. sonnet, opus, claude-sonnet-4-5)
+--backend BACKEND   Override the mutation backend [claude|codex|cursor|gemini|opencode]
+--model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
 
@@ -643,20 +647,23 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 │   ├── g0-s0/           # Seed
 │   ├── g1-m1/           # Gen 1 Mutation 1
 │   └── g2-x1/           # Gen 2 Merge 1
-└── evaluations/
-    └── g0-s0.json       # EvalResult per candidate
+├── evaluations/
+│   └── g0-s0.json       # EvalResult per candidate
+├── attempts/            # Per-rejected-candidate attempt records (JSON)
+└── skips/               # Per-generation perfect-skip event lists (JSON)
 ```
 
 ### Module Overview
 
 | Module | Role |
 |---|---|
-| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log |
+| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log, attempts |
 | `config.py` | TOML config parsing via Pydantic v2 |
 | `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
 | `worktree.py` | Git worktree lifecycle (create, clone, snapshot, remove) |
 | `executor.py` | Run evaluator commands |
+| `evaluator_manifest.py` | SHA-256 manifest for protected evaluator files; refresh helpers for mutation and merge candidates |
 | `mutator.py` | Backend mutation invocation with autonomous system prompt and HELIX usage artifacts |
 | `merger.py` | Backend merge/crossover between complementary candidates |
 | `lineage.py` | Ancestry graph tracking |
