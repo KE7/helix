@@ -488,22 +488,18 @@ def _reconcile_incomplete_attempts_on_resume(
 
     for candidate_id in sorted(incomplete_ids):
         wt_path = worktrees_dir / candidate_id
-        try:
-            remove_worktree(
-                Candidate(
-                    id=candidate_id,
-                    worktree_path=str(wt_path),
-                    branch_name=f"helix/{candidate_id}",
-                    generation=_gen_from_id(candidate_id),
-                    parent_id=None,
-                    parent_ids=[],
-                    operation="interrupted",
-                )
-            )
-        except Exception as exc:
-            print_warning(
-                f"Could not remove incomplete attempt worktree {candidate_id}: {exc}"
-            )
+        _safe_remove_worktree(
+            Candidate(
+                id=candidate_id,
+                worktree_path=str(wt_path),
+                branch_name=f"helix/{candidate_id}",
+                generation=_gen_from_id(candidate_id),
+                parent_id=None,
+                parent_ids=[],
+                operation="interrupted",
+            ),
+            label="orphan worktree from prior run",
+        )
 
     _remove_lineage_records(lineage_path, incomplete_ids)
     for candidate_id in incomplete_ids:
@@ -625,6 +621,22 @@ def _collect_protected_evaluator_paths(
         protected.add(rel)
 
     return sorted(protected)
+
+
+def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
+    """Remove ``candidate``'s worktree, warning on failure rather than raising.
+
+    The nine rejection / cleanup paths in :func:`_run_evolution_impl` and
+    :func:`_reconcile_incomplete_attempts_on_resume` all need the same
+    "best-effort remove + warn" behaviour.  Extracting this avoids 9× copies
+    of the same try/except.
+    """
+    try:
+        remove_worktree(candidate)
+    except Exception as exc:
+        print_warning(
+            f"Could not remove worktree for {label} {candidate.id}: {exc}"
+        )
 
 
 def _copy_protected_path(source: Path, destination: Path) -> None:
@@ -1874,7 +1886,7 @@ def _run_evolution_impl(
                     source="seed_generation",
                 )
             except Exception:
-                remove_worktree(seed)
+                _safe_remove_worktree(seed, label="failed seed generation")
                 raise
             print_success("Seed generation complete.")
         else:
@@ -2193,12 +2205,7 @@ def _run_evolution_impl(
                                 f"Merge {merge_id} touched protected evaluator files "
                                 f"({', '.join(merge_tamper)}) -- rejecting."
                             )
-                            try:
-                                remove_worktree(merged)
-                            except Exception as _rm_exc:
-                                print_warning(
-                                    f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                )
+                            _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
                         else:
                             candidates[merged.id] = merged
                             record_entry(
@@ -2235,12 +2242,7 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} produced a previously-seen "
                                     f"output (desc {merged_sha[:8]}) -- skipping."
                                 )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for duplicate-desc merge {merge_id}: {_rm_exc}"
-                                    )
+                                _safe_remove_worktree(merged, label="duplicate-desc merge candidate")
                                 if merged.id in candidates:
                                     del candidates[merged.id]
                                 _save_state(state)
@@ -2414,12 +2416,7 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
                                     f"max parent {required_score:.4f} -- rejecting."
                                 )
-                                try:
-                                    remove_worktree(merged)
-                                except Exception as _rm_exc:
-                                    print_warning(
-                                        f"Could not remove worktree for rejected merge {merge_id}: {_rm_exc}"
-                                    )
+                                _safe_remove_worktree(merged, label="score-rejected merge candidate")
                                 if merged.id in candidates:
                                     del candidates[merged.id]
 
@@ -2876,12 +2873,7 @@ def _run_evolution_impl(
                         f"Mutation {child.id} touched protected evaluator files "
                         f"({', '.join(tampered_paths)}) -- rejecting."
                     )
-                    try:
-                        remove_worktree(child)
-                    except Exception as _rm_exc:
-                        print_warning(
-                            f"Could not remove worktree for rejected candidate {child.id}: {_rm_exc}"
-                        )
+                    _safe_remove_worktree(child, label="tamper-rejected mutation candidate")
                     continue
 
                 candidates[child.id] = child
@@ -3003,12 +2995,7 @@ def _run_evolution_impl(
                             f"Minibatch gate: {child.id} rejected "
                             f"(sum {sum(_after):.4f} vs parent {sum(_before):.4f}) -- removing."
                         )
-                        try:
-                            remove_worktree(child)
-                        except Exception as _rm_exc:
-                            print_warning(
-                                f"Could not remove worktree for rejected candidate {child.id}: {_rm_exc}"
-                            )
+                        _safe_remove_worktree(child, label="minibatch-gate-rejected candidate")
                         del candidates[child.id]
                         continue
                     else:
@@ -3084,12 +3071,7 @@ def _run_evolution_impl(
                             f"Acceptance: {child.id} does not improve "
                             f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
                         )
-                        try:
-                            remove_worktree(child)
-                        except Exception as _rm_exc:
-                            print_warning(
-                                f"Could not remove worktree for rejected candidate {child.id}: {_rm_exc}"
-                            )
+                        _safe_remove_worktree(child, label="train-gate-rejected candidate")
                         del candidates[child.id]
                         continue
 
@@ -3163,13 +3145,7 @@ def _run_evolution_impl(
                             f"(sum {sum(_stage_after):.4f} vs parent "
                             f"{sum(_stage_before):.4f}) -- removing."
                         )
-                        try:
-                            remove_worktree(child)
-                        except Exception as _rm_exc:
-                            print_warning(
-                                f"Could not remove worktree for stage-rejected candidate "
-                                f"{child.id}: {_rm_exc}"
-                            )
+                        _safe_remove_worktree(child, label="val-stage-rejected candidate")
                         del candidates[child.id]
                         continue
 
