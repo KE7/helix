@@ -586,6 +586,10 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         BACKEND_STDERR_ARTIFACT_NAME,
         ".helix_artifacts/",
         "helix_batch.json",
+        # Per-candidate OpenCode SQLite state (XDG_DATA_HOME isolation).
+        # Each parallel opencode worker gets a fresh database here; keeps
+        # the candidate git tree free of opencode's session/session files.
+        ".helix_opencode_state/",
     ]
     existing = gitignore.read_text() if gitignore.exists() else ""
     to_append = [p for p in patterns if p not in existing]
@@ -1515,6 +1519,30 @@ def invoke_claude_code(
     _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+    if backend == "opencode" and (sandbox is None or not sandbox.enabled):
+        # Per-candidate SQLite isolation for concurrent opencode subprocesses.
+        #
+        # OpenCode stores its session database at:
+        #   macOS: ~/Library/Application Support/opencode/opencode.db
+        #   Linux: $XDG_DATA_HOME/opencode/opencode.db  (default ~/.local/share/opencode/)
+        #
+        # When multiple proposals run in parallel (num_parallel_proposals > 1),
+        # every worker spawns a fresh `opencode run` subprocess that issues
+        # `PRAGMA journal_mode = WAL` against this shared database at startup.
+        # Concurrent WAL-mode requests on the same file produce:
+        #   "Failed to run the query 'PRAGMA journal_mode = WAL'"
+        # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while g1-s2 succeeded).
+        #
+        # Fix: set XDG_DATA_HOME to a per-candidate directory.  OpenCode respects
+        # XDG_DATA_HOME and will create an isolated database at:
+        #   <worktree>/.helix_opencode_state/opencode/opencode.db
+        # Each parallel worker gets its own fresh database; no contention.
+        #
+        # The sandbox branch is excluded: container isolation already provides
+        # per-candidate filesystem separation, so XDG_DATA_HOME would be redundant.
+        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
+        opencode_state_dir.mkdir(parents=True, exist_ok=True)
+        backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
         result = run_sandboxed_command(
