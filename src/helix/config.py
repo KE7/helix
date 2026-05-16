@@ -299,7 +299,7 @@ class EvolutionConfig(BaseModel):
     and parallel proposal settings.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     max_generations: int = 10
     perfect_score_threshold: float | None = None
@@ -334,7 +334,7 @@ class EvolutionConfig(BaseModel):
     minibatch_size: int = Field(
         default=3,
         description=(
-            "Number of training examples per minibatch acceptance test. "
+            "Number of training examples per reflective mutation. "
             "GEPA parity: ReflectionConfig.reflection_minibatch_size default."
         ),
     )

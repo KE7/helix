@@ -1013,69 +1013,6 @@ def _cached_evaluate_batch(
     return merged, num_actual_evals
 
 
-def _inject_top_k_best_example_history(
-    eval_result: EvalResult,
-    frontier: ParetoFrontier,
-    *,
-    k: int = 3,
-) -> EvalResult:
-    """Attach per-example best-history context for reflection prompts.
-
-    Optimize Anything exposes top-performing example histories to reflection.
-    HELIX's compatible surface is a per-example ``side_info`` field named
-    ``top_k_best_example_history``; it is rendered by the existing diagnostics
-    prompt path without changing candidate/worktree semantics.
-    """
-    if k <= 0 or not eval_result.instance_scores or not frontier.has_results():
-        return eval_result
-
-    example_ids = list(eval_result.instance_scores.keys())
-    history_by_id: dict[str, list[dict[str, Any]]] = {}
-    for eid in example_ids:
-        rows: list[dict[str, Any]] = []
-        for cid, result in frontier.iter_results():
-            if eid in result.instance_scores:
-                rows.append(
-                    {
-                        "candidate_id": cid,
-                        "score": float(result.instance_scores[eid]),
-                    }
-                )
-        rows.sort(key=lambda row: row["score"], reverse=True)
-        if rows:
-            history_by_id[eid] = rows[:k]
-
-    if not history_by_id:
-        return eval_result
-
-    if eval_result.per_example_side_info is None:
-        per_example: list[dict[str, Any]] = [{} for _ in example_ids]
-    else:
-        per_example = [dict(item) for item in eval_result.per_example_side_info]
-        if len(per_example) != len(example_ids):
-            # Length skew between ``instance_scores`` and ``per_example_side_info``
-            # almost certainly indicates an upstream bug (the two are positional
-            # over the same example id list).  Don't silently throw away the
-            # caller's diagnostics — warn loudly and rebuild empty so reflection
-            # still gets the top-K history rather than crashing.
-            logger.warning(
-                "per_example_side_info length (%d) does not match "
-                "instance_scores length (%d) for candidate %s; rebuilding "
-                "side_info from empty before injecting top_k history.",
-                len(per_example),
-                len(example_ids),
-                eval_result.candidate_id,
-            )
-            per_example = [{} for _ in example_ids]
-
-    for idx, eid in enumerate(example_ids):
-        history_rows = history_by_id.get(eid)
-        if history_rows:
-            per_example[idx]["top_k_best_example_history"] = history_rows
-    eval_result.per_example_side_info = per_example
-    return eval_result
-
-
 def _run_full_val_eval(
     candidate: Candidate,
     state: EvolutionState,
@@ -2363,11 +2300,6 @@ def _run_evolution_impl(
                 # ---- Step W2: Build eval_for_mutate ----
                 assert _parent_eval is not None
                 _eval_for_mutate = _parent_eval
-
-                # Inject top-k history (read-only from frontier — safe in parallel)
-                _eval_for_mutate = _inject_top_k_best_example_history(
-                    _eval_for_mutate, frontier
-                )
 
                 # ---- Step W3: Skip-perfect check ----
                 # GEPA parity (reflective_mutation.py:308-327): fires on both
