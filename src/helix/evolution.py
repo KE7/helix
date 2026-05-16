@@ -2173,6 +2173,55 @@ def _run_evolution_impl(
             assert isinstance(_np_raw, int)
             n_proposals = _np_raw
 
+            # -- Atomic-worker result types (sealed union via class hierarchy) --
+            # Using a proper class hierarchy instead of a single ``kind``-discriminated
+            # dataclass gives mypy --strict the isinstance narrowing it needs to verify
+            # field accesses in the acceptance loop without any asserts or TypeGuards.
+            from dataclasses import dataclass as _dc  # noqa: PLC0415
+
+            # Convenience alias for the pre-sample context tuple shared by all result types.
+            _ProposalCtx = tuple[Candidate, EvalResult | None, list[str] | None, str]
+
+            @_dc
+            class _SkippedResult:
+                """skip-perfect fired — LLM was not called."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult
+                parent_n_uncached: int = 0
+
+            @_dc
+            class _LLMFailedResult:
+                """mutate() raised or returned None; parent_eval_result may be None."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult | None
+                parent_n_uncached: int = 0
+
+            @_dc
+            class _TamperedResult:
+                """LLM produced a child that modified protected evaluator files."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult
+                child: Candidate
+                tampered_paths: list[str]
+                parent_n_uncached: int = 0
+                child_usage: UsageStats | None = None
+
+            @_dc
+            class _SuccessResult:
+                """All steps completed; child_eval_result may be None (no-minibatch path)."""
+                presample_ctx: _ProposalCtx
+                parent_eval_result: EvalResult
+                child: Candidate
+                child_eval_result: EvalResult | None = None
+                parent_n_uncached: int = 0
+                child_n_uncached: int = 0
+                child_usage: UsageStats | None = None
+
+            _ProposalResult = (
+                _SkippedResult | _LLMFailedResult | _TamperedResult | _SuccessResult
+            )
+
+
             # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
             # GEPA core/engine.py:381-452 has three stages:
             #   1. ``prepare_proposal`` — sequential (parent select + minibatch sample)
@@ -2241,363 +2290,381 @@ def _run_evolution_impl(
                     (parent, parent_frontier_result, subsample_ids, new_id)
                 )
 
-            # ---- Step 1b: Parent minibatch eval (PARALLEL) ----
-            # GEPA parity (audit-mutation §C4 MODERATE E): GEPA runs
-            # ``eval_curr = self.adapter.evaluate(ctx.minibatch, ctx.curr_prog, ...)``
-            # (reflective_mutation.py:268) inside ``execute_proposal``, which
-            # engine.py:422-426 submits to a ThreadPoolExecutor so N parent evals
-            # overlap.  HELIX used to run this sequentially in the pre-sample loop
-            # (evolution.py:1406-1444 pre-fix).  Legacy no-minibatch path still
-            # runs ``_cached_eval(parent, "train")`` here because there is no
-            # per-proposal subsample to use.
-            def _eval_parent(
-                pre_ctx: tuple[Candidate, EvalResult | None, list[str] | None, str],
-            ) -> tuple[EvalResult | None, int]:
+
+            # -- _run_proposal_worker closure (atomic per-proposal worker) --
+            # Replaces the old _eval_parent + _do_mutate split closures with a
+            # single atomic worker that runs the full GEPA execute_proposal shape:
+            #   parent_eval (reflective_mutation.py:268) →
+            #   skip-perfect (reflective_mutation.py:308) →
+            #   LLM mutate (reflective_mutation.py:369) →
+            #   tamper check → child_eval (reflective_mutation.py:420).
+            # Budget charging is deferred to the sequential acceptance loop
+            # (apply_proposal_output parity).
+            def _run_proposal_worker(
+                pre_ctx: _ProposalCtx,
+            ) -> "_SkippedResult | _LLMFailedResult | _TamperedResult | _SuccessResult":
+                """Atomic proposal worker — GEPA execute_proposal shape.
+
+                Runs inside a ThreadPoolExecutor. All parameters except pre_ctx
+                are captured from the enclosing scope (config, project_root,
+                frontier, minibatch_cache, eval_cache, worktrees_dir,
+                evaluator_manifest, use_minibatch_gate, gen).
+
+                Thread-safety:
+                - Reads frontier (read-only during worker phase) ✓
+                - Reads config, project_root (immutable) ✓
+                - Writes to per-candidate worktree only (no shared mutable state) ✓
+                - Budget mutations DEFERRED to sequential acceptance loop ✓
+                """
                 _parent, _pfr, _sub_ids, _new_id = pre_ctx
+
+                # ---- Step W1: Parent eval ----
+                # Minibatch path: run parent eval fresh (bypass cache, GEPA parity).
+                # No-minibatch path: run train eval (single-task mode, n=1 in practice).
+                _parent_eval: "EvalResult | None" = None
+                _parent_n_uncached: int = 0
                 if _sub_ids is not None:
-                    # GEPA parity (reflective_mutation.py:268-269): parent
-                    # minibatch evals BYPASS the cache — pass ``None`` so that
-                    # every call goes to the real evaluator and charges the full
-                    # minibatch size toward budget.  The cache is reserved for
-                    # val-set full evaluations only (GEPA engine.py:154-173).
-                    # This prevents NB-2: without this, a cache-warm parent that
-                    # always scores perfectly charges 0 toward budget while gen
-                    # keeps advancing (Change 1), making budget the only guard.
-                    _mb, _n_uncached = _cached_evaluate_batch(
-                        _parent,
+                    try:
+                        # Bypass minibatch_cache — mirrors GEPA reflective_mutation.py:268
+                        _mb, _n = _cached_evaluate_batch(
+                            _parent,
+                            list(_sub_ids),
+                            None,  # bypass minibatch_cache
+                            config,
+                            "train",
+                            project_root,
+                        )
+                        _mb.candidate_id = _parent.id
+                        _parent_eval = _mb
+                        _parent_n_uncached = _n
+                    except Exception as _pe_exc:
+                        print_warning(
+                            f"Parent eval for proposal {_new_id} "
+                            f"(parent: {_parent.id}, gen {gen}) failed: "
+                            f"{type(_pe_exc).__name__}: {_pe_exc} — proposal slot skipped."
+                        )
+                        return _LLMFailedResult(
+                            presample_ctx=pre_ctx,
+                            parent_eval_result=None,
+                            parent_n_uncached=0,
+                        )
+                else:
+                    # No-minibatch path: run train eval inside worker.
+                    # eval_cache is a shared dict; safe for n=1 (single-task mode).
+                    set_phase(HelixPhase.TRAIN_EVALUATION)
+                    _train_result, _train_cached = _cached_eval(
+                        _parent, config, "train", eval_cache
+                    )
+                    _train_result.candidate_id = _parent.id
+                    _parent_eval = _train_result
+                    # Encode was_cached as n_uncached (0 = was_cached, 1 = not cached)
+                    _parent_n_uncached = 0 if _train_cached else 1
+
+                # ---- Step W2: Build eval_for_mutate ----
+                assert _parent_eval is not None
+                _eval_for_mutate = _parent_eval
+
+                # Inject top-k history (read-only from frontier — safe in parallel)
+                _eval_for_mutate = _inject_top_k_best_example_history(
+                    _eval_for_mutate, frontier
+                )
+
+                # ---- Step W3: Skip-perfect check ----
+                # GEPA parity (reflective_mutation.py:308-327): fires on both
+                # minibatch and no-minibatch paths.  _parent_eval is always set
+                # at this point (minibatch eval OR train eval above).
+                if (
+                    config.evolution.perfect_score_threshold is not None
+                    and _parent_eval is not None
+                    and all(
+                        s >= config.evolution.perfect_score_threshold
+                        for s in _parent_eval.instance_scores.values()
+                    )
+                ):
+                    return _SkippedResult(
+                        presample_ctx=pre_ctx,
+                        parent_eval_result=_parent_eval,
+                        parent_n_uncached=_parent_n_uncached,
+                    )
+
+                # ---- Step W4: LLM mutation ----
+                try:
+                    _child = mutate(
+                        parent=_parent,
+                        eval_result=_eval_for_mutate,
+                        new_id=_new_id,
+                        config=config,
+                        base_dir=worktrees_dir,
+                        background=config.agent.background,
+                        prepare_worktree=lambda cand: (
+                            _refresh_and_snapshot_protected_evaluator_files(
+                                cand, config, project_root
+                            )
+                        ),
+                    )
+                except Exception as _mu_exc:
+                    # Re-raise PromptArtifactCollisionError (fatal for the whole run)
+                    if isinstance(_mu_exc, PromptArtifactCollisionError):
+                        raise
+                    # For HelixError / RateLimitError and other errors, log and return llm_failed
+                    if isinstance(_mu_exc, HelixError):
+                        _mu_exc.operation = (
+                            _mu_exc.operation or f"parallel mutate {_new_id}"
+                        )
+                        print_helix_error(_mu_exc)
+                        if isinstance(_mu_exc, RateLimitError):
+                            logger.error(
+                                "Mutation %s (parent: %s, gen %d) failed after all retries: "
+                                "%s: %s — proposal slot skipped.",
+                                _new_id, _parent.id, gen,
+                                type(_mu_exc).__name__, _mu_exc,
+                            )
+                            print_error(
+                                f"Mutation [bold]{_new_id}[/bold] hit rate limit after all "
+                                f"retries — proposal slot skipped. "
+                                f"Run [cyan]helix resume[/cyan] when rate limits clear."
+                            )
+                    else:
+                        print_error(
+                            f"Parallel mutation {_new_id} (parent: {_parent.id}, gen {gen}) "
+                            f"failed with exception:\n{traceback.format_exc()}"
+                        )
+                    return _LLMFailedResult(
+                        presample_ctx=pre_ctx,
+                        parent_eval_result=_parent_eval,
+                        parent_n_uncached=_parent_n_uncached,
+                    )
+
+                if _child is None:
+                    return _LLMFailedResult(
+                        presample_ctx=pre_ctx,
+                        parent_eval_result=_parent_eval,
+                        parent_n_uncached=_parent_n_uncached,
+                    )
+
+                # ---- Step W5: Tamper check ----
+                _tampered = _detect_evaluator_tamper(
+                    _child, evaluator_manifest, config, project_root
+                )
+                if _tampered:
+                    return _TamperedResult(
+                        presample_ctx=pre_ctx,
+                        parent_eval_result=_parent_eval,
+                        child=_child,
+                        tampered_paths=_tampered,
+                        parent_n_uncached=_parent_n_uncached,
+                        child_usage=_child.usage if _child.usage else None,
+                    )
+
+                # ---- Step W6: Child minibatch eval ----
+                _child_eval: "EvalResult | None" = None
+                _child_n_uncached: int = 0
+                if _sub_ids is not None:
+                    _ce, _cn = _cached_evaluate_batch(
+                        _child,
                         list(_sub_ids),
-                        None,  # bypass minibatch_cache — mirrors GEPA line 268
+                        minibatch_cache,  # use cache for child (unlike parent bypass)
                         config,
                         "train",
                         project_root,
                     )
-                    _mb.candidate_id = _parent.id
-                    return _mb, _n_uncached
-                return None, 0
+                    _ce.candidate_id = _child.id
+                    _child_eval = _ce
+                    _child_n_uncached = _cn
 
-            parent_eval_results: list[tuple[EvalResult | None, int]]
-            if n_proposals > 1 and len(presample_contexts) > 1:
-                from concurrent.futures import (
-                    ThreadPoolExecutor,
-                    as_completed as _as_completed,
+                return _SuccessResult(
+                    presample_ctx=pre_ctx,
+                    parent_eval_result=_parent_eval,
+                    child=_child,
+                    child_eval_result=_child_eval,
+                    parent_n_uncached=_parent_n_uncached,
+                    child_n_uncached=_child_n_uncached,
+                    child_usage=_child.usage if _child.usage else None,
                 )
 
-                parent_eval_results = [(None, 0)] * len(presample_contexts)
-                # GEPA parity: bound concurrency by ``max_workers``
-                # (optimize_anything.py:485) while preserving the "at most
-                # len(contexts)" natural cap.
-                _pe_max_workers = min(
-                    len(presample_contexts), config.evolution.max_workers
-                )
-                with ThreadPoolExecutor(max_workers=_pe_max_workers) as _pe_pool:
-                    _pe_future_to_idx = {
-                        _pe_pool.submit(_eval_parent, _pre_ctx): _idx
-                        for _idx, _pre_ctx in enumerate(presample_contexts)
+            # ---- Step 2: Atomic workers (GEPA execute_proposal parity) ----
+            # One worker per proposal slot; all run in a single ThreadPoolExecutor.
+            # Each worker executes: parent_eval → skip-perfect → LLM → tamper → child_eval.
+            # Budget charging is deferred to the sequential acceptance loop (Step 3).
+            # GEPA parity: engine.py:422-443, reflective_mutation.py:268,308,369,420.
+
+            if _budget_break and not presample_contexts:
+                print_warning("Budget exhausted mid-generation -- stopping.")
+                _save_state(state)
+                break
+
+            set_phase(HelixPhase.MUTATION)
+
+            worker_results: "list[_ProposalResult | None]" = [None] * len(presample_contexts)
+
+            from concurrent.futures import (  # noqa: PLC0415
+                ThreadPoolExecutor as _TPE,
+                as_completed as _ac,
+            )
+
+            _w_max = min(len(presample_contexts), config.evolution.max_workers)
+            if len(presample_contexts) > 1:
+                with _TPE(max_workers=_w_max) as _wpool:
+                    _wfutures = {
+                        _wpool.submit(_run_proposal_worker, _pctx): _widx
+                        for _widx, _pctx in enumerate(presample_contexts)
                     }
-                    for _pe_future in _as_completed(_pe_future_to_idx):
-                        _pe_idx = _pe_future_to_idx[_pe_future]
-                        # GEPA parity: engine.py:427-443 wraps future.result() so a
-                        # single evaluator exception drops only that proposal
-                        # instead of aborting the whole generation.  (HELIX does
-                        # not expose GEPA's ``on_error`` callback surface.)
+                    for _wf in _ac(_wfutures):
+                        _widx = _wfutures[_wf]
                         try:
-                            parent_eval_results[_pe_idx] = _pe_future.result()
-                        except Exception as _pe_exc:
-                            _pe_ctx = presample_contexts[_pe_idx]
-                            _pe_parent = _pe_ctx[0]
-                            _pe_new_id = _pe_ctx[3]
+                            worker_results[_widx] = _wf.result()
+                        except PromptArtifactCollisionError:
+                            raise
+                        except Exception as _wexc:
+                            _wpctx = presample_contexts[_widx]
+                            _wid = _wpctx[3]
+                            _wparent = _wpctx[0]
                             print_warning(
-                                f"Parent eval for proposal {_pe_new_id} "
-                                f"(parent: {_pe_parent.id}, gen {gen}) failed: "
-                                f"{type(_pe_exc).__name__}: {_pe_exc} — "
-                                f"proposal slot skipped."
+                                f"Worker for proposal {_wid} "
+                                f"(parent: {_wparent.id}, gen {gen}) "
+                                f"raised an unexpected exception: "
+                                f"{type(_wexc).__name__}: {_wexc} — proposal slot dropped."
                             )
-                            # Sentinel: ``_mb_result=None, n_uncached=0``.  The
-                            # §1c loop below treats ``parent_mb_result is None``
-                            # for a minibatch-gated run as a drop signal and
-                            # ``continue``s without charging budget.
-                            parent_eval_results[_pe_idx] = (None, 0)
+                            worker_results[_widx] = _LLMFailedResult(
+                                presample_ctx=_wpctx,
+                                parent_eval_result=None,
+                                parent_n_uncached=0,
+                            )
             else:
-                parent_eval_results = [
-                    _eval_parent(_pre_ctx) for _pre_ctx in presample_contexts
-                ]
+                # n=1 sequential path (or single surviving slot after budget break)
+                for _idx, _pctx in enumerate(presample_contexts):
+                    worker_results[_idx] = _run_proposal_worker(_pctx)
 
-            # ---- Step 1c: Charge budget + skip-perfect (SEQUENTIAL) ----
-            # GEPA core/engine.py:361 applies deferred updates sequentially via
-            # ``apply_proposal_output``.  Here we charge the uncached example
-            # count for a completed parent minibatch evaluator run, then apply
-            # the skip-perfect gate (reflective_mutation.py:308-312).
-            proposal_contexts: list[
-                tuple[Candidate, EvalResult | None, EvalResult, str]
-            ] = []
-            proposal_subsamples: list[list[str] | None] = []
-            proposal_parent_mb_results: list[EvalResult | None] = []
+            # ---- Step 3: Sequential acceptance (sampling order, GEPA engine.py:446-452) ----
+            # Read worker results in pre-sampling order.  Budget mutations, lineage
+            # writes, and frontier updates are all sequential here
+            # (GEPA apply_proposal_output parity, engine.py:449-452).
+
+            _last_eval_result: "EvalResult | None" = None
+            _gen_skip_records: "list[dict[str, Any]]" = []
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
-            # Accumulate per-proposal skip records; written as a single JSON list
-            # after the loop so that n_proposals > 1 with multiple perfect parents
-            # does not silently overwrite earlier records (review NB-1).
-            _gen_skip_records: list[dict[str, Any]] = []
 
-            for _p_idx, (_pre_ctx, (_mb_result, _n_uncached)) in enumerate(
-                zip(presample_contexts, parent_eval_results)
-            ):
-                parent, parent_frontier_result, subsample_ids, new_id = _pre_ctx
-                parent_mb_result: EvalResult | None = _mb_result
-
-                # GEPA parity (engine.py:427-443): when the parallel parent-eval
-                # future raised, _mb_result is the None sentinel set above.  Skip
-                # the proposal just like GEPA skips on ``outputs[idx] is None``.
-                # We do NOT charge budget: the eval aborted before completing, so
-                # there is no corresponding ``num_metric_calls`` to account for
-                # (mirrors GEPA's ``total_evals`` being added inside
-                # ``execute_proposal`` only on successful evaluation).  Legacy
-                # single-task/no-example mode (``subsample_ids is None``) intentionally
-                # allows _mb_result=None and falls through to a train re-eval.
-                if subsample_ids is not None and parent_mb_result is None:
-                    print_warning(
-                        f"Iteration {gen}: dropping proposal {new_id} "
-                        f"(parent {parent.id}) — parent-eval failed in §1b."
-                    )
+            for _p_idx, wr in enumerate(worker_results):
+                if wr is None:
                     continue
 
-                if subsample_ids is not None:
+                _parent, _parent_frontier_result, _subsample_ids, _new_id = wr.presample_ctx
+
+                # --- Handle non-success kinds (isinstance narrows wr for mypy) ---
+
+                if isinstance(wr, _LLMFailedResult):
+                    # Charge parent eval budget if the parent eval ran successfully
+                    # before the LLM call failed.
+                    if _subsample_ids is not None and wr.parent_eval_result is not None:
+                        budget_api.charge_evaluation(
+                            state,
+                            num_actual_examples=wr.parent_n_uncached,
+                            candidate_id=_parent.id,
+                            split="train",
+                            source="parent_minibatch",
+                        )
+                    print_warning(f"Mutation {_new_id} failed -- skipping.")
+                    continue
+
+                if isinstance(wr, _SkippedResult):
+                    # Charge parent eval budget (both paths)
+                    if _subsample_ids is not None:
+                        budget_api.charge_evaluation(
+                            state,
+                            num_actual_examples=wr.parent_n_uncached,
+                            candidate_id=_parent.id,
+                            split="train",
+                            source="parent_minibatch",
+                        )
+                    else:
+                        # No-minibatch path: worker ran _cached_eval; n_uncached encodes was_cached
+                        budget_api.charge_evaluation(
+                            state,
+                            was_cached=(wr.parent_n_uncached == 0),
+                            candidate_id=_parent.id,
+                            split="train",
+                            source="parent_train_no_minibatch",
+                        )
+                    _gen_skip_records.append({
+                        "generation": gen,
+                        "parent_id": _parent.id,
+                        "reason": "perfect_subsample",
+                        "parent_eval": wr.parent_eval_result.to_dict(),
+                    })
+                    print_info(
+                        f"Iteration {gen}: all subsample scores perfect for parent "
+                        f"{_parent.id}; skipping proposal "
+                        f"(GEPA reflective_mutation.py:308-327)."
+                    )
+                    semantic_skip_count += 1
+                    if _subsample_ids is not None:
+                        retryable_semantic_skip_count += 1
+                    continue
+
+                if isinstance(wr, _TamperedResult):
+                    # Charge parent eval budget
+                    if _subsample_ids is not None:
+                        budget_api.charge_evaluation(
+                            state,
+                            num_actual_examples=wr.parent_n_uncached,
+                            candidate_id=_parent.id,
+                            split="train",
+                            source="parent_minibatch",
+                        )
+                    # Charge LLM usage (mutation happened, even if rejected)
+                    if wr.child_usage:
+                        live.update(usage=wr.child_usage)
+                        budget_api.charge_llm_usage(
+                            state, wr.child_usage,
+                            candidate_id=wr.child.id, source="mutation",
+                        )
+                    print_warning(
+                        f"Mutation {wr.child.id} touched protected evaluator files "
+                        f"({', '.join(wr.tampered_paths)}) -- rejecting."
+                    )
+                    _safe_remove_worktree(wr.child, label="tamper-rejected mutation candidate")
+                    continue
+
+                # wr is _SuccessResult at this point (mypy narrows via isinstance exhaustion)
+                child = wr.child
+
+                # Charge parent eval budget
+                if _subsample_ids is not None and wr.parent_eval_result is not None:
+                    # Minibatch path
                     budget_api.charge_evaluation(
                         state,
-                        num_actual_examples=_n_uncached,
-                        candidate_id=parent.id,
+                        num_actual_examples=wr.parent_n_uncached,
+                        candidate_id=_parent.id,
                         split="train",
                         source="parent_minibatch",
                     )
-
-                if budget_api.budget_exhausted(state, config):
-                    _budget_break = True
-                    break
-
-                # GEPA parity: the eval_result passed to the mutator is the
-                # parent's minibatch eval (reflective_mutation.py:268,341), not
-                # a full-train re-eval. HELIX previously ran a redundant
-                # _cached_eval(parent, 'train') here, which forced evaluator-owned
-                # datasets to rescore the entire training split just to provide
-                # prompt context. No-minibatch single-task/no-example mode keeps a
-                # train eval because there is no minibatch to use.
-                eval_for_mutate: EvalResult
-                if parent_mb_result is not None:
-                    eval_for_mutate = parent_mb_result
                 else:
-                    set_phase(HelixPhase.TRAIN_EVALUATION)
-                    eval_for_mutate, _train_cached = _cached_eval(
-                        parent, config, "train", eval_cache
-                    )
-                    eval_for_mutate.candidate_id = parent.id
+                    # No-minibatch path: parent_n_uncached encodes was_cached
+                    # (0 = was cached, 1 = not cached)
                     budget_api.charge_evaluation(
                         state,
-                        was_cached=_train_cached,
-                        candidate_id=parent.id,
+                        was_cached=(wr.parent_n_uncached == 0),
+                        candidate_id=_parent.id,
                         split="train",
                         source="parent_train_no_minibatch",
                     )
 
-                eval_for_mutate = _inject_top_k_best_example_history(
-                    eval_for_mutate, frontier
-                )
+                if budget_api.budget_exhausted(state, config):
+                    print_warning("Budget exhausted mid-generation -- stopping.")
+                    _save_state(state)
+                    _budget_break = True
+                    break
 
-                # Skip-if-perfect (GEPA reflective_mutation.py:308-327, audit
-                # finding M1 in audit-init-engine.md B1/B2):
-                #   * GEPA returns ProposalOutput(proposal=None) and the outer
-                #     iteration loop CONTINUES with a new parent — it does NOT
-                #     terminate the whole run.  Mirror that by ``continue``-ing
-                #     the per-proposal sampling loop (HELIX evolution.py).
-                #   * GEPA's condition is ``all(s >= perfect_score for s in
-                #     eval_curr.scores)`` (reflective_mutation.py:311) — every
-                #     per-example score must clear the bar.  HELIX previously
-                #     used the mean ``aggregate_score()``, which fires sooner
-                #     when a minibatch is [0.5, 1.0, 1.0] @ threshold=0.8.
-                if config.evolution.perfect_score_threshold is not None and all(
-                    s >= config.evolution.perfect_score_threshold
-                    for s in eval_for_mutate.instance_scores.values()
-                ):
-                    _gen_skip_records.append({
-                        "generation": gen,
-                        "parent_id": parent.id,
-                        "reason": "perfect_subsample",
-                        "parent_eval": eval_for_mutate.to_dict(),
-                    })
-                    print_info(
-                        f"Iteration {gen}: all subsample scores perfect for "
-                        f"parent {parent.id}; skipping proposal "
-                        f"(GEPA reflective_mutation.py:308-327)."
+                # Charge LLM usage
+                if wr.child_usage:
+                    live.update(usage=wr.child_usage)
+                    budget_api.charge_llm_usage(
+                        state, wr.child_usage, candidate_id=child.id, source="mutation",
                     )
-                    semantic_skip_count += 1
-                    if subsample_ids is not None:
-                        retryable_semantic_skip_count += 1
-                    continue
-
-                proposal_contexts.append(
-                    (parent, parent_frontier_result, eval_for_mutate, new_id)
-                )
-                proposal_subsamples.append(subsample_ids)
-                proposal_parent_mb_results.append(parent_mb_result)
-
-            # Write all skip records for this generation as a single JSON list.
-            # Must come after the inner loop so every proposal's result is known.
-            if _gen_skip_records:
-                _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
-
-            if _budget_break and not proposal_contexts:
-                print_warning("Budget exhausted mid-generation -- stopping.")
-                _save_state(state)
-                break
-            if (
-                not proposal_contexts
-                and semantic_skip_count
-                and retryable_semantic_skip_count == semantic_skip_count
-            ):
-                # Perfect-subsample skip: all parents scored perfectly on the
-                # minibatch so no mutation was attempted.  GEPA parity
-                # (engine.py:649, reflective_mutation.py:308-327): gen was
-                # already incremented unconditionally at the top of the loop,
-                # so state.generation is now set to the *new* gen value.  On
-                # resume the next iteration will be gen+1 — no rollback, no
-                # retry-same-generation infinite loop (NB-2 fix).
-                _save_state(state)
-                TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
-                continue
-
-            # ---- Step 2: Execute mutations (parallel if N > 1) ----
-            set_phase(HelixPhase.MUTATION)
-
-            def _do_mutate(
-                ctx: tuple[Candidate, EvalResult | None, EvalResult, str],
-            ) -> Candidate | None:
-                _parent, _parent_frontier_result, _eval_for_mutate, _new_id = ctx
-                # GEPA parity: mutator receives the parent's minibatch eval
-                # (see make_reflective_dataset(curr_prog, eval_curr, ...) in
-                # reflective_mutation.py:341), not a full-train re-eval.
-                return mutate(
-                    parent=_parent,
-                    eval_result=_eval_for_mutate,
-                    new_id=_new_id,
-                    config=config,
-                    base_dir=worktrees_dir,
-                    background=config.agent.background,
-                    prepare_worktree=lambda cand: (
-                        _refresh_and_snapshot_protected_evaluator_files(
-                            cand, config, project_root
-                        )
-                    ),
-                )
-
-            mutation_results: list[Candidate | None]
-            if n_proposals > 1 and len(proposal_contexts) > 1:
-                from concurrent.futures import (
-                    ThreadPoolExecutor,
-                    as_completed as _as_completed,
-                )
-
-                mutation_results = [None] * len(proposal_contexts)
-                # GEPA parity: bound concurrency by ``max_workers``
-                # (optimize_anything.py:485) while preserving the "at most
-                # len(contexts)" natural cap.
-                _mu_max_workers = min(
-                    len(proposal_contexts), config.evolution.max_workers
-                )
-                with ThreadPoolExecutor(max_workers=_mu_max_workers) as pool:
-                    future_to_idx = {
-                        pool.submit(_do_mutate, ctx): idx
-                        for idx, ctx in enumerate(proposal_contexts)
-                    }
-                    for future in _as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        try:
-                            child = future.result()
-                            mutation_results[idx] = child
-                            if child and child.usage:
-                                live.update(usage=child.usage)
-                                budget_api.charge_llm_usage(
-                                    state,
-                                    child.usage,
-                                    candidate_id=child.id,
-                                    source="mutation",
-                                )
-                        except Exception as exc:
-                            _ctx = proposal_contexts[idx]
-                            _fail_id = _ctx[3]
-                            _fail_parent = _ctx[0]
-                            if isinstance(exc, HelixError):
-                                exc.operation = (
-                                    exc.operation or f"parallel mutate {_fail_id}"
-                                )
-                                print_helix_error(exc)
-                                if isinstance(exc, PromptArtifactCollisionError):
-                                    raise
-                                if isinstance(exc, RateLimitError):
-                                    # Loud ERROR log so the user clearly sees which
-                                    # proposal slot was dropped and why (Fix 2).
-                                    logger.error(
-                                        "Mutation %s (parent: %s, gen %d) failed after "
-                                        "all retries: %s: %s — proposal slot skipped.",
-                                        _fail_id,
-                                        _fail_parent.id,
-                                        gen,
-                                        type(exc).__name__,
-                                        exc,
-                                    )
-                                    print_error(
-                                        f"Mutation [bold]{_fail_id}[/bold] hit rate limit "
-                                        f"after all retries — proposal slot skipped. "
-                                        f"Run [cyan]helix resume[/cyan] when rate limits clear."
-                                    )
-                            else:
-                                print_error(
-                                    f"Parallel mutation {_fail_id} "
-                                    f"(parent: {_fail_parent.id}, gen {gen}) "
-                                    f"failed with exception:\n"
-                                    f"{traceback.format_exc()}"
-                                )
-            else:
-                mutation_results = []
-                for ctx in proposal_contexts:
-                    child = _do_mutate(ctx)
-                    mutation_results.append(child)
-                    if child and child.usage:
-                        live.update(usage=child.usage)
-                        budget_api.charge_llm_usage(
-                            state,
-                            child.usage,
-                            candidate_id=child.id,
-                            source="mutation",
-                        )
-
-            # ---- Step 3: Process acceptances SEQUENTIALLY ----
-            # Each accepted mutation's full val eval updates state before
-            # the next is processed (GEPA engine.py:444-452).
-            _last_eval_result: EvalResult | None = None
-
-            for _p_idx, (ctx, child) in enumerate(
-                zip(proposal_contexts, mutation_results)
-            ):
-                _parent, _parent_frontier_result, _eval_for_mutate, _new_id = ctx
-                _subsample_ids = proposal_subsamples[_p_idx]
-                _parent_mb = proposal_parent_mb_results[_p_idx]
-
-                if child is None:
-                    print_warning(f"Mutation {_new_id} failed -- skipping.")
-                    continue
 
                 mutations_attempted += 1
                 live.update(mutations_attempted=mutations_attempted)
-
-                tampered_paths = _detect_evaluator_tamper(
-                    child, evaluator_manifest, config, project_root
-                )
-                if tampered_paths:
-                    print_warning(
-                        f"Mutation {child.id} touched protected evaluator files "
-                        f"({', '.join(tampered_paths)}) -- rejecting."
-                    )
-                    _safe_remove_worktree(child, label="tamper-rejected mutation candidate")
-                    continue
 
                 candidates[child.id] = child
                 record_entry(
@@ -2618,39 +2685,23 @@ def _run_evolution_impl(
                 snapshot_candidate(child, f"helix: mutate {child.id}")
 
                 # --- Gating evaluation ----------------------------------------
-                # Two paths here — both gate on GEPA's strict-sum acceptance
-                # (``acceptance.should_accept``), matching GEPA engine.py:303:
-                #  (a) Minibatch gate (GEPA §5.1): when train_loader exists,
-                #      run the child on the SAME subsample as the parent and
-                #      accept on sum improvement over the parent's minibatch
-                #      scores.  No separate train re-eval.
-                #  (b) Legacy train-gating: no train_loader — run the child
-                #      on the full train split and apply the same acceptance
-                #      criterion (GEPA parity MODERATE D — audit-mutation.md C3).
+                # Two paths — both gate on GEPA's strict-sum acceptance criterion:
+                # (a) Minibatch gate: child eval already done in worker → use directly.
+                # (b) Legacy no-minibatch: run child eval sequentially here (old behavior).
+                _eval_for_mutate = wr.parent_eval_result  # parent baseline
+
                 if (
                     use_minibatch_gate
                     and _subsample_ids is not None
-                    and _parent_mb is not None
+                    and wr.parent_eval_result is not None
+                    and wr.child_eval_result is not None
                 ):
-                    set_phase(HelixPhase.MUTATION_GATING)
-                    # GEPA parity: route child-on-minibatch through the
-                    # per-example cache consumer.  For a freshly mutated
-                    # child the cache never hits (the candidate hash is new),
-                    # but the fresh scores are put_batch'd so that any later
-                    # re-eval of the same child on overlapping indices is free.
-                    gating_result, _n = _cached_evaluate_batch(
-                        child,
-                        list(_subsample_ids),
-                        minibatch_cache,
-                        config,
-                        "train",
-                        project_root,
-                    )
-                    gating_result.candidate_id = child.id
+                    # (a) Minibatch path: child eval result already in worker result
+                    gating_result = wr.child_eval_result
                     _last_eval_result = gating_result
                     budget_api.charge_evaluation(
                         state,
-                        num_actual_examples=_n,
+                        num_actual_examples=wr.child_n_uncached,
                         candidate_id=child.id,
                         split="train",
                         source="mutation_minibatch_gate",
@@ -2665,21 +2716,20 @@ def _run_evolution_impl(
                     # Apply the configured acceptance criterion on the
                     # per-instance score vectors (GEPA §5.1).
                     #
-                    # GEPA parity (adapter.py:154 — ``len(outputs) == len(scores)
-                    # == len(batch)``): a missing instance id in the parent or
-                    # child minibatch result is an evaluator bug, not a benign
-                    # zero.  Both vectors must cover every id in
-                    # ``_subsample_ids`` so the acceptance criterion compares
-                    # like-for-like.  The merge path enforces the same invariant
-                    # at evolution.py:1394-1411.
-                    from types import SimpleNamespace as _SN
+                    # GEPA parity (adapter.py:154): a missing instance id in the
+                    # parent or child minibatch result is an evaluator bug, not a
+                    # benign zero.  Both vectors must cover every id in
+                    # ``_subsample_ids`` so the acceptance criterion compares like-for-like.
+                    from types import SimpleNamespace as _SN  # noqa: PLC0415
 
-                    assert set(_subsample_ids).issubset(_parent_mb.instance_scores), (
+                    assert set(_subsample_ids).issubset(
+                        wr.parent_eval_result.instance_scores
+                    ), (
                         f"Parent minibatch eval missing ids: "
-                        f"{set(_subsample_ids) - set(_parent_mb.instance_scores)}"
+                        f"{set(_subsample_ids) - set(wr.parent_eval_result.instance_scores)}"
                     )
                     _before = [
-                        float(_parent_mb.instance_scores[str(eid)])
+                        float(wr.parent_eval_result.instance_scores[str(eid)])
                         for eid in _subsample_ids
                     ]
                     assert set(_subsample_ids).issubset(
@@ -2698,80 +2748,59 @@ def _run_evolution_impl(
                     )
                     if not acceptance.should_accept(_proposal):
                         _save_attempt_result(
-                            base_dir,
-                            gating_result,
-                            status="rejected",
-                            reason="minibatch_gate",
-                            parent_id=_parent.id,
-                            generation=gen,
-                            stage="train_minibatch",
-                            example_ids=list(_subsample_ids),
+                            base_dir, gating_result,
+                            status="rejected", reason="minibatch_gate",
+                            parent_id=_parent.id, generation=gen,
+                            stage="train_minibatch", example_ids=list(_subsample_ids),
                         )
                         TRACE.emit(
-                            EventType.ACCEPT_DECISION,
-                            candidate_id=child.id,
-                            decision="reject",
-                            example_ids=list(_subsample_ids),
+                            EventType.ACCEPT_DECISION, candidate_id=child.id,
+                            decision="reject", example_ids=list(_subsample_ids),
                             score=float(sum(_after)),
                         )
                         print_warning(
                             f"Minibatch gate: {child.id} rejected "
                             f"(sum {sum(_after):.4f} vs parent {sum(_before):.4f}) -- removing."
                         )
-                        _safe_remove_worktree(child, label="minibatch-gate-rejected candidate")
+                        _safe_remove_worktree(
+                            child, label="minibatch-gate-rejected candidate"
+                        )
                         del candidates[child.id]
                         continue
                     else:
                         TRACE.emit(
-                            EventType.ACCEPT_DECISION,
-                            candidate_id=child.id,
-                            decision="accept",
-                            example_ids=list(_subsample_ids),
+                            EventType.ACCEPT_DECISION, candidate_id=child.id,
+                            decision="accept", example_ids=list(_subsample_ids),
                             score=float(sum(_after)),
                         )
+
                 else:
+                    # (b) Legacy no-minibatch path: run child eval sequentially
+                    # Single-task/no-example mode still gates on train eval.
+                    # The parent baseline comes from the train eval passed to the mutator.
                     set_phase(HelixPhase.MUTATION_GATING)
+                    parent_acceptance_result = _eval_for_mutate
                     gating_result, _gating_cached = _cached_eval(
                         child, config, "train", eval_cache
                     )
                     gating_result.candidate_id = child.id
                     _last_eval_result = gating_result
-                    # Single-task/no-example mode still gates on train, but the parent baseline
-                    # must come from the same train eval that was passed into the mutator,
-                    # not the parent's stored val frontier result.
-                    parent_acceptance_result = _eval_for_mutate
+                    # Single-task/no-example mode still charges on train eval.
+                    # GEPA parity (MODERATE D — audit-mutation.md C3):
+                    # same strict-sum acceptance criterion as minibatch path.
                     budget_api.charge_evaluation(
-                        state,
-                        was_cached=_gating_cached,
-                        candidate_id=child.id,
-                        split="train",
-                        source="mutation_train_gate",
+                        state, was_cached=_gating_cached, candidate_id=child.id,
+                        split="train", source="mutation_train_gate",
                     )
-
                     if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
                         break
 
-                    # GEPA parity (MODERATE D — audit-mutation.md C3):
-                    # GEPA has a single acceptance path — sum-score strict
-                    # improvement on the same minibatch (engine.py:287-303,
-                    # reflective_mutation.py:420).  HELIX previously ran
-                    # ``degrades()`` as a pre-check in this legacy (no-minibatch)
-                    # path, applying a tolerance that GEPA does not have.  The
-                    # pre-check is removed so both paths now gate on the SAME
-                    # criterion (``acceptance.should_accept`` = strict sum by
-                    # default).  Routing through the acceptance criterion
-                    # instead of the inline ``child_sum <= parent_sum`` check
-                    # mirrors GEPA engine.py:303 and lets callers swap in
-                    # ``ImprovementOrEqualAcceptance`` uniformly across both
-                    # paths.
-                    from types import SimpleNamespace as _SN
+                    from types import SimpleNamespace as _SN  # noqa: PLC0415
 
-                    _legacy_before = list(
-                        parent_acceptance_result.instance_scores.values()
-                    )
+                    _legacy_before = list(parent_acceptance_result.instance_scores.values())
                     _legacy_after = list(gating_result.instance_scores.values())
                     _legacy_proposal = _SN(
                         subsample_scores_before=_legacy_before,
@@ -2781,14 +2810,10 @@ def _run_evolution_impl(
                         parent_sum = sum(_legacy_before)
                         child_sum = sum(_legacy_after)
                         _save_attempt_result(
-                            base_dir,
-                            gating_result,
-                            status="rejected",
-                            reason="train_gate",
-                            parent_id=_parent.id,
-                            generation=gen,
-                            stage="train",
-                            example_ids=None,
+                            base_dir, gating_result,
+                            status="rejected", reason="train_gate",
+                            parent_id=_parent.id, generation=gen,
+                            stage="train", example_ids=None,
                         )
                         print_warning(
                             f"Acceptance: {child.id} does not improve "
@@ -2799,36 +2824,29 @@ def _run_evolution_impl(
                         continue
 
                 # --- Staged val gate ------------------------------------------
+                # UNCHANGED from previous architecture — runs sequentially after gating.
                 use_val_stage_gate = _has_example_scores(
                     _parent_frontier_result, stage_val_example_ids
                 )
                 if stage_val_example_ids and use_val_stage_gate:
                     set_phase(HelixPhase.VAL_EVALUATION)
                     stage_result, _n = _cached_evaluate_batch(
-                        child,
-                        list(stage_val_example_ids),
-                        minibatch_cache,
-                        config,
-                        "val",
-                        project_root,
+                        child, list(stage_val_example_ids), minibatch_cache,
+                        config, "val", project_root,
                     )
                     stage_result.candidate_id = child.id
                     _last_eval_result = stage_result
                     budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=_n,
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_val_stage",
+                        state, num_actual_examples=_n, candidate_id=child.id,
+                        split="val", source="mutation_val_stage",
                     )
-
                     if budget_api.budget_exhausted(state, config):
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
                         break
 
-                    from types import SimpleNamespace as _SN
+                    from types import SimpleNamespace as _SN  # noqa: PLC0415
 
                     _stage_before = _scores_for_example_ids(
                         _parent_frontier_result
@@ -2837,29 +2855,21 @@ def _run_evolution_impl(
                         ),
                         stage_val_example_ids,
                     )
-                    _stage_after = _scores_for_example_ids(
-                        stage_result, stage_val_example_ids
-                    )
+                    _stage_after = _scores_for_example_ids(stage_result, stage_val_example_ids)
                     _proposal = _SN(
                         subsample_scores_before=_stage_before,
                         subsample_scores_after=_stage_after,
                     )
                     if not acceptance.should_accept(_proposal):
                         _save_attempt_result(
-                            base_dir,
-                            stage_result,
-                            status="rejected",
-                            reason="val_stage",
-                            parent_id=_parent.id,
-                            generation=gen,
-                            stage="val_stage",
-                            example_ids=list(stage_val_example_ids),
+                            base_dir, stage_result,
+                            status="rejected", reason="val_stage",
+                            parent_id=_parent.id, generation=gen,
+                            stage="val_stage", example_ids=list(stage_val_example_ids),
                         )
                         TRACE.emit(
-                            EventType.ACCEPT_DECISION,
-                            candidate_id=child.id,
-                            decision="reject_stage",
-                            example_ids=list(stage_val_example_ids),
+                            EventType.ACCEPT_DECISION, candidate_id=child.id,
+                            decision="reject_stage", example_ids=list(stage_val_example_ids),
                             score=float(sum(_stage_after)),
                         )
                         print_warning(
@@ -2873,10 +2883,8 @@ def _run_evolution_impl(
                         continue
 
                     TRACE.emit(
-                        EventType.ACCEPT_DECISION,
-                        candidate_id=child.id,
-                        decision="accept_stage",
-                        example_ids=list(stage_val_example_ids),
+                        EventType.ACCEPT_DECISION, candidate_id=child.id,
+                        decision="accept_stage", example_ids=list(stage_val_example_ids),
                         score=float(sum(_stage_after)),
                     )
                     print_info(
@@ -2886,14 +2894,8 @@ def _run_evolution_impl(
                     )
 
                 # --- Val evaluation -------------------------------------------
+                # UNCHANGED: run full val eval sequentially after gating.
                 set_phase(HelixPhase.VAL_EVALUATION)
-                # GEPA parity: when val_size is set, route the full-val eval
-                # through the per-example cache consumer so that overlapping
-                # val indices across candidates (or re-evals of the same
-                # candidate) are not recomputed.  When val_size is unset we
-                # fall back to the legacy ``_cached_eval`` path keyed by
-                # ``(candidate_id, split)`` — single-task/no-example mode has no example
-                # ids to key on.
                 val_result = _run_full_val_eval(
                     child,
                     state,
@@ -2942,6 +2944,26 @@ def _run_evolution_impl(
                     mutations_attempted=mutations_attempted,
                     mutations_accepted=mutations_accepted,
                 )
+
+            # Write skip records for this generation (GEPA parity — single JSON list)
+            if _gen_skip_records:
+                _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
+
+            # Check semantic skip: all proposals were perfect on the minibatch.
+            # GEPA parity (engine.py:649, reflective_mutation.py:308-327): gen was
+            # already incremented unconditionally at the top of the loop, so on
+            # resume the next iteration will be gen+1 — no rollback, no infinite loop.
+            if (
+                not any(
+                    wr and isinstance(wr, (_SuccessResult, _TamperedResult))
+                    for wr in worker_results
+                )
+                and semantic_skip_count
+                and retryable_semantic_skip_count == semantic_skip_count
+            ):
+                _save_state(state)
+                TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
+                continue
             # If budget was exhausted during sequential acceptance, break outer loop.
             if _budget_break:
                 break

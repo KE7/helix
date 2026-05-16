@@ -2569,3 +2569,427 @@ class TestStoppingConditionValidation:
         # Must NOT raise — max_generations=1 is a valid stopping condition.
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
+
+# ---------------------------------------------------------------------------
+# Atomic Proposal Worker Tests
+#
+# The atomic-worker pattern merges parent-eval + LLM + child-eval into one
+# atomic worker per proposal slot, all running inside a single
+# ThreadPoolExecutor.  Budget charging is deferred to the sequential
+# acceptance loop (GEPA apply_proposal_output parity,
+# reflective_mutation.py:472).
+#
+# NOTE: Tests 1–4 will likely fail against the CURRENT evolution.py (before
+# W1's changes implement the atomic worker).  They are written correctly for
+# the atomic-worker design and should pass after W1's commit is merged.
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicProposalWorker:
+    """Tests for the atomic proposal worker (GEPA execute_proposal parity)."""
+
+    def test_worker_executes_parent_eval_and_child_eval_on_same_thread(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Parent eval and child eval both run on worker threads, not the main thread.
+
+        Under the atomic-worker design, each proposal worker executes parent_eval →
+        skip-perfect → LLM → child_eval atomically in a single
+        ThreadPoolExecutor worker thread (GEPA execute_proposal shape,
+        reflective_mutation.py:268,308,369,420).  The child eval therefore
+        must NOT run on the main thread — unlike the current three-stage
+        pipeline where Step 3 (child eval) is sequential on the main thread.
+
+        Verification: record threading.get_ident() for parent evals (seed.id,
+        split=train, instance_ids not None) and child evals (non-seed,
+        split=train, instance_ids not None).  With n=2 proposals, both sets
+        must be non-empty and neither must contain the main thread id.
+        """
+        import threading
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        mut_ids = iter(["g1-s1", "g1-s2"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        main_thread_id = threading.get_ident()
+        parent_eval_threads: set[int] = set()
+        child_eval_threads: set[int] = set()
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if split == "train" and instance_ids is not None:
+                if candidate.id == seed.id:
+                    # Parent minibatch eval — record which thread we're on.
+                    parent_eval_threads.add(threading.get_ident())
+                    return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
+                else:
+                    # Child minibatch eval — record which thread we're on.
+                    child_eval_threads.add(threading.get_ident())
+                    # Child improves → passes the minibatch gate.
+                    return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+            if instance_ids is not None:
+                # Val evals (seed full-val, child full-val after gate).
+                return _make_result(candidate.id, {i: 0.7 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=2,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert main_thread_id not in parent_eval_threads, (
+            "Parent eval ran on the main thread — expected worker thread "
+            "(atomic-worker regression)"
+        )
+        assert main_thread_id not in child_eval_threads, (
+            "Child eval ran on the main thread — expected worker thread "
+            "(atomic-worker regression: child eval should run in the same "
+            "atomic worker as parent eval, not sequentially on the main thread)"
+        )
+        assert len(parent_eval_threads) >= 1, (
+            f"Expected >= 1 parent eval thread id; got {parent_eval_threads}"
+        )
+        assert len(child_eval_threads) >= 1, (
+            f"Expected >= 1 child eval thread id; got {child_eval_threads}"
+        )
+
+    def test_worker_skipped_result_returns_without_llm_call(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """When skip-perfect fires inside the worker, mutate() is never called.
+
+        Under the atomic-worker design, the skip-perfect check (Step W3) lives inside the
+        atomic worker function.  A parent whose subsample scores all reach the
+        ``perfect_score_threshold`` causes the worker to return
+        ``_ProposalResult(kind='skipped', ...)`` before ever reaching the LLM
+        mutation step (Step W4).
+
+        Config: n=1 proposal, max_generations=1, perfect_score_threshold=0.9.
+        All parent minibatch scores are 1.0 → skip fires → mutate.call_count == 0.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if split == "train" and instance_ids is not None:
+                # Always perfect → skip-perfect (Step W3) fires inside the worker.
+                return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 1.0 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 1.0})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=1,
+        )
+        config.evolution.perfect_score_threshold = 0.9
+
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert all_mocks["mutate"].call_count == 0, (
+            f"mutate() must not be called when skip-perfect fires inside the "
+            f"worker (atomic-worker Step W3 parity); "
+            f"call_count={all_mocks['mutate'].call_count}"
+        )
+
+    def test_worker_llm_failure_does_not_crash_pool(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """mutate() raising RuntimeError on one slot does not crash the whole pool.
+
+        Under the atomic-worker design, each worker catches non-fatal exceptions from
+        mutate() and returns ``_ProposalResult(kind='llm_failed', ...)`` rather
+        than propagating the exception out of the worker (GEPA
+        reflective_mutation.py:369-420 error path).  The pool continues with
+        the remaining slots.
+
+        Config: n=3 proposals.  The first mutate() call (thread-safely tracked)
+        raises RuntimeError; the other two return valid candidates.
+        run_evolution must NOT raise and mutate must have been called at least
+        once (the call that raised).
+        """
+        import threading
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        mut_ids = iter(["g1-s1", "g1-s2"])
+        _lock = threading.Lock()
+        _call_counter: list[int] = [0]
+
+        def _mutate_fail_first(**kw: Any) -> Any:
+            with _lock:
+                _call_counter[0] += 1
+                is_first = _call_counter[0] == 1
+            if is_first:
+                raise RuntimeError("simulated LLM failure — atomic-worker isolation test")
+            return _make_candidate(next(mut_ids))
+
+        all_mocks["mutate"].side_effect = _mutate_fail_first
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                if candidate.id == seed.id and split == "train":
+                    return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
+                return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=3,
+        )
+
+        # Must not raise — the RuntimeError from mutate() is caught inside the
+        # worker and returned as kind='llm_failed'; the other slots complete.
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert all_mocks["mutate"].call_count >= 1, (
+            "mutate() should have been called at least once "
+            "(including the call that raised RuntimeError)"
+        )
+
+    def test_n_proposals_3_runs_all_workers_in_parallel(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """With n=3, parent minibatch evals are dispatched to a thread pool.
+
+        Under the atomic-worker design, all N atomic workers run inside a single
+        ThreadPoolExecutor (GEPA engine.py:422-443 parity).  With n=3 proposals
+        and a time.sleep(0.05) inside each parent eval, the pool must spawn
+        multiple worker threads simultaneously.
+
+        Verification: record threading.get_ident() for parent evals (seed.id,
+        split=train, instance_ids not None).  The main thread id must not appear
+        in the recorded set, and at least 2 distinct worker thread ids must be
+        present (indicating genuine concurrency, not sequential dispatch).
+        """
+        import threading
+        import time
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        main_thread_id = threading.get_ident()
+        parent_eval_threads: set[int] = set()
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if (
+                candidate.id == seed.id
+                and split == "train"
+                and instance_ids is not None
+            ):
+                parent_eval_threads.add(threading.get_ident())
+                # Sleep ensures the first eval is still in flight when the
+                # second and third submits fire, so the ThreadPoolExecutor
+                # spawns multiple worker threads rather than reusing one.
+                time.sleep(0.05)
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.4 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=3,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert main_thread_id not in parent_eval_threads, (
+            "Parent eval ran on the main thread; expected worker threads "
+            "(atomic-worker regression — workers not dispatched to ThreadPoolExecutor)"
+        )
+        assert len(parent_eval_threads) >= 2, (
+            f"Expected >= 2 distinct worker thread ids for n=3 parent evals "
+            f"(genuine concurrency); got {parent_eval_threads}"
+        )
+
+    def test_budget_charges_happen_sequentially_in_acceptance_loop(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """budget.evaluations never decreases across consecutive save_state calls.
+
+        Under the atomic-worker design, budget mutations happen only inside the sequential
+        acceptance loop (GEPA apply_proposal_output parity,
+        reflective_mutation.py:472) — never inside the parallel workers.
+        Capturing ``state.budget.evaluations`` at each ``save_state`` call must
+        therefore produce a monotonically non-decreasing sequence, regardless of
+        which order the parallel workers completed.
+
+        Config: n=2 proposals; both children improve on parent so that two full
+        acceptance-loop iterations execute and multiple save_state calls are made.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        mut_ids = iter(["g1-s1", "g1-s2"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                if candidate.id == seed.id and split == "train":
+                    # Parent scores low — child will improve and pass the gate.
+                    return _make_result(candidate.id, {i: 0.3 for i in instance_ids})
+                if split == "train":
+                    # Child improves on parent minibatch → accepted.
+                    return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
+                # Val evals (seed full-val, child full-val).
+                return _make_result(candidate.id, {i: 0.7 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        budget_snapshots: list[int] = []
+
+        def capture_budget(state: Any, path: Any) -> None:
+            budget_snapshots.append(state.budget.evaluations)
+
+        all_mocks["save_state"].side_effect = capture_budget
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=10_000,
+            num_parallel_proposals=2,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert budget_snapshots, "save_state must be called at least once"
+        for i in range(1, len(budget_snapshots)):
+            assert budget_snapshots[i] >= budget_snapshots[i - 1], (
+                f"budget.evaluations decreased at snapshot index {i}: "
+                f"{budget_snapshots[i - 1]} → {budget_snapshots[i]}; "
+                f"full sequence: {budget_snapshots}. "
+                "Budget charges must be strictly sequential (acceptance loop only, "
+                "never inside parallel workers) — atomic-worker invariant."
+            )
+
+    def test_worker_tampered_result_rejects_child_without_crash(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """When tamper-check fires inside the worker, the child is rejected and removed.
+
+        Under the atomic-worker design, Step W5 of the atomic worker calls
+        ``_detect_evaluator_tamper``.  If the child touched protected evaluator
+        files, the worker returns ``_TamperedResult`` with the tampered path
+        list.  The acceptance loop (Step 3) must:
+          1. Not raise / not crash.
+          2. Call ``remove_worktree`` to clean up the rejected child worktree.
+          3. Not add the tampered child to the frontier or candidates dict.
+
+        Config: n=1 proposal, 1 generation.  ``_detect_evaluator_tamper`` is
+        patched to return ``["evaluate.py"]`` (one tampered path).
+        """
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        child = _make_candidate("g1-s1")
+        all_mocks["mutate"].return_value = child
+
+        # Patch _detect_evaluator_tamper so the worker returns _TamperedResult.
+        mocker.patch(
+            "helix.evolution._detect_evaluator_tamper",
+            return_value=["evaluate.py"],
+        )
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=1,
+        )
+
+        # Must not raise — tamper is a rejection, not a fatal error.
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # mutate() ran (LLM was invoked before tamper check)
+        assert all_mocks["mutate"].call_count == 1, (
+            "mutate() must be called once (tamper check is Step W5, after Step W4 LLM)"
+        )
+        # Tampered child worktree must be cleaned up
+        assert all_mocks["remove_worktree"].called, (
+            "remove_worktree must be called to clean up tamper-rejected child "
+            "(_TamperedResult acceptance-loop path)"
+        )
+        # Tampered child must NOT have been snapshot-committed to any branch
+        for call in all_mocks["snapshot_candidate"].call_args_list:
+            snapped = call.args[0] if call.args else call.kwargs.get("candidate")
+            assert snapped is None or snapped.id != child.id, (
+                f"snapshot_candidate must not be called for tampered child {child.id}"
+            )
+
