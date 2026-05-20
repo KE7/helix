@@ -91,7 +91,7 @@ class TestFix2RateLimitDiagnostics:
             operation="Claude Code invocation",
             phase="subprocess exit",
             command="claude --print -p ...",
-            cwd="/tmp/worktree",
+            cwd="/fake/worktree",
             stdout="",
             stderr="Error: 529 overloaded",
             exit_code=529,
@@ -100,7 +100,7 @@ class TestFix2RateLimitDiagnostics:
         assert err.operation == "Claude Code invocation"
         assert err.phase == "subprocess exit"
         assert err.command == "claude --print -p ..."
-        assert err.cwd == "/tmp/worktree"
+        assert err.cwd == "/fake/worktree"
         assert err.stdout == ""
         assert err.stderr == "Error: 529 overloaded"
         assert err.exit_code == 529
@@ -119,13 +119,13 @@ class TestFix2RateLimitDiagnostics:
 
         config = AgentConfig()
         with pytest.raises(RateLimitError) as exc_info:
-            invoke_claude_code("/tmp/wt", "test prompt", config)
+            invoke_claude_code("/fake/wt", "test prompt", config)
 
         err = exc_info.value
         assert err.exit_code == 1
         assert err.stderr == "Error: 529 overloaded please retry"
         assert err.stdout == ""
-        assert err.cwd == "/tmp/wt"
+        assert err.cwd == "/fake/wt"
         assert err.command != ""
         assert err.suggestion != ""
 
@@ -144,11 +144,11 @@ class TestFix2RateLimitDiagnostics:
 
         config = AgentConfig()
         with pytest.raises(RateLimitError) as exc_info:
-            invoke_claude_code("/tmp/wt", "test prompt", config)
+            invoke_claude_code("/fake/wt", "test prompt", config)
 
         err = exc_info.value
         assert err.exit_code == 0
-        assert err.cwd == "/tmp/wt"
+        assert err.cwd == "/fake/wt"
         assert err.command != ""
         assert err.suggestion != ""
 
@@ -159,7 +159,7 @@ class TestFix2RateLimitDiagnostics:
             operation="invoke",
             phase="exit",
             command="claude -p ...",
-            cwd="/tmp",
+            cwd="/fake",
             stdout="out",
             stderr="rate limit exceeded",
             exit_code=1,
@@ -170,7 +170,7 @@ class TestFix2RateLimitDiagnostics:
         assert "invoke" in full
         assert "exit" in full
         assert "claude -p ..." in full
-        assert "/tmp" in full
+        assert "/fake" in full
         assert "out" in full
         assert "rate limit exceeded" in full
         assert "retry later" in full
@@ -311,7 +311,7 @@ class TestFix4FileLogging:
             operation="mutate g1-s0",
             phase="subprocess exit",
             command="claude --print -p ...",
-            cwd="/tmp/wt",
+            cwd="/fake/wt",
             stdout="some stdout text",
             stderr="some stderr text",
             exit_code=1,
@@ -343,7 +343,7 @@ class TestFix4FileLogging:
             operation="Claude Code invocation",
             phase="subprocess exit",
             command="claude --print -p test",
-            cwd="/tmp/wt",
+            cwd="/fake/wt",
             stdout="",
             stderr="Error: 529 overloaded",
             exit_code=529,

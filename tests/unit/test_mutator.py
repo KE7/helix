@@ -43,7 +43,7 @@ def make_eval_result(
 
 def make_candidate(
     cid: str = "g0-s0",
-    worktree_path: str = "/tmp/fake-wt",
+    worktree_path: str = "/fake/fake-wt",
 ) -> Candidate:
     return Candidate(
         id=cid,
@@ -615,7 +615,7 @@ class TestInvokeClaudeCode:
             returncode=0,
         )
         config = AgentConfig()
-        result, usage = invoke_claude_code("/tmp/wt", "do something", config)
+        result, usage = invoke_claude_code("/fake/wt", "do something", config)
         assert result == payload
 
     def test_raises_on_nonzero_returncode(self, mocker):
@@ -627,7 +627,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig()
         with pytest.raises(MutationError, match="exited with code 1"):
-            invoke_claude_code("/tmp/wt", "do something", config)
+            invoke_claude_code("/fake/wt", "do something", config)
 
     def test_raises_on_invalid_json(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
@@ -638,13 +638,13 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig()
         with pytest.raises(MutationError, match="Failed to parse"):
-            invoke_claude_code("/tmp/wt", "do something", config)
+            invoke_claude_code("/fake/wt", "do something", config)
 
     def test_cli_args_include_required_flags(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         config = AgentConfig()
-        invoke_claude_code("/tmp/wt", "the prompt", config)
+        invoke_claude_code("/fake/wt", "the prompt", config)
 
         call_args = mock_run.call_args
         args_list = call_args[0][0]
@@ -674,7 +674,7 @@ class TestInvokeClaudeCode:
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         config = AgentConfig()
-        invoke_claude_code("/tmp/wt", "prompt", config)
+        invoke_claude_code("/fake/wt", "prompt", config)
         assert "timeout" not in mock_run.call_args[1]
 
     def test_codex_cli_args_include_required_flags(self, mocker):
@@ -686,7 +686,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="codex", model="gpt-5", effort="high")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code("/fake/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["codex", "exec"]
@@ -715,7 +715,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="codex", effort='high"quoted')
 
-        invoke_claude_code("/tmp/wt", "the prompt", config)
+        invoke_claude_code("/fake/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert 'model_reasoning_effort="high\\"quoted"' in args_list
@@ -729,7 +729,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="cursor", model="gpt-5")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code("/fake/wt", "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["cursor", "agent"]
@@ -738,7 +738,7 @@ class TestInvokeClaudeCode:
         assert "stream-json" in args_list
         assert "--yolo" in args_list
         assert "--workspace" in args_list
-        assert "/tmp/wt" in args_list
+        assert "/fake/wt" in args_list
         assert "the prompt" not in args_list
         assert ".agent_task_prompt.md" in args_list[-1]
         assert "input" not in mock_run.call_args[1]
@@ -989,7 +989,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="gemini")
 
-        result, _ = invoke_claude_code("/tmp/wt", "prompt", config)
+        result, _ = invoke_claude_code("/fake/wt", "prompt", config)
 
         assert result["events"][0]["type"] == "init"
         assert result["unparsable_lines"] == [
@@ -1008,7 +1008,7 @@ class TestInvokeClaudeCode:
         ],
     )
     def test_gemini_and_opencode_cli_args(
-        self, mocker, backend, expected_prefix, expected_flags
+        self, mocker, tmp_path: Path, backend, expected_prefix, expected_flags
     ):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
@@ -1018,7 +1018,11 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend=backend, model="test-model")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        # opencode materialises ``<worktree>/.helix_opencode_state`` for per-
+        # candidate SQLite isolation (mutator.py:1543), so this test needs a
+        # real, writable directory rather than the synthetic ``/fake/wt``
+        # path string the other backends tolerate.
+        result, _ = invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[: len(expected_prefix)] == expected_prefix
@@ -1079,7 +1083,7 @@ class TestInvokeClaudeCode:
         )
         monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
 
-        invoke_claude_code("/tmp/wt", "prompt", AgentConfig(backend="cursor"))
+        invoke_claude_code("/fake/wt", "prompt", AgentConfig(backend="cursor"))
 
         assert mock_run.call_args.kwargs["env"]["CURSOR_API_KEY"] == "cursor-key"
 
@@ -1089,7 +1093,7 @@ class TestInvokeClaudeCode:
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://wrong")
 
         invoke_claude_code(
-            "/tmp/wt",
+            "/fake/wt",
             "prompt",
             AgentConfig(),
             passthrough_env=["ANTHROPIC_BASE_URL"],
@@ -1125,7 +1129,7 @@ class TestMutate:
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(parent, er, "g1-s0", config, Path("/fake"))
 
         assert result is child
 
@@ -1142,7 +1146,7 @@ class TestMutate:
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(parent, er, "g1-s0", config, Path("/fake"))
         assert result.operation == "mutate"
 
     def test_returns_none_on_mutation_error(self, tmp_path: Path, mocker):
@@ -1161,7 +1165,7 @@ class TestMutate:
         mock_remove = mocker.patch("helix.mutator.remove_worktree")
         mocker.patch("helix.mutator.snapshot_candidate")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(parent, er, "g1-s0", config, Path("/fake"))
 
         assert result is None
         mock_remove.assert_called_once_with(child)
@@ -1182,7 +1186,7 @@ class TestMutate:
         mock_remove = mocker.patch("helix.mutator.remove_worktree")
         mocker.patch("helix.mutator.snapshot_candidate")
 
-        mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        mutate(parent, er, "g1-s0", config, Path("/fake"))
 
         mock_remove.assert_called_once_with(child)
 
@@ -1206,7 +1210,7 @@ class TestMutate:
         )
         mocker.patch("helix.mutator.remove_worktree")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(parent, er, "g1-s0", config, Path("/fake"))
 
         # mutate() returns the child but does NOT snapshot internally
         assert result is child
@@ -1228,7 +1232,7 @@ class TestMutate:
         mock_snapshot = mocker.patch("helix.mutator.snapshot_candidate")
         mocker.patch("helix.mutator.remove_worktree")
 
-        mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        mutate(parent, er, "g1-s0", config, Path("/fake"))
 
         mock_snapshot.assert_not_called()
 
@@ -1247,7 +1251,7 @@ class TestMutate:
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
-        mutate(parent, er, "g1-s0", config, Path("/tmp"), background="special context")
+        mutate(parent, er, "g1-s0", config, Path("/fake"), background="special context")
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "special context" in prompt_arg

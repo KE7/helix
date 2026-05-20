@@ -15,7 +15,6 @@ minibatch gate whenever the evaluator keyed its dict by aggregate
 metric names (``task__metric``) instead of the per-example ids HELIX
 wrote to ``helix_batch.json`` (``task__trialN``): 113 generations of
 evolution were once wasted on exactly that zero-vs-zero footgun.
-See ``/tmp/gepa_audit_report.md`` for the full audit.
 
 Contract
 --------

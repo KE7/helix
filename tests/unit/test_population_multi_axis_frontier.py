@@ -40,7 +40,7 @@ from helix.population import (
 def _make_candidate(cid: str) -> Candidate:
     return Candidate(
         id=cid,
-        worktree_path=f"/tmp/{cid}",
+        worktree_path=f"/fake/{cid}",
         branch_name=f"branch-{cid}",
         generation=0,
         parent_id=None,

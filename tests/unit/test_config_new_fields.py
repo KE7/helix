@@ -27,16 +27,16 @@ from helix.config import (
 
 class TestSeedlessConfigValPath:
     def test_val_path_none_falls_back_to_train_path(self):
-        cfg = SeedlessConfig(train_path=Path("/tmp/train.jsonl"))
+        cfg = SeedlessConfig(train_path=Path("/fake/train.jsonl"))
         assert cfg.val_path is None
-        assert cfg.effective_val_path == Path("/tmp/train.jsonl")
+        assert cfg.effective_val_path == Path("/fake/train.jsonl")
 
     def test_val_path_set_returns_val_path(self):
         cfg = SeedlessConfig(
-            train_path=Path("/tmp/train.jsonl"),
-            val_path=Path("/tmp/val.jsonl"),
+            train_path=Path("/fake/train.jsonl"),
+            val_path=Path("/fake/val.jsonl"),
         )
-        assert cfg.effective_val_path == Path("/tmp/val.jsonl")
+        assert cfg.effective_val_path == Path("/fake/val.jsonl")
 
     def test_both_none_returns_none(self):
         cfg = SeedlessConfig()
@@ -148,7 +148,7 @@ class TestEvolutionConfigNewFields:
         ``max(1, max_workers // minibatch_size)`` in model_post_init.
 
         Mirrors GEPA ``_resolve_num_parallel_proposals``
-        (/tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116).
+        (src/gepa/optimize_anything.py:1108-1116).
         """
         cfg = EvolutionConfig(
             num_parallel_proposals="auto",
@@ -430,8 +430,8 @@ class TestTomlRoundTrip:
             command = "pytest"
 
             [seedless]
-            train_path = "/tmp/train.jsonl"
-            val_path = "/tmp/val.jsonl"
+            train_path = "/fake/train.jsonl"
+            val_path = "/fake/val.jsonl"
 
             [evolution]
             minibatch_size = 7
@@ -443,9 +443,9 @@ class TestTomlRoundTrip:
         """)
         )
         cfg = load_config(toml)
-        assert cfg.seedless.train_path == Path("/tmp/train.jsonl")
-        assert cfg.seedless.val_path == Path("/tmp/val.jsonl")
-        assert cfg.seedless.effective_val_path == Path("/tmp/val.jsonl")
+        assert cfg.seedless.train_path == Path("/fake/train.jsonl")
+        assert cfg.seedless.val_path == Path("/fake/val.jsonl")
+        assert cfg.seedless.effective_val_path == Path("/fake/val.jsonl")
         assert cfg.evolution.minibatch_size == 7
         assert cfg.evolution.max_workers == 3
         assert cfg.evolution.num_parallel_proposals == 2
@@ -463,18 +463,18 @@ class TestTomlRoundTrip:
             command = "pytest"
 
             [seedless]
-            train_path = "/tmp/train.jsonl"
+            train_path = "/fake/train.jsonl"
         """)
         )
         cfg = load_config(toml)
         assert cfg.seedless.val_path is None
-        assert cfg.seedless.effective_val_path == Path("/tmp/train.jsonl")
+        assert cfg.seedless.effective_val_path == Path("/fake/train.jsonl")
 
     def test_model_dump_roundtrip(self):
         cfg = HelixConfig(
             objective="Test",
             evaluator={"command": "pytest"},
-            seedless={"train_path": "/tmp/train.jsonl", "val_path": "/tmp/val.jsonl"},
+            seedless={"train_path": "/fake/train.jsonl", "val_path": "/fake/val.jsonl"},
             evolution={
                 "minibatch_size": 4,
                 "max_workers": 2,
@@ -485,8 +485,8 @@ class TestTomlRoundTrip:
         )
         dumped = cfg.model_dump()
         restored = HelixConfig.model_validate(dumped)
-        assert restored.seedless.val_path == Path("/tmp/val.jsonl")
-        assert restored.seedless.effective_val_path == Path("/tmp/val.jsonl")
+        assert restored.seedless.val_path == Path("/fake/val.jsonl")
+        assert restored.seedless.effective_val_path == Path("/fake/val.jsonl")
         assert restored.evolution.minibatch_size == 4
         assert restored.evolution.max_workers == 2
         assert restored.evolution.cache_evaluation is True

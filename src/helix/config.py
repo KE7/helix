@@ -344,7 +344,7 @@ class EvolutionConfig(BaseModel):
             "Max parallel eval workers — bounds both the parent-eval and "
             "mutation ThreadPools in the num_parallel_proposals pipeline. "
             "GEPA parity: EngineConfig.max_workers "
-            "(/tmp/gepa-official/src/gepa/optimize_anything.py:485, "
+            "(src/gepa/optimize_anything.py:485, "
             "default os.cpu_count() or 32)."
         ),
     )
@@ -425,7 +425,7 @@ class EvolutionConfig(BaseModel):
         # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
         # ``max(1, max_workers // minibatch_size)`` once at construction
         # time so every downstream consumer sees a plain int.  Mirrors
-        # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
+        # GEPA src/gepa/optimize_anything.py:1108-1116.
         if self.num_parallel_proposals == "auto":
             self.num_parallel_proposals = max(
                 1, self.max_workers // max(1, self.minibatch_size)

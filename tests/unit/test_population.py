@@ -16,7 +16,7 @@ from helix.population import Candidate, EvalResult, ParetoFrontier
 def make_candidate(cid: str, generation: int = 0) -> Candidate:
     return Candidate(
         id=cid,
-        worktree_path=f"/tmp/{cid}",
+        worktree_path=f"/fake/{cid}",
         branch_name=f"branch-{cid}",
         generation=generation,
         parent_id=None,

@@ -5,8 +5,8 @@ evaluator emits a list of ``[score_i, side_info_i]`` pairs positional
 to the ids in ``helix_batch.json``.  HELIX zips them into the id-keyed
 ``instance_scores`` the minibatch gate needs and stores the
 per-example side_info list on :class:`helix.population.EvalResult` for
-the reflection prompt.  See :mod:`helix.parsers.helix_result` and
-``/tmp/gepa_audit_report.md`` for the GEPA parity rationale.
+the reflection prompt.  See :mod:`helix.parsers.helix_result` for the
+GEPA parity rationale.
 
 The parser is strict by design: any deviation from the contract raises
 :class:`EvaluatorError` rather than silently falling back.  The footgun

@@ -56,7 +56,7 @@ from helix.state import BudgetState, EvolutionState
 def make_candidate(cid: str = "g0-s0", generation: int = 0) -> Candidate:
     return Candidate(
         id=cid,
-        worktree_path=f"/tmp/helix/{cid}",
+        worktree_path=f"/fake/helix/{cid}",
         branch_name=f"helix/{cid}",
         generation=generation,
         parent_id=None,
@@ -192,7 +192,7 @@ def all_mocks(mocker):
         "record_entry": mocker.patch("helix.evolution.record_entry"),
         "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value={}),
         "HelixLiveDisplay": mocker.patch("helix.evolution.HelixLiveDisplay"),
-        # GEPA parity (merge-pairing audit D1, /tmp/audit_audit-merge-pairing.md:49-50):
+        # GEPA parity (merge.py:130-131):
         # the merge branch now enforces GEPA's ``len(parent_program_for_candidate) < 3``
         # early-exit (merge.py:130-131), i.e. you need two siblings plus one
         # ancestor.  Provide a 3-entry dummy lineage by default so merge tests
@@ -561,7 +561,7 @@ class TestGatingInEvolutionLoop:
         seed = make_candidate("g0-s0")
         child = Candidate(
             id="g1-s1",
-            worktree_path="/tmp/helix/g1-s1",
+            worktree_path="/fake/helix/g1-s1",
             branch_name="helix/g1-s1",
             generation=1,
             parent_id=seed.id,
@@ -722,7 +722,7 @@ class TestGatingInEvolutionLoop:
         seed = make_candidate("g0-s0")
         child = Candidate(
             id="g1-s1",
-            worktree_path="/tmp/helix/g1-s1",
+            worktree_path="/fake/helix/g1-s1",
             branch_name="helix/g1-s1",
             generation=1,
             parent_id=seed.id,
@@ -731,7 +731,7 @@ class TestGatingInEvolutionLoop:
         )
         merged = Candidate(
             id="g2-m1",
-            worktree_path="/tmp/helix/g2-m1",
+            worktree_path="/fake/helix/g2-m1",
             branch_name="helix/g2-m1",
             generation=2,
             parent_id=seed.id,
@@ -1455,8 +1455,8 @@ class TestMergeBehavior:
             f"merge eval must route through val, saw splits: "
             f"{[s for s, _ in merged_eval_calls]}"
         )
-        # GEPA parity (merge-gate audit M3, /tmp/audit_audit-merge-gate.md:10-32):
-        # after the subsample gate passes, HELIX now runs a SECOND (full-val)
+        # GEPA parity: after the subsample gate
+        # passes, HELIX now runs a SECOND (full-val)
         # eval on the merged candidate mirroring GEPA ``engine.py:690`` →
         # ``_run_full_eval_and_add`` → ``_evaluate_on_valset``.  With
         # val_size=None (single-task/no-example mode) the full-val path falls through
@@ -1537,12 +1537,11 @@ class TestMergeBehavior:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert merged_eval_batches, "merged candidate was never evaluated"
-        # GEPA parity (merge-gate audit M3): the first merge eval is the
+        # GEPA parity: the first merge eval is the
         # subsample gate (exactly ``merge_subsample_size`` ids drawn from
         # the common val intersection); subsequent calls are the
-        # GEPA-aligned post-acceptance full-val pass
-        # (/tmp/audit_audit-merge-gate.md:10-32).  Assert only the first
-        # call against the subsample contract.
+        # GEPA-aligned post-acceptance full-val pass.  Assert only the
+        # first call against the subsample contract.
         first_batch = merged_eval_batches[0]
         assert len(first_batch) == 3, (
             f"merge subsample must use exactly merge_subsample_size ids, "
@@ -1680,7 +1679,7 @@ class TestMergeBehavior:
     def test_merge_accepted_entry_has_full_val_coverage(
         self, mocker, tmp_path, all_mocks
     ):
-        """GEPA parity (merge-gate audit M3, /tmp/audit_audit-merge-gate.md:10-32).
+        """GEPA parity (gepa/core/engine.py:688-696, full-val merge eval).
 
         Once the subsample gate passes, HELIX runs a SECOND (full-val)
         eval on the merged candidate and uses THAT result for
@@ -1815,7 +1814,7 @@ class TestMergeBehavior:
     def test_merge_attempted_pairs_stored_canonically(
         self, mocker, tmp_path, all_mocks
     ):
-        """GEPA parity (merge-pairing audit C3, merge.py:94-95).
+        """GEPA parity (merge.py:94-95).
 
         ``find_merge_triplet`` canonicalizes the sampled pair via lex sort
         before returning, so the attempted-pair ledger stores
@@ -1911,7 +1910,7 @@ class TestMergeBehavior:
     def test_merge_description_triplet_recorded_on_accept(
         self, mocker, tmp_path, all_mocks
     ):
-        """GEPA parity (merge-pairing audit C1, merge.py:195-203).
+        """GEPA parity (merge.py:195-203).
 
         Forward-direction test: an accepted merge records a
         ``(id1, id2, desc_hash)`` triplet in
@@ -2004,7 +2003,7 @@ class TestMergeBehavior:
         )
 
     def test_merge_gate_requires_three_candidates(self, mocker, tmp_path, all_mocks):
-        """GEPA parity (merge-pairing audit D1, merge.py:130-131).
+        """GEPA parity (merge.py:130-131).
 
         The ``len(parent_program_for_candidate) < 3`` early-exit means a
         run with only two recorded candidates (seed + one child) skips

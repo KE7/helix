@@ -27,7 +27,7 @@ from helix.state import BudgetState, EvolutionState
 def make_candidate(cid: str = "g0-s0", generation: int = 0) -> Candidate:
     return Candidate(
         id=cid,
-        worktree_path=f"/tmp/helix/{cid}",
+        worktree_path=f"/fake/helix/{cid}",
         branch_name=f"helix/{cid}",
         generation=generation,
         parent_id=None,
@@ -184,7 +184,7 @@ class TestRunEvolutionSeedless:
         """generate_seed must be called with the worktree_path of the seed candidate."""
         config = make_config(seedless=True)
         seed_cand = make_candidate("g0-s0")
-        seed_cand_wt = "/tmp/helix/g0-s0"
+        seed_cand_wt = "/fake/helix/g0-s0"
         seed_cand = Candidate(
             id="g0-s0",
             worktree_path=seed_cand_wt,

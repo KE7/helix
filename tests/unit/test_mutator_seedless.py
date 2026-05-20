@@ -93,14 +93,14 @@ class TestGenerateSeed:
         mock_result = {"result": "ok", "subtype": "success"}
 
         with patch("helix.mutator.invoke_claude_code", return_value=(mock_result, {})) as mock_invoke:
-            generate_seed("/tmp/fake-wt", "some prompt", config)
+            generate_seed("/fake/fake-wt", "some prompt", config)
 
         mock_invoke.assert_called_once()
 
     def test_passes_worktree_path_to_invoke(self):
         """generate_seed must pass the worktree_path as first arg to invoke_claude_code."""
         config = make_config()
-        worktree_path = "/tmp/my-seed-worktree"
+        worktree_path = "/fake/my-seed-worktree"
 
         with patch("helix.mutator.invoke_claude_code", return_value=({}, {})) as mock_invoke:
             generate_seed(worktree_path, "prompt text", config)
@@ -114,7 +114,7 @@ class TestGenerateSeed:
         prompt = "my seed generation prompt"
 
         with patch("helix.mutator.invoke_claude_code", return_value=({}, {})) as mock_invoke:
-            generate_seed("/tmp/wt", prompt, config)
+            generate_seed("/fake/wt", prompt, config)
 
         args, kwargs = mock_invoke.call_args
         assert args[1] == prompt
@@ -124,7 +124,7 @@ class TestGenerateSeed:
         config = make_config()
 
         with patch("helix.mutator.invoke_claude_code", return_value=({}, {})) as mock_invoke:
-            generate_seed("/tmp/wt", "prompt", config)
+            generate_seed("/fake/wt", "prompt", config)
 
         args, kwargs = mock_invoke.call_args
         assert args[2] is config.agent
@@ -140,7 +140,7 @@ class TestGenerateSeed:
 
         with patch("helix.mutator.invoke_claude_code", side_effect=exc):
             with pytest.raises(MutationError) as exc_info:
-                generate_seed("/tmp/wt", "prompt", config)
+                generate_seed("/fake/wt", "prompt", config)
 
         # Must be the exact same exception (no wrapping, no retry)
         assert exc_info.value is exc
@@ -158,7 +158,7 @@ class TestGenerateSeed:
 
         with patch("helix.mutator.invoke_claude_code", side_effect=failing_invoke):
             with pytest.raises(MutationError):
-                generate_seed("/tmp/wt", "prompt", config)
+                generate_seed("/fake/wt", "prompt", config)
 
         assert call_count == 1, f"Expected exactly 1 call, got {call_count} (retry loop detected!)"
 
@@ -168,6 +168,6 @@ class TestGenerateSeed:
         mock_usage = {"input_tokens": 100}
 
         with patch("helix.mutator.invoke_claude_code", return_value=({"subtype": "success"}, mock_usage)):
-            result = generate_seed("/tmp/wt", "prompt", config)
+            result = generate_seed("/fake/wt", "prompt", config)
 
         assert result == mock_usage

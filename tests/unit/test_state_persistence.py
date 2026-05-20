@@ -1,7 +1,7 @@
 """Unit tests for GEPA-aligned state persistence.
 
-Covers the additions called out in /tmp/audit_audit-rng-state-persist.md
-(MODERATE_DIVERGENCE — schema thin vs GEPA):
+Covers the GEPA-parity state-persistence schema (HELIX was thinner than
+GEPA):
 
 * C1 — per-(candidate, example) eval cache survives save → load round-trip
   (GEPA core/state.py:185, 306-340, 348-376, 683-687).
@@ -80,7 +80,7 @@ def _make_full_state() -> EvolutionState:
 def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     """save_state → load_state must deep-equal the original on every field.
 
-    Audit ref: /tmp/audit_audit-rng-state-persist.md C/§3 + D1.
+    Covers per-program discovery budget + schema version persistence.
     """
     state = _make_full_state()
     save_state(state, tmp_path)
@@ -122,7 +122,7 @@ def _write_legacy_state_json(base_dir: Path) -> None:
     legacy = {
         # Note: deliberately omits "schema_version" and
         # "num_metric_calls_by_discovery".  Mirrors the on-disk format that
-        # existed before audit-rng-state-persist D1 was addressed.
+        # existed before the schema-version field was added.
         "generation": 1,
         "frontier": ["g0-s0"],
         "instance_scores": {"g0-s0": {"task_a": 0.5}},

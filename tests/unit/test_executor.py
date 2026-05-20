@@ -16,7 +16,7 @@ from helix.executor import run_evaluator
 # ---------------------------------------------------------------------------
 
 
-def make_candidate(worktree_path: str = "/tmp/fake-worktree") -> Candidate:
+def make_candidate(worktree_path: str = "/fake/fake-worktree") -> Candidate:
     return Candidate(
         id="cand-001",
         worktree_path=worktree_path,

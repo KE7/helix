@@ -7,8 +7,7 @@ BREAKING (pre-1.0): ``helix_result`` previously accepted one
 ``helix_batch.json``.  HELIX zips them into id-keyed
 ``instance_scores`` (for the minibatch gate) and stores the raw
 per-example side_info list on ``EvalResult`` for the reflection
-prompt.  See :mod:`helix.parsers.helix_result` and
-``/tmp/gepa_audit_report.md``.
+prompt.  See :mod:`helix.parsers.helix_result`.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from helix.mutator import build_mutation_prompt
 # ---------------------------------------------------------------------------
 
 
-def make_candidate(worktree_path: str | Path = "/tmp/fake-worktree") -> Candidate:
+def make_candidate(worktree_path: str | Path = "/fake/fake-worktree") -> Candidate:
     return Candidate(
         id="cand-001",
         worktree_path=str(worktree_path),

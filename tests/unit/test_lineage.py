@@ -1,13 +1,12 @@
 """Unit tests for helix.lineage.find_merge_triplet.
 
 Ported from GEPA's merge pair-selection behavior
-(gepa/proposer/merge.py:87-115, 118-207).  Covers the post-align-merge
-changes spelled out in the merge-pairing audit
-(/tmp/audit_audit-merge-pairing.md):
+(gepa/proposer/merge.py:87-115, 118-207).  Three post-align-merge
+behaviours covered:
 
-- B1: overlap-floor filter moved INTO the retry loop.
-- B2: attempted-pair filter moved INTO the retry loop.
-- C3: canonical (lex-sorted) pair returned, mirroring GEPA
+- overlap-floor filter moved INTO the retry loop.
+- attempted-pair filter moved INTO the retry loop.
+- canonical (lex-sorted) pair returned, mirroring GEPA
   ``merge.py:94-95`` ``if j < i: i, j = j, i``.
 """
 
@@ -35,7 +34,7 @@ def _build_lineage(parents_by_id: dict[str, list[str]]) -> dict[str, LineageEntr
 
 
 class TestFindMergeTripletCanonicalization:
-    """GEPA parity (merge-pairing audit C3, merge.py:94-95).
+    """GEPA parity (merge.py:94-95).
 
     The sampled pair is lex-sorted inside ``find_merge_triplet`` so that
     ``(A, B)`` and ``(B, A)`` both surface as ``(A, B)`` regardless of the
@@ -68,7 +67,7 @@ class TestFindMergeTripletCanonicalization:
 
 
 class TestFindMergeTripletWithinRetryFilters:
-    """GEPA parity (merge-pairing audit B1+B2, merge.py:147-148, 199-201).
+    """GEPA parity (merge.py:147-148, 199-201).
 
     The attempted-pair and val-overlap filters live INSIDE the retry loop
     (``for _ in range(max_attempts)``).  A blocked sample resamples within

@@ -80,7 +80,7 @@ class TestLoadConfig:
             background = "You are a coding expert."
 
             [worktree]
-            base_dir = "/tmp/worktrees"
+            base_dir = "/fake/worktrees"
             cleanup_dominated = false
         """)
 
@@ -101,7 +101,7 @@ class TestLoadConfig:
         assert cfg.agent.model == "claude-opus-4-5-20250514"
         assert cfg.agent.background == "You are a coding expert."
 
-        assert cfg.worktree.base_dir == "/tmp/worktrees"
+        assert cfg.worktree.base_dir == "/fake/worktrees"
         assert cfg.worktree.cleanup_dominated is False
 
     def test_agent_section_loads(self, tmp_path):

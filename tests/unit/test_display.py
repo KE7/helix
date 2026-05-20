@@ -210,7 +210,7 @@ class TestCandidateSummaryJsonSerialization:
     def _make_candidate_summary(self) -> CandidateSummary:
         candidate = Candidate(
             id="g1-s1",
-            worktree_path="/tmp/helix/g1-s1",
+            worktree_path="/fake/helix/g1-s1",
             branch_name="helix/g1-s1",
             generation=1,
             parent_id="g0-s0",

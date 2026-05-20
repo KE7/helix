@@ -33,7 +33,7 @@ def make_eval_result(
     )
 
 
-def make_candidate(cid: str = "g0-s0", worktree_path: str = "/tmp/wt") -> Candidate:
+def make_candidate(cid: str = "g0-s0", worktree_path: str = "/fake/wt") -> Candidate:
     return Candidate(
         id=cid,
         worktree_path=worktree_path,
@@ -111,14 +111,14 @@ class TestMerge:
         cb = make_candidate("g0-s1")
         config = make_config()
 
-        child = make_candidate("g1-m0", "/tmp/g1-m0")
+        child = make_candidate("g1-m0", "/fake/g1-m0")
         mocker.patch("helix.merger.clone_candidate", return_value=child)
         mocker.patch("helix.merger.get_diff", return_value="+x = 1")
         mocker.patch("helix.merger.invoke_claude_code", return_value=({"result": "ok"}, {}))
         mocker.patch("helix.merger.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         assert result is child
 
@@ -134,7 +134,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         assert result.operation == "merge"
 
@@ -150,7 +150,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         assert "g0-s0" in result.parent_ids
         assert "g0-s1" in result.parent_ids
@@ -170,7 +170,7 @@ class TestMerge:
         mock_remove = mocker.patch("helix.merger.remove_worktree")
         mocker.patch("helix.merger.snapshot_candidate")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         assert result is None
         mock_remove.assert_called_once_with(child)
@@ -190,7 +190,7 @@ class TestMerge:
         mock_remove = mocker.patch("helix.merger.remove_worktree")
         mocker.patch("helix.merger.snapshot_candidate")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         mock_remove.assert_called_once_with(child)
 
@@ -211,7 +211,7 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         # merge() returns the child but does NOT snapshot internally
         assert result is child
@@ -232,7 +232,7 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        merge(ca, cb, "g1-m0", config, Path("/fake"))
 
         mock_snapshot.assert_not_called()
 
@@ -248,7 +248,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"), background="unique_context_xyz")
+        merge(ca, cb, "g1-m0", config, Path("/fake"), background="unique_context_xyz")
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "unique_context_xyz" in prompt_arg

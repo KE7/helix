@@ -125,7 +125,7 @@ def find_merge_triplet(
     GEPA parity (L1): improvement filter is non-strict (``>``) matching
     GEPA merge.py:59 — ancestor score must not exceed either candidate.
 
-    GEPA parity (merge-pairing audit B1/B2/C3, /tmp/audit_audit-merge-pairing.md):
+    GEPA parity:
     - Canonicalize ``(i, j)`` inside the sampling loop so downstream
       consumers (the merge subprocess, the attempted-pair ledger) always
       see a lex-sorted tuple.  Mirrors GEPA ``merge.py:94-95``
@@ -184,7 +184,7 @@ def find_merge_triplet(
         if i == j:
             continue
 
-        # GEPA parity (merge-pairing audit C3, merge.py:94-95): canonicalize
+        # GEPA parity (merge.py:94-95): canonicalize
         # pair so (i, j) and (j, i) land on the same (i, j) tuple for all
         # downstream consumers (merge subprocess arg order, attempted-pair
         # ledger, description-triplet dedup).  HELIX ids are strings, so
@@ -192,13 +192,13 @@ def find_merge_triplet(
         if j < i:
             i, j = j, i
 
-        # GEPA parity (merge-pairing audit B2, merge.py:147-148): skip
+        # GEPA parity (merge.py:147-148): skip
         # already-attempted pairs inside the retry loop instead of burning
         # the whole propose() call.
         if attempted_pairs is not None and (i, j) in attempted_pairs:
             continue
 
-        # GEPA parity (merge-pairing audit B1, merge.py:199-201): skip
+        # GEPA parity (merge.py:199-201): skip
         # pairs with insufficient val-support overlap inside the retry
         # loop.  This lets the next sample win instead of consuming the
         # whole generation on the first unlucky draw.
