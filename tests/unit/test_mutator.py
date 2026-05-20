@@ -121,11 +121,6 @@ class TestBuildMutationPrompt:
         prompt = build_mutation_prompt("goal", er, background=None)
         assert "no additional background" in prompt
 
-    def test_contains_mutation_complete_marker(self):
-        er = make_eval_result()
-        prompt = build_mutation_prompt("goal", er)
-        assert "[MUTATION COMPLETE]" in prompt
-
     def test_contains_execution_instructions(self):
         er = make_eval_result()
         prompt = build_mutation_prompt("goal", er)
@@ -557,7 +552,7 @@ class TestMutationPromptArtifact:
         # Objective + autonomous-rules block are both in the rendered
         # prompt via build_mutation_prompt.
         assert config.objective in content
-        assert "[MUTATION COMPLETE]" in content
+        assert "Task instructions:" in content
 
     def test_gitignore_excludes_helix_artifacts(self, tmp_path: Path, mocker):
         """``.gitignore`` in the worktree gains entries for the prompt

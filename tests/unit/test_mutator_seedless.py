@@ -70,11 +70,6 @@ class TestBuildSeedGenerationPrompt:
         )
         assert "Evaluator" not in prompt
 
-    def test_completion_signal_in_prompt(self):
-        """The completion signal string must appear in the prompt."""
-        prompt = build_seed_generation_prompt(objective="Test objective")
-        assert "[SEED GENERATION COMPLETE]" in prompt
-
     def test_returns_string(self):
         """build_seed_generation_prompt must return a str."""
         result = build_seed_generation_prompt(objective="Test")

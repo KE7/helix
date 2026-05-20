@@ -88,9 +88,6 @@ combined solution that better achieves the objective.
 Candidate A is already checked out in your working directory.  Apply the changes from
 Candidate B that are beneficial, and discard or adapt those that conflict or regress.
 You may read, edit, create, or delete files as needed.
-
-When you have finished making all your changes, output the exact text:
-[MERGE COMPLETE]
 {turn_budget}"""
 
 # ---------------------------------------------------------------------------

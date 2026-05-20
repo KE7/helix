@@ -75,10 +75,6 @@ class TestBuildMergePrompt:
         prompt = build_merge_prompt("goal", None, None, "")
         assert "no additional background" in prompt
 
-    def test_contains_merge_complete_marker(self):
-        prompt = build_merge_prompt("goal", None, None, "")
-        assert "[MERGE COMPLETE]" in prompt
-
     def test_contains_execution_instructions(self):
         prompt = build_merge_prompt("goal", None, None, "")
         assert "Task instructions:" in prompt

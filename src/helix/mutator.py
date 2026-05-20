@@ -44,7 +44,6 @@ Task instructions:
 - Do not request confirmation or clarification; choose a reasonable approach and continue.
 - If one approach fails, try an alternative and keep progressing.
 - Use available tools to inspect, edit, and validate changes.
-- When finished, print exactly: [MUTATION COMPLETE]
 """
 
 SEEDLESS_INIT_PROMPT_TEMPLATE = """\
@@ -59,9 +58,6 @@ that will be iteratively refined by an optimization system.
 Generate a strong initial candidate based on the goal above.
 Create all necessary files directly in the current working directory.
 Make your implementation complete and ready to be evaluated immediately.
-
-When you have finished creating all files, output the exact text:
-[SEED GENERATION COMPLETE]
 {turn_budget}"""
 
 MUTATION_PROMPT_TEMPLATE = """\
@@ -79,9 +75,6 @@ MUTATION_PROMPT_TEMPLATE = """\
 ## Your Task
 Analyse the evaluation results above and improve the code to better achieve the objective.
 Make targeted, meaningful changes. You may read, edit, create, or delete files as needed.
-
-When you have finished making all your changes, output the exact text:
-[MUTATION COMPLETE]
 {turn_budget}"""
 
 # ---------------------------------------------------------------------------
@@ -476,47 +469,6 @@ def build_mutation_prompt(
         background=bg,
         turn_budget=_turn_budget_section(max_turns),
     )
-
-
-# ---------------------------------------------------------------------------
-# Mutation summary parsing
-# ---------------------------------------------------------------------------
-
-
-def parse_mutation_summary(output: str) -> dict[str, str]:
-    """Parse a ``[SUMMARY]...[END SUMMARY]`` block from Claude Code output.
-
-    Extracts structured key-value pairs written by the mutation/merge agent
-    after ``[MUTATION COMPLETE]`` or ``[MERGE COMPLETE]``.  The block format
-    is::
-
-        [SUMMARY]
-        files_changed: src/foo.py, src/bar.py
-        root_cause: ...
-        changes_made: ...
-        [END SUMMARY]
-
-    Returns
-    -------
-    dict[str, str]
-        Parsed key-value pairs.  Returns an empty dict if no block is found
-        or the block contains no valid ``key: value`` lines.  Never raises.
-    """
-    result: dict[str, str] = {}
-    in_block = False
-    for line in output.splitlines():
-        if "[SUMMARY]" in line:
-            in_block = True
-            continue
-        if "[END SUMMARY]" in line:
-            break
-        if in_block and ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-            if key:
-                result[key] = value
-    return result
 
 
 # ---------------------------------------------------------------------------
