@@ -70,13 +70,51 @@ Make targeted, meaningful changes. You may read, edit, create, or delete files a
 # ---------------------------------------------------------------------------
 
 
+def _indefinite_article(n: int) -> str:
+    """Pick ``"a"`` or ``"an"`` to match the spoken pronunciation of ``n``.
+
+    Within HELIX's realistic max-turns range (1 ≤ n ≤ ~1000), the
+    vowel-leading numbers are 8, 11, 18, and the 80s / 800s.  Everything
+    else takes ``"a"``.  Handles the visible ``"You have a 8-turn limit"``
+    article-agreement glitch without imposing a full English-number
+    pronunciation rule on the codebase.
+    """
+    s = str(abs(n))
+    if s in {"11", "18"}:
+        return "an"
+    if s.startswith("8"):  # 8, 80-89, 800-899, ...
+        return "an"
+    return "a"
+
+
 def _turn_budget_section(max_turns: int | None) -> str:
-    """Return the turn budget prompt section, or empty string if unbounded."""
+    """Return the turn budget prompt section, or empty string if unbounded.
+
+    Enforcement semantics differ by backend:
+
+    * ``claude`` — hard cap.  HELIX passes ``--max-turns N`` to the Claude
+      Code CLI (``_build_cli_args``), the runtime kills the session at the
+      limit, and the resulting ``subtype="error_max_turns"`` response is
+      detected at :func:`invoke_claude_code` and treated as partial
+      success.
+    * ``codex`` / ``cursor`` / ``gemini`` / ``opencode`` — soft hint only.
+      None of these CLIs expose an equivalent flag (verified against
+      ``--help`` for the installed binaries), so the in-prompt request is
+      the only signal the agent receives.  Whether the agent self-honors
+      the limit depends entirely on its own behaviour.
+
+    The section is therefore emitted for every backend regardless — it
+    still has some value as a soft hint — but callers depending on hard
+    enforcement should set the budget low enough to also be enforced via
+    subprocess-level mechanisms (wall-clock timeout, sandbox limits) or
+    use the Claude backend.
+    """
     if max_turns is None:
         return ""
+    article = _indefinite_article(max_turns)
     return (
         f"\n## Turn Budget\n"
-        f"You have a {max_turns}-turn limit for this task, where turns refer to "
+        f"You have {article} {max_turns}-turn limit for this task, where turns refer to "
         f"how many tool calls or interactions you can make. Plan your work "
         f"accordingly — prioritize the highest-impact changes first and be "
         f"efficient with your tool usage.\n"

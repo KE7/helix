@@ -213,6 +213,41 @@ class TestBuildMutationPrompt:
         assert "real-extra" in prompt
 
 
+class TestTurnBudgetArticleAgreement:
+    """``_turn_budget_section`` must use the correct indefinite article
+    ("a" vs "an") so the rendered prompt reads naturally:
+
+      * ``"You have a 5-turn limit"`` (consonant sound — "five")
+      * ``"You have an 8-turn limit"`` (vowel sound — "eight")
+
+    Pre-fix the article was always hardcoded ``"a"``, producing
+    ``"You have a 8-turn limit"`` for the 8/11/18/80s cases.
+    """
+
+    def test_consonant_leading_numbers_use_a(self) -> None:
+        from helix.mutator import _turn_budget_section
+
+        for n in (1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 17, 19, 20, 50, 100, 200):
+            section = _turn_budget_section(n)
+            assert f"You have a {n}-turn limit" in section, (
+                f"max_turns={n} should use 'a', section was: {section!r}"
+            )
+
+    def test_vowel_leading_numbers_use_an(self) -> None:
+        from helix.mutator import _turn_budget_section
+
+        for n in (8, 11, 18, 80, 85, 88, 800, 888):
+            section = _turn_budget_section(n)
+            assert f"You have an {n}-turn limit" in section, (
+                f"max_turns={n} should use 'an', section was: {section!r}"
+            )
+
+    def test_none_returns_empty(self) -> None:
+        from helix.mutator import _turn_budget_section
+
+        assert _turn_budget_section(None) == ""
+
+
 class TestPerExampleDiagnostics:
     """``build_mutation_prompt`` renders ``eval_result.per_example_side_info``
     as the Diagnostics section under the new GEPA O.A. contract
