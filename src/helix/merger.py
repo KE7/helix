@@ -61,13 +61,31 @@ def select_eval_subsample_for_merged_program(
 # Prompts
 # ---------------------------------------------------------------------------
 
-MERGE_TASK_INSTRUCTIONS = """\
+MERGE_TASK_INSTRUCTIONS_SINGLE_DIFF = """\
 ## Your Task
 You are merging the best aspects of Candidate A and Candidate B to create a superior
 combined solution that better achieves the objective.
 
 Candidate A is already checked out in your working directory.  Apply the changes from
 Candidate B that are beneficial, and discard or adapt those that conflict or regress.
+You may read, edit, create, or delete files as needed."""
+
+MERGE_TASK_INSTRUCTIONS_TWO_DIFF = """\
+## Your Task
+You are merging the best aspects of Candidate A and Candidate B to create a superior
+combined solution that better achieves the objective.
+
+Candidate A's worktree is already checked out — A's contribution (the hunks shown in
+"Diff: Candidate A relative to common ancestor") is already in place, so you do not
+need to re-apply it.  Your job is to bring in Candidate B's contribution (the hunks
+shown in "Diff: Candidate B relative to common ancestor") wherever it is beneficial.
+
+For each hunk in B's diff:
+- If the file is untouched by A's diff, the change is independent — apply it.
+- If the file is also touched by A's diff (overlapping region), the two parents
+  diverged from the ancestor on the same region: reconcile the changes, picking
+  whichever side better serves the objective, or synthesize a combined version.
+
 You may read, edit, create, or delete files as needed."""
 
 # ---------------------------------------------------------------------------
@@ -103,16 +121,36 @@ def build_merge_prompt(
     diff: str,
     background: str | None = None,
     max_turns: int | None = None,
+    *,
+    ancestor_id: str | None = None,
+    diff_a_from_ancestor: str | None = None,
+    diff_b_from_ancestor: str | None = None,
 ) -> str:
     """Construct the merge prompt for the configured agent backend.
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    (``gepa/optimize_anything.py:501-596``).  Absent eval results for a
-    candidate, an empty diff, and absent ``background`` all skip their
-    respective sections entirely instead of emitting ``"(no evaluation
-    data)"`` / ``"(no diff — candidates are identical)"`` / ``"(no
-    additional background provided)"`` placeholders.
+    (``gepa/optimize_anything.py:501-596``).
+
+    **Diff section format** — two-diff (ancestor-relative) vs single (A↔B):
+
+    GEPA's merge operator (``gepa/proposer/merge.py:155-203``) reasons over
+    *three* program states — common ancestor, candidate A, candidate B —
+    to attribute each component change to whichever parent diverged from
+    the ancestor.  When ``ancestor_id`` + both ``diff_a_from_ancestor``
+    and ``diff_b_from_ancestor`` are supplied, this prompt mirrors that
+    structure at the file-hunk level: each parent's diff against the
+    common ancestor is rendered as its own labelled section, so the
+    agent can read off "A's contribution" and "B's contribution"
+    directly instead of inferring three-way info from a single A↔B diff.
+
+    When the ancestor-relative pair is not supplied (e.g. legacy callers,
+    tests that don't have an ancestor handy), the prompt falls back to
+    the single ``## Diff (B relative to A)`` section driven by ``diff``.
+
+    Absent eval results, absent diff(s), and absent ``background`` all
+    skip their respective sections entirely instead of emitting
+    placeholder strings.
     """
     sections: list[str] = [AUTONOMOUS_SYSTEM_PROMPT.rstrip()]
 
@@ -129,14 +167,45 @@ def build_merge_prompt(
             "## Candidate B Strengths\n" + _format_eval_strengths(eval_result_b)
         )
 
-    diff_stripped = diff.strip()
-    if diff_stripped:
-        sections.append(f"## Diff (B relative to A)\n```diff\n{diff_stripped}\n```")
+    # Diff section — prefer the two-diff (ancestor-relative) form when
+    # both diffs are available, fall back to single A↔B otherwise.  Each
+    # branch independently honors the "omit when empty" invariant.
+    use_two_diff = (
+        ancestor_id is not None
+        and diff_a_from_ancestor is not None
+        and diff_b_from_ancestor is not None
+    )
+    if use_two_diff:
+        diff_a_stripped = (diff_a_from_ancestor or "").strip()
+        diff_b_stripped = (diff_b_from_ancestor or "").strip()
+        if diff_a_stripped:
+            sections.append(
+                f"## Diff: Candidate A relative to common ancestor {ancestor_id}\n"
+                f"```diff\n{diff_a_stripped}\n```"
+            )
+        if diff_b_stripped:
+            sections.append(
+                f"## Diff: Candidate B relative to common ancestor {ancestor_id}\n"
+                f"```diff\n{diff_b_stripped}\n```"
+            )
+    else:
+        diff_stripped = diff.strip()
+        if diff_stripped:
+            sections.append(
+                f"## Diff (B relative to A)\n```diff\n{diff_stripped}\n```"
+            )
 
     if background:
         sections.append(f"## Background / Context\n{background}")
 
-    sections.append(MERGE_TASK_INSTRUCTIONS)
+    # Task instructions vary by diff form.  Two-diff form gets explicit
+    # guidance on what A's contribution vs B's contribution means and how
+    # to reason about overlapping vs disjoint hunks; single-diff form
+    # keeps the legacy "apply B's changes" framing.
+    sections.append(
+        MERGE_TASK_INSTRUCTIONS_TWO_DIFF if use_two_diff
+        else MERGE_TASK_INSTRUCTIONS_SINGLE_DIFF
+    )
 
     turn_budget = _turn_budget_section(max_turns)
     if turn_budget:
@@ -160,22 +229,40 @@ def merge(
     eval_result_a: EvalResult | None = None,
     eval_result_b: EvalResult | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
+    ancestor: Candidate | None = None,
 ) -> Candidate | None:
     """Merge *candidate_a* and *candidate_b* using Claude Code.
 
-    Clones *candidate_a*, computes the diff to *candidate_b*, builds a merge
+    Clones *candidate_a*, computes the relevant diffs, builds a merge
     prompt, and invokes Claude Code.  Snapshots on success; removes the
     worktree and returns ``None`` on failure.
+
+    Two diff-rendering modes, controlled by the optional ``ancestor``
+    argument:
+
+    * **Two-diff (ancestor-relative)** — when ``ancestor`` is provided,
+      computes ``get_diff(ancestor, candidate_a)`` and
+      ``get_diff(ancestor, candidate_b)`` and renders both as separately
+      labelled sections in the prompt.  The agent can then attribute
+      each hunk to whichever parent diverged from the common ancestor —
+      file-hunk-level analogue of GEPA's component-wise attribution
+      (``gepa/proposer/merge.py:163-191``: ``if pred_anc == pred_id1 …``
+      → take id2's version; ``elif pred_anc != pred_id1 and pred_anc !=
+      pred_id2`` → tiebreak by score).
+    * **Single (A↔B)** — fallback when no ancestor is provided.
+      Computes ``get_diff(candidate_a, candidate_b)`` and renders a
+      single ``## Diff (B relative to A)`` section.  The agent has to
+      infer three-way info from a two-way comparison.
 
     GEPA-parity note: this is the correct domain adaptation of GEPA's
     text-component merge (``gepa/proposer/merge.py:155-203``) for HELIX's
     full-codebase setting.  GEPA can splice ``dict[str, str]`` programs
     deterministically by swapping components from each parent; HELIX
     candidates are full git worktrees, where syntactic per-component swap
-    is undefined, so an LLM-mediated edit is the only viable approach.
-    The surrounding trigger / parent-selection / subsample / acceptance /
-    full-val logic in :mod:`helix.evolution` mirrors GEPA's
-    ``MergeProposer`` and ``GEPAEngine`` verbatim.
+    is undefined, so an LLM-mediated edit is the only viable approach —
+    but feeding the agent the three-way diff structure GEPA's algorithm
+    uses (two ancestor-relative diffs instead of one A↔B diff) gives it
+    the same shape of attribution information.
 
     Parameters
     ----------
@@ -195,6 +282,15 @@ def merge(
         Evaluation result for candidate A (optional, for richer prompt).
     eval_result_b:
         Evaluation result for candidate B (optional, for richer prompt).
+    prepare_worktree:
+        Optional callback to refresh protected files in the new worktree
+        before the agent runs.
+    ancestor:
+        Optional most-recent common ancestor of A and B (typically
+        ``frontier.candidates[ancestor_id]`` where ``ancestor_id`` came
+        from :func:`helix.lineage.find_merge_triplet`).  When supplied,
+        the prompt uses the two-diff (ancestor-relative) form; when
+        ``None``, falls back to the single A↔B diff.
 
     Returns
     -------
@@ -207,15 +303,31 @@ def merge(
     if prepare_worktree is not None:
         prepare_worktree(child)
 
-    diff = get_diff(candidate_a, candidate_b)
+    # Diff-rendering mode selection.  ``ancestor`` available → compute
+    # the two ancestor-relative diffs that drive the GEPA-style
+    # attribution prompt.  Otherwise compute the single A↔B fallback.
+    if ancestor is not None:
+        diff_a_from_ancestor: str | None = get_diff(ancestor, candidate_a)
+        diff_b_from_ancestor: str | None = get_diff(ancestor, candidate_b)
+        # ``diff`` (single A↔B) is computed lazily only for the fallback
+        # path; with both ancestor-relative diffs in hand, the prompt
+        # builder ignores the legacy parameter, so pass an empty string.
+        legacy_diff = ""
+    else:
+        diff_a_from_ancestor = None
+        diff_b_from_ancestor = None
+        legacy_diff = get_diff(candidate_a, candidate_b)
 
     prompt = build_merge_prompt(
         config.objective,
         eval_result_a,
         eval_result_b,
-        diff,
+        legacy_diff,
         background,
         config.agent.max_turns,
+        ancestor_id=ancestor.id if ancestor is not None else None,
+        diff_a_from_ancestor=diff_a_from_ancestor,
+        diff_b_from_ancestor=diff_b_from_ancestor,
     )
 
     try:

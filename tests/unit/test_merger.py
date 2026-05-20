@@ -114,6 +114,102 @@ class TestBuildMergePrompt:
         assert "no diff" not in prompt
 
 
+class TestBuildMergePromptTwoDiff:
+    """GEPA-parity two-diff form: when ``ancestor_id`` and both
+    ancestor-relative diffs are supplied, the prompt emits two labelled
+    sections instead of the single A↔B diff.  Mirrors GEPA's
+    three-way attribution reasoning (``gepa/proposer/merge.py:163-191``)
+    at the file-hunk level — agent reads off A's contribution and B's
+    contribution directly instead of inferring three-way info from a
+    two-way comparison.
+    """
+
+    def test_emits_two_ancestor_relative_sections(self):
+        prompt = build_merge_prompt(
+            "goal", None, None, "",
+            ancestor_id="g0-s0",
+            diff_a_from_ancestor="+self.bn = nn.BatchNorm1d(...)\n",
+            diff_b_from_ancestor="+if epoch < 10: lr = 0.001\n",
+        )
+        assert "## Diff: Candidate A relative to common ancestor g0-s0" in prompt
+        assert "## Diff: Candidate B relative to common ancestor g0-s0" in prompt
+        assert "self.bn = nn.BatchNorm1d" in prompt
+        assert "if epoch < 10" in prompt
+        # Fallback section MUST NOT also render — the agent should see
+        # exactly the two ancestor-relative diffs, not three sections.
+        assert "## Diff (B relative to A)" not in prompt
+
+    def test_two_diff_form_uses_two_diff_task_block(self):
+        """The two-diff form pairs the ancestor-relative diffs with a
+        task block that explicitly tells the agent A's contribution is
+        already in the working tree (so it doesn't re-apply it) and B's
+        contribution is what needs to be brought in.  Pinning this
+        substring prevents a future refactor from accidentally swapping
+        back to the single-diff task block, which would confuse the
+        agent about whether A's diff needs to be re-applied.
+        """
+        prompt = build_merge_prompt(
+            "goal", None, None, "",
+            ancestor_id="g0-s0",
+            diff_a_from_ancestor="+a contribution\n",
+            diff_b_from_ancestor="+b contribution\n",
+        )
+        assert "A's contribution (the hunks shown in" in prompt
+        # The single-diff task block's "Apply the changes from Candidate B"
+        # phrasing must NOT appear in the two-diff form.
+        assert "Apply the changes from\nCandidate B that are beneficial" not in prompt
+
+    def test_single_diff_form_uses_single_diff_task_block(self):
+        """Companion to the two-diff task-block test: the single-diff
+        fallback must keep the legacy task framing intact.
+        """
+        prompt = build_merge_prompt("goal", None, None, "+some diff")
+        assert "Apply the changes from\nCandidate B" in prompt
+        # The two-diff task block's phrasing must NOT appear in the
+        # single-diff form.
+        assert "A's contribution (the hunks shown in" not in prompt
+
+    def test_single_diff_fallback_when_ancestor_missing(self):
+        """No ancestor + no ancestor diffs → single A↔B diff form
+        (backward-compatible default).
+        """
+        prompt = build_merge_prompt("goal", None, None, "+some diff content")
+        assert "## Diff (B relative to A)" in prompt
+        assert "+some diff content" in prompt
+        # Two-diff section headers must NOT appear in the fallback path.
+        assert "relative to common ancestor" not in prompt
+
+    def test_single_diff_fallback_when_ancestor_id_only(self):
+        """Defensive: an ``ancestor_id`` without both diffs falls back
+        to the single A↔B path.  Prevents a half-configured caller from
+        emitting an "ancestor header pointing to nothing" prompt.
+        """
+        prompt = build_merge_prompt(
+            "goal", None, None, "+legacy diff",
+            ancestor_id="g0-s0",
+            diff_a_from_ancestor=None,
+            diff_b_from_ancestor=None,
+        )
+        assert "## Diff (B relative to A)" in prompt
+        assert "+legacy diff" in prompt
+        assert "relative to common ancestor" not in prompt
+
+    def test_two_diff_form_omits_empty_side(self):
+        """If one of the ancestor-relative diffs is empty (one parent
+        didn't change anything relative to the ancestor), only the
+        non-empty side renders.  Edge case: a parent might "improve" via
+        metadata changes that ``git diff`` doesn't see.
+        """
+        prompt = build_merge_prompt(
+            "goal", None, None, "",
+            ancestor_id="g0-s0",
+            diff_a_from_ancestor="+self.bn = nn.BatchNorm1d(...)\n",
+            diff_b_from_ancestor="",
+        )
+        assert "## Diff: Candidate A relative to common ancestor g0-s0" in prompt
+        assert "## Diff: Candidate B relative to common ancestor g0-s0" not in prompt
+
+
 # ---------------------------------------------------------------------------
 # Tests: merge
 # ---------------------------------------------------------------------------
@@ -266,6 +362,87 @@ class TestMerge:
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "unique_context_xyz" in prompt_arg
+
+    def test_ancestor_triggers_two_diff_form(self, mocker):
+        """When ``merge()`` receives an ``ancestor`` argument, it must
+        call ``get_diff`` twice (ancestor→A and ancestor→B) and the
+        rendered prompt must contain both ancestor-relative diff
+        sections instead of the single A↔B diff.
+        """
+        ancestor = make_candidate("g0-s0")
+        ca = make_candidate("g1-s0")
+        cb = make_candidate("g1-s1")
+        config = make_config()
+
+        child = make_candidate("g2-m0")
+        mocker.patch("helix.merger.clone_candidate", return_value=child)
+
+        # get_diff is called per-side; sequence captures which two diffs
+        # were requested so we can assert the right pair of arguments
+        # was passed (ancestor→A and ancestor→B, NOT A↔B).
+        diff_calls: list[tuple[str, str]] = []
+
+        def fake_get_diff(x, y):
+            diff_calls.append((x.id, y.id))
+            return f"+contribution from {y.id}"
+
+        mocker.patch("helix.merger.get_diff", side_effect=fake_get_diff)
+        mock_invoke = mocker.patch(
+            "helix.merger.invoke_claude_code", return_value=({}, {})
+        )
+        mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
+        mocker.patch("helix.merger.remove_worktree")
+
+        merge(ca, cb, "g2-m0", config, Path("/tmp"), ancestor=ancestor)
+
+        # Two get_diff calls, both anchored on the ancestor.
+        assert diff_calls == [("g0-s0", "g1-s0"), ("g0-s0", "g1-s1")], (
+            f"expected two ancestor-relative diff calls; got {diff_calls}"
+        )
+
+        # Prompt must contain both ancestor-relative section headers
+        # and neither the legacy A↔B header nor any leftover placeholder.
+        prompt_arg = mock_invoke.call_args[0][1]
+        assert "## Diff: Candidate A relative to common ancestor g0-s0" in prompt_arg
+        assert "## Diff: Candidate B relative to common ancestor g0-s0" in prompt_arg
+        assert "## Diff (B relative to A)" not in prompt_arg
+        assert "contribution from g1-s0" in prompt_arg
+        assert "contribution from g1-s1" in prompt_arg
+
+    def test_no_ancestor_uses_single_diff_form(self, mocker):
+        """Backward-compat: ``merge()`` without an ``ancestor`` argument
+        still computes a single A↔B diff and renders the legacy section.
+        """
+        ca = make_candidate("g1-s0")
+        cb = make_candidate("g1-s1")
+        config = make_config()
+
+        child = make_candidate("g2-m0")
+        mocker.patch("helix.merger.clone_candidate", return_value=child)
+
+        diff_calls: list[tuple[str, str]] = []
+
+        def fake_get_diff(x, y):
+            diff_calls.append((x.id, y.id))
+            return "+A-to-B contribution"
+
+        mocker.patch("helix.merger.get_diff", side_effect=fake_get_diff)
+        mock_invoke = mocker.patch(
+            "helix.merger.invoke_claude_code", return_value=({}, {})
+        )
+        mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
+        mocker.patch("helix.merger.remove_worktree")
+
+        merge(ca, cb, "g2-m0", config, Path("/tmp"))  # no ancestor
+
+        # Single get_diff call with A↔B arguments.
+        assert diff_calls == [("g1-s0", "g1-s1")], (
+            f"expected single A↔B diff call; got {diff_calls}"
+        )
+
+        prompt_arg = mock_invoke.call_args[0][1]
+        assert "## Diff (B relative to A)" in prompt_arg
+        assert "## Diff: Candidate A relative to common ancestor" not in prompt_arg
 
     def test_imports_mutation_error_from_mutator(self):
         """merger.py must reuse MutationError from mutator to avoid duplication."""

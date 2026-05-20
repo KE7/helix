@@ -1808,12 +1808,12 @@ def _run_evolution_impl(
                     )
 
                 if triplet is not None:
-                    # GEPA parity (merge-pairing audit C3, merge.py:94-95):
-                    # ``find_merge_triplet`` now returns the canonical
-                    # ``(i, j)`` (lex-sorted), so ``cid_i <= cid_j`` always —
-                    # the merge subprocess, attempted-pair ledger and the
-                    # description-triplet dedup all see the same tuple order.
-                    cid_i, cid_j, _ancestor_id = triplet
+                    # GEPA parity (merge.py:94-95): ``find_merge_triplet``
+                    # now returns the canonical ``(i, j)`` (lex-sorted),
+                    # so ``cid_i <= cid_j`` always — the merge subprocess,
+                    # attempted-pair ledger and the description-triplet
+                    # dedup all see the same tuple order.
+                    cid_i, cid_j, ancestor_id = triplet
                     pair_key = [cid_i, cid_j]
 
                     # Resolve parent val results once; by contract the
@@ -1832,8 +1832,25 @@ def _run_evolution_impl(
 
                     a = frontier._candidates[cid_i]
                     b = frontier._candidates[cid_j]
-
+                    # Resolve the common ancestor for the two-diff merge
+                    # prompt (GEPA parity at the file-hunk level: feed the
+                    # agent the same three-way structure GEPA's algorithm
+                    # uses to attribute changes —
+                    # ``gepa/proposer/merge.py:163-191``).  The ancestor
+                    # came from ``find_merge_triplet``; resolve it through
+                    # the frontier's append-only candidate map.  ``None``
+                    # is tolerated downstream — ``merge()`` falls back to
+                    # the single A↔B diff when the ancestor isn't
+                    # resolvable (defensive: lineage / frontier drift).
+                    ancestor_candidate = frontier.candidates.get(ancestor_id)
                     merge_id = budget_api.next_merge_id(state, gen)
+                    if ancestor_candidate is None:
+                        print_warning(
+                            f"Merge {merge_id} ({cid_i} + {cid_j}): common "
+                            f"ancestor {ancestor_id} not found in frontier "
+                            f"candidate map; falling back to single A↔B "
+                            f"diff form for this merge."
+                        )
 
                     merged = merge(
                         candidate_a=a,
@@ -1849,6 +1866,7 @@ def _run_evolution_impl(
                                 cand, config, project_root
                             )
                         ),
+                        ancestor=ancestor_candidate,
                     )
 
                     if merged is None:
