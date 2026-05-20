@@ -23,6 +23,15 @@ from helix.population import FrontierType
 # v0; ``load_state`` migrates by default-filling missing fields).
 SCHEMA_VERSION: int = 2
 
+# Schema version for the per-(candidate, example) eval cache pickle.
+# Bumped to 1 when ``CachedEvaluation`` gained a per-example ``side_info``
+# slot — pre-extension caches dropped the LIBERO reflection feedstock on
+# every hit, so a resume that silently kept them around would silently
+# keep dropping it.  ``load_eval_cache`` quarantines any payload without
+# this version (treated as schema 0) instead of loading it, so the next
+# eval pass repopulates the cache with the new slot filled.
+EVAL_CACHE_SCHEMA_VERSION: int = 1
+
 
 @dataclass
 class BudgetState:
@@ -267,13 +276,22 @@ def save_eval_cache(cache_dict: dict[Any, Any], base_dir: Path) -> None:
     ``MinibatchEvalCache._cache`` directly.  No-op semantics for an empty
     cache: the file is still written so that resume can reliably distinguish
     "cache disabled in last run" from "cache enabled but empty".
+
+    The payload is a ``{"schema_version": int, "entries": cache_dict}``
+    envelope rather than the bare cache dict — ``load_eval_cache`` rejects
+    older shapes so a pre-extension cache (no ``CachedEvaluation.side_info``
+    slot) is not silently revived.  See ``EVAL_CACHE_SCHEMA_VERSION``.
     """
     target = _eval_cache_path(base_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
+    payload: dict[str, Any] = {
+        "schema_version": EVAL_CACHE_SCHEMA_VERSION,
+        "entries": cache_dict,
+    }
     try:
         with os.fdopen(fd, "wb") as f:
-            pickle.dump(cache_dict, f)
+            pickle.dump(payload, f)
         os.replace(tmp_path, target)
     except Exception:
         try:
@@ -287,10 +305,19 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
     """Load the per-(candidate, example) eval cache, or None if absent.
 
     GEPA parity: mirrors the cache-restore behaviour at
-    gepa/core/state.py:348-376.  Returns the raw dict so the
+    gepa/core/state.py:348-376.  Returns the raw entries dict so the
     caller can install it on a freshly constructed cache instance (the
     caller decides whether caching is enabled — see ``initialize_gepa_state``
     at gepa/core/state.py:683-687 for the equivalent gating).
+
+    Schema check: payloads without the current ``schema_version`` are
+    quarantined and treated as absent so the next eval pass repopulates
+    the cache.  This is deliberate, not "backwards compatibility": a
+    pre-extension cache (``CachedEvaluation`` without the ``side_info``
+    slot) silently reproduces the very LIBERO-reflection regression the
+    slot was added to fix, so silently keeping it on resume would
+    persist the bug.  The old payload is preserved on disk under a
+    timestamped suffix for diagnostics.
     """
     target = _eval_cache_path(base_dir)
     if not target.exists():
@@ -316,7 +343,35 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
             stacklevel=2,
         )
         return None
-    return loaded
+    # Schema-version guard.  A payload without ``schema_version`` is a
+    # pre-extension cache (bare ``dict[CacheKey, CachedEvaluation]`` with
+    # no ``side_info`` slot); quarantine it so the next eval pass refills
+    # the new slot rather than silently losing the reflection feedstock.
+    version = loaded.get("schema_version") if "schema_version" in loaded else None
+    if version != EVAL_CACHE_SCHEMA_VERSION:
+        quarantined = _quarantine_corrupt_cache(
+            target, reason=f"schema-v{version}-expected-v{EVAL_CACHE_SCHEMA_VERSION}"
+        )
+        warnings.warn(
+            f"Ignoring eval cache at {target}: schema_version={version!r} "
+            f"does not match current {EVAL_CACHE_SCHEMA_VERSION}.  The next "
+            f"eval pass will repopulate the cache with the current shape.  "
+            f"Previous payload preserved at {quarantined}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    entries = loaded.get("entries")
+    if not isinstance(entries, dict):
+        quarantined = _quarantine_corrupt_cache(target, reason="malformed-envelope")
+        warnings.warn(
+            f"Ignoring eval cache at {target}: envelope missing 'entries' "
+            f"dict (got {type(entries).__name__}). Quarantined to {quarantined}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    return entries
 
 
 def _quarantine_corrupt_cache(target: Path, *, reason: str) -> Path:

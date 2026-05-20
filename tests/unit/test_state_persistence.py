@@ -188,8 +188,8 @@ def test_load_state_rejects_newer_schema_version(tmp_path: Path) -> None:
 def test_eval_cache_pickle_roundtrip(tmp_path: Path) -> None:
     """save_eval_cache → load_eval_cache must round-trip the tuple-keyed dict.
 
-    Audit ref: C1 — JSON cannot encode tuple keys; we use a sibling pickle
-    so the per-(candidate_hash, example_id) cache survives crash/resume the
+    JSON cannot encode tuple keys; we use a sibling pickle so the
+    per-(candidate_hash, example_id) cache survives crash/resume the
     same way GEPA's pickled state does (gepa/core/state.py:306-340, 348-376).
     """
     cache: MinibatchEvalCache[object, str] = MinibatchEvalCache[object, str]()
@@ -211,7 +211,7 @@ def test_eval_cache_pickle_roundtrip(tmp_path: Path) -> None:
 def test_eval_cache_load_returns_none_when_missing(tmp_path: Path) -> None:
     """load_eval_cache must return None when no companion pickle exists.
 
-    Audit ref: C1 — fresh runs (no prior state) should not raise.
+    Fresh runs (no prior state) should not raise.
     """
     assert load_eval_cache(tmp_path) is None
 
@@ -235,6 +235,80 @@ def test_eval_cache_load_tolerates_non_dict(tmp_path: Path) -> None:
     quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-*"))
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == _pickle.dumps(["not", "a", "dict"])
+
+
+def test_eval_cache_load_rejects_pre_extension_payload(tmp_path: Path) -> None:
+    """A pre-``side_info`` cache (bare ``dict[CacheKey, CachedEvaluation]``
+    without the schema-versioned envelope) must be quarantined, not silently
+    loaded.  The pre-extension shape silently dropped the LIBERO reflection
+    feedstock on every cache hit (every cached entry's ``side_info`` would
+    be ``None``), so reviving it on resume would reproduce the very
+    regression the ``side_info`` slot was added to fix.
+    """
+    import pickle as _pickle
+
+    helix_dir = tmp_path / ".helix"
+    helix_dir.mkdir(parents=True)
+    target = helix_dir / "eval_cache.pkl"
+    # Bare dict, no envelope, no schema_version — exactly what previous
+    # versions of HELIX wrote.
+    legacy_payload = {
+        ("hash_a", "task_0"): "anything",
+        ("hash_b", "task_1"): "anything",
+    }
+    target.write_bytes(_pickle.dumps(legacy_payload))
+
+    with pytest.warns(RuntimeWarning, match="schema_version"):
+        assert load_eval_cache(tmp_path) is None
+
+    # The legacy file is moved aside (not deleted) so the user can inspect it.
+    assert not target.exists()
+    quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-schema-*"))
+    assert len(quarantined) == 1
+    assert _pickle.loads(quarantined[0].read_bytes()) == legacy_payload
+
+
+def test_eval_cache_load_rejects_wrong_schema_version(tmp_path: Path) -> None:
+    """A payload with an unrecognised ``schema_version`` is also quarantined.
+    Covers the forward-compat case where a future HELIX wrote a v2 cache and
+    the user resumed under a v1 binary.
+    """
+    import pickle as _pickle
+
+    helix_dir = tmp_path / ".helix"
+    helix_dir.mkdir(parents=True)
+    target = helix_dir / "eval_cache.pkl"
+    future_payload = {"schema_version": 999, "entries": {}}
+    target.write_bytes(_pickle.dumps(future_payload))
+
+    with pytest.warns(RuntimeWarning, match="schema_version=999"):
+        assert load_eval_cache(tmp_path) is None
+
+    assert not target.exists()
+    quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-schema-*"))
+    assert len(quarantined) == 1
+
+
+def test_eval_cache_load_rejects_malformed_envelope(tmp_path: Path) -> None:
+    """The envelope must carry an ``entries`` dict.  A versioned payload
+    that lost the entries (corruption mid-write, etc.) is quarantined.
+    """
+    import pickle as _pickle
+
+    from helix.state import EVAL_CACHE_SCHEMA_VERSION
+
+    helix_dir = tmp_path / ".helix"
+    helix_dir.mkdir(parents=True)
+    target = helix_dir / "eval_cache.pkl"
+    bad_payload = {"schema_version": EVAL_CACHE_SCHEMA_VERSION, "entries": "not-a-dict"}
+    target.write_bytes(_pickle.dumps(bad_payload))
+
+    with pytest.warns(RuntimeWarning, match="malformed-envelope"):
+        assert load_eval_cache(tmp_path) is None
+
+    assert not target.exists()
+    quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-malformed-envelope-*"))
+    assert len(quarantined) == 1
 
 
 def test_eval_cache_load_tolerates_unreadable_pickle(tmp_path: Path) -> None:
