@@ -116,20 +116,31 @@ class TestBuildMutationPrompt:
         prompt = build_mutation_prompt("goal", er, background="special context here")
         assert "special context here" in prompt
 
-    def test_default_background_when_none(self):
+    def test_background_section_omitted_when_none(self):
+        """GEPA parity: empty optional inputs skip the section entirely
+        instead of emitting a placeholder.  Mirrors GEPA O.A.'s
+        ``_build_reflection_prompt_template`` (optimize_anything.py:501-596),
+        which only appends a section when its content is non-empty.
+        """
         er = make_eval_result()
         prompt = build_mutation_prompt("goal", er, background=None)
-        assert "no additional background" in prompt
+        assert "## Background / Context" not in prompt
+        assert "no additional background" not in prompt
 
     def test_contains_execution_instructions(self):
         er = make_eval_result()
         prompt = build_mutation_prompt("goal", er)
         assert "Task instructions:" in prompt
 
-    def test_no_scores_fallback(self):
+    def test_scores_section_omitted_when_empty(self):
+        """No ``eval_result.scores`` → ``## Current Evaluation Scores``
+        section is skipped entirely (no ``"(no scores recorded)"``
+        placeholder).
+        """
         er = make_eval_result(scores={})
         prompt = build_mutation_prompt("goal", er)
-        assert "no scores recorded" in prompt
+        assert "## Current Evaluation Scores" not in prompt
+        assert "no scores recorded" not in prompt
 
     def test_renders_helix_log_notes(self):
         er = make_eval_result(

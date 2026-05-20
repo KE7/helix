@@ -61,44 +61,28 @@ def select_eval_subsample_for_merged_program(
 # Prompts
 # ---------------------------------------------------------------------------
 
-MERGE_PROMPT_TEMPLATE = """\
-{system_prompt}
-
-## Objective
-{objective}
-
-## Candidate A Strengths
-{strengths_a}
-
-## Candidate B Strengths
-{strengths_b}
-
-## Diff (B relative to A)
-```diff
-{diff}
-```
-
-## Background / Context
-{background}
-
+MERGE_TASK_INSTRUCTIONS = """\
 ## Your Task
 You are merging the best aspects of Candidate A and Candidate B to create a superior
 combined solution that better achieves the objective.
 
 Candidate A is already checked out in your working directory.  Apply the changes from
 Candidate B that are beneficial, and discard or adapt those that conflict or regress.
-You may read, edit, create, or delete files as needed.
-{turn_budget}"""
+You may read, edit, create, or delete files as needed."""
 
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
 
 
-def _format_eval_strengths(eval_result: EvalResult | None, label: str) -> str:
-    """Return a human-readable summary of a candidate's eval result."""
-    if eval_result is None:
-        return f"  {label}: (no evaluation data)"
+def _format_eval_strengths(eval_result: EvalResult) -> str:
+    """Return a human-readable summary of a candidate's eval result.
+
+    Returns the section body only (no header); the caller is responsible
+    for the ``## Candidate {A,B} Strengths`` heading.  Empty input is
+    handled by skipping the section entirely in :func:`build_merge_prompt`
+    rather than emitting a ``"(no evaluation data)"`` placeholder.
+    """
     lines = [f"  Aggregate score: {eval_result.aggregate_score():.4f}"]
     for k, v in sorted(eval_result.scores.items()):
         lines.append(f"  {k}: {v}")
@@ -120,21 +104,45 @@ def build_merge_prompt(
     background: str | None = None,
     max_turns: int | None = None,
 ) -> str:
-    """Construct the merge prompt for Claude Code."""
-    strengths_a = _format_eval_strengths(eval_result_a, "Candidate A")
-    strengths_b = _format_eval_strengths(eval_result_b, "Candidate B")
-    bg = background or "(no additional background provided)"
-    diff_text = diff.strip() if diff.strip() else "(no diff — candidates are identical)"
+    """Construct the merge prompt for the configured agent backend.
 
-    return MERGE_PROMPT_TEMPLATE.format(
-        system_prompt=AUTONOMOUS_SYSTEM_PROMPT,
-        objective=objective,
-        strengths_a=strengths_a,
-        strengths_b=strengths_b,
-        diff=diff_text,
-        background=bg,
-        turn_budget=_turn_budget_section(max_turns),
-    )
+    Sections are emitted only when they have content, mirroring GEPA O.A.'s
+    ``_build_reflection_prompt_template`` accumulator pattern
+    (``gepa/optimize_anything.py:501-596``).  Absent eval results for a
+    candidate, an empty diff, and absent ``background`` all skip their
+    respective sections entirely instead of emitting ``"(no evaluation
+    data)"`` / ``"(no diff — candidates are identical)"`` / ``"(no
+    additional background provided)"`` placeholders.
+    """
+    sections: list[str] = [AUTONOMOUS_SYSTEM_PROMPT.rstrip()]
+
+    if objective:
+        sections.append(f"## Objective\n{objective}")
+
+    if eval_result_a is not None:
+        sections.append(
+            "## Candidate A Strengths\n" + _format_eval_strengths(eval_result_a)
+        )
+
+    if eval_result_b is not None:
+        sections.append(
+            "## Candidate B Strengths\n" + _format_eval_strengths(eval_result_b)
+        )
+
+    diff_stripped = diff.strip()
+    if diff_stripped:
+        sections.append(f"## Diff (B relative to A)\n```diff\n{diff_stripped}\n```")
+
+    if background:
+        sections.append(f"## Background / Context\n{background}")
+
+    sections.append(MERGE_TASK_INSTRUCTIONS)
+
+    turn_budget = _turn_budget_section(max_turns)
+    if turn_budget:
+        sections.append(turn_budget.strip())
+
+    return "\n\n".join(sections) + "\n"
 
 
 # ---------------------------------------------------------------------------

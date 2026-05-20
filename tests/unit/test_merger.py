@@ -71,9 +71,15 @@ class TestBuildMergePrompt:
         prompt = build_merge_prompt("goal", None, None, "", background="special bg")
         assert "special bg" in prompt
 
-    def test_default_background_when_none(self):
+    def test_background_section_omitted_when_none(self):
+        """GEPA parity: empty optional inputs skip the section entirely
+        instead of emitting a placeholder.  Mirrors GEPA O.A.'s
+        ``_build_reflection_prompt_template`` (optimize_anything.py:501-596),
+        which only appends a section when its content is non-empty.
+        """
         prompt = build_merge_prompt("goal", None, None, "")
-        assert "no additional background" in prompt
+        assert "## Background / Context" not in prompt
+        assert "no additional background" not in prompt
 
     def test_contains_execution_instructions(self):
         prompt = build_merge_prompt("goal", None, None, "")
@@ -86,14 +92,26 @@ class TestBuildMergePrompt:
         assert "0.8" in prompt
         assert "0.9" in prompt
 
-    def test_handles_none_eval_results(self):
-        # Should not raise even with no eval data
+    def test_strengths_sections_omitted_when_eval_results_none(self):
+        """``eval_result_a`` / ``eval_result_b`` of ``None`` → the
+        corresponding ``## Candidate {A,B} Strengths`` section is skipped
+        entirely (no ``"(no evaluation data)"`` placeholder).
+        """
         prompt = build_merge_prompt("goal", None, None, "some diff")
-        assert "no evaluation data" in prompt
+        assert "## Candidate A Strengths" not in prompt
+        assert "## Candidate B Strengths" not in prompt
+        assert "no evaluation data" not in prompt
 
-    def test_empty_diff_shows_fallback(self):
+    def test_diff_section_omitted_when_empty(self):
+        """An empty diff → ``## Diff (B relative to A)`` section is
+        skipped entirely (no ``"(no diff — candidates are identical)"``
+        placeholder).  Upstream callers should not invoke merge on
+        identical candidates; this test pins the prompt-level fallback.
+        """
         prompt = build_merge_prompt("goal", None, None, "")
-        assert "identical" in prompt or "no diff" in prompt
+        assert "## Diff" not in prompt
+        assert "identical" not in prompt
+        assert "no diff" not in prompt
 
 
 # ---------------------------------------------------------------------------
