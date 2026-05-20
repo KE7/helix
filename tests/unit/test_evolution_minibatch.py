@@ -41,7 +41,7 @@ from helix.state import BudgetState, EvolutionState
 def _make_candidate(cid: str = "g0-s0") -> Candidate:
     return Candidate(
         id=cid,
-        worktree_path=f"/tmp/helix/{cid}",
+        worktree_path=f"/fake/helix/{cid}",
         branch_name=f"helix/{cid}",
         generation=0,
         parent_id=None,
@@ -960,7 +960,7 @@ class TestCachedEvaluateBatch:
         write_batch_mock = mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/fake"),
         )
 
         assert run_eval_mock.call_count == 0, (
@@ -995,7 +995,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand_b, ["0", "1"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand_b, ["0", "1"], cache, self._trivial_config(), "train", Path("/fake"),
         )
 
         assert num_actual == 0
@@ -1165,7 +1165,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/fake"),
         )
 
         assert seen_instance_ids == [["0", "1", "2"]], (
@@ -1197,10 +1197,10 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         first, first_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/fake"),
         )
         second, second_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/fake"),
         )
 
         assert seen_instance_ids == [["0", "1"], ["0", "1"]]
@@ -1248,7 +1248,7 @@ class TestCachedEvaluateBatch:
         )
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/fake"),
         )
 
         # Evaluator called exactly once, with only the missing id.
@@ -1267,20 +1267,25 @@ class TestCachedEvaluateBatch:
 
     def test_partial_cache_hit_per_example_fields_merge(self, mocker: Any) -> None:
         """Partial-cache-hit merge of ``per_example_side_info`` and
-        ``objective_scores``.  Pins the closure side-channel design
-        from commit H (``_cached_evaluate_batch``):
+        ``objective_scores``.
 
-          * cache-hit positions get ``{}`` for per_example_side_info
-            (the cache has no slot for freeform side_info so the merge
-            can't round-trip it — their prior side_info was consumed
-            by the reflection prompt at their original eval time);
-          * fresh miss positions get the per_example_side_info dict
-            from the fresh EvalResult, zipped by id;
-          * ``objective_scores`` IS round-tripped through the cache
-            (it has a dedicated slot — see
-            ``eval_cache.CachedEvaluation.objective_scores``), so
-            cache-hit positions get back the previously-stored dict
-            and miss positions get the freshly-harvested dict.
+        Both axes now round-trip through the cache via dedicated
+        ``CachedEvaluation`` slots:
+
+          * ``objective_scores`` — original GEPA parity slot
+            (``gepa/core/state.py:37-43``).
+          * ``side_info`` — HELIX extension mirroring GEPA's
+            ``OptimizeAnythingAdapter._eval_cache`` at
+            ``gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py:200-216``,
+            which caches the per-example reflection feedstock alongside
+            score/output.  Without this slot a second visit to the same
+            (candidate, example) lost the LIBERO ``evaluation_diagnostics``
+            / ``judge_metrics`` / ``evaluator_error`` payload before it
+            reached the mutator's ``## Diagnostics`` section.
+
+        Cache-hit positions therefore return the dict that was stored
+        with ``put_batch(..., side_info_list=...)``, and fresh miss
+        positions get the dict from the live evaluator output.
         """
         from helix.eval_cache import EvaluationCache as MBCache
         from helix.evolution import _cached_evaluate_batch
@@ -1288,8 +1293,10 @@ class TestCachedEvaluateBatch:
         cache: MBCache[object, str] = MBCache[object, str]()
         cand = self._make_cand("cand-pcfm")
         cand_dict = {"content_key": cand.id, "split": "train"}
-        # Pre-populate ids "0" and "2" with both score AND
-        # objective_scores (the cache stores these natively).
+        # Pre-populate ids "0" and "2" with score + objective_scores +
+        # side_info.  The side_info payload mirrors the shape LIBERO's
+        # evaluator emits: ``evaluation_diagnostics`` with task metadata
+        # and ``judge_metrics`` axes.
         cache.put_batch(
             cand_dict,
             ["0", "2"],
@@ -1298,6 +1305,10 @@ class TestCachedEvaluateBatch:
             objective_scores_list=[
                 {"obj_alpha": 0.11, "obj_beta": 0.8},
                 {"obj_alpha": 0.33, "obj_beta": 0.1},
+            ],
+            side_info_list=[
+                {"evaluation_diagnostics": {"instance_id": "0", "judge_metrics": {"q": 0.9}}},
+                {"evaluation_diagnostics": {"instance_id": "2", "judge_metrics": {"q": 0.4}}},
             ],
         )
         # "1" is uncached — the evaluator is invoked with it only, and
@@ -1332,7 +1343,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/fake"),
         )
 
         # instance_scores merge: cached 0/2 + fresh 1 (established
@@ -1350,14 +1361,81 @@ class TestCachedEvaluateBatch:
             {"obj_alpha": 0.33, "obj_beta": 0.1},     # cached id "2"
         ]
 
-        # per_example_side_info: cache has no slot, so cache-hit
-        # positions get ``{}`` placeholder; the fresh miss position
-        # gets the dict we returned from fake_run.
+        # per_example_side_info now also round-trips: cache-hit
+        # positions return the dict stored at the original eval time
+        # (LIBERO feedback preserved); the fresh miss position gets
+        # the live evaluator output.
         assert result.per_example_side_info is not None
         assert result.per_example_side_info == [
-            {},                                                               # cached "0" → {}
-            {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},         # fresh "1"
-            {},                                                               # cached "2" → {}
+            {"evaluation_diagnostics": {"instance_id": "0", "judge_metrics": {"q": 0.9}}},
+            {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},
+            {"evaluation_diagnostics": {"instance_id": "2", "judge_metrics": {"q": 0.4}}},
+        ]
+
+    def test_partial_cache_hit_side_info_repopulated_after_fresh_eval(
+        self, mocker: Any
+    ) -> None:
+        """A fresh evaluation populates ``side_info`` in the cache so a
+        subsequent fully-cached lookup re-materialises the per-example
+        reflection feedstock without re-running the evaluator.
+
+        Mirrors GEPA's ``OptimizeAnythingAdapter._call_evaluator`` cache
+        store at
+        ``gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py:200-216``:
+        once a (candidate, example) has been evaluated, the adapter cache
+        returns the full ``(score, output, side_info)`` tuple on the next
+        hit — never re-running the evaluator just to recover side_info.
+        """
+        from helix.eval_cache import EvaluationCache as MBCache
+        from helix.evolution import _cached_evaluate_batch
+
+        cache: MBCache[object, str] = MBCache[object, str]()
+        cand = self._make_cand("cand-roundtrip")
+
+        call_count = {"n": 0}
+
+        def fake_run(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            call_count["n"] += 1
+            ids = list(instance_ids or [])
+            return EvalResult(
+                candidate_id=candidate.id,
+                scores={},
+                asi={},
+                instance_scores={eid: 0.42 for eid in ids},
+                per_example_side_info=[
+                    {"evaluation_diagnostics": {"instance_id": eid, "judge_metrics": {"q": 0.7}}}
+                    for eid in ids
+                ],
+                objective_scores=[{"obj": 0.42} for _ in ids],
+            )
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        first, first_actual = _cached_evaluate_batch(
+            cand, ["a", "b"], cache, self._trivial_config(), "train", Path("/fake"),
+        )
+        assert first_actual == 2  # cold miss → both ids evaluated
+        assert call_count["n"] == 1
+
+        second, second_actual = _cached_evaluate_batch(
+            cand, ["a", "b"], cache, self._trivial_config(), "train", Path("/fake"),
+        )
+        assert second_actual == 0  # full hit → evaluator not invoked again
+        assert call_count["n"] == 1  # confirms run_evaluator was not called
+
+        # side_info survives the round-trip — LIBERO feedback signal is
+        # preserved on cache hits.
+        assert second.per_example_side_info == first.per_example_side_info
+        assert second.per_example_side_info == [
+            {"evaluation_diagnostics": {"instance_id": "a", "judge_metrics": {"q": 0.7}}},
+            {"evaluation_diagnostics": {"instance_id": "b", "judge_metrics": {"q": 0.7}}},
         ]
 
     def test_cache_populates_after_fresh_eval(self, mocker: Any) -> None:
@@ -1389,7 +1467,7 @@ class TestCachedEvaluateBatch:
 
         # First call: full miss → evaluator runs once.
         first_result, first_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "train", Path("/tmp"),
+            cand, ["0", "1"], cache, cfg, "train", Path("/fake"),
         )
         assert call_count["n"] == 1
         assert first_num_actual == 2
@@ -1397,7 +1475,7 @@ class TestCachedEvaluateBatch:
 
         # Second call with the same (candidate, ids): full hit → no re-run.
         second_result, second_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "train", Path("/tmp"),
+            cand, ["0", "1"], cache, cfg, "train", Path("/fake"),
         )
         assert call_count["n"] == 1, (
             "Evaluator must not be invoked a second time for cached ids"
@@ -1435,7 +1513,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0"], cache, self._trivial_config(), "val", Path("/tmp"),
+            cand, ["0"], cache, self._trivial_config(), "val", Path("/fake"),
         )
 
         assert seen_splits == ["val"]
@@ -1466,7 +1544,7 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/fake"),
         )
 
         assert seen_instance_ids == [["0", "1"]]
@@ -1523,8 +1601,8 @@ class TestWriteHelixBatchStringIds:
 
 
 # ---------------------------------------------------------------------------
-# MODERATE E (audit-mutation §C4) — parent minibatch eval runs in parallel
-# worker threads, matching GEPA core/engine.py:381-452 which submits
+# Parent minibatch eval runs in parallel worker threads, matching GEPA
+# core/engine.py:381-452 which submits
 # ``execute_proposal`` (reflective_mutation.py:239-285) — including
 # ``adapter.evaluate`` at :268 — to a ``ThreadPoolExecutor``.
 #
@@ -1539,7 +1617,7 @@ class TestParentMinibatchParallelism:
     ) -> None:
         """Under ``num_parallel_proposals > 1`` the N parent-minibatch evals
         must be dispatched to a ``ThreadPoolExecutor`` (call-count evidence
-        of concurrency per audit-mutation §C4 MODERATE E).
+        of concurrency).
 
         We cannot block on a barrier because parents share the same seed
         worktree and the per-worktree file-handoff lock correctly serialises
