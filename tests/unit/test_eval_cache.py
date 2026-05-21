@@ -9,12 +9,20 @@ def test_get_put_round_trip() -> None:
     cache: EvaluationCache[str, int] = EvaluationCache()
     cand = {"a": "1", "b": "2"}
     assert cache.get(cand, 7) is None
-    cache.put(cand, 7, output="hello", score=0.5, objective_scores={"acc": 1.0})
+    cache.put(
+        cand,
+        7,
+        output="hello",
+        score=0.5,
+        objective_scores={"acc": 1.0},
+        side_info={"trace": "cached"},
+    )
     entry = cache.get(cand, 7)
     assert entry is not None
     assert entry.output == "hello"
     assert entry.score == 0.5
     assert entry.objective_scores == {"acc": 1.0}
+    assert entry.side_info == {"trace": "cached"}
 
 
 def test_get_batch_splits_cached_uncached() -> None:
@@ -38,17 +46,19 @@ def test_put_batch_stores_all_entries() -> None:
         ["a", "b", "c"],
         [0.1, 0.2, 0.3],
         [{"m": 1.0}, {"m": 2.0}, {"m": 3.0}],
+        [{"log": "a"}, {"log": "b"}, {"log": "c"}],
     )
-    for eid, out, score, m in [
-        (10, "a", 0.1, 1.0),
-        (20, "b", 0.2, 2.0),
-        (30, "c", 0.3, 3.0),
+    for eid, out, score, m, log in [
+        (10, "a", 0.1, 1.0, "a"),
+        (20, "b", 0.2, 2.0, "b"),
+        (30, "c", 0.3, 3.0, "c"),
     ]:
         e = cache.get(cand, eid)
         assert e is not None
         assert e.output == out
         assert e.score == score
         assert e.objective_scores == {"m": m}
+        assert e.side_info == {"log": log}
 
 
 def test_put_batch_no_objective_scores() -> None:
@@ -58,6 +68,7 @@ def test_put_batch_no_objective_scores() -> None:
     e = cache.get(cand, 1)
     assert e is not None
     assert e.objective_scores is None
+    assert e.side_info is None
 
 
 def test_evaluate_with_cache_full_calls_evaluator_only_for_uncached() -> None:
@@ -73,14 +84,20 @@ def test_evaluate_with_cache_full_calls_evaluator_only_for_uncached() -> None:
 
     def evaluator(
         batch: list[int], _c: dict[str, str]
-    ) -> tuple[list[str], list[float], list[dict[str, float]] | None]:
+    ) -> tuple[
+        list[str],
+        list[float],
+        list[dict[str, float]] | None,
+        list[dict[str, str]] | None,
+    ]:
         calls.append(list(batch))
         outs = [f"out{eid}" for eid in batch]
         scores = [float(eid) / 10 for eid in batch]
         obj = [{"acc": float(eid)} for eid in batch]
-        return outs, scores, obj
+        side_info = [{"feedback": f"log{eid}"} for eid in batch]
+        return outs, scores, obj, side_info
 
-    outputs, scores, obj_by_id, n_uncached = cache.evaluate_with_cache_full(
+    outputs, scores, obj_by_id, side_info_by_id, n_uncached = cache.evaluate_with_cache_full(
         cand, [1, 2, 3], fetcher, evaluator
     )
 
@@ -90,6 +107,10 @@ def test_evaluate_with_cache_full_calls_evaluator_only_for_uncached() -> None:
     assert scores == {1: 0.9, 2: 0.2, 3: 0.3}
     assert obj_by_id is not None
     assert obj_by_id == {2: {"acc": 2.0}, 3: {"acc": 3.0}}
+    assert side_info_by_id == {
+        2: {"feedback": "log2"},
+        3: {"feedback": "log3"},
+    }
 
 
 def test_evaluate_with_cache_full_second_call_fully_cached() -> None:
@@ -102,14 +123,24 @@ def test_evaluate_with_cache_full_second_call_fully_cached() -> None:
 
     def evaluator(
         batch: list[int], _c: dict[str, str]
-    ) -> tuple[list[str], list[float], list[dict[str, float]] | None]:
+    ) -> tuple[
+        list[str],
+        list[float],
+        list[dict[str, float]] | None,
+        list[dict[str, str]] | None,
+    ]:
         calls.append(list(batch))
-        return [f"o{e}" for e in batch], [0.0 for _ in batch], None
+        return (
+            [f"o{e}" for e in batch],
+            [0.0 for _ in batch],
+            None,
+            [{"feedback": f"log{e}"} for e in batch],
+        )
 
     cache.evaluate_with_cache_full(cand, [1, 2, 3], fetcher, evaluator)
     assert calls == [[1, 2, 3]]
 
-    outputs, scores, obj, n_new = cache.evaluate_with_cache_full(
+    outputs, scores, obj, side_info, n_new = cache.evaluate_with_cache_full(
         cand, [1, 2, 3], fetcher, evaluator
     )
     assert calls == [[1, 2, 3]]  # not called again
@@ -117,6 +148,11 @@ def test_evaluate_with_cache_full_second_call_fully_cached() -> None:
     assert outputs == {1: "o1", 2: "o2", 3: "o3"}
     assert scores == {1: 0.0, 2: 0.0, 3: 0.0}
     assert obj is None
+    assert side_info == {
+        1: {"feedback": "log1"},
+        2: {"feedback": "log2"},
+        3: {"feedback": "log3"},
+    }
 
 
 def test_candidate_hash_order_independent() -> None:

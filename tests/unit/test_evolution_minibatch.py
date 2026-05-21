@@ -1267,13 +1267,9 @@ class TestCachedEvaluateBatch:
 
     def test_partial_cache_hit_per_example_fields_merge(self, mocker: Any) -> None:
         """Partial-cache-hit merge of ``per_example_side_info`` and
-        ``objective_scores``.  Pins the closure side-channel design
-        from commit H (``_cached_evaluate_batch``):
+        ``objective_scores``:
 
-          * cache-hit positions get ``{}`` for per_example_side_info
-            (the cache has no slot for freeform side_info so the merge
-            can't round-trip it — their prior side_info was consumed
-            by the reflection prompt at their original eval time);
+          * cache-hit positions get their own cached side_info by id;
           * fresh miss positions get the per_example_side_info dict
             from the fresh EvalResult, zipped by id;
           * ``objective_scores`` IS round-tripped through the cache
@@ -1298,6 +1294,10 @@ class TestCachedEvaluateBatch:
             objective_scores_list=[
                 {"obj_alpha": 0.11, "obj_beta": 0.8},
                 {"obj_alpha": 0.33, "obj_beta": 0.1},
+            ],
+            side_info_list=[
+                {"trajectory": "cached_trace_0", "rollout_id": "cached__0"},
+                {"trajectory": "cached_trace_2", "rollout_id": "cached__2"},
             ],
         )
         # "1" is uncached — the evaluator is invoked with it only, and
@@ -1350,14 +1350,13 @@ class TestCachedEvaluateBatch:
             {"obj_alpha": 0.33, "obj_beta": 0.1},     # cached id "2"
         ]
 
-        # per_example_side_info: cache has no slot, so cache-hit
-        # positions get ``{}`` placeholder; the fresh miss position
-        # gets the dict we returned from fake_run.
+        # per_example_side_info round-trips by example id through the cache;
+        # the fresh miss position gets the dict we returned from fake_run.
         assert result.per_example_side_info is not None
         assert result.per_example_side_info == [
-            {},                                                               # cached "0" → {}
+            {"trajectory": "cached_trace_0", "rollout_id": "cached__0"},       # cached "0"
             {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},         # fresh "1"
-            {},                                                               # cached "2" → {}
+            {"trajectory": "cached_trace_2", "rollout_id": "cached__2"},       # cached "2"
         ]
 
     def test_cache_populates_after_fresh_eval(self, mocker: Any) -> None:
