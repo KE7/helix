@@ -114,6 +114,8 @@ class TestEvolutionConfigNewFields:
         assert cfg.cache_evaluation is False
         assert cfg.acceptance_criterion == "strict_improvement"
         assert cfg.val_stage_size is None
+        assert cfg.num_sampled_groups is None
+        assert cfg.num_examples_per_group is None
 
     def test_acceptance_criterion_accepts_improvement_or_equal(self):
         cfg = EvolutionConfig(acceptance_criterion="improvement_or_equal")
@@ -135,6 +137,9 @@ class TestEvolutionConfigNewFields:
             cache_evaluation=True,
             acceptance_criterion="improvement_or_equal",
             val_stage_size=50,
+            batch_sampler="stratified",
+            num_sampled_groups=1,
+            num_examples_per_group=4,
         )
         assert cfg.minibatch_size == 5
         assert cfg.max_workers == 4
@@ -142,6 +147,32 @@ class TestEvolutionConfigNewFields:
         assert cfg.cache_evaluation is True
         assert cfg.acceptance_criterion == "improvement_or_equal"
         assert cfg.val_stage_size == 50
+        assert cfg.num_sampled_groups == 1
+        assert cfg.num_examples_per_group == 4
+
+    def test_group_example_sampling_fields_must_be_paired(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(num_sampled_groups=1)
+        with pytest.raises(ValidationError):
+            EvolutionConfig(num_examples_per_group=2)
+
+    def test_group_example_sampling_fields_reject_non_positive(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(
+                batch_sampler="stratified",
+                num_sampled_groups=0,
+                num_examples_per_group=2,
+            )
+        with pytest.raises(ValidationError):
+            EvolutionConfig(
+                batch_sampler="stratified",
+                num_sampled_groups=1,
+                num_examples_per_group=0,
+            )
+
+    def test_group_example_sampling_requires_stratified_sampler(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(num_sampled_groups=1, num_examples_per_group=2)
 
     def test_num_parallel_proposals_auto_resolves(self):
         """GEPA parity: ``num_parallel_proposals="auto"`` resolves to
@@ -435,11 +466,14 @@ class TestTomlRoundTrip:
 
             [evolution]
             minibatch_size = 7
+            batch_sampler = "stratified"
             max_workers = 3
             num_parallel_proposals = 2
             cache_evaluation = true
             acceptance_criterion = "improvement_or_equal"
             val_stage_size = 50
+            num_sampled_groups = 1
+            num_examples_per_group = 4
         """)
         )
         cfg = load_config(toml)
@@ -452,6 +486,8 @@ class TestTomlRoundTrip:
         assert cfg.evolution.cache_evaluation is True
         assert cfg.evolution.acceptance_criterion == "improvement_or_equal"
         assert cfg.evolution.val_stage_size == 50
+        assert cfg.evolution.num_sampled_groups == 1
+        assert cfg.evolution.num_examples_per_group == 4
 
     def test_toml_val_path_omitted_falls_back(self, tmp_path):
         toml = tmp_path / "helix.toml"
@@ -477,10 +513,13 @@ class TestTomlRoundTrip:
             seedless={"train_path": "/tmp/train.jsonl", "val_path": "/tmp/val.jsonl"},
             evolution={
                 "minibatch_size": 4,
+                "batch_sampler": "stratified",
                 "max_workers": 2,
                 "cache_evaluation": True,
                 "acceptance_criterion": "improvement_or_equal",
                 "val_stage_size": 25,
+                "num_sampled_groups": 1,
+                "num_examples_per_group": 2,
             },
         )
         dumped = cfg.model_dump()
@@ -492,3 +531,5 @@ class TestTomlRoundTrip:
         assert restored.evolution.cache_evaluation is True
         assert restored.evolution.acceptance_criterion == "improvement_or_equal"
         assert restored.evolution.val_stage_size == 25
+        assert restored.evolution.num_sampled_groups == 1
+        assert restored.evolution.num_examples_per_group == 2

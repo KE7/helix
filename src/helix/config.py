@@ -382,6 +382,24 @@ class EvolutionConfig(BaseModel):
             "minibatch_size are available."
         ),
     )
+    num_sampled_groups: int | None = Field(
+        default=None,
+        description=(
+            "Optional stratified sampler group count. When set with "
+            "num_examples_per_group, each minibatch contains num_sampled_groups "
+            "groups and num_examples_per_group examples from each selected group. "
+            "Unset preserves the legacy stratified behavior of "
+            "minibatch_size distinct groups with one example each."
+        ),
+    )
+    num_examples_per_group: int | None = Field(
+        default=None,
+        description=(
+            "Optional stratified sampler example count per sampled group. Must "
+            "be set together with num_sampled_groups. The effective minibatch "
+            "cardinality becomes num_sampled_groups * num_examples_per_group."
+        ),
+    )
     group_key_separator: str = Field(
         default="__",
         description=(
@@ -453,6 +471,26 @@ class EvolutionConfig(BaseModel):
                 "evolution.group_key_separator must be a non-empty string "
                 "when evolution.batch_sampler='stratified' "
                 f"(got {self.group_key_separator!r})"
+            )
+        if (self.num_sampled_groups is None) != (self.num_examples_per_group is None):
+            raise ValueError(
+                "evolution.num_sampled_groups and evolution.num_examples_per_group "
+                "must be set together"
+            )
+        if self.num_sampled_groups is not None and self.batch_sampler != "stratified":
+            raise ValueError(
+                "evolution.num_sampled_groups and evolution.num_examples_per_group "
+                "require evolution.batch_sampler='stratified'"
+            )
+        if self.num_sampled_groups is not None and self.num_sampled_groups < 1:
+            raise ValueError(
+                "evolution.num_sampled_groups must be >= 1 "
+                f"(got {self.num_sampled_groups})"
+            )
+        if self.num_examples_per_group is not None and self.num_examples_per_group < 1:
+            raise ValueError(
+                "evolution.num_examples_per_group must be >= 1 "
+                f"(got {self.num_examples_per_group})"
             )
 
 

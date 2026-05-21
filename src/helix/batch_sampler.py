@@ -113,14 +113,15 @@ class EpochShuffledBatchSampler(Generic[DataId]):
 
 
 class StratifiedBatchSampler(Generic[DataId]):
-    """Task-stratified minibatch sampler.
+    """Group-stratified minibatch sampler.
 
-    Each epoch is pre-shuffled such that every minibatch of size ``K`` is a
-    slice of ``K`` instances drawn from ``K`` distinct groups (per
-    ``group_fn``).  This guarantees task diversity within every minibatch,
-    which helps reflection-style evolutionary search reason about
-    generalisation instead of overfitting to whichever task happens to
-    dominate a random batch.
+    By default, each epoch is pre-shuffled such that every minibatch of size
+    ``K`` is a slice of ``K`` instances drawn from ``K`` distinct groups (per
+    ``group_fn``).  When ``num_sampled_groups`` and ``num_examples_per_group`` are
+    set, each batch instead contains ``num_sampled_groups`` groups with
+    ``num_examples_per_group`` instances from each group.  This guarantees task
+    diversity, or deliberate same-group multi-example sampling, within every
+    minibatch.
 
     Design notes:
 
@@ -128,8 +129,8 @@ class StratifiedBatchSampler(Generic[DataId]):
       *within* each group, then interleave across groups round-robin.  The
       resulting flat schedule (``self.shuffled_ids``) has the property that
       any contiguous window of ``minibatch_size`` indices begins at a
-      multiple of ``minibatch_size`` and touches ``minibatch_size`` distinct
-      groups — as long as at least ``minibatch_size`` groups exist.
+      multiple of the effective minibatch size and touches the requested
+      number of distinct groups — as long as enough groups exist.
     - Per-round rotation: when ``num_groups > minibatch_size``, each round
       drops the trailing ``num_groups % minibatch_size`` groups (padding
       would re-introduce a group collision).  We rotate ``group_keys`` by
@@ -143,13 +144,13 @@ class StratifiedBatchSampler(Generic[DataId]):
       round, dropping any trailing remainder rather than padding with
       duplicates (padding would re-introduce a group collision within the
       final minibatch).
-    - Fallback: when ``len(groups) < minibatch_size``, a stratified minibatch
-      is impossible, so the sampler transparently delegates to an internal
-      :class:`EpochShuffledBatchSampler` for GEPA parity semantics.
+    - Fallback: when ``len(groups) < num_sampled_groups``, a stratified
+      minibatch is impossible, so the sampler transparently delegates to an
+      internal :class:`EpochShuffledBatchSampler` for GEPA parity semantics.
 
     Invariants:
-      S1. Every returned minibatch of size ``m`` contains exactly ``m``
-          distinct group keys (when ``num_groups >= m``).
+      S1. Every returned minibatch contains exactly ``m`` distinct group keys
+          and ``t`` examples per group (when ``num_groups >= m``).
       S2. Within an epoch each instance is yielded at most once.  In each
           round of the round-robin interleave, only the first
           ``whole_rounds_per_round = (num_groups // m) * m`` entries are
@@ -167,8 +168,25 @@ class StratifiedBatchSampler(Generic[DataId]):
         minibatch_size: int,
         group_fn: Callable[[DataId], str],
         rng: random.Random | None = None,
+        num_sampled_groups: int | None = None,
+        num_examples_per_group: int | None = None,
     ) -> None:
+        if num_sampled_groups is not None and num_sampled_groups < 1:
+            raise ValueError(
+                "num_sampled_groups must be >= 1 "
+                f"(got {num_sampled_groups})"
+            )
+        if num_examples_per_group is not None and num_examples_per_group < 1:
+            raise ValueError(
+                "num_examples_per_group must be >= 1 "
+                f"(got {num_examples_per_group})"
+            )
         self.minibatch_size = minibatch_size
+        self.num_sampled_groups = (
+            minibatch_size if num_sampled_groups is None else num_sampled_groups
+        )
+        self.num_examples_per_group = 1 if num_examples_per_group is None else num_examples_per_group
+        self.effective_minibatch_size = self.num_sampled_groups * self.num_examples_per_group
         self.group_fn = group_fn
         self.rng = rng if rng is not None else random.Random(0)
         self.shuffled_ids: list[DataId] = []
@@ -194,10 +212,10 @@ class StratifiedBatchSampler(Generic[DataId]):
         num_groups = len(group_keys)
 
         # Fallback path: not enough groups to guarantee stratification.
-        if num_groups < self.minibatch_size:
+        if num_groups < self.num_sampled_groups:
             if self._fallback is None:
                 self._fallback = EpochShuffledBatchSampler[DataId](
-                    minibatch_size=self.minibatch_size, rng=self.rng
+                    minibatch_size=self.effective_minibatch_size, rng=self.rng
                 )
             # Keep schedule empty so next_minibatch_ids delegates.
             self.shuffled_ids = []
@@ -224,21 +242,36 @@ class StratifiedBatchSampler(Generic[DataId]):
         # before slicing rotates which group lands in the trimmed slot
         # across rounds, so no group is starved within an epoch when
         # ``num_groups > m`` and ``num_groups % m != 0``.
-        max_rounds = max(len(buckets[k]) for k in group_keys)
-        m = self.minibatch_size
+        max_rounds = max(
+            len(buckets[k]) // self.num_examples_per_group for k in group_keys
+        )
+        m = self.num_sampled_groups
+        t = self.num_examples_per_group
         whole_rounds_per_round = (num_groups // m) * m
         trimmed: list[DataId] = []
         for r in range(max_rounds):
             offset = r % num_groups
             rotated_keys = group_keys[offset:] + group_keys[:offset]
-            round_slice = [buckets[k][r] for k in rotated_keys if r < len(buckets[k])]
+            round_slice: list[DataId] = []
+            for k in rotated_keys:
+                start = r * t
+                end = start + t
+                if end <= len(buckets[k]):
+                    round_slice.extend(buckets[k][start:end])
             # Take at most whole_rounds_per_round entries, then clip to a
-            # multiple of m in case this round is partial.
-            keep = min(len(round_slice), whole_rounds_per_round)
-            keep -= keep % m
+            # whole number of stratified batches in case this round is partial.
+            keep_groups = min(len(round_slice) // t, whole_rounds_per_round)
+            keep_groups -= keep_groups % m
+            keep = keep_groups * t
             trimmed.extend(round_slice[:keep])
 
         self.shuffled_ids = trimmed
+        if len(self.shuffled_ids) < self.effective_minibatch_size:
+            if self._fallback is None:
+                self._fallback = EpochShuffledBatchSampler[DataId](
+                    minibatch_size=self.effective_minibatch_size, rng=self.rng
+                )
+            self.shuffled_ids = []
 
     def next_minibatch_ids(
         self, loader: DataLoader[DataId], state: _SamplerState
@@ -254,7 +287,7 @@ class StratifiedBatchSampler(Generic[DataId]):
         if self._fallback is not None and trainset_size == self.last_trainset_size:
             return self._fallback.next_minibatch_ids(loader, state)
 
-        base_idx = state.i * self.minibatch_size
+        base_idx = state.i * self.effective_minibatch_size
         curr_epoch = (
             0 if self.epoch == -1 else base_idx // max(len(self.shuffled_ids), 1)
         )
@@ -271,10 +304,10 @@ class StratifiedBatchSampler(Generic[DataId]):
         if not self.shuffled_ids and self._fallback is not None:
             return self._fallback.next_minibatch_ids(loader, state)
 
-        assert len(self.shuffled_ids) >= self.minibatch_size
-        assert len(self.shuffled_ids) % self.minibatch_size == 0
+        assert len(self.shuffled_ids) >= self.effective_minibatch_size
+        assert len(self.shuffled_ids) % self.effective_minibatch_size == 0
         base_idx = base_idx % len(self.shuffled_ids)
-        end_idx = base_idx + self.minibatch_size
+        end_idx = base_idx + self.effective_minibatch_size
         assert end_idx <= len(self.shuffled_ids)
         _ids = self.shuffled_ids[base_idx:end_idx]
         TRACE.emit(
