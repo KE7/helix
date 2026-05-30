@@ -198,6 +198,8 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
             "acceptance_criterion": config.evolution.acceptance_criterion,
             "minibatch_size": config.evolution.minibatch_size,
             "batch_sampler": config.evolution.batch_sampler,
+            "num_sampled_groups": config.evolution.num_sampled_groups,
+            "num_examples_per_group": config.evolution.num_examples_per_group,
             "group_key_separator": config.evolution.group_key_separator,
             "val_stage_size": config.evolution.val_stage_size,
             "merge_enabled": config.evolution.merge_enabled,
@@ -1361,6 +1363,8 @@ def _run_evolution_impl(
                 minibatch_size=config.evolution.minibatch_size,
                 group_fn=_group_fn,
                 rng=rng,
+                num_sampled_groups=config.evolution.num_sampled_groups,
+                num_examples_per_group=config.evolution.num_examples_per_group,
             )
         else:
             batch_sampler = EpochShuffledBatchSampler[str](

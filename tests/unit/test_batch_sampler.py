@@ -151,6 +151,40 @@ def test_stratified_minibatch_contains_k_distinct_groups() -> None:
         )
 
 
+def test_stratified_num_sampled_groups_one_samples_multiple_examples_from_same_group() -> None:
+    """A stratified minibatch may now pick one group and several examples."""
+    ids = [f"{g}__trial_{i}" for g in ("a", "b", "c") for i in range(5)]
+    loader = _Loader(ids)
+    sampler = StratifiedBatchSampler(
+        minibatch_size=3,
+        group_fn=_group_by_prefix,
+        rng=random.Random(0),
+        num_sampled_groups=1,
+        num_examples_per_group=4,
+    )
+
+    for i in range(6):
+        batch = sampler.next_minibatch_ids(loader, _State(i=i))
+        assert len(batch) == 4
+        groups = {_group_by_prefix(eid) for eid in batch}
+        assert len(groups) == 1
+        assert len(set(batch)) == 4
+
+
+def test_stratified_legacy_defaults_still_use_minibatch_size_distinct_groups() -> None:
+    ids = [f"{g}__{i}" for g in ("a", "b", "c", "d") for i in range(2)]
+    loader = _Loader(ids)
+    sampler = StratifiedBatchSampler(
+        minibatch_size=3,
+        group_fn=_group_by_prefix,
+        rng=random.Random(5),
+    )
+
+    batch = sampler.next_minibatch_ids(loader, _State(i=0))
+    assert len(batch) == 3
+    assert len({_group_by_prefix(eid) for eid in batch}) == 3
+
+
 def test_stratified_epoch_covers_all_instances() -> None:
     """Each full epoch should emit every instance exactly once (balanced groups)."""
     ids = ["a__0", "a__1", "b__0", "b__1", "c__0", "c__1"]
