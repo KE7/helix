@@ -34,6 +34,7 @@ class CachedEvaluation(Generic[RolloutOutput]):
     output: RolloutOutput
     score: float
     objective_scores: dict[str, float] | None = None
+    side_info: dict[str, Any] | None = None
 
 
 @dataclass
@@ -60,10 +61,11 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         output: RolloutOutput,
         score: float,
         objective_scores: dict[str, float] | None = None,
+        side_info: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             self._cache[(_candidate_hash(candidate), example_id)] = CachedEvaluation(
-                output, score, objective_scores
+                output, score, objective_scores, side_info
             )
 
     def get_batch(
@@ -95,6 +97,7 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         outputs: list[RolloutOutput],
         scores: list[float],
         objective_scores_list: list[dict[str, float]] | None = None,
+        side_info_list: list[dict[str, Any]] | None = None,
     ) -> None:
         h = _candidate_hash(candidate)
         with self._lock:
@@ -103,6 +106,7 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
                     outputs[i],
                     scores[i],
                     objective_scores_list[i] if objective_scores_list else None,
+                    side_info_list[i] if side_info_list else None,
                 )
         TRACE.emit(
             EventType.CACHE_PUT,
@@ -117,12 +121,18 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         fetcher: Callable[[list[DataId]], Any],
         evaluator: Callable[
             [Any, dict[str, str]],
-            tuple[list[RolloutOutput], list[float], list[dict[str, float]] | None],
+            tuple[
+                list[RolloutOutput],
+                list[float],
+                list[dict[str, float]] | None,
+                list[dict[str, Any]] | None,
+            ],
         ],
     ) -> tuple[
         dict[DataId, RolloutOutput],
         dict[DataId, float],
         dict[DataId, dict[str, float]] | None,
+        dict[DataId, dict[str, Any]] | None,
         int,
     ]:
         cached, uncached_ids = self.get_batch(candidate, example_ids)
@@ -138,9 +148,15 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
                 if objective_by_id is None:
                     objective_by_id = {}
                 objective_by_id[eid] = c.objective_scores
+        side_info_by_id: dict[DataId, dict[str, Any]] | None = None
+        for eid, c in cached.items():
+            if c.side_info is not None:
+                if side_info_by_id is None:
+                    side_info_by_id = {}
+                side_info_by_id[eid] = c.side_info
         if uncached_ids:
             batch = fetcher(uncached_ids)
-            outputs, scores, obj_scores = evaluator(batch, candidate)
+            outputs, scores, obj_scores, side_infos = evaluator(batch, candidate)
             for idx, eid in enumerate(uncached_ids):
                 outputs_by_id[eid] = outputs[idx]
                 scores_by_id[eid] = scores[idx]
@@ -148,5 +164,16 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
                     if objective_by_id is None:
                         objective_by_id = {}
                     objective_by_id[eid] = obj_scores[idx]
-            self.put_batch(candidate, uncached_ids, outputs, scores, obj_scores)
-        return outputs_by_id, scores_by_id, objective_by_id, len(uncached_ids)
+                if side_infos is not None:
+                    if side_info_by_id is None:
+                        side_info_by_id = {}
+                    side_info_by_id[eid] = side_infos[idx]
+            self.put_batch(
+                candidate,
+                uncached_ids,
+                outputs,
+                scores,
+                obj_scores,
+                side_infos,
+            )
+        return outputs_by_id, scores_by_id, objective_by_id, side_info_by_id, len(uncached_ids)

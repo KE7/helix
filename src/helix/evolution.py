@@ -903,15 +903,6 @@ def _cached_evaluate_batch(
         "split": split,
     }
 
-    # Closure side-channel: the cache stores ``(output, score, objective_scores)``
-    # per id but has no slot for freeform ``side_info``.  Collect fresh
-    # per-example side_info in a closure dict so we can attach it to the
-    # merged ``EvalResult`` below.  Cache-hit ids (not in this dict) get
-    # ``{}`` as their per_example_side_info slot — their prior side_info
-    # was consumed by the reflection prompt at their original eval time
-    # and is not round-tripped through the cache.
-    fresh_side_info_by_id: dict[str, dict[str, Any]] = {}
-
     def _fetcher(ids: list[str]) -> list[str]:
         # HELIX evaluators read batches off disk via helix_batch.json;
         # the "batch" handed to the evaluator callable is just the list
@@ -922,7 +913,12 @@ def _cached_evaluate_batch(
     def _evaluator(
         batch: list[str],
         _candidate: dict[str, str],
-    ) -> tuple[list[object], list[float], list[dict[str, float]] | None]:
+    ) -> tuple[
+        list[object],
+        list[float],
+        list[dict[str, float]] | None,
+        list[dict[str, Any]] | None,
+    ]:
         # Write a REDUCED helix_batch.json containing only the uncached
         # example ids, then invoke the evaluator subprocess.  Evaluators
         # read that file from cwd and filter their own dataset to exactly
@@ -967,16 +963,24 @@ def _cached_evaluate_batch(
             batch
         ):
             obj_list = [fresh.objective_scores[i] for i in range(len(batch))]
-        # Capture per-example side_info for the outer merge.  Only
-        # freshly-evaluated ids populate this; cache hits remain ``{}``.
+        # Capture per-example side_info for the cache.  This is keyed by the
+        # same (candidate hash, example id) pair as scores/objectives, so a
+        # later cache hit can render exactly the diagnostics for the selected
+        # examples instead of dropping them or reusing unrelated batch logs.
+        side_info_list: list[dict[str, Any]] | None = None
         if fresh.per_example_side_info is not None and len(
             fresh.per_example_side_info
         ) == len(batch):
-            for i, eid in enumerate(batch):
-                fresh_side_info_by_id[eid] = fresh.per_example_side_info[i]
-        return outputs, scores, obj_list
+            side_info_list = [fresh.per_example_side_info[i] for i in range(len(batch))]
+        return outputs, scores, obj_list, side_info_list
 
-    _, scores_by_id, objective_by_id, num_actual_evals = cache.evaluate_with_cache_full(
+    (
+        _,
+        scores_by_id,
+        objective_by_id,
+        side_info_by_id,
+        num_actual_evals,
+    ) = cache.evaluate_with_cache_full(
         cand_dict,
         example_ids,
         _fetcher,
@@ -999,9 +1003,9 @@ def _cached_evaluate_batch(
     if objective_by_id is not None:
         objective_scores_list = [objective_by_id.get(eid, {}) for eid in example_ids]
     per_example_side_info_list: list[dict[str, Any]] | None = None
-    if fresh_side_info_by_id:
+    if side_info_by_id is not None:
         per_example_side_info_list = [
-            fresh_side_info_by_id.get(eid, {}) for eid in example_ids
+            side_info_by_id.get(eid, {}) for eid in example_ids
         ]
 
     merged = EvalResult(
