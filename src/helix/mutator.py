@@ -44,7 +44,6 @@ Task instructions:
 - Do not request confirmation or clarification; choose a reasonable approach and continue.
 - If one approach fails, try an alternative and keep progressing.
 - Use available tools to inspect, edit, and validate changes.
-- When finished, print exactly: [MUTATION COMPLETE]
 """
 
 SEEDLESS_INIT_PROMPT_TEMPLATE = """\
@@ -59,43 +58,63 @@ that will be iteratively refined by an optimization system.
 Generate a strong initial candidate based on the goal above.
 Create all necessary files directly in the current working directory.
 Make your implementation complete and ready to be evaluated immediately.
-
-When you have finished creating all files, output the exact text:
-[SEED GENERATION COMPLETE]
 {turn_budget}"""
 
-MUTATION_PROMPT_TEMPLATE = """\
-{system_prompt}
-
-## Objective
-{objective}
-
-## Current Evaluation Scores
-{scores}
-
-{diagnostics_section}{evaluator_notes_section}{evaluator_output_section}{extra_asi_section}## Background / Context
-{background}
-
+MUTATION_TASK_INSTRUCTIONS = """\
 ## Your Task
 Analyse the evaluation results above and improve the code to better achieve the objective.
-Make targeted, meaningful changes. You may read, edit, create, or delete files as needed.
-
-When you have finished making all your changes, output the exact text:
-[MUTATION COMPLETE]
-{turn_budget}"""
+Make targeted, meaningful changes. You may read, edit, create, or delete files as needed."""
 
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
 
 
+def _indefinite_article(n: int) -> str:
+    """Pick ``"a"`` or ``"an"`` to match the spoken pronunciation of ``n``.
+
+    Within HELIX's realistic max-turns range (1 ≤ n ≤ ~1000), the
+    vowel-leading numbers are 8, 11, 18, and the 80s / 800s.  Everything
+    else takes ``"a"``.  Handles the visible ``"You have a 8-turn limit"``
+    article-agreement glitch without imposing a full English-number
+    pronunciation rule on the codebase.
+    """
+    s = str(abs(n))
+    if s in {"11", "18"}:
+        return "an"
+    if s.startswith("8"):  # 8, 80-89, 800-899, ...
+        return "an"
+    return "a"
+
+
 def _turn_budget_section(max_turns: int | None) -> str:
-    """Return the turn budget prompt section, or empty string if unbounded."""
+    """Return the turn budget prompt section, or empty string if unbounded.
+
+    Enforcement semantics differ by backend:
+
+    * ``claude`` — hard cap.  HELIX passes ``--max-turns N`` to the Claude
+      Code CLI (``_build_cli_args``), the runtime kills the session at the
+      limit, and the resulting ``subtype="error_max_turns"`` response is
+      detected at :func:`invoke_claude_code` and treated as partial
+      success.
+    * ``codex`` / ``cursor`` / ``gemini`` / ``opencode`` — soft hint only.
+      None of these CLIs expose an equivalent flag (verified against
+      ``--help`` for the installed binaries), so the in-prompt request is
+      the only signal the agent receives.  Whether the agent self-honors
+      the limit depends entirely on its own behaviour.
+
+    The section is therefore emitted for every backend regardless — it
+    still has some value as a soft hint — but callers depending on hard
+    enforcement should set the budget low enough to also be enforced via
+    subprocess-level mechanisms (wall-clock timeout, sandbox limits) or
+    use the Claude backend.
+    """
     if max_turns is None:
         return ""
+    article = _indefinite_article(max_turns)
     return (
         f"\n## Turn Budget\n"
-        f"You have a {max_turns}-turn limit for this task, where turns refer to "
+        f"You have {article} {max_turns}-turn limit for this task, where turns refer to "
         f"how many tool calls or interactions you can make. Plan your work "
         f"accordingly — prioritize the highest-impact changes first and be "
         f"efficient with your tool usage.\n"
@@ -142,12 +161,13 @@ def _evaluator_failed(eval_result: EvalResult) -> bool:
     return eval_result.asi.get("_returncode") not in (None, "0", 0)
 
 
-# All ``_render_*`` helpers below share a strict invariant: they return
-# either the empty string (the section is suppressed) or a block of
-# text that ends with a single trailing blank line (``"\n\n"``).  The
-# ``MUTATION_PROMPT_TEMPLATE`` chains them together verbatim and relies
-# on this convention to keep section spacing consistent.  Update both
-# the helper and the template if you change it.
+# All ``_render_*`` helpers below return either the empty string (the
+# section is suppressed) or a fully-formed Markdown section.  Empty
+# returns let ``build_mutation_prompt`` skip the section entirely —
+# mirrors GEPA's ``_build_reflection_prompt_template`` accumulator
+# pattern (``gepa/optimize_anything.py:501-596``).  Non-empty returns
+# may carry trailing whitespace; ``build_mutation_prompt`` rstrips
+# before joining sections with a uniform blank-line separator.
 
 
 def _render_evaluator_notes(eval_result: EvalResult) -> str:
@@ -158,25 +178,53 @@ def _render_evaluator_notes(eval_result: EvalResult) -> str:
 
 
 def _render_evaluator_output_fallback(eval_result: EvalResult) -> str:
-    """Render stdout/stderr only when they are useful fallback diagnostics."""
-    has_notes = bool(eval_result.asi.get("log", "").strip())
-    include_streams = _evaluator_failed(eval_result) or (
-        not _has_structured_diagnostics(eval_result) and not has_notes
-    )
-    if not include_streams:
-        return ""
+    """Render ``## Evaluator Output`` from stdout/stderr, or ``""``.
 
+    Two distinct cases:
+
+    * **Evaluator subprocess failed** (non-zero exit) — always emit the
+      section.  Empty streams render with ``(no stdout)`` / ``(no stderr)``
+      placeholders here intentionally: the agent needs to know the
+      evaluator failed but produced no output to inspect (a meaningful
+      diagnostic on its own).
+
+    * **Evaluator succeeded** — only emit the section when at least one
+      stream has content *and* no richer diagnostic surface
+      (``log`` notes or structured side_info) exists.  Empty streams are
+      omitted entirely; partial coverage (only ``stdout`` non-empty, or
+      only ``stderr``) renders just the present sub-section instead of
+      padding the other with a ``(no X)`` placeholder.
+    """
     stdout = _strip_machine_protocol_from_evaluator_stream(
         eval_result.asi.get("stdout", "")
     )
     stderr = _strip_machine_protocol_from_evaluator_stream(
         eval_result.asi.get("stderr", "")
     )
-    if not stdout:
-        stdout = "(no stdout)"
-    if not stderr:
-        stderr = "(no stderr)"
-    return f"## Evaluator Output\n\n### stdout\n{stdout}\n\n### stderr\n{stderr}\n\n"
+
+    if _evaluator_failed(eval_result):
+        stdout_text = stdout or "(no stdout)"
+        stderr_text = stderr or "(no stderr)"
+        return (
+            f"## Evaluator Output\n\n"
+            f"### stdout\n{stdout_text}\n\n"
+            f"### stderr\n{stderr_text}"
+        )
+
+    # Evaluator succeeded — defer to richer surfaces when they exist,
+    # otherwise surface only the streams that actually have content.
+    has_notes = bool(eval_result.asi.get("log", "").strip())
+    if _has_structured_diagnostics(eval_result) or has_notes:
+        return ""
+
+    parts: list[str] = []
+    if stdout:
+        parts.append(f"### stdout\n{stdout}")
+    if stderr:
+        parts.append(f"### stderr\n{stderr}")
+    if not parts:
+        return ""
+    return "## Evaluator Output\n\n" + "\n\n".join(parts)
 
 
 def build_seed_generation_prompt(
@@ -401,122 +449,128 @@ def _render_per_example_diagnostics(
     return "\n".join(lines) + "\n"
 
 
+def _render_scores_section(eval_result: EvalResult) -> str:
+    """Render ``## Current Evaluation Scores`` or ``""`` when no scores exist.
+
+    Mirrors GEPA O.A.'s "only emit a section when there is content for it"
+    pattern (``gepa/optimize_anything.py:501-596``).  Previously HELIX
+    emitted the section with a ``"(no scores recorded)"`` placeholder; now
+    the section header is omitted entirely so the agent never sees a stub.
+    """
+    lines = [f"  {k}: {v}" for k, v in sorted(eval_result.scores.items())]
+    if not lines:
+        return ""
+    return "## Current Evaluation Scores\n" + "\n".join(lines)
+
+
+def _render_extra_asi(eval_result: EvalResult) -> str:
+    """Render any free-form ``extra_*`` ASI keys, or ``""`` when none exist.
+
+    Reserved keys (``stdout``, ``stderr``, ``error``, ``log``, ``_returncode``)
+    are filtered out — they're surfaced through dedicated sections
+    (``## Evaluator Notes``, ``## Evaluator Output``) or the
+    ``_returncode`` legacy sentinel — and must never leak into this
+    catch-all rendering.
+    """
+    entries = {
+        k: v
+        for k, v in sorted(eval_result.asi.items())
+        if k not in ("stdout", "stderr", "error", "log", "_returncode")
+    }
+    if not entries:
+        return ""
+    body = "\n".join(f"### {k}\n{v}" for k, v in entries.items())
+    return f"### Extra Evaluator Info\n{body}"
+
+
+def _render_diagnostics(eval_result: EvalResult) -> str:
+    """Render the ``## Diagnostics`` section, or ``""`` when no side_info.
+
+    Precedence:
+      1. ``eval_result.per_example_side_info`` (per-example GEPA O.A.
+         contract — list of dicts positional to instance_scores ids) when
+         populated; mirrors GEPA's
+         ``OptimizeAnythingAdapter.make_reflective_dataset`` combined
+         with ``format_samples`` at
+         ``gepa/strategies/instruction_proposal.py:54-95``.
+      2. ``eval_result.side_info`` (legacy batch-level dict) when
+         per-example data is absent.
+      3. Empty string when neither is present.
+    """
+    if eval_result.per_example_side_info is not None:
+        # Monotonic markdown hierarchy under the surrounding
+        # ``## Diagnostics`` (h2): each example is ``### Example <id>``
+        # (h3), each side_info key is ``#### {key}`` (h4), nested
+        # values bump further.
+        return _render_per_example_diagnostics(
+            example_ids=list(eval_result.instance_scores.keys()),
+            per_example_side_info=eval_result.per_example_side_info,
+            example_header_level=3,
+            key_header_level=4,
+        )
+    if eval_result.side_info is not None:
+        diag_lines = "\n".join(
+            f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
+        )
+        return f"## Diagnostics\n{diag_lines}"
+    return ""
+
+
 def build_mutation_prompt(
     objective: str,
     eval_result: EvalResult,
     background: str | None = None,
     max_turns: int | None = None,
 ) -> str:
-    """Construct the mutation prompt for Claude Code."""
-    scores_text = "\n".join(
-        f"  {k}: {v}" for k, v in sorted(eval_result.scores.items())
-    )
-    if not scores_text:
-        scores_text = "  (no scores recorded)"
+    """Construct the mutation prompt for the configured agent backend.
 
-    # Collect any extra_N entries from ASI.  The reserved keys here
-    # are surfaced through dedicated prompt sections (or the
-    # ``EvalResult.evaluator_returncode`` typed field, in the case of
-    # the historical ``_returncode`` legacy key) and must never leak
-    # into the catch-all "extra" rendering.
-    extra_entries = {
-        k: v
-        for k, v in sorted(eval_result.asi.items())
-        if k not in ("stdout", "stderr", "error", "log", "_returncode")
-    }
-    if extra_entries:
-        extra_lines = "\n".join(f"### {k}\n{v}" for k, v in extra_entries.items())
-        extra_asi_section = f"### Extra Evaluator Info\n{extra_lines}\n\n"
-    else:
-        extra_asi_section = ""
+    Sections are emitted only when they have content, mirroring GEPA O.A.'s
+    ``_build_reflection_prompt_template`` accumulator pattern
+    (``gepa/optimize_anything.py:501-596``).  Empty ``objective``, empty
+    ``eval_result.scores``, absent diagnostics, absent evaluator notes,
+    absent stdout/stderr fallback, absent extra ASI, and absent
+    ``background`` all skip their respective sections entirely instead of
+    rendering placeholder strings like ``"(no additional background
+    provided)"`` or ``"(no scores recorded)"`` that taught nothing.
 
-    # Render side_info diagnostics.  Precedence:
-    #   1. ``eval_result.per_example_side_info`` (new per-example GEPA
-    #      O.A. contract — list of dicts positional to instance_scores
-    #      ids) when populated; mirrors GEPA's
-    #      ``OptimizeAnythingAdapter.make_reflective_dataset`` at
-    #      ``optimize_anything_adapter.py:524-553`` combined with
-    #      ``format_samples`` at
-    #      ``gepa/strategies/instruction_proposal.py:54-95``.
-    #   2. ``eval_result.side_info`` (legacy batch-level dict) when
-    #      ``per_example_side_info`` is absent — unchanged rendering
-    #      for non-``helix_result`` paths that still populate the
-    #      legacy field.
-    #   3. No diagnostics section otherwise.
-    diagnostics_section = ""
-    if eval_result.per_example_side_info is not None:
-        # Monotonic markdown hierarchy under the surrounding
-        # ``## Diagnostics`` (h2): each example is ``### Example <id>``
-        # (h3), each side_info key is ``#### {key}`` (h4), nested
-        # values bump further.  Before this the Example header was
-        # ``#`` (h1), which inverted the hierarchy and confused
-        # markdown-aware tooling / LLM markdown parsers.
-        diagnostics_section = _render_per_example_diagnostics(
-            example_ids=list(eval_result.instance_scores.keys()),
-            per_example_side_info=eval_result.per_example_side_info,
-            example_header_level=3,
-            key_header_level=4,
-        )
-    elif eval_result.side_info is not None:
-        diag_lines = "\n".join(
-            f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
-        )
-        diagnostics_section = f"## Diagnostics\n{diag_lines}\n\n"
-
-    bg = background or "(no additional background provided)"
-
-    return MUTATION_PROMPT_TEMPLATE.format(
-        system_prompt=AUTONOMOUS_SYSTEM_PROMPT,
-        objective=objective,
-        scores=scores_text,
-        evaluator_notes_section=_render_evaluator_notes(eval_result),
-        evaluator_output_section=_render_evaluator_output_fallback(eval_result),
-        extra_asi_section=extra_asi_section,
-        diagnostics_section=diagnostics_section,
-        background=bg,
-        turn_budget=_turn_budget_section(max_turns),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Mutation summary parsing
-# ---------------------------------------------------------------------------
-
-
-def parse_mutation_summary(output: str) -> dict[str, str]:
-    """Parse a ``[SUMMARY]...[END SUMMARY]`` block from Claude Code output.
-
-    Extracts structured key-value pairs written by the mutation/merge agent
-    after ``[MUTATION COMPLETE]`` or ``[MERGE COMPLETE]``.  The block format
-    is::
-
-        [SUMMARY]
-        files_changed: src/foo.py, src/bar.py
-        root_cause: ...
-        changes_made: ...
-        [END SUMMARY]
-
-    Returns
-    -------
-    dict[str, str]
-        Parsed key-value pairs.  Returns an empty dict if no block is found
-        or the block contains no valid ``key: value`` lines.  Never raises.
+    ``## Your Task`` and the system prompt are always emitted; they are
+    the only sections that don't depend on caller-provided content.
     """
-    result: dict[str, str] = {}
-    in_block = False
-    for line in output.splitlines():
-        if "[SUMMARY]" in line:
-            in_block = True
-            continue
-        if "[END SUMMARY]" in line:
-            break
-        if in_block and ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-            if key:
-                result[key] = value
-    return result
+    sections: list[str] = [AUTONOMOUS_SYSTEM_PROMPT.rstrip()]
+
+    if objective:
+        sections.append(f"## Objective\n{objective}")
+
+    scores = _render_scores_section(eval_result)
+    if scores:
+        sections.append(scores)
+
+    diagnostics = _render_diagnostics(eval_result)
+    if diagnostics:
+        sections.append(diagnostics.rstrip())
+
+    notes = _render_evaluator_notes(eval_result)
+    if notes:
+        sections.append(notes.rstrip())
+
+    output_fallback = _render_evaluator_output_fallback(eval_result)
+    if output_fallback:
+        sections.append(output_fallback.rstrip())
+
+    extra_asi = _render_extra_asi(eval_result)
+    if extra_asi:
+        sections.append(extra_asi)
+
+    if background:
+        sections.append(f"## Background / Context\n{background}")
+
+    sections.append(MUTATION_TASK_INSTRUCTIONS)
+
+    turn_budget = _turn_budget_section(max_turns)
+    if turn_budget:
+        sections.append(turn_budget.strip())
+
+    return "\n\n".join(sections) + "\n"
 
 
 # ---------------------------------------------------------------------------

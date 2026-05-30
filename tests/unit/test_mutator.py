@@ -116,25 +116,31 @@ class TestBuildMutationPrompt:
         prompt = build_mutation_prompt("goal", er, background="special context here")
         assert "special context here" in prompt
 
-    def test_default_background_when_none(self):
+    def test_background_section_omitted_when_none(self):
+        """GEPA parity: empty optional inputs skip the section entirely
+        instead of emitting a placeholder.  Mirrors GEPA O.A.'s
+        ``_build_reflection_prompt_template`` (optimize_anything.py:501-596),
+        which only appends a section when its content is non-empty.
+        """
         er = make_eval_result()
         prompt = build_mutation_prompt("goal", er, background=None)
-        assert "no additional background" in prompt
-
-    def test_contains_mutation_complete_marker(self):
-        er = make_eval_result()
-        prompt = build_mutation_prompt("goal", er)
-        assert "[MUTATION COMPLETE]" in prompt
+        assert "## Background / Context" not in prompt
+        assert "no additional background" not in prompt
 
     def test_contains_execution_instructions(self):
         er = make_eval_result()
         prompt = build_mutation_prompt("goal", er)
         assert "Task instructions:" in prompt
 
-    def test_no_scores_fallback(self):
+    def test_scores_section_omitted_when_empty(self):
+        """No ``eval_result.scores`` → ``## Current Evaluation Scores``
+        section is skipped entirely (no ``"(no scores recorded)"``
+        placeholder).
+        """
         er = make_eval_result(scores={})
         prompt = build_mutation_prompt("goal", er)
-        assert "no scores recorded" in prompt
+        assert "## Current Evaluation Scores" not in prompt
+        assert "no scores recorded" not in prompt
 
     def test_renders_helix_log_notes(self):
         er = make_eval_result(
@@ -205,6 +211,41 @@ class TestBuildMutationPrompt:
         assert "_returncode" not in prompt
         # Sanity: the genuine extra_N entry still renders.
         assert "real-extra" in prompt
+
+
+class TestTurnBudgetArticleAgreement:
+    """``_turn_budget_section`` must use the correct indefinite article
+    ("a" vs "an") so the rendered prompt reads naturally:
+
+      * ``"You have a 5-turn limit"`` (consonant sound — "five")
+      * ``"You have an 8-turn limit"`` (vowel sound — "eight")
+
+    Pre-fix the article was always hardcoded ``"a"``, producing
+    ``"You have a 8-turn limit"`` for the 8/11/18/80s cases.
+    """
+
+    def test_consonant_leading_numbers_use_a(self) -> None:
+        from helix.mutator import _turn_budget_section
+
+        for n in (1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 17, 19, 20, 50, 100, 200):
+            section = _turn_budget_section(n)
+            assert f"You have a {n}-turn limit" in section, (
+                f"max_turns={n} should use 'a', section was: {section!r}"
+            )
+
+    def test_vowel_leading_numbers_use_an(self) -> None:
+        from helix.mutator import _turn_budget_section
+
+        for n in (8, 11, 18, 80, 85, 88, 800, 888):
+            section = _turn_budget_section(n)
+            assert f"You have an {n}-turn limit" in section, (
+                f"max_turns={n} should use 'an', section was: {section!r}"
+            )
+
+    def test_none_returns_empty(self) -> None:
+        from helix.mutator import _turn_budget_section
+
+        assert _turn_budget_section(None) == ""
 
 
 class TestPerExampleDiagnostics:
@@ -557,7 +598,7 @@ class TestMutationPromptArtifact:
         # Objective + autonomous-rules block are both in the rendered
         # prompt via build_mutation_prompt.
         assert config.objective in content
-        assert "[MUTATION COMPLETE]" in content
+        assert "Task instructions:" in content
 
     def test_gitignore_excludes_helix_artifacts(self, tmp_path: Path, mocker):
         """``.gitignore`` in the worktree gains entries for the prompt
