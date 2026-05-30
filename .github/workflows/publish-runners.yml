@@ -11,14 +11,75 @@ env:
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
 
 jobs:
-  publish-base:
-    name: Build and publish base runner image
-    runs-on: ubuntu-latest
+  # ── 1. Build base image, one job per arch, push by digest ─────────────────
+  build-base:
+    name: Build base image (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push base by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/base.Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-base,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-base-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── 2. Merge both arch digests into a single multi-arch manifest ──────────
+  merge-base:
+    name: Merge base image manifests
+    runs-on: ubuntu-latest
+    needs: build-base
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-base-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -37,19 +98,17 @@ jobs:
             type=ref,event=tag
             type=semver,pattern={{version}}
 
-      - name: Build and publish base
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/base.Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Create and push merged manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE_PREFIX }}-base@sha256:%s ' *)
 
-  publish-backends:
-    name: Build and publish backend runner images
-    runs-on: ubuntu-latest
-    needs: publish-base
+  # ── 3. Build each backend (5 images × 2 arches = 10 jobs), push by digest ─
+  build-backends:
+    name: Build ${{ matrix.image.name }} (${{ matrix.platform }})
+    needs: merge-base
     permissions:
       contents: read
       packages: write
@@ -67,9 +126,90 @@ jobs:
             dockerfile: docker/gemini.Dockerfile
           - name: opencode
             dockerfile: docker/opencode.Dockerfile
-
+        platform:
+          - linux/amd64
+          - linux/arm64
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Choose base tag
+        id: base-tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push backend by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            BASE_IMAGE=${{ env.IMAGE_PREFIX }}-base:${{ steps.base-tag.outputs.value }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── 4. Merge each backend's 2 arch digests into a multi-arch manifest ─────
+  merge-backends:
+    name: Merge ${{ matrix.image.name }} image manifests
+    needs: build-backends
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: claude
+          - name: codex
+          - name: cursor
+          - name: gemini
+          - name: opencode
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.image.name }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -88,31 +228,18 @@ jobs:
             type=ref,event=tag
             type=semver,pattern={{version}}
 
-      - name: Choose base tag
-        id: base-tag
-        shell: bash
+      - name: Create and push merged manifest list
+        working-directory: /tmp/digests
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=latest" >> "$GITHUB_OUTPUT"
-          fi
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE_PREFIX }}-${{ matrix.image.name }}@sha256:%s ' *)
 
-      - name: Build and publish backend
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.image.dockerfile }}
-          push: true
-          build-args: |
-            BASE_IMAGE=${{ env.IMAGE_PREFIX }}-base:${{ steps.base-tag.outputs.value }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
+  # ── 5. Smoke-test every published image on the native amd64 runner ────────
   verify:
     name: Verify published runner images
     runs-on: ubuntu-latest
-    needs: publish-backends
+    needs: merge-backends
     permissions:
       packages: read
     strategy:
