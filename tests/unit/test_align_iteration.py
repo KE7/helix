@@ -288,8 +288,8 @@ class TestLegacyGatingUsesSumOnly:
         self,
         mocker,
         tmp_path,
-        all_mocks,
-        monkeypatch,  # noqa: F811
+        all_mocks,  # noqa: F811
+        monkeypatch,
     ):
         from helix import evolution as _evo
 
