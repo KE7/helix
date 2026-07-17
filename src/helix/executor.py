@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import shlex
 import subprocess
+import threading
 import uuid
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 from helix.asi import (
     HELIX_ASI_LOG_ENV,
@@ -16,9 +21,15 @@ from helix.asi import (
     read as read_asi_log,
     read_text as read_asi_log_text,
 )
+from helix.eval_cache import EvaluationBatchKey
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
-from helix.exceptions import EvaluatorError, format_error_context
+from helix.exceptions import (
+    EvaluatorError,
+    PromptArtifactCollisionError,
+    ResumeIncompatibleError,
+    format_error_context,
+)
 from helix.parsers import get_parser
 from helix.sandbox import (
     current_evaluator_sidecar_runtime,
@@ -485,3 +496,294 @@ def run_evaluator(
         score=_result.aggregate_score(),
     )
     return _result
+
+
+# ---------------------------------------------------------------------------
+# Step 3: ordered cross-candidate evaluator batching
+# ---------------------------------------------------------------------------
+#
+# ``run_evaluator_batch`` runs a list of evaluator requests concurrently under
+# a bounded worker pool, returns one result per input in the SAME order, and
+# collapses cross-candidate duplicates so identical evaluator work runs once.
+#
+# Two requests are duplicates iff their :class:`EvaluationBatchKey` matches —
+# ``(content_key, split, instance_ids)``.  Candidate *lineage* ids are absent
+# from the key on purpose: two distinct candidates whose committed content,
+# split, and exact ordered minibatch are identical evaluate to the same scores,
+# so only the first (the "leader") is dispatched.  Every later request sharing
+# that key (a "follower") reuses the leader's result and is charged
+# ``num_actual_evaluations == 0`` so evaluation-budget accounting never
+# double-counts shared work.  ``instance_ids`` is carried and hashed as an
+# ordered tuple because evaluator side information is positional to
+# ``helix_batch.json`` — reordering the minibatch is a *different* request.
+
+
+@dataclass(frozen=True)
+class EvalBatchItem:
+    """One evaluator request submitted to :func:`run_evaluator_batch`.
+
+    ``content_key`` is the caller-computed cache identity of the candidate's
+    committed content (see ``evolution._candidate_content_key``); it — not
+    ``candidate.id`` — participates in cross-candidate deduplication.
+    ``instance_ids`` is an ordered tuple (``None`` → evaluate the whole split);
+    its order is significant and preserved through hashing and dispatch.
+    """
+
+    candidate: Candidate
+    content_key: str
+    split: str
+    instance_ids: tuple[str, ...] | None
+
+    @property
+    def dedup_key(self) -> EvaluationBatchKey:
+        """Cross-candidate dedup identity: ``(content_key, split, instance_ids)``."""
+        return EvaluationBatchKey(
+            content_key=self.content_key,
+            split=self.split,
+            instance_ids=self.instance_ids,
+        )
+
+
+@dataclass(frozen=True)
+class EvalBatchResult:
+    """One result slot from :func:`run_evaluator_batch`, positional to input.
+
+    Exactly one of ``result``/``error`` is populated:
+
+    * ``result`` set, ``error`` None  → the evaluator succeeded.
+    * ``result`` None, ``error`` set  → an ordinary per-item failure; the rest
+      of the batch is unaffected.
+
+    ``num_actual_evaluations`` is the evaluation-budget charge for this slot:
+    the leader carries the runner's reported count, and every deduplicated
+    follower is charged ``0``.  ``deduplicated_from`` is ``None`` for a leader
+    (the request that actually ran) or the input index of the leader this
+    follower reused.
+    """
+
+    item: EvalBatchItem
+    result: EvalResult | None
+    error: Exception | None
+    num_actual_evaluations: int
+    deduplicated_from: int | None
+
+
+# The runner seam: ``runner(item) -> (EvalResult, num_actual_evaluations)``.
+# Production wires this to a closure over the per-example cache (see
+# ``evolution._cached_evaluate_batch``) so ``num_actual_evaluations`` reflects
+# cache hits; tests inject fakes to exercise ordering/dedup/failure/fatal paths
+# without a subprocess.
+BatchEvaluatorRunner: TypeAlias = Callable[[EvalBatchItem], tuple[EvalResult, int]]
+
+# Fatal exceptions abort the whole batch instead of being captured as an
+# ordinary per-item failure: a prompt-artifact collision or resume-semantics
+# mismatch invalidates the entire run, and Ctrl-C / interpreter exit must not
+# be swallowed by a worker thread.
+_FATAL_BATCH_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    PromptArtifactCollisionError,
+    ResumeIncompatibleError,
+    KeyboardInterrupt,
+    SystemExit,
+)
+
+# Per-worktree serialization: two leaders that share a worktree path must not
+# run concurrently, because the evaluator handoff writes ``helix_batch.json``
+# into that worktree and parallel runs would clobber each other's batch file.
+# Distinct worktrees evaluate concurrently.  Mirrors ``evolution._worktree_lock``
+# but is owned here so the batch runner is self-contained.
+_BATCH_WORKTREE_LOCKS: dict[str, threading.Lock] = {}
+_BATCH_WORKTREE_LOCKS_MUTEX = threading.Lock()
+
+
+def _batch_worktree_lock(worktree_path: str) -> threading.Lock:
+    key = str(worktree_path)
+    with _BATCH_WORKTREE_LOCKS_MUTEX:
+        lock = _BATCH_WORKTREE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _BATCH_WORKTREE_LOCKS[key] = lock
+        return lock
+
+
+def _clone_result_for_follower(result: EvalResult, candidate_id: str) -> EvalResult:
+    """Return an independent ``EvalResult`` for a deduplicated follower.
+
+    The leader's :class:`~helix.population.EvalResult` is deep-copied so a
+    follower slot never aliases the leader's mutable ``scores`` /
+    ``instance_scores`` / ``asi`` / side-info containers — HELIX relabels
+    ``candidate_id`` and mutates these dicts per candidate downstream (see the
+    many ``result.candidate_id = ...`` sites in ``evolution.py``), so a shared
+    object would silently corrupt every peer slot.  ``candidate_id`` is set to
+    the follower's own candidate to preserve positional candidate identity.
+    """
+    cloned = copy.deepcopy(result)
+    cloned.candidate_id = candidate_id
+    return cloned
+
+
+def make_default_batch_runner(config: HelixConfig) -> BatchEvaluatorRunner:
+    """Default runner seam: evaluate each item via :func:`run_evaluator`.
+
+    ``num_actual_evaluations`` is the number of examples actually sent to the
+    evaluator: ``len(instance_ids)`` for a minibatch, else the number of
+    instance scores the whole-split run produced.  Production overrides this
+    with a cache-aware runner so hits are charged ``0``.
+    """
+
+    def _run(item: EvalBatchItem) -> tuple[EvalResult, int]:
+        instance_ids = (
+            list(item.instance_ids) if item.instance_ids is not None else None
+        )
+        result = run_evaluator(
+            item.candidate,
+            config,
+            split=item.split,
+            instance_ids=instance_ids,
+        )
+        count = (
+            len(item.instance_ids)
+            if item.instance_ids is not None
+            else len(result.instance_scores)
+        )
+        return result, count
+
+    return _run
+
+
+def run_evaluator_batch(
+    items: Sequence[EvalBatchItem],
+    runner: BatchEvaluatorRunner,
+    *,
+    max_workers: int,
+    config: HelixConfig | None = None,
+) -> list[EvalBatchResult]:
+    """Run evaluator requests concurrently, deduplicated, in input order.
+
+    Args:
+        items: Evaluator requests.  The returned list is positional to this
+            sequence — ``result[i]`` corresponds to ``items[i]``.
+        runner: The runner seam, ``runner(item) -> (EvalResult, count)``.  Only
+            *leaders* (the first item bearing a given
+            :attr:`EvalBatchItem.dedup_key`) are handed to the runner; followers
+            reuse the leader's outcome.
+        max_workers: Upper bound on concurrent runner invocations.  The pool is
+            additionally capped at the number of leaders.  Must be ``>= 1``.
+        config: When provided, the evaluator command is validated ONCE before
+            any dispatch; a malformed command raises :class:`EvaluatorError`
+            here rather than as N identical per-item failures.
+
+    Returns:
+        One :class:`EvalBatchResult` per input item, in order.
+
+    Raises:
+        The pre-dispatch config error (e.g. :class:`EvaluatorError` from command
+        validation, or ``ValueError`` for ``max_workers < 1``) before any work
+        starts; and any fatal runner exception
+        (:class:`PromptArtifactCollisionError`, :class:`ResumeIncompatibleError`,
+        ``KeyboardInterrupt``, ``SystemExit``) that aborts the whole batch.
+        Ordinary runner exceptions are captured per-item in
+        :attr:`EvalBatchResult.error` and do not propagate.
+    """
+    # --- Pre-dispatch config validation (propagates; never per-item) --------
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be >= 1, got {max_workers}")
+    if config is not None:
+        # Fail the whole batch once on a malformed command rather than letting
+        # every leader raise the identical EvaluatorError inside a worker.
+        _validate_and_split_command(config.evaluator.command)
+
+    results: list[EvalBatchResult | None] = [None] * len(items)
+    if not items:
+        return []
+
+    # --- Deduplicate: first occurrence of a key is the leader --------------
+    leader_index_by_key: dict[EvaluationBatchKey, int] = {}
+    leader_of: list[int] = []  # leader_of[i] = input index of i's leader
+    leader_indices: list[int] = []
+    for i, item in enumerate(items):
+        key = item.dedup_key
+        leader = leader_index_by_key.get(key)
+        if leader is None:
+            leader_index_by_key[key] = i
+            leader_of.append(i)
+            leader_indices.append(i)
+        else:
+            leader_of.append(leader)
+
+    # --- Dispatch leaders concurrently, serialized per worktree ------------
+    # leader input index -> (result, count) on success, or a captured error.
+    leader_outcome: dict[int, tuple[EvalResult, int]] = {}
+    leader_error: dict[int, Exception] = {}
+
+    def _run_leader(index: int) -> None:
+        item = items[index]
+        with _batch_worktree_lock(item.candidate.worktree_path):
+            leader_outcome[index] = runner(item)
+
+    pool_workers = min(max_workers, len(leader_indices))
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
+        futures = {
+            pool.submit(_run_leader, idx): idx for idx in leader_indices
+        }
+        # ``future.result()`` re-raises whatever the worker raised.  Fatal
+        # exceptions propagate out of this loop (and the ``with`` block waits
+        # for in-flight leaders to drain); ordinary failures are captured.
+        for future, idx in futures.items():
+            try:
+                future.result()
+            except _FATAL_BATCH_EXCEPTIONS:
+                raise
+            except Exception as exc:  # ordinary per-item failure
+                leader_error[idx] = exc
+
+    # --- Validate runner-reported counts before assembly -------------------
+    # A negative evaluation charge is a runner-contract violation; reject the
+    # whole batch rather than emit a nonsensical budget number.
+    for idx, (_res, count) in leader_outcome.items():
+        if count < 0:
+            raise ValueError(
+                "runner reported negative num_actual_evaluations "
+                f"({count}) for item index {idx}"
+            )
+
+    # --- Assemble results in input order ------------------------------------
+    for i, item in enumerate(items):
+        leader = leader_of[i]
+        is_leader = leader == i
+        if leader in leader_error:
+            # Failed leader → failed slot; followers reuse the same error and
+            # are still charged zero.
+            results[i] = EvalBatchResult(
+                item=item,
+                result=None,
+                error=leader_error[leader],
+                num_actual_evaluations=0,
+                deduplicated_from=None if is_leader else leader,
+            )
+        elif is_leader:
+            leader_result, count = leader_outcome[leader]
+            results[i] = EvalBatchResult(
+                item=item,
+                result=leader_result,
+                error=None,
+                num_actual_evaluations=count,
+                deduplicated_from=None,
+            )
+        else:
+            # Deduplicated follower: hand back an INDEPENDENT clone relabeled to
+            # this slot's candidate, charged zero.  Never share the leader's
+            # mutable EvalResult (see ``_clone_result_for_follower``).
+            leader_result, _count = leader_outcome[leader]
+            results[i] = EvalBatchResult(
+                item=item,
+                result=_clone_result_for_follower(
+                    leader_result, item.candidate.id
+                ),
+                error=None,
+                num_actual_evaluations=0,
+                deduplicated_from=leader,
+            )
+
+    # Cardinality guard: exactly one result per input, all populated.
+    assert all(r is not None for r in results) and len(results) == len(items)
+    return [r for r in results if r is not None]

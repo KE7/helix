@@ -1,8 +1,11 @@
 """Unit tests for helix.eval_cache."""
 from __future__ import annotations
 
+import dataclasses
 
-from helix.eval_cache import EvaluationCache, _candidate_hash
+import pytest
+
+from helix.eval_cache import EvaluationBatchKey, EvaluationCache, _candidate_hash
 
 
 def test_get_put_round_trip() -> None:
@@ -179,3 +182,88 @@ def test_cache_isolation_by_candidate() -> None:
     cached, uncached = cache.get_batch(b, [1])
     assert cached == {}
     assert uncached == [1]
+
+
+# ---------------------------------------------------------------------------
+# Cardinality validation — must reject before any cache mutation
+# ---------------------------------------------------------------------------
+
+
+def test_put_batch_rejects_short_outputs_before_mutation() -> None:
+    cache: EvaluationCache[str, int] = EvaluationCache()
+    cand = {"k": "v"}
+    with pytest.raises(ValueError, match="cardinality mismatch"):
+        cache.put_batch(cand, [1, 2, 3], ["a", "b"], [0.1, 0.2, 0.3])
+    # No partial writes: the whole put was rejected up front.
+    assert cache.get(cand, 1) is None
+    assert cache.get(cand, 2) is None
+    assert cache.get(cand, 3) is None
+
+
+def test_put_batch_rejects_objective_and_side_info_mismatch() -> None:
+    cache: EvaluationCache[str, int] = EvaluationCache()
+    cand = {"k": "v"}
+    with pytest.raises(ValueError, match="objective_scores"):
+        cache.put_batch(cand, [1, 2], ["a", "b"], [0.1, 0.2], [{"m": 1.0}])
+    with pytest.raises(ValueError, match="side_info"):
+        cache.put_batch(cand, [1, 2], ["a", "b"], [0.1, 0.2], None, [{"log": "x"}])
+    assert cache.get(cand, 1) is None
+    assert cache.get(cand, 2) is None
+
+
+def test_evaluate_with_cache_full_rejects_bad_cardinality_before_mutation() -> None:
+    cache: EvaluationCache[str, int] = EvaluationCache()
+    cand = {"k": "v"}
+
+    def fetcher(ids: list[int]) -> list[int]:
+        return list(ids)
+
+    def evaluator(
+        batch: list[int], _c: dict[str, str]
+    ) -> tuple[
+        list[str],
+        list[float],
+        list[dict[str, float]] | None,
+        list[dict[str, str]] | None,
+    ]:
+        # Two outputs but only one score for a two-id request → mismatch.
+        return ["o1", "o2"], [0.1], None, None
+
+    with pytest.raises(ValueError, match="cardinality mismatch"):
+        cache.evaluate_with_cache_full(cand, [1, 2], fetcher, evaluator)
+
+    # The evaluator ran but its bad payload never reached the cache.
+    assert cache.get(cand, 1) is None
+    assert cache.get(cand, 2) is None
+
+
+# ---------------------------------------------------------------------------
+# EvaluationBatchKey — cross-candidate dedup identity
+# ---------------------------------------------------------------------------
+
+
+def test_evaluation_batch_key_equality_and_hash() -> None:
+    a = EvaluationBatchKey("K", "val", ("1", "2"))
+    b = EvaluationBatchKey("K", "val", ("1", "2"))
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a in {b}
+
+
+def test_evaluation_batch_key_instance_id_order_is_significant() -> None:
+    a = EvaluationBatchKey("K", "val", ("1", "2"))
+    b = EvaluationBatchKey("K", "val", ("2", "1"))
+    assert a != b
+
+
+def test_evaluation_batch_key_content_split_and_none_distinguish() -> None:
+    base = EvaluationBatchKey("K", "val", ("1",))
+    assert base != EvaluationBatchKey("J", "val", ("1",))  # content_key
+    assert base != EvaluationBatchKey("K", "train", ("1",))  # split
+    assert base != EvaluationBatchKey("K", "val", None)  # whole-split vs minibatch
+
+
+def test_evaluation_batch_key_is_frozen() -> None:
+    key = EvaluationBatchKey("K", "val", None)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        key.split = "train"  # type: ignore[misc]

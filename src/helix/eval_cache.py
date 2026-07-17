@@ -19,6 +19,21 @@ RolloutOutput = TypeVar("RolloutOutput")
 CacheKey: TypeAlias = tuple[CandidateHash, Any]  # (hash, example_id)
 
 
+@dataclass(frozen=True, slots=True)
+class EvaluationBatchKey:
+    """Identity of one evaluator request for cross-candidate deduplication.
+
+    Candidate lineage ids are deliberately absent.  Two requests may share
+    work only when their evaluation-relevant content, dataset split, and exact
+    ordered minibatch are all identical.  Minibatch order is significant
+    because evaluator side information is positional to ``helix_batch.json``.
+    """
+
+    content_key: str
+    split: str
+    instance_ids: tuple[str, ...] | None
+
+
 def _candidate_hash(candidate: dict[str, str]) -> CandidateHash:
     """Deterministic hash of a candidate dict (order-independent over keys).
 
@@ -99,6 +114,13 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         objective_scores_list: list[dict[str, float]] | None = None,
         side_info_list: list[dict[str, Any]] | None = None,
     ) -> None:
+        _validate_batch_cardinality(
+            example_ids,
+            outputs,
+            scores,
+            objective_scores_list,
+            side_info_list,
+        )
         h = _candidate_hash(candidate)
         with self._lock:
             for i, eid in enumerate(example_ids):
@@ -157,6 +179,13 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         if uncached_ids:
             batch = fetcher(uncached_ids)
             outputs, scores, obj_scores, side_infos = evaluator(batch, candidate)
+            _validate_batch_cardinality(
+                uncached_ids,
+                outputs,
+                scores,
+                obj_scores,
+                side_infos,
+            )
             for idx, eid in enumerate(uncached_ids):
                 outputs_by_id[eid] = outputs[idx]
                 scores_by_id[eid] = scores[idx]
@@ -177,3 +206,30 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
                 side_infos,
             )
         return outputs_by_id, scores_by_id, objective_by_id, side_info_by_id, len(uncached_ids)
+
+
+def _validate_batch_cardinality(
+    example_ids: list[DataId],
+    outputs: list[RolloutOutput],
+    scores: list[float],
+    objective_scores_list: list[dict[str, float]] | None,
+    side_info_list: list[dict[str, Any]] | None,
+) -> None:
+    """Validate every positional evaluator output before cache/state mutation."""
+
+    expected = len(example_ids)
+    lengths = {
+        "outputs": len(outputs),
+        "scores": len(scores),
+    }
+    if objective_scores_list is not None:
+        lengths["objective_scores"] = len(objective_scores_list)
+    if side_info_list is not None:
+        lengths["side_info"] = len(side_info_list)
+    mismatched = {name: size for name, size in lengths.items() if size != expected}
+    if mismatched:
+        rendered = ", ".join(f"{name}={size}" for name, size in mismatched.items())
+        raise ValueError(
+            "Evaluator batch cardinality mismatch: "
+            f"expected {expected} result(s) for {expected} example id(s); {rendered}."
+        )
