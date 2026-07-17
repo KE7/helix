@@ -566,7 +566,15 @@ def test_best_improvement_uses_stable_first_tie_and_cleans_other_siblings(
     )
 
     assert scenario.result.frontier_ids == ["g0-s0", "g1-s1"]
-    assert scenario.snapshotted_ids == ["g1-s1"]
+    # HELIX snapshots every viable mutation before child scoring so content
+    # hashes and lineage remain stable; selection then retains only the first
+    # tied improvement and cleans the other snapshotted worktrees.
+    assert scenario.snapshotted_ids == [
+        "g1-s1",
+        "g1-s2",
+        "g1-s3",
+        "g1-s4",
+    ]
     assert set(scenario.removed_ids) == {"g1-s2", "g1-s3", "g1-s4"}
     for candidate_id in scenario.removed_ids:
         assert not (scenario.base_dir / "worktrees" / candidate_id).exists()
