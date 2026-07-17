@@ -17,7 +17,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 
 from helix.batch_sampler import (
@@ -71,6 +71,8 @@ from helix.proposals import (
     EvaluatedProposal,
     FailedProposal,
     ProposalTask,
+    ProposalAcceptanceCriterion,
+    ProposalSelectionStrategy,
     PxNSampling,
     SelectedProposal,
     SkippedProposal,
@@ -2434,38 +2436,43 @@ def _run_evolution_impl(
                 )
                 raise
             fatal_parent_error: BaseException | None = None
-            for task, call in zip(tasks, parent_calls):
-                if call.error is not None:
-                    outcome = FailedProposal(
+            proposal_outcome: TerminalProposalOutcome
+            for task, parent_call in zip(tasks, parent_calls):
+                if parent_call.error is not None:
+                    proposal_outcome = FailedProposal(
                         task=task,
                         stage="parent_evaluation",
-                        message=f"{type(call.error).__name__}: {call.error}",
+                        message=(
+                            f"{type(parent_call.error).__name__}: "
+                            f"{parent_call.error}"
+                        ),
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status=(
                             "fatal"
-                            if _is_fatal_proposal_exception(call.error)
+                            if _is_fatal_proposal_exception(parent_call.error)
                             else "failed"
                         ),
                         reason="parent_eval",
                     )
-                    if _is_fatal_proposal_exception(call.error):
-                        fatal_parent_error = fatal_parent_error or call.error
+                    if _is_fatal_proposal_exception(parent_call.error):
+                        fatal_parent_error = fatal_parent_error or parent_call.error
                     else:
                         print_warning(
                             f"Parent eval for proposal {task.reserved_child_id} "
                             f"(parent: {task.parent_candidate.id}, gen {gen}) "
-                            f"failed: {type(call.error).__name__}: {call.error} "
+                            f"failed: {type(parent_call.error).__name__}: "
+                            f"{parent_call.error} "
                             "— proposal slot skipped."
                         )
                     continue
 
-                assert call.result is not None
-                parent_result = call.result
+                assert parent_call.result is not None
+                parent_result = parent_call.result
                 parent_result.candidate_id = task.parent_candidate.id
-                parent_n_uncached = call.num_actual_evaluations
+                parent_n_uncached = parent_call.num_actual_evaluations
                 if task.minibatch_ids is not None:
                     budget_api.charge_evaluation(
                         state,
@@ -2490,13 +2497,13 @@ def _run_evolution_impl(
                         for score in parent_result.instance_scores.values()
                     )
                 ):
-                    outcome = SkippedProposal(
+                    proposal_outcome = SkippedProposal(
                         task=task,
                         parent_eval_result=parent_result,
                         reason="perfect_subsample",
                         parent_n_uncached=parent_n_uncached,
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status="skipped",
@@ -2559,14 +2566,14 @@ def _run_evolution_impl(
                 for task in tasks:
                     if task.batch_index not in parent_ready:
                         continue
-                    outcome = FailedProposal(
+                    proposal_outcome = FailedProposal(
                         task=task,
                         stage="mutation",
                         message="evaluation budget exhausted before mutation dispatch",
                         parent_eval_result=parent_ready[task.batch_index][0],
                         parent_n_uncached=parent_ready[task.batch_index][1],
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status="not_dispatched",
@@ -2623,53 +2630,61 @@ def _run_evolution_impl(
             )
             fatal_mutation_error: BaseException | None = None
             mutation_children: list[Candidate] = []
-            for item, call in zip(mutation_inputs, mutation_calls):
-                task, (parent_result, parent_n_uncached) = item
-                if call.error is not None:
-                    outcome = FailedProposal(
+            for mutation_item, mutation_call in zip(
+                mutation_inputs, mutation_calls
+            ):
+                task, (parent_result, parent_n_uncached) = mutation_item
+                if mutation_call.error is not None:
+                    proposal_outcome = FailedProposal(
                         task=task,
                         stage="mutation",
-                        message=f"{type(call.error).__name__}: {call.error}",
+                        message=(
+                            f"{type(mutation_call.error).__name__}: "
+                            f"{mutation_call.error}"
+                        ),
                         parent_eval_result=parent_result,
                         parent_n_uncached=parent_n_uncached,
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status=(
                             "fatal"
-                            if _is_fatal_proposal_exception(call.error)
+                            if _is_fatal_proposal_exception(mutation_call.error)
                             else "failed"
                         ),
                         reason="mutation",
                     )
-                    if _is_fatal_proposal_exception(call.error):
-                        fatal_mutation_error = fatal_mutation_error or call.error
-                    elif isinstance(call.error, HelixError):
-                        call.error.operation = (
-                            call.error.operation
+                    if _is_fatal_proposal_exception(mutation_call.error):
+                        fatal_mutation_error = (
+                            fatal_mutation_error or mutation_call.error
+                        )
+                    elif isinstance(mutation_call.error, HelixError):
+                        mutation_call.error.operation = (
+                            mutation_call.error.operation
                             or f"parallel mutate {task.reserved_child_id}"
                         )
-                        print_helix_error(call.error)
+                        print_helix_error(mutation_call.error)
                     else:
                         print_error(
                             f"Parallel mutation {task.reserved_child_id} "
                             f"(parent: {task.parent_candidate.id}, gen {gen}) "
-                            f"failed: {type(call.error).__name__}: {call.error}"
+                            f"failed: {type(mutation_call.error).__name__}: "
+                            f"{mutation_call.error}"
                         )
                     continue
 
-                assert call.value is not None
-                child, tampered_paths = call.value
+                assert mutation_call.value is not None
+                child, tampered_paths = mutation_call.value
                 if child is None:
-                    outcome = FailedProposal(
+                    proposal_outcome = FailedProposal(
                         task=task,
                         stage="mutation",
                         message="mutation returned no candidate",
                         parent_eval_result=parent_result,
                         parent_n_uncached=parent_n_uncached,
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status="failed",
@@ -2688,14 +2703,14 @@ def _run_evolution_impl(
                     )
 
                 if tampered_paths:
-                    outcome = TamperedProposal(
+                    proposal_outcome = TamperedProposal(
                         task=task,
                         parent_eval_result=parent_result,
                         child_candidate=child,
                         tampered_paths=tampered_paths,
                         parent_n_uncached=parent_n_uncached,
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status="tampered",
@@ -2768,7 +2783,7 @@ def _run_evolution_impl(
                 try:
                     snapshot_candidate(child, f"helix: mutate {child.id}")
                 except Exception as exc:
-                    outcome = FailedProposal(
+                    proposal_outcome = FailedProposal(
                         task=task,
                         stage="mutation",
                         message=f"{type(exc).__name__}: {exc}",
@@ -2776,7 +2791,7 @@ def _run_evolution_impl(
                         child_candidate=child,
                         parent_n_uncached=prepared[2],
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status="failed",
@@ -2852,30 +2867,33 @@ def _run_evolution_impl(
                 )
                 raise
             fatal_child_error: BaseException | None = None
-            for item, call in zip(child_inputs, child_calls):
-                task, parent_result, parent_n_uncached, child = item
-                if call.error is not None:
-                    outcome = FailedProposal(
+            for child_item, child_call in zip(child_inputs, child_calls):
+                task, parent_result, parent_n_uncached, child = child_item
+                if child_call.error is not None:
+                    proposal_outcome = FailedProposal(
                         task=task,
                         stage="child_evaluation",
-                        message=f"{type(call.error).__name__}: {call.error}",
+                        message=(
+                            f"{type(child_call.error).__name__}: "
+                            f"{child_call.error}"
+                        ),
                         parent_eval_result=parent_result,
                         child_candidate=child,
                         parent_n_uncached=parent_n_uncached,
                     )
-                    proposal_outcomes[task.batch_index] = outcome
+                    proposal_outcomes[task.batch_index] = proposal_outcome
                     _record_terminal(
                         task,
                         status=(
                             "fatal"
-                            if _is_fatal_proposal_exception(call.error)
+                            if _is_fatal_proposal_exception(child_call.error)
                             else "failed"
                         ),
                         reason="child_eval",
                         child=child,
                     )
-                    if _is_fatal_proposal_exception(call.error):
-                        fatal_child_error = fatal_child_error or call.error
+                    if _is_fatal_proposal_exception(child_call.error):
+                        fatal_child_error = fatal_child_error or child_call.error
                     else:
                         _discard_child(
                             child,
@@ -2883,10 +2901,10 @@ def _run_evolution_impl(
                         )
                     continue
 
-                assert call.result is not None
-                child_result = call.result
+                assert child_call.result is not None
+                child_result = child_call.result
                 child_result.candidate_id = child.id
-                child_n_uncached = call.num_actual_evaluations
+                child_n_uncached = child_call.num_actual_evaluations
                 _last_eval_result = child_result
                 if task.minibatch_ids is not None:
                     budget_api.charge_evaluation(
@@ -2904,7 +2922,7 @@ def _run_evolution_impl(
                         split="train",
                         source="mutation_train_gate",
                     )
-                proposal = EvaluatedProposal(
+                proposal_outcome = EvaluatedProposal(
                     task=task,
                     parent_eval_result=parent_result,
                     child_candidate=child,
@@ -2912,8 +2930,9 @@ def _run_evolution_impl(
                     parent_n_uncached=parent_n_uncached,
                     child_n_uncached=child_n_uncached,
                 )
-                proposal_outcomes[task.batch_index] = proposal
-                evaluated_proposals.append(proposal)
+                proposal_outcomes[task.batch_index] = proposal_outcome
+                assert isinstance(proposal_outcome, EvaluatedProposal)
+                evaluated_proposals.append(proposal_outcome)
 
             if fatal_child_error is not None:
                 for _, _, _, child in child_inputs:
@@ -2939,6 +2958,7 @@ def _run_evolution_impl(
             # Run the configured selection exactly once over all successfully
             # evaluated children.  Acceptance is owned by the selector, so a
             # stateful criterion cannot be accidentally called twice.
+            selector: ProposalSelectionStrategy
             if config.evolution.proposal_selection == "all_improvements":
                 selector = AllImprovements()
             elif config.evolution.proposal_selection == "best_improvement":
@@ -2948,7 +2968,7 @@ def _run_evolution_impl(
                 selector = TopKImprovements(config.evolution.proposal_top_k)
             selected_proposals = selector.select(
                 evaluated_proposals,
-                acceptance,
+                cast(ProposalAcceptanceCriterion, acceptance),
             )
             selected_ids = {
                 selected.proposal.child_candidate.id
@@ -3110,23 +3130,23 @@ def _run_evolution_impl(
                 )
                 raise
             fatal_stage_error: BaseException | None = None
-            for selected, call in zip(stage_inputs, stage_calls):
+            for selected, stage_call in zip(stage_inputs, stage_calls):
                 proposal = selected.proposal
                 task = proposal.task
                 child = proposal.child_candidate
-                if call.error is not None:
+                if stage_call.error is not None:
                     _record_terminal(
                         task,
                         status=(
                             "fatal"
-                            if _is_fatal_proposal_exception(call.error)
+                            if _is_fatal_proposal_exception(stage_call.error)
                             else "failed"
                         ),
                         reason="val_stage",
                         child=child,
                     )
-                    if _is_fatal_proposal_exception(call.error):
-                        fatal_stage_error = fatal_stage_error or call.error
+                    if _is_fatal_proposal_exception(stage_call.error):
+                        fatal_stage_error = fatal_stage_error or stage_call.error
                     else:
                         _discard_child(
                             child,
@@ -3134,10 +3154,10 @@ def _run_evolution_impl(
                         )
                     continue
 
-                assert call.result is not None
-                stage_result = call.result
+                assert stage_call.result is not None
+                stage_result = stage_call.result
                 stage_result.candidate_id = child.id
-                stage_n_uncached = call.num_actual_evaluations
+                stage_n_uncached = stage_call.num_actual_evaluations
                 _last_eval_result = stage_result
                 budget_api.charge_evaluation(
                     state,
@@ -3314,23 +3334,23 @@ def _run_evolution_impl(
                 raise
             fatal_full_error: BaseException | None = None
             full_results: list[tuple[SelectedProposal, EvalResult]] = []
-            for selected, call in zip(validation_ready, full_calls):
+            for selected, full_call in zip(validation_ready, full_calls):
                 proposal = selected.proposal
                 task = proposal.task
                 child = proposal.child_candidate
-                if call.error is not None:
+                if full_call.error is not None:
                     _record_terminal(
                         task,
                         status=(
                             "fatal"
-                            if _is_fatal_proposal_exception(call.error)
+                            if _is_fatal_proposal_exception(full_call.error)
                             else "failed"
                         ),
                         reason="full_validation",
                         child=child,
                     )
-                    if _is_fatal_proposal_exception(call.error):
-                        fatal_full_error = fatal_full_error or call.error
+                    if _is_fatal_proposal_exception(full_call.error):
+                        fatal_full_error = fatal_full_error or full_call.error
                     else:
                         _discard_child(
                             child,
@@ -3338,10 +3358,10 @@ def _run_evolution_impl(
                         )
                     continue
 
-                assert call.result is not None
-                val_result = call.result
+                assert full_call.result is not None
+                val_result = full_call.result
                 val_result.candidate_id = child.id
-                val_n_uncached = call.num_actual_evaluations
+                val_n_uncached = full_call.num_actual_evaluations
                 _last_eval_result = val_result
                 if full_val_example_ids:
                     budget_api.charge_evaluation(
