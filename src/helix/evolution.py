@@ -12,7 +12,8 @@ import shlex
 import subprocess
 import tempfile
 import threading
-from collections.abc import Callable, Sequence
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -83,11 +84,23 @@ from helix.proposals import (
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
+    ProposalBatchRecord,
+    ProposalCleanupResult,
+    ProposalSelectionResult,
+    ProposalTaskRecord,
+    ProposalTaskStatus,
+    build_scheduler_checkpoint,
+    checkpoint_batch_after_apply,
+    checkpoint_batch_before_dispatch,
+    checkpoint_batch_task,
+    checkpoint_scheduler_state,
     clear_eval_cache,
+    decode_rng_state,
     EvaluationCache,
     EvolutionState,
     load_eval_cache,
     load_state,
+    reconcile_interrupted_batches,
     save_eval_cache,
     save_state,
 )
@@ -639,6 +652,7 @@ def _is_fatal_proposal_exception(exc: BaseException) -> bool:
         (
             PromptArtifactCollisionError,
             ResumeIncompatibleError,
+            AssertionError,
             ValueError,
             TypeError,
         ),
@@ -711,6 +725,120 @@ def _plan_pxn_tasks(
     assert sampled_tasks == p * n
     assert len(tasks) == p * n
     return tasks
+
+
+def _scheduler_checkpoint(
+    rng: _random.Random,
+    batch_sampler: BatchSampler[str] | None,
+) -> dict[str, Any]:
+    """Snapshot the shared frontier/sampler RNG and sampler schedule."""
+
+    sampler_rng_state = rng.getstate()
+    sampler_epoch = -1
+    shuffled_ids: Sequence[str] = ()
+    last_trainset_size = 0
+    id_frequencies: Mapping[str, int] | None = None
+    fallback: dict[str, Any] | None = None
+
+    if isinstance(batch_sampler, EpochShuffledBatchSampler):
+        sampler_rng_state = batch_sampler.rng.getstate()
+        sampler_epoch = batch_sampler.epoch
+        shuffled_ids = batch_sampler.shuffled_ids
+        last_trainset_size = batch_sampler.last_trainset_size
+        id_frequencies = {
+            str(key): int(value) for key, value in batch_sampler.id_freqs.items()
+        }
+    elif isinstance(batch_sampler, StratifiedBatchSampler):
+        sampler_rng_state = batch_sampler.rng.getstate()
+        sampler_epoch = batch_sampler.epoch
+        shuffled_ids = batch_sampler.shuffled_ids
+        last_trainset_size = batch_sampler.last_trainset_size
+        inner = batch_sampler._fallback
+        if inner is not None:
+            fallback = {
+                "rng_state": list(inner.rng.getstate()),
+                "epoch": inner.epoch,
+                "shuffled_ids": list(inner.shuffled_ids),
+                "last_trainset_size": inner.last_trainset_size,
+                "id_frequencies": {
+                    str(key): int(value) for key, value in inner.id_freqs.items()
+                },
+            }
+
+    return build_scheduler_checkpoint(
+        frontier_rng_state=rng.getstate(),
+        sampler_rng_state=sampler_rng_state,
+        sampler_epoch=sampler_epoch,
+        sampler_shuffled_ids=shuffled_ids,
+        sampler_last_trainset_size=last_trainset_size,
+        sampler_id_frequencies=id_frequencies,
+        sampler_fallback=fallback,
+    )
+
+
+def _restore_scheduler_checkpoint(
+    checkpoint: Mapping[str, Any],
+    rng: _random.Random,
+    batch_sampler: BatchSampler[str] | None,
+) -> None:
+    """Restore the exact shared RNG/minibatch position from persisted state."""
+
+    raw_frontier_state = checkpoint.get("frontier_rng_state")
+    if isinstance(raw_frontier_state, list):
+        rng.setstate(decode_rng_state(raw_frontier_state))
+
+    raw_sampler = checkpoint.get("sampler")
+    if not isinstance(raw_sampler, Mapping) or batch_sampler is None:
+        return
+    if not isinstance(
+        batch_sampler,
+        (EpochShuffledBatchSampler, StratifiedBatchSampler),
+    ):
+        return
+    raw_sampler_rng = raw_sampler.get("rng_state")
+    if isinstance(raw_sampler_rng, list):
+        batch_sampler.rng.setstate(decode_rng_state(raw_sampler_rng))
+    raw_ids = raw_sampler.get("shuffled_ids", [])
+    if isinstance(raw_ids, list):
+        batch_sampler.shuffled_ids = [str(value) for value in raw_ids]
+    batch_sampler.epoch = int(raw_sampler.get("epoch", -1))
+    batch_sampler.last_trainset_size = int(
+        raw_sampler.get("last_trainset_size", 0)
+    )
+
+    raw_frequencies = raw_sampler.get("id_frequencies", {})
+    if (
+        isinstance(batch_sampler, EpochShuffledBatchSampler)
+        and isinstance(raw_frequencies, Mapping)
+    ):
+        batch_sampler.id_freqs = Counter(
+            {str(key): int(value) for key, value in raw_frequencies.items()}
+        )
+
+    if not isinstance(batch_sampler, StratifiedBatchSampler):
+        return
+    raw_fallback = raw_sampler.get("fallback")
+    if not isinstance(raw_fallback, Mapping) or not raw_fallback:
+        batch_sampler._fallback = None
+        return
+    inner = EpochShuffledBatchSampler[str](
+        minibatch_size=batch_sampler.effective_minibatch_size,
+        rng=batch_sampler.rng,
+    )
+    inner.epoch = int(raw_fallback.get("epoch", -1))
+    inner.last_trainset_size = int(raw_fallback.get("last_trainset_size", 0))
+    raw_inner_ids = raw_fallback.get("shuffled_ids", [])
+    if isinstance(raw_inner_ids, list):
+        inner.shuffled_ids = [str(value) for value in raw_inner_ids]
+    raw_inner_freqs = raw_fallback.get("id_frequencies", {})
+    if isinstance(raw_inner_freqs, Mapping):
+        inner.id_freqs = Counter(
+            {str(key): int(value) for key, value in raw_inner_freqs.items()}
+        )
+    raw_inner_rng = raw_fallback.get("rng_state")
+    if isinstance(raw_inner_rng, list):
+        inner.rng.setstate(decode_rng_state(raw_inner_rng))
+    batch_sampler._fallback = inner
 
 
 def _proposal_terminal_record(
@@ -1668,6 +1796,29 @@ def _run_evolution_impl(
         state.frontier = frontier.candidate_ids()
         state.active_frontier = frontier.active_frontier_snapshot()
 
+    def _cleanup_interrupted_batch_worktree(
+        candidate_id: str,
+        worktree_path: Path,
+    ) -> bool:
+        candidate = Candidate(
+            id=candidate_id,
+            worktree_path=str(worktree_path),
+            branch_name=f"helix/{candidate_id}",
+            generation=_gen_from_id(candidate_id),
+            parent_id=None,
+            parent_ids=[],
+            operation="interrupted",
+        )
+        try:
+            remove_worktree(candidate)
+        except Exception as exc:
+            print_warning(
+                f"Could not remove interrupted batch worktree "
+                f"{candidate_id}: {exc}"
+            )
+            return False
+        return not worktree_path.exists()
+
     if state is None:
         state = EvolutionState(
             generation=0,
@@ -1686,6 +1837,8 @@ def _run_evolution_impl(
     else:
         needs_seed = False
         _validate_resume_semantics(state, config)
+        if state.scheduler_state:
+            _restore_scheduler_checkpoint(state.scheduler_state, rng, batch_sampler)
         if not state.resume_semantics:
             # Legacy state predating the resume_semantics guard: validation
             # short-circuits, so surface that the guard is dormant for THIS
@@ -1707,6 +1860,13 @@ def _run_evolution_impl(
                 "Config hash differs from the saved state; resuming with the current "
                 "config while keeping the existing frontier and history."
             )
+        reconcile_interrupted_batches(
+            state,
+            project_root,
+            worktrees_dir=worktrees_dir,
+            cleanup_worktree=_cleanup_interrupted_batch_worktree,
+            saver=_save_state,
+        )
         if _reconcile_incomplete_attempts_on_resume(
             state=state,
             base_dir=base_dir,
@@ -2339,6 +2499,60 @@ def _run_evolution_impl(
                 state=state,
                 generation=gen,
             )
+            batch_id = f"g{gen}-proposals"
+            max_in_flight_evaluations = sum(
+                2
+                * (
+                    len(task.minibatch_ids)
+                    if task.minibatch_ids is not None
+                    else 1
+                )
+                + len(stage_val_example_ids)
+                + (len(full_val_example_ids) if full_val_example_ids else 1)
+                for task in tasks
+            )
+            checkpoint_scheduler_state(
+                state,
+                project_root,
+                _scheduler_checkpoint(rng, batch_sampler),
+                saver=_save_state,
+            )
+            proposal_batch = ProposalBatchRecord(
+                batch_id=batch_id,
+                generation=gen,
+                p=p,
+                n=n,
+                tasks=[
+                    ProposalTaskRecord(
+                        batch_id=batch_id,
+                        p=p,
+                        n=n,
+                        task_index=task.batch_index,
+                        parent_group=task.parent_group_index,
+                        mutation_index=task.mutation_index,
+                        parent_id=task.parent_candidate.id,
+                        child_id=task.reserved_child_id,
+                    )
+                    for task in tasks
+                ],
+            )
+            checkpoint_batch_before_dispatch(
+                state,
+                project_root,
+                proposal_batch,
+                max_evaluations=config.evolution.max_evaluations,
+                max_in_flight_evaluations=max_in_flight_evaluations,
+                saver=_save_state,
+            )
+            for task in tasks:
+                checkpoint_batch_task(
+                    state,
+                    project_root,
+                    batch_id=batch_id,
+                    task_index=task.batch_index,
+                    status="running",
+                    saver=_save_state,
+                )
             parent_frontier_results = {
                 task.batch_index: frontier.get_result(task.parent_candidate.id)
                 for task in tasks
@@ -2346,6 +2560,10 @@ def _run_evolution_impl(
             terminal_records: dict[int, dict[str, Any]] = {}
             proposal_outcomes: dict[int, TerminalProposalOutcome] = {}
             cleaned_child_ids: set[str] = set()
+            cleanup_results: dict[str, ProposalCleanupResult] = {}
+            task_budget_charges = {
+                task.batch_index: BudgetState() for task in tasks
+            }
             parent_ready: dict[int, tuple[EvalResult, int]] = {}
             child_ready: dict[
                 int, tuple[ProposalTask, EvalResult, int, Candidate]
@@ -2358,6 +2576,34 @@ def _run_evolution_impl(
             _last_eval_result: EvalResult | None = None
             _budget_break = False
 
+            def _discard_child(
+                child: Candidate,
+                *,
+                label: str,
+            ) -> ProposalCleanupResult:
+                if child.id in cleaned_child_ids:
+                    return cleanup_results[child.id]
+                cleaned_child_ids.add(child.id)
+                candidates.pop(child.id, None)
+                worktree_path = Path(child.worktree_path)
+                existed = worktree_path.exists()
+                try:
+                    remove_worktree(child)
+                except Exception as exc:
+                    print_warning(
+                        f"Could not remove worktree for {label} {child.id}: {exc}"
+                    )
+                    cleanup: ProposalCleanupResult = "failed"
+                else:
+                    if existed and worktree_path.exists():
+                        cleanup = "failed"
+                    elif existed:
+                        cleanup = "removed"
+                    else:
+                        cleanup = "missing"
+                cleanup_results[child.id] = cleanup
+                return cleanup
+
             def _record_terminal(
                 task: ProposalTask,
                 *,
@@ -2365,19 +2611,99 @@ def _run_evolution_impl(
                 reason: str,
                 child: Candidate | None = None,
             ) -> None:
+                if task.batch_index in terminal_records:
+                    return
+                if status == "accepted":
+                    persisted_status: ProposalTaskStatus = "applied"
+                elif status == "skipped":
+                    persisted_status = "skipped"
+                elif status == "tampered":
+                    persisted_status = "tampered"
+                elif status in {"not_selected", "rejected", "not_applied"}:
+                    persisted_status = "rejected"
+                else:
+                    # Internal labels such as fatal, discarded, and
+                    # not_dispatched are detail strings, not persisted enum
+                    # values.  They terminalize as failed.
+                    persisted_status = "failed"
+
+                if persisted_status == "applied":
+                    selection: ProposalSelectionResult = "selected"
+                elif status == "not_selected":
+                    selection = "not_selected"
+                elif status in {"rejected", "not_applied"} or reason in {
+                    "val_stage",
+                    "full_validation",
+                }:
+                    selection = "selected"
+                else:
+                    selection = "not_applicable"
+
+                cleanup: ProposalCleanupResult
+                if child is not None and persisted_status != "applied":
+                    cleanup = _discard_child(
+                        child,
+                        label=f"{reason} proposal candidate",
+                    )
+                else:
+                    cleanup = "not_required"
+
+                outcome = proposal_outcomes.get(task.batch_index)
+                score_delta = (
+                    outcome.improvement
+                    if isinstance(outcome, EvaluatedProposal)
+                    else None
+                )
+                charge = task_budget_charges[task.batch_index]
+                persisted_charge = BudgetState(
+                    evaluations=charge.evaluations,
+                    input_tokens=charge.input_tokens,
+                    output_tokens=charge.output_tokens,
+                    cached_input_tokens=charge.cached_input_tokens,
+                    cache_creation_input_tokens=charge.cache_creation_input_tokens,
+                    cache_read_input_tokens=charge.cache_read_input_tokens,
+                    reasoning_tokens=charge.reasoning_tokens,
+                    cost_usd=charge.cost_usd,
+                )
+                checkpoint_batch_task(
+                    state,
+                    project_root,
+                    batch_id=batch_id,
+                    task_index=task.batch_index,
+                    status=persisted_status,
+                    score_delta=score_delta,
+                    selection=selection,
+                    cleanup=cleanup,
+                    budget_charge=persisted_charge,
+                    budget_accounted=True,
+                    applied=(persisted_status == "applied"),
+                    detail=f"{status}: {reason}",
+                    saver=_save_state,
+                )
                 terminal_records[task.batch_index] = _proposal_terminal_record(
                     task,
-                    status=status,
+                    status=persisted_status,
                     reason=reason,
                     child_id=child.id if child is not None else None,
                 )
 
-            def _discard_child(child: Candidate, *, label: str) -> None:
-                if child.id in cleaned_child_ids:
-                    return
-                cleaned_child_ids.add(child.id)
-                _safe_remove_worktree(child, label=label)
-                candidates.pop(child.id, None)
+            def _add_evaluation_charge(task: ProposalTask, units: int) -> None:
+                task_budget_charges[task.batch_index].evaluations += units
+
+            def _add_usage_charge(
+                task: ProposalTask,
+                usage: UsageStats,
+            ) -> None:
+                charge = task_budget_charges[task.batch_index]
+                charge.input_tokens += usage.input_tokens
+                charge.output_tokens += usage.output_tokens
+                charge.cached_input_tokens += usage.cached_input_tokens
+                charge.cache_creation_input_tokens += (
+                    usage.cache_creation_input_tokens
+                )
+                charge.cache_read_input_tokens += usage.cache_read_input_tokens
+                charge.reasoning_tokens += usage.reasoning_tokens
+                charge.cost_usd += usage.cost_usd
 
             # ---- Parent scoring batch ------------------------------------
             # The same parent can appear in more than one group, and siblings
@@ -2474,7 +2800,7 @@ def _run_evolution_impl(
                 parent_result.candidate_id = task.parent_candidate.id
                 parent_n_uncached = parent_call.num_actual_evaluations
                 if task.minibatch_ids is not None:
-                    budget_api.charge_evaluation(
+                    charged = budget_api.charge_evaluation(
                         state,
                         num_actual_examples=parent_n_uncached,
                         candidate_id=task.parent_candidate.id,
@@ -2482,13 +2808,14 @@ def _run_evolution_impl(
                         source="parent_minibatch",
                     )
                 else:
-                    budget_api.charge_evaluation(
+                    charged = budget_api.charge_evaluation(
                         state,
                         was_cached=(parent_n_uncached == 0),
                         candidate_id=task.parent_candidate.id,
                         split="train",
                         source="parent_train_no_minibatch",
                     )
+                _add_evaluation_charge(task, charged)
 
                 if (
                     config.evolution.perfect_score_threshold is not None
@@ -2701,6 +3028,7 @@ def _run_evolution_impl(
                         candidate_id=child.id,
                         source="mutation",
                     )
+                    _add_usage_charge(task, child.usage)
 
                 if tampered_paths:
                     proposal_outcome = TamperedProposal(
@@ -2907,7 +3235,7 @@ def _run_evolution_impl(
                 child_n_uncached = child_call.num_actual_evaluations
                 _last_eval_result = child_result
                 if task.minibatch_ids is not None:
-                    budget_api.charge_evaluation(
+                    charged = budget_api.charge_evaluation(
                         state,
                         num_actual_examples=child_n_uncached,
                         candidate_id=child.id,
@@ -2915,13 +3243,14 @@ def _run_evolution_impl(
                         source="mutation_minibatch_gate",
                     )
                 else:
-                    budget_api.charge_evaluation(
+                    charged = budget_api.charge_evaluation(
                         state,
                         was_cached=(child_n_uncached == 0),
                         candidate_id=child.id,
                         split="train",
                         source="mutation_train_gate",
                     )
+                _add_evaluation_charge(task, charged)
                 proposal_outcome = EvaluatedProposal(
                     task=task,
                     parent_eval_result=parent_result,
@@ -3159,13 +3488,14 @@ def _run_evolution_impl(
                 stage_result.candidate_id = child.id
                 stage_n_uncached = stage_call.num_actual_evaluations
                 _last_eval_result = stage_result
-                budget_api.charge_evaluation(
+                charged = budget_api.charge_evaluation(
                     state,
                     num_actual_examples=stage_n_uncached,
                     candidate_id=child.id,
                     split="val",
                     source="mutation_val_stage",
                 )
+                _add_evaluation_charge(task, charged)
                 parent_frontier_result = parent_frontier_results[task.batch_index]
                 assert parent_frontier_result is not None
                 before = _scores_for_example_ids(
@@ -3364,7 +3694,7 @@ def _run_evolution_impl(
                 val_n_uncached = full_call.num_actual_evaluations
                 _last_eval_result = val_result
                 if full_val_example_ids:
-                    budget_api.charge_evaluation(
+                    charged = budget_api.charge_evaluation(
                         state,
                         num_actual_examples=val_n_uncached,
                         candidate_id=child.id,
@@ -3372,13 +3702,14 @@ def _run_evolution_impl(
                         source="mutation_full_val_batch",
                     )
                 else:
-                    budget_api.charge_evaluation(
+                    charged = budget_api.charge_evaluation(
                         state,
                         was_cached=(val_n_uncached == 0),
                         candidate_id=child.id,
                         split="val",
                         source="mutation_full_val",
                     )
+                _add_evaluation_charge(task, charged)
                 full_results.append((selected, val_result))
 
             if fatal_full_error is not None:
@@ -3458,6 +3789,12 @@ def _run_evolution_impl(
                 generation=gen,
                 tasks=tasks,
                 records=terminal_records,
+            )
+            checkpoint_batch_after_apply(
+                state,
+                project_root,
+                batch_id=batch_id,
+                saver=_save_state,
             )
             if _gen_skip_records:
                 _save_skip_record(
