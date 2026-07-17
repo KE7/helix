@@ -5,9 +5,51 @@ from __future__ import annotations
 import json
 
 import pytest
+from rich.console import Console
 
-from helix.display import UsageStats
+from helix.display import UsageStats, render_proposal_batch_table
 from helix.population import Candidate, CandidateSummary, EvalResult
+from helix.state import ProposalBatchRecord, ProposalTaskRecord
+from helix.trace import TRACE, EventType
+
+
+def _terminal_batch() -> ProposalBatchRecord:
+    batch_id = "g2-b0"
+    tasks = [
+        ProposalTaskRecord(
+            batch_id=batch_id,
+            p=2,
+            n=2,
+            task_index=index,
+            parent_group=index // 2,
+            mutation_index=index % 2,
+            parent_id="parent-a" if index < 2 else "parent-b",
+            child_id=f"child-{index}",
+        )
+        for index in range(4)
+    ]
+    terminal = [
+        ("applied", "selected", "not_required", 0.25, True),
+        ("rejected", "not_selected", "removed", -0.1, False),
+        ("failed", "not_applicable", "missing", None, False),
+        ("interrupted", "not_applicable", "failed", None, False),
+    ]
+    for task, (status, selection, cleanup, delta, applied) in zip(
+        tasks, terminal, strict=True
+    ):
+        task.status = status  # type: ignore[assignment]
+        task.selection = selection  # type: ignore[assignment]
+        task.cleanup = cleanup  # type: ignore[assignment]
+        task.score_delta = delta
+        task.applied = applied
+    return ProposalBatchRecord(
+        batch_id=batch_id,
+        generation=2,
+        p=2,
+        n=2,
+        tasks=tasks,
+        phase="interrupted",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,3 +303,64 @@ class TestCandidateSummaryJsonSerialization:
             "CandidateSummary.to_dict() must call .to_dict() on usage; "
             f"got {type(d['usage'])!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# P-by-N proposal observability
+# ---------------------------------------------------------------------------
+
+
+def test_batch_table_renders_every_terminal_slot_in_parent_major_order() -> None:
+    batch = _terminal_batch()
+    table = render_proposal_batch_table(batch)
+    render_console = Console(record=True, width=140)
+    render_console.print(table)
+    rendered = render_console.export_text()
+
+    assert "2×2, 4 slots" in rendered
+    positions = [rendered.index(f"child-{index}") for index in range(4)]
+    assert positions == sorted(positions)
+    for status in ("applied", "rejected", "failed", "interrupted"):
+        assert status in rendered
+    for cleanup in ("not_required", "removed", "missing"):
+        assert cleanup in rendered
+
+
+def test_completed_batch_table_rejects_nonterminal_slot() -> None:
+    batch = _terminal_batch()
+    batch.tasks[2].status = "running"
+    batch.tasks[2].cleanup = "pending"
+    with pytest.raises(ValueError, match="nonterminal slots: 2"):
+        render_proposal_batch_table(batch)
+
+
+def test_trace_emits_exactly_one_terminal_event_per_batch_slot() -> None:
+    batch = _terminal_batch()
+    with TRACE.record() as events:
+        TRACE.emit_proposal_batch_terminal(batch)
+
+    terminal_events = [
+        event
+        for event in events
+        if event.type is EventType.PROPOSAL_TASK_TERMINAL
+    ]
+    assert len(terminal_events) == batch.p * batch.n
+    assert [event.task_index for event in terminal_events] == [0, 1, 2, 3]
+    assert [event.child_id for event in terminal_events] == [
+        "child-0",
+        "child-1",
+        "child-2",
+        "child-3",
+    ]
+    assert all(event.status is not None for event in terminal_events)
+    assert events[0].type is EventType.PROPOSAL_BATCH_START
+    assert events[-1].type is EventType.PROPOSAL_BATCH_END
+
+
+def test_trace_rejects_partial_batch_instead_of_omitting_slot() -> None:
+    batch = _terminal_batch()
+    batch.tasks[3].status = "evaluated"
+    batch.tasks[3].cleanup = "pending"
+    with TRACE.record():
+        with pytest.raises(ValueError, match="nonterminal slots: 3"):
+            TRACE.emit_proposal_batch_terminal(batch)

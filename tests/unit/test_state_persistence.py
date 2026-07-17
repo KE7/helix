@@ -20,6 +20,7 @@ Covers the additions called out in /tmp/audit_audit-rng-state-persist.md
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,15 @@ from helix.state import (
     SCHEMA_VERSION,
     BudgetState,
     EvolutionState,
+    ProposalBatchRecord,
+    ProposalTaskRecord,
+    build_scheduler_checkpoint,
+    checkpoint_batch_after_apply,
+    checkpoint_batch_before_dispatch,
+    checkpoint_batch_task,
+    checkpoint_scheduler_state,
     clear_eval_cache,
+    decode_rng_state,
     load_eval_cache,
     load_state,
     save_eval_cache,
@@ -42,8 +51,64 @@ from helix.state import (
 # ---------------------------------------------------------------------------
 
 
+def _make_batch(*, batch_id: str = "g4-b0") -> ProposalBatchRecord:
+    tasks = [
+        ProposalTaskRecord(
+            batch_id=batch_id,
+            p=2,
+            n=2,
+            task_index=index,
+            parent_group=index // 2,
+            mutation_index=index % 2,
+            parent_id="g0-s0" if index < 2 else "g1-s1",
+            child_id=f"g4-s{index + 10}",
+        )
+        for index in range(4)
+    ]
+    return ProposalBatchRecord(
+        batch_id=batch_id,
+        generation=4,
+        p=2,
+        n=2,
+        tasks=tasks,
+    )
+
+
 def _make_full_state() -> EvolutionState:
     """Build an EvolutionState with every field populated."""
+    batch = _make_batch()
+    terminal_values = [
+        ("applied", "selected", "not_required", True, 0.2),
+        ("rejected", "not_selected", "removed", False, -0.1),
+        ("skipped", "not_applicable", "missing", False, None),
+        ("failed", "not_applicable", "removed", False, None),
+    ]
+    for task, (status, selection, cleanup, applied, delta) in zip(
+        batch.tasks, terminal_values, strict=True
+    ):
+        task.status = status  # type: ignore[assignment]
+        task.selection = selection  # type: ignore[assignment]
+        task.cleanup = cleanup  # type: ignore[assignment]
+        task.applied = applied
+        task.score_delta = delta
+        task.budget_charge = BudgetState(evaluations=2)
+        task.budget_accounted = True
+    batch.phase = "complete"
+    batch.budget_before_dispatch = 34
+    batch.max_evaluations = 40
+    batch.max_in_flight_evaluations = 8
+    batch.maximum_overshoot = 2
+    batch.budget_after_apply = 42
+    rng = random.Random(123)
+    scheduler_state = build_scheduler_checkpoint(
+        frontier_rng_state=rng.getstate(),
+        sampler_rng_state=rng.getstate(),
+        sampler_epoch=2,
+        sampler_shuffled_ids=["task_b", "task_a"],
+        sampler_last_trainset_size=2,
+        sampler_id_frequencies={"task_a": 1, "task_b": 1},
+        sampler_fallback={"epoch": -1, "shuffled_ids": []},
+    )
     return EvolutionState(
         generation=4,
         frontier=["g0-s0", "g1-s1", "g2-m1"],
@@ -74,6 +139,8 @@ def _make_full_state() -> EvolutionState:
             "g2-m1": 28,
         },
         active_frontier={"task_a": ["g2-m1"], "task_b": ["g2-m1"]},
+        proposal_batches=[batch],
+        scheduler_state=scheduler_state,
     )
 
 
@@ -92,6 +159,8 @@ def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     # Sanity-check that the new fields specifically survived.
     assert loaded.num_metric_calls_by_discovery == state.num_metric_calls_by_discovery
     assert loaded.active_frontier == state.active_frontier
+    assert loaded.proposal_batches == state.proposal_batches
+    assert loaded.scheduler_state == state.scheduler_state
     assert loaded.schema_version == SCHEMA_VERSION
 
 
@@ -148,6 +217,8 @@ def test_load_legacy_state_populates_defaults(tmp_path: Path) -> None:
     assert loaded is not None
     # The new fields default — empty dict for discovery, current schema_version.
     assert loaded.num_metric_calls_by_discovery == {}
+    assert loaded.proposal_batches == []
+    assert loaded.scheduler_state == {}
     assert loaded.schema_version == SCHEMA_VERSION
     # Pre-existing fields still load correctly.
     assert loaded.generation == 1
@@ -367,6 +438,8 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "active_frontier",
         "frontier_type",
         "resume_semantics",
+        "proposal_batches",
+        "scheduler_state",
     }
     assert set(raw.keys()) == expected_keys, (
         f"state.json keys diverged from schema_version={SCHEMA_VERSION} "
@@ -390,6 +463,219 @@ def test_legacy_state_load_followed_by_save_writes_versioned_payload(tmp_path: P
     raw = json.loads((tmp_path / ".helix" / "state.json").read_text())
     assert raw["schema_version"] == SCHEMA_VERSION
     assert raw["num_metric_calls_by_discovery"] == {}
+    assert raw["proposal_batches"] == []
+    assert raw["scheduler_state"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Parallel-proposal checkpoint ledger
+# ---------------------------------------------------------------------------
+
+
+def test_pre_dispatch_checkpoint_uses_injected_saver(tmp_path: Path) -> None:
+    state = EvolutionState(
+        generation=4,
+        frontier=["g0-s0", "g1-s1"],
+        instance_scores={},
+        budget=BudgetState(evaluations=7),
+        config_hash="h",
+    )
+    calls: list[EvolutionState] = []
+
+    def cache_aware_saver(value: EvolutionState) -> None:
+        calls.append(value)
+        save_state(value, tmp_path)
+
+    batch = checkpoint_batch_before_dispatch(
+        state,
+        tmp_path,
+        _make_batch(),
+        max_evaluations=10,
+        max_in_flight_evaluations=8,
+        saver=cache_aware_saver,
+    )
+
+    assert calls == [state]
+    assert batch.phase == "dispatched"
+    assert batch.maximum_overshoot == 5
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert loaded.proposal_batches == [batch]
+
+
+def test_task_accounted_marker_is_idempotent_without_charging_budget(
+    tmp_path: Path,
+) -> None:
+    state = EvolutionState(
+        generation=4,
+        frontier=["g0-s0", "g1-s1"],
+        instance_scores={},
+        budget=BudgetState(evaluations=11),
+        config_hash="h",
+    )
+    batch = checkpoint_batch_before_dispatch(state, tmp_path, _make_batch())
+    saver_calls = 0
+
+    def saver(value: EvolutionState) -> None:
+        nonlocal saver_calls
+        saver_calls += 1
+        save_state(value, tmp_path)
+
+    charge = BudgetState(evaluations=3, input_tokens=20, cost_usd=0.1)
+    first = checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=0,
+        status="evaluated",
+        budget_charge=charge,
+        budget_accounted=True,
+        saver=saver,
+    )
+    second = checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=0,
+        status="evaluated",
+        budget_charge=charge,
+        budget_accounted=True,
+        saver=saver,
+    )
+
+    assert first is second
+    assert second.budget_accounted is True
+    assert second.budget_charge == charge
+    assert state.budget.evaluations == 11
+    assert saver_calls == 2
+
+    with pytest.raises(ValueError, match="different budget delta"):
+        checkpoint_batch_task(
+            state,
+            tmp_path,
+            batch_id=batch.batch_id,
+            task_index=0,
+            budget_charge=BudgetState(evaluations=4),
+            budget_accounted=True,
+            saver=saver,
+        )
+
+
+def test_pre_dispatch_rejects_candidate_id_collision(tmp_path: Path) -> None:
+    state = EvolutionState(
+        generation=4,
+        frontier=["g4-s10"],
+        instance_scores={},
+        budget=BudgetState(),
+        config_hash="h",
+    )
+    with pytest.raises(ValueError, match="already reserved"):
+        checkpoint_batch_before_dispatch(state, tmp_path, _make_batch())
+
+
+def test_post_apply_checkpoint_requires_and_persists_every_terminal_slot(
+    tmp_path: Path,
+) -> None:
+    state = EvolutionState(
+        generation=4,
+        frontier=["g0-s0", "g1-s1"],
+        instance_scores={},
+        budget=BudgetState(evaluations=19),
+        config_hash="h",
+    )
+    batch = checkpoint_batch_before_dispatch(state, tmp_path, _make_batch())
+    with pytest.raises(ValueError, match="nonterminal slots: 0, 1, 2, 3"):
+        checkpoint_batch_after_apply(state, tmp_path, batch_id=batch.batch_id)
+
+    checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=0,
+        status="evaluated",
+    )
+    checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=0,
+        status="applied",
+        selection="selected",
+        applied=True,
+    )
+    for task_index, status, cleanup in (
+        (1, "rejected", "removed"),
+        (2, "skipped", "missing"),
+        (3, "failed", "removed"),
+    ):
+        checkpoint_batch_task(
+            state,
+            tmp_path,
+            batch_id=batch.batch_id,
+            task_index=task_index,
+            status=status,  # type: ignore[arg-type]
+            cleanup=cleanup,  # type: ignore[arg-type]
+        )
+
+    saver_calls: list[EvolutionState] = []
+
+    def saver(value: EvolutionState) -> None:
+        saver_calls.append(value)
+        save_state(value, tmp_path)
+
+    completed = checkpoint_batch_after_apply(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        saver=saver,
+    )
+
+    assert completed.phase == "complete"
+    assert completed.budget_after_apply == 19
+    assert completed.all_tasks_terminal()
+    assert saver_calls == [state]
+
+
+def test_scheduler_checkpoint_roundtrips_rng_and_sampler_position(
+    tmp_path: Path,
+) -> None:
+    rng = random.Random(99)
+    rng.choice(["a", "b", "c"])
+    checkpoint = build_scheduler_checkpoint(
+        frontier_rng_state=rng.getstate(),
+        sampler_rng_state=rng.getstate(),
+        sampler_epoch=3,
+        sampler_shuffled_ids=["c", "a", "b", "a"],
+        sampler_last_trainset_size=3,
+        sampler_id_frequencies={"a": 2, "b": 1, "c": 1},
+        sampler_fallback={"epoch": 1, "last_trainset_size": 3},
+    )
+    expected_draws = [rng.random() for _ in range(4)]
+    state = EvolutionState(
+        generation=2,
+        frontier=["g0-s0"],
+        instance_scores={},
+        budget=BudgetState(),
+        config_hash="h",
+    )
+    saver_calls: list[EvolutionState] = []
+
+    def saver(value: EvolutionState) -> None:
+        saver_calls.append(value)
+        save_state(value, tmp_path)
+
+    checkpoint_scheduler_state(state, tmp_path, checkpoint, saver=saver)
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert saver_calls == [state]
+    assert loaded.scheduler_state["sampler"]["epoch"] == 3
+    assert loaded.scheduler_state["sampler"]["shuffled_ids"] == ["c", "a", "b", "a"]
+
+    restored_rng = random.Random()
+    restored_rng.setstate(
+        decode_rng_state(loaded.scheduler_state["frontier_rng_state"])
+    )
+    assert [restored_rng.random() for _ in range(4)] == expected_draws
 
 
 def test_clear_eval_cache_removes_stale_pickle(tmp_path: Path) -> None:

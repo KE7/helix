@@ -17,7 +17,10 @@ import inspect
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
+
+if TYPE_CHECKING:
+    from helix.state import ProposalBatchRecord
 
 
 class EventType(str, Enum):
@@ -33,6 +36,9 @@ class EventType(str, Enum):
     ITER_END = "ITER_END"
     OPT_END = "OPT_END"
     BUDGET_UPDATE = "BUDGET_UPDATE"
+    PROPOSAL_BATCH_START = "PROPOSAL_BATCH_START"
+    PROPOSAL_TASK_TERMINAL = "PROPOSAL_TASK_TERMINAL"
+    PROPOSAL_BATCH_END = "PROPOSAL_BATCH_END"
 
 
 @dataclass
@@ -62,6 +68,18 @@ class Event:
     cost_usd: float | None = None
     generation: int | None = None
     proposal_index: int | None = None
+    batch_id: str | None = None
+    p: int | None = None
+    n: int | None = None
+    task_index: int | None = None
+    parent_group: int | None = None
+    mutation_index: int | None = None
+    parent_id: str | None = None
+    child_id: str | None = None
+    status: str | None = None
+    score_delta: float | None = None
+    selection: str | None = None
+    cleanup: str | None = None
     mutation_counter: int | None = None
     merge_counter: int | None = None
     merge_invocations: int | None = None
@@ -83,6 +101,58 @@ class TraceBus:
         frame = inspect.stack()[1]
         source = f"{frame.filename}:{frame.lineno}"
         self.events.append(Event(type=type, source=source, **fields))
+
+    def emit_proposal_batch_terminal(self, batch: ProposalBatchRecord) -> None:
+        """Emit one ordered terminal event for every planned P*N slot.
+
+        A partial batch is rejected instead of producing a misleading trace.
+        Consumers can rely on the interval between ``PROPOSAL_BATCH_START``
+        and ``PROPOSAL_BATCH_END`` containing exactly ``P*N`` terminal task
+        events in parent-major order.
+        """
+        if not self.enabled:
+            return
+        batch.validate_plan()
+        nonterminal = [task.task_index for task in batch.tasks if not task.is_terminal()]
+        if nonterminal:
+            raise ValueError(
+                f"Cannot trace proposal batch {batch.batch_id!r}; nonterminal slots: "
+                + ", ".join(str(index) for index in nonterminal)
+            )
+        self.emit(
+            EventType.PROPOSAL_BATCH_START,
+            batch_id=batch.batch_id,
+            p=batch.p,
+            n=batch.n,
+            generation=batch.generation,
+        )
+        for task in batch.tasks:
+            self.emit(
+                EventType.PROPOSAL_TASK_TERMINAL,
+                batch_id=task.batch_id,
+                p=task.p,
+                n=task.n,
+                task_index=task.task_index,
+                proposal_index=task.task_index,
+                parent_group=task.parent_group,
+                mutation_index=task.mutation_index,
+                parent_id=task.parent_id,
+                candidate_id=task.child_id,
+                child_id=task.child_id,
+                status=task.status,
+                score_delta=task.score_delta,
+                selection=task.selection,
+                cleanup=task.cleanup,
+                generation=batch.generation,
+            )
+        self.emit(
+            EventType.PROPOSAL_BATCH_END,
+            batch_id=batch.batch_id,
+            p=batch.p,
+            n=batch.n,
+            generation=batch.generation,
+            decision=batch.phase,
+        )
 
     @contextmanager
     def record(self) -> Iterator[list[Event]]:

@@ -8,9 +8,10 @@ import pickle
 import tempfile
 import time
 import warnings
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from helix.population import FrontierType
 
@@ -21,7 +22,7 @@ from helix.population import FrontierType
 # had no schema version on ``state.json``; subsequent bumps mark explicit
 # JSON-native schema additions (the unversioned predecessor is treated as
 # v0; ``load_state`` migrates by default-filling missing fields).
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 
 @dataclass
@@ -40,6 +41,287 @@ class BudgetState:
     cache_read_input_tokens: int = 0
     reasoning_tokens: int = 0
     cost_usd: float = 0.0
+
+
+ProposalTaskStatus = Literal[
+    "planned",
+    "running",
+    "evaluated",
+    "skipped",
+    "failed",
+    "tampered",
+    "rejected",
+    "applied",
+    "interrupted",
+]
+ProposalSelectionResult = Literal[
+    "pending", "not_applicable", "not_selected", "selected"
+]
+ProposalCleanupResult = Literal[
+    "pending", "not_required", "removed", "missing", "failed"
+]
+ProposalBatchPhase = Literal["planned", "dispatched", "applying", "complete", "interrupted"]
+
+TERMINAL_PROPOSAL_STATUSES: frozenset[ProposalTaskStatus] = frozenset(
+    {"skipped", "failed", "tampered", "rejected", "applied", "interrupted"}
+)
+TERMINAL_CLEANUP_RESULTS: frozenset[ProposalCleanupResult] = frozenset(
+    {"not_required", "removed", "missing", "failed"}
+)
+
+_PROPOSAL_TASK_STATUSES = frozenset(
+    {
+        "planned",
+        "running",
+        "evaluated",
+        "skipped",
+        "failed",
+        "tampered",
+        "rejected",
+        "applied",
+        "interrupted",
+    }
+)
+_PROPOSAL_SELECTION_RESULTS = frozenset(
+    {"pending", "not_applicable", "not_selected", "selected"}
+)
+_PROPOSAL_CLEANUP_RESULTS = frozenset(
+    {"pending", "not_required", "removed", "missing", "failed"}
+)
+_PROPOSAL_BATCH_PHASES = frozenset(
+    {"planned", "dispatched", "applying", "complete", "interrupted"}
+)
+
+
+def _budget_state_from_mapping(data: Mapping[str, Any]) -> BudgetState:
+    return BudgetState(
+        evaluations=int(data.get("evaluations", 0)),
+        input_tokens=int(data.get("input_tokens", 0)),
+        output_tokens=int(data.get("output_tokens", 0)),
+        cached_input_tokens=int(data.get("cached_input_tokens", 0)),
+        cache_creation_input_tokens=int(data.get("cache_creation_input_tokens", 0)),
+        cache_read_input_tokens=int(data.get("cache_read_input_tokens", 0)),
+        reasoning_tokens=int(data.get("reasoning_tokens", 0)),
+        cost_usd=float(data.get("cost_usd", 0.0)),
+    )
+
+
+@dataclass
+class ProposalTaskRecord:
+    """Durable state for one parent-major P-by-N proposal slot.
+
+    ``budget_accounted`` and ``applied`` are explicit crash barriers.  A
+    resumed run can therefore distinguish completed evaluator work from work
+    that still needs charging, and a selected result from one already inserted
+    into the frontier.  Candidate IDs remain reserved even when the task is
+    interrupted or cleaned up.
+    """
+
+    batch_id: str
+    p: int
+    n: int
+    task_index: int
+    parent_group: int
+    mutation_index: int
+    parent_id: str
+    child_id: str
+    status: ProposalTaskStatus = "planned"
+    score_delta: float | None = None
+    selection: ProposalSelectionResult = "pending"
+    cleanup: ProposalCleanupResult = "pending"
+    budget_charge: BudgetState = field(default_factory=BudgetState)
+    budget_accounted: bool = False
+    applied: bool = False
+    detail: str | None = None
+
+    def is_terminal(self) -> bool:
+        """Return whether both execution and cleanup reached a terminal state."""
+        return (
+            self.status in TERMINAL_PROPOSAL_STATUSES
+            and self.cleanup in TERMINAL_CLEANUP_RESULTS
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "p": self.p,
+            "n": self.n,
+            "task_index": self.task_index,
+            "parent_group": self.parent_group,
+            "mutation_index": self.mutation_index,
+            "parent_id": self.parent_id,
+            "child_id": self.child_id,
+            "status": self.status,
+            "score_delta": self.score_delta,
+            "selection": self.selection,
+            "cleanup": self.cleanup,
+            "budget_charge": asdict(self.budget_charge),
+            "budget_accounted": self.budget_accounted,
+            "applied": self.applied,
+            "detail": self.detail,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ProposalTaskRecord:
+        raw_status = str(data.get("status", "planned"))
+        raw_selection = str(data.get("selection", "pending"))
+        raw_cleanup = str(data.get("cleanup", "pending"))
+        if raw_status not in _PROPOSAL_TASK_STATUSES:
+            raise ValueError(f"Invalid proposal task status: {raw_status!r}")
+        if raw_selection not in _PROPOSAL_SELECTION_RESULTS:
+            raise ValueError(f"Invalid proposal selection result: {raw_selection!r}")
+        if raw_cleanup not in _PROPOSAL_CLEANUP_RESULTS:
+            raise ValueError(f"Invalid proposal cleanup result: {raw_cleanup!r}")
+        raw_budget = data.get("budget_charge", {})
+        budget_mapping = raw_budget if isinstance(raw_budget, Mapping) else {}
+        raw_delta = data.get("score_delta")
+        return cls(
+            batch_id=str(data["batch_id"]),
+            p=int(data["p"]),
+            n=int(data["n"]),
+            task_index=int(data["task_index"]),
+            parent_group=int(data["parent_group"]),
+            mutation_index=int(data["mutation_index"]),
+            parent_id=str(data["parent_id"]),
+            child_id=str(data["child_id"]),
+            status=cast(ProposalTaskStatus, raw_status),
+            score_delta=None if raw_delta is None else float(raw_delta),
+            selection=cast(ProposalSelectionResult, raw_selection),
+            cleanup=cast(ProposalCleanupResult, raw_cleanup),
+            budget_charge=_budget_state_from_mapping(budget_mapping),
+            budget_accounted=bool(data.get("budget_accounted", False)),
+            applied=bool(data.get("applied", False)),
+            detail=None if data.get("detail") is None else str(data["detail"]),
+        )
+
+
+@dataclass
+class ProposalBatchRecord:
+    """Durable pre-dispatch plan and deterministic post-apply checkpoint."""
+
+    batch_id: str
+    generation: int
+    p: int
+    n: int
+    tasks: list[ProposalTaskRecord]
+    phase: ProposalBatchPhase = "planned"
+    budget_before_dispatch: int = 0
+    max_evaluations: int = 0
+    max_in_flight_evaluations: int = 0
+    maximum_overshoot: int = 0
+    budget_after_apply: int | None = None
+
+    def validate_plan(self) -> None:
+        """Validate the exact parent-major P-by-N shape and unique IDs."""
+        if not self.batch_id:
+            raise ValueError("Proposal batch_id cannot be empty")
+        if self.p < 1 or self.n < 1:
+            raise ValueError("Proposal batch P and N must both be at least one")
+        expected_count = self.p * self.n
+        if len(self.tasks) != expected_count:
+            raise ValueError(
+                f"Proposal batch {self.batch_id!r} has {len(self.tasks)} tasks; "
+                f"expected exactly P*N={expected_count}"
+            )
+        child_ids: set[str] = set()
+        group_parents: dict[int, str] = {}
+        for index, task in enumerate(self.tasks):
+            expected_group, expected_mutation = divmod(index, self.n)
+            if task.batch_id != self.batch_id or task.p != self.p or task.n != self.n:
+                raise ValueError(f"Task {index} does not match its proposal batch")
+            if (
+                task.task_index != index
+                or task.parent_group != expected_group
+                or task.mutation_index != expected_mutation
+            ):
+                raise ValueError(
+                    f"Task {index} is not in parent-major P-by-N order "
+                    f"(expected group={expected_group}, mutation={expected_mutation})"
+                )
+            if not task.child_id:
+                raise ValueError(f"Task {index} has an empty child_id")
+            if task.child_id in child_ids:
+                raise ValueError(f"Duplicate planned child_id: {task.child_id}")
+            child_ids.add(task.child_id)
+            previous_parent = group_parents.setdefault(task.parent_group, task.parent_id)
+            if previous_parent != task.parent_id:
+                raise ValueError(
+                    f"Parent group {task.parent_group} contains different parents"
+                )
+
+    def all_tasks_terminal(self) -> bool:
+        return all(task.is_terminal() for task in self.tasks)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "generation": self.generation,
+            "p": self.p,
+            "n": self.n,
+            "phase": self.phase,
+            "budget_before_dispatch": self.budget_before_dispatch,
+            "max_evaluations": self.max_evaluations,
+            "max_in_flight_evaluations": self.max_in_flight_evaluations,
+            "maximum_overshoot": self.maximum_overshoot,
+            "budget_after_apply": self.budget_after_apply,
+            "tasks": [task.to_dict() for task in self.tasks],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ProposalBatchRecord:
+        raw_phase = str(data.get("phase", "planned"))
+        if raw_phase not in _PROPOSAL_BATCH_PHASES:
+            raise ValueError(f"Invalid proposal batch phase: {raw_phase!r}")
+        raw_tasks = data.get("tasks", [])
+        if not isinstance(raw_tasks, list):
+            raise ValueError("Proposal batch tasks must be a list")
+        tasks: list[ProposalTaskRecord] = []
+        for raw_task in raw_tasks:
+            if not isinstance(raw_task, Mapping):
+                raise ValueError("Proposal batch task must be an object")
+            tasks.append(ProposalTaskRecord.from_dict(raw_task))
+        raw_after = data.get("budget_after_apply")
+        batch = cls(
+            batch_id=str(data["batch_id"]),
+            generation=int(data["generation"]),
+            p=int(data["p"]),
+            n=int(data["n"]),
+            tasks=tasks,
+            phase=cast(ProposalBatchPhase, raw_phase),
+            budget_before_dispatch=int(data.get("budget_before_dispatch", 0)),
+            max_evaluations=int(data.get("max_evaluations", 0)),
+            max_in_flight_evaluations=int(
+                data.get("max_in_flight_evaluations", 0)
+            ),
+            maximum_overshoot=int(data.get("maximum_overshoot", 0)),
+            budget_after_apply=None if raw_after is None else int(raw_after),
+        )
+        batch.validate_plan()
+        return batch
+
+
+@dataclass(frozen=True)
+class BatchDispatchDecision:
+    """Pre-dispatch budget decision and the batch's explicit overshoot bound."""
+
+    allowed: bool
+    evaluations_before: int
+    max_evaluations: int
+    max_in_flight_evaluations: int
+    maximum_overshoot: int
+
+
+@dataclass(frozen=True)
+class BatchReconciliation:
+    """Audit summary produced while terminalizing an interrupted batch."""
+
+    batch_id: str
+    reserved_child_ids: tuple[str, ...]
+    applied_child_ids: tuple[str, ...]
+    accounted_child_ids: tuple[str, ...]
+    cleaned_child_ids: tuple[str, ...]
+    missing_child_ids: tuple[str, ...]
+    cleanup_failed_child_ids: tuple[str, ...]
 
 
 class EvaluationCache:
@@ -126,11 +408,23 @@ class EvolutionState:
     # a GEPA-style single pickled artifact: HELIX still persists worktrees,
     # evaluations, lineage, and state as separate artifacts.
     resume_semantics: dict[str, Any] = field(default_factory=dict)
+    # Step 7 parallel-proposal ledger.  Every planned P*N child id remains
+    # here permanently, including skipped and interrupted slots, so resume
+    # never rewinds into an already-issued id or infers completion from only
+    # the first worker/artifact in a batch.
+    proposal_batches: list[ProposalBatchRecord] = field(default_factory=list)
+    # JSON-safe runtime scheduler checkpoint.  Kept separate from
+    # ``resume_semantics`` because it is evolving execution position, not a
+    # compatibility knob.  Legacy states default to an empty mapping.
+    scheduler_state: dict[str, Any] = field(default_factory=dict)
     # GEPA parity (audit-rng-state-persist D1): persisted schema version.
     # Mirrors GEPA core/state.py:182 / class-var :153.  Bumped when the
     # serialized schema changes; ``load_state`` migrates older payloads by
     # supplying defaults for any missing fields.
     schema_version: int = SCHEMA_VERSION
+
+
+CheckpointSaver = Callable[[EvolutionState], None]
 
 
 _STATE_FILENAME = "state.json"
@@ -150,6 +444,505 @@ def _state_path(base_dir: Path) -> Path:
 
 def _eval_cache_path(base_dir: Path) -> Path:
     return base_dir / _STATE_DIR / _EVAL_CACHE_FILENAME
+
+
+def _persist_checkpoint(
+    state: EvolutionState,
+    base_dir: Path,
+    saver: CheckpointSaver | None,
+) -> None:
+    """Persist through evolution's cache-aware wrapper when one is supplied."""
+    if saver is None:
+        save_state(state, base_dir)
+    else:
+        saver(state)
+
+
+def _to_json_safe(value: Any) -> Any:
+    """Normalize tuples/mappings into JSON-native scheduler state."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (tuple, list)):
+        return [_to_json_safe(item) for item in value]
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("Scheduler state mapping keys must be strings")
+            normalized[key] = _to_json_safe(item)
+        return normalized
+    raise TypeError(f"Scheduler state value is not JSON-safe: {type(value).__name__}")
+
+
+def encode_rng_state(rng_state: object) -> list[Any]:
+    """Encode ``random.Random.getstate()`` output for ``state.json``."""
+    normalized = _to_json_safe(rng_state)
+    if not isinstance(normalized, list):
+        raise TypeError("RNG state must be tuple/list shaped")
+    return normalized
+
+
+def _lists_to_tuples(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_lists_to_tuples(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _lists_to_tuples(item) for key, item in value.items()}
+    return value
+
+
+def decode_rng_state(encoded: Sequence[Any]) -> tuple[Any, ...]:
+    """Reconstruct the tuple shape required by ``random.Random.setstate``."""
+    restored = _lists_to_tuples(list(encoded))
+    if not isinstance(restored, tuple):
+        raise TypeError("Encoded RNG state must restore to a tuple")
+    return restored
+
+
+def build_scheduler_checkpoint(
+    *,
+    frontier_rng_state: object,
+    sampler_rng_state: object,
+    sampler_epoch: int,
+    sampler_shuffled_ids: Sequence[Any],
+    sampler_last_trainset_size: int,
+    sampler_id_frequencies: Mapping[str, int] | None = None,
+    sampler_fallback: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the JSON-native frontier/sampler checkpoint runtime restores.
+
+    ``sampler_fallback`` can contain the inner epoch sampler's equivalent
+    fields when stratified sampling delegated to its fallback path.
+    """
+    if sampler_epoch < -1:
+        raise ValueError("sampler_epoch cannot be less than -1")
+    if sampler_last_trainset_size < 0:
+        raise ValueError("sampler_last_trainset_size cannot be negative")
+    checkpoint = {
+        "frontier_rng_state": encode_rng_state(frontier_rng_state),
+        "sampler": {
+            "rng_state": encode_rng_state(sampler_rng_state),
+            "epoch": sampler_epoch,
+            "shuffled_ids": list(sampler_shuffled_ids),
+            "last_trainset_size": sampler_last_trainset_size,
+            "id_frequencies": dict(sampler_id_frequencies or {}),
+            "fallback": dict(sampler_fallback or {}),
+        },
+    }
+    normalized = _to_json_safe(checkpoint)
+    assert isinstance(normalized, dict)
+    return normalized
+
+
+def checkpoint_scheduler_state(
+    state: EvolutionState,
+    base_dir: Path,
+    scheduler_state: Mapping[str, Any],
+    *,
+    saver: CheckpointSaver | None = None,
+) -> None:
+    """Persist current RNG/sampler position through the cache-aware saver."""
+    normalized = _to_json_safe(scheduler_state)
+    if not isinstance(normalized, dict):
+        raise TypeError("scheduler_state must be an object")
+    state.scheduler_state = normalized
+    _persist_checkpoint(state, base_dir, saver)
+
+
+def check_batch_dispatch_budget(
+    state: EvolutionState,
+    *,
+    max_evaluations: int,
+    max_in_flight_evaluations: int,
+) -> BatchDispatchDecision:
+    """Check the budget once before dispatch and state the overshoot bound.
+
+    A batch may start only while the current evaluation count is below a
+    positive cap.  Once started, every completed in-flight call is accounted,
+    even if that crosses the cap.  Consequently the permitted overshoot is
+    bounded by ``max(0, before + max_in_flight_evaluations - cap)``.  A
+    non-positive cap is unlimited and reports no finite overshoot.
+    """
+    if max_in_flight_evaluations < 0:
+        raise ValueError("max_in_flight_evaluations cannot be negative")
+    before = state.budget.evaluations
+    allowed = max_evaluations <= 0 or before < max_evaluations
+    overshoot = (
+        0
+        if max_evaluations <= 0
+        else max(0, before + max_in_flight_evaluations - max_evaluations)
+    )
+    return BatchDispatchDecision(
+        allowed=allowed,
+        evaluations_before=before,
+        max_evaluations=max_evaluations,
+        max_in_flight_evaluations=max_in_flight_evaluations,
+        maximum_overshoot=overshoot,
+    )
+
+
+def get_proposal_batch(
+    state: EvolutionState, batch_id: str
+) -> ProposalBatchRecord | None:
+    """Return one persisted batch by id, or ``None`` when it is new."""
+    return next(
+        (batch for batch in state.proposal_batches if batch.batch_id == batch_id),
+        None,
+    )
+
+
+def reserved_candidate_ids(state: EvolutionState) -> set[str]:
+    """Return frontier and planned child IDs that may never be issued again."""
+    reserved = set(state.frontier)
+    reserved.update(
+        task.child_id
+        for batch in state.proposal_batches
+        for task in batch.tasks
+    )
+    return reserved
+
+
+def _batch_plan_signature(batch: ProposalBatchRecord) -> tuple[Any, ...]:
+    return (
+        batch.batch_id,
+        batch.generation,
+        batch.p,
+        batch.n,
+        tuple(
+            (
+                task.task_index,
+                task.parent_group,
+                task.mutation_index,
+                task.parent_id,
+                task.child_id,
+            )
+            for task in batch.tasks
+        ),
+    )
+
+
+def checkpoint_batch_before_dispatch(
+    state: EvolutionState,
+    base_dir: Path,
+    batch: ProposalBatchRecord,
+    *,
+    max_evaluations: int = 0,
+    max_in_flight_evaluations: int = 0,
+    saver: CheckpointSaver | None = None,
+) -> ProposalBatchRecord:
+    """Persist a complete P*N plan before any worker is submitted.
+
+    Repeating the call with the same batch plan is idempotent.  Reusing a
+    batch id for a different plan, or any child id reserved by another batch,
+    is rejected before state is changed.
+    """
+    batch.validate_plan()
+    existing = get_proposal_batch(state, batch.batch_id)
+    if existing is not None:
+        if _batch_plan_signature(existing) != _batch_plan_signature(batch):
+            raise ValueError(f"Proposal batch id collision: {batch.batch_id}")
+        return existing
+
+    decision = check_batch_dispatch_budget(
+        state,
+        max_evaluations=max_evaluations,
+        max_in_flight_evaluations=max_in_flight_evaluations,
+    )
+    if not decision.allowed:
+        raise ValueError(
+            f"Cannot dispatch proposal batch {batch.batch_id!r}: evaluation "
+            f"budget {decision.evaluations_before}/{decision.max_evaluations} "
+            "is exhausted"
+        )
+
+    already_reserved = reserved_candidate_ids(state)
+    collisions = sorted(
+        task.child_id for task in batch.tasks if task.child_id in already_reserved
+    )
+    if collisions:
+        raise ValueError(
+            "Planned proposal child IDs are already reserved: " + ", ".join(collisions)
+        )
+
+    batch.phase = "dispatched"
+    batch.budget_before_dispatch = decision.evaluations_before
+    batch.max_evaluations = decision.max_evaluations
+    batch.max_in_flight_evaluations = decision.max_in_flight_evaluations
+    batch.maximum_overshoot = decision.maximum_overshoot
+    state.proposal_batches.append(batch)
+    _persist_checkpoint(state, base_dir, saver)
+    return batch
+
+
+_ALLOWED_TASK_TRANSITIONS: dict[ProposalTaskStatus, frozenset[ProposalTaskStatus]] = {
+    "planned": frozenset(
+        {
+            "planned",
+            "running",
+            "evaluated",
+            "skipped",
+            "failed",
+            "tampered",
+            "rejected",
+            "interrupted",
+        }
+    ),
+    "running": frozenset(
+        {
+            "running",
+            "evaluated",
+            "skipped",
+            "failed",
+            "tampered",
+            "rejected",
+            "interrupted",
+        }
+    ),
+    "evaluated": frozenset(
+        {"evaluated", "rejected", "applied", "interrupted"}
+    ),
+    "skipped": frozenset({"skipped"}),
+    "failed": frozenset({"failed"}),
+    "tampered": frozenset({"tampered"}),
+    "rejected": frozenset({"rejected"}),
+    "applied": frozenset({"applied"}),
+    "interrupted": frozenset({"interrupted"}),
+}
+
+
+def _task_by_index(batch: ProposalBatchRecord, task_index: int) -> ProposalTaskRecord:
+    if task_index < 0 or task_index >= len(batch.tasks):
+        raise IndexError(
+            f"Proposal task index {task_index} is outside batch {batch.batch_id!r}"
+        )
+    return batch.tasks[task_index]
+
+
+def checkpoint_batch_task(
+    state: EvolutionState,
+    base_dir: Path,
+    *,
+    batch_id: str,
+    task_index: int,
+    status: ProposalTaskStatus | None = None,
+    score_delta: float | None = None,
+    selection: ProposalSelectionResult | None = None,
+    cleanup: ProposalCleanupResult | None = None,
+    budget_charge: BudgetState | None = None,
+    budget_accounted: bool | None = None,
+    applied: bool | None = None,
+    detail: str | None = None,
+    expected_status: ProposalTaskStatus | None = None,
+    saver: CheckpointSaver | None = None,
+) -> ProposalTaskRecord:
+    """Atomically checkpoint one ordered result/apply transition.
+
+    Evolution remains the authoritative charger: it first calls the relevant
+    source-tagged ``budget_api.charge_*`` helper, then passes the already-
+    computed delta here with ``budget_accounted=True``.  This function never
+    mutates the global budget.  Retrying an identical accounted marker is a
+    no-op; retrying with a different charge is rejected.
+    """
+    batch = get_proposal_batch(state, batch_id)
+    if batch is None:
+        raise KeyError(f"Unknown proposal batch: {batch_id}")
+    task = _task_by_index(batch, task_index)
+    if expected_status is not None and task.status != expected_status:
+        raise ValueError(
+            f"Proposal task {batch_id}/{task_index} is {task.status!r}; "
+            f"expected {expected_status!r}"
+        )
+    next_status = task.status if status is None else status
+    if next_status not in _ALLOWED_TASK_TRANSITIONS[task.status]:
+        raise ValueError(
+            f"Invalid proposal task transition: {task.status!r} -> {next_status!r}"
+        )
+    if applied is True and next_status != "applied":
+        raise ValueError("A task can be marked applied only with status='applied'")
+    if next_status == "applied" and selection not in (None, "selected"):
+        raise ValueError("An applied proposal task must have selection='selected'")
+
+    if budget_charge is not None:
+        if task.budget_accounted and task.budget_charge != budget_charge:
+            raise ValueError(
+                f"Proposal task {batch_id}/{task_index} was already charged "
+                "with a different budget delta"
+            )
+        task.budget_charge = budget_charge
+    if budget_accounted is False and task.budget_accounted:
+        raise ValueError(
+            f"Proposal task {batch_id}/{task_index} is already budget-accounted"
+        )
+    if budget_accounted is True:
+        task.budget_accounted = True
+
+    task.status = next_status
+    if score_delta is not None:
+        task.score_delta = score_delta
+    if selection is not None:
+        task.selection = selection
+    if cleanup is not None:
+        task.cleanup = cleanup
+    if applied is not None:
+        task.applied = applied
+    if next_status == "applied":
+        task.selection = "selected"
+        task.cleanup = "not_required" if cleanup is None else cleanup
+        task.applied = True
+    elif next_status in {"skipped", "failed", "tampered"} and selection is None:
+        task.selection = "not_applicable"
+    elif next_status == "rejected" and selection is None:
+        task.selection = "not_selected"
+    if detail is not None:
+        task.detail = detail
+    if batch.phase == "dispatched" and next_status not in {"planned", "running"}:
+        batch.phase = "applying"
+    _persist_checkpoint(state, base_dir, saver)
+    return task
+
+
+def checkpoint_batch_after_apply(
+    state: EvolutionState,
+    base_dir: Path,
+    *,
+    batch_id: str,
+    saver: CheckpointSaver | None = None,
+) -> ProposalBatchRecord:
+    """Persist the post-apply barrier after every planned slot is terminal."""
+    batch = get_proposal_batch(state, batch_id)
+    if batch is None:
+        raise KeyError(f"Unknown proposal batch: {batch_id}")
+    nonterminal = [task.task_index for task in batch.tasks if not task.is_terminal()]
+    if nonterminal:
+        raise ValueError(
+            f"Cannot complete proposal batch {batch_id!r}; nonterminal slots: "
+            + ", ".join(str(index) for index in nonterminal)
+        )
+    cleanup_failed = [
+        task.task_index for task in batch.tasks if task.cleanup == "failed"
+    ]
+    if cleanup_failed:
+        raise ValueError(
+            f"Cannot complete proposal batch {batch_id!r}; cleanup failed for slots: "
+            + ", ".join(str(index) for index in cleanup_failed)
+        )
+    actual_in_flight = state.budget.evaluations - batch.budget_before_dispatch
+    if actual_in_flight < 0:
+        raise ValueError(
+            f"Proposal batch {batch_id!r} ended below its pre-dispatch budget"
+        )
+    if (
+        batch.max_in_flight_evaluations > 0
+        and actual_in_flight > batch.max_in_flight_evaluations
+    ):
+        raise ValueError(
+            f"Proposal batch {batch_id!r} accounted {actual_in_flight} evaluations; "
+            f"declared in-flight bound is {batch.max_in_flight_evaluations}"
+        )
+    actual_overshoot = (
+        0
+        if batch.max_evaluations <= 0
+        else max(0, state.budget.evaluations - batch.max_evaluations)
+    )
+    if actual_overshoot > batch.maximum_overshoot:
+        raise ValueError(
+            f"Proposal batch {batch_id!r} overshot by {actual_overshoot}; "
+            f"checkpoint bound is {batch.maximum_overshoot}"
+        )
+    batch.phase = "complete"
+    batch.budget_after_apply = state.budget.evaluations
+    _persist_checkpoint(state, base_dir, saver)
+    return batch
+
+
+def reconcile_interrupted_batches(
+    state: EvolutionState,
+    base_dir: Path,
+    *,
+    worktrees_dir: Path,
+    cleanup_worktree: Callable[[str, Path], bool],
+    saver: CheckpointSaver | None = None,
+) -> list[BatchReconciliation]:
+    """Terminalize every slot in every interrupted persisted batch.
+
+    Applied/frontier children are preserved and marked applied, preventing a
+    second frontier insertion.  Every other planned worktree is passed to the
+    caller's Git-aware cleanup callback.  Budget facts are never changed:
+    already-accounted completed work remains charged, while unaccounted work
+    is not guessed at.  All child IDs remain reserved through the ledger.
+    """
+    reconciled: list[BatchReconciliation] = []
+    changed = False
+    for batch in state.proposal_batches:
+        retry_failed_cleanup = any(
+            task.cleanup == "failed" and not task.applied for task in batch.tasks
+        )
+        if batch.phase == "complete" or (
+            batch.phase == "interrupted" and not retry_failed_cleanup
+        ):
+            continue
+        reserved_ids: list[str] = []
+        applied_ids: list[str] = []
+        accounted_ids: list[str] = []
+        cleaned_ids: list[str] = []
+        missing_ids: list[str] = []
+        failed_ids: list[str] = []
+        for task in batch.tasks:
+            reserved_ids.append(task.child_id)
+            if task.budget_accounted:
+                accounted_ids.append(task.child_id)
+
+            if task.applied or task.status == "applied" or task.child_id in state.frontier:
+                task.status = "applied"
+                task.selection = "selected"
+                task.cleanup = "not_required"
+                task.applied = True
+                applied_ids.append(task.child_id)
+                continue
+
+            worktree_path = worktrees_dir / task.child_id
+            if not worktree_path.exists() and task.cleanup in {"removed", "missing"}:
+                if task.cleanup == "removed":
+                    cleaned_ids.append(task.child_id)
+                else:
+                    missing_ids.append(task.child_id)
+                continue
+            if worktree_path.exists():
+                try:
+                    removed = cleanup_worktree(task.child_id, worktree_path)
+                except Exception as exc:
+                    removed = False
+                    task.detail = f"Interrupted-batch cleanup failed: {exc}"
+                if removed and not worktree_path.exists():
+                    task.cleanup = "removed"
+                    cleaned_ids.append(task.child_id)
+                else:
+                    task.cleanup = "failed"
+                    failed_ids.append(task.child_id)
+            else:
+                task.cleanup = "missing"
+                missing_ids.append(task.child_id)
+            task.status = "interrupted"
+            if task.selection == "pending":
+                task.selection = "not_applicable"
+            task.applied = False
+
+        batch.phase = "interrupted"
+        batch.budget_after_apply = state.budget.evaluations
+        reconciled.append(
+            BatchReconciliation(
+                batch_id=batch.batch_id,
+                reserved_child_ids=tuple(reserved_ids),
+                applied_child_ids=tuple(applied_ids),
+                accounted_child_ids=tuple(accounted_ids),
+                cleaned_child_ids=tuple(cleaned_ids),
+                missing_child_ids=tuple(missing_ids),
+                cleanup_failed_child_ids=tuple(failed_ids),
+            )
+        )
+        changed = True
+    if changed:
+        _persist_checkpoint(state, base_dir, saver)
+    return reconciled
 
 
 def save_state(state: EvolutionState, base_dir: Path) -> None:
@@ -177,6 +970,8 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "active_frontier": state.active_frontier,
         "frontier_type": state.frontier_type,
         "resume_semantics": state.resume_semantics,
+        "proposal_batches": [batch.to_dict() for batch in state.proposal_batches],
+        "scheduler_state": _to_json_safe(state.scheduler_state),
     }
 
     # Atomic write: write to tmp file in same directory, then rename
@@ -214,17 +1009,23 @@ def load_state(base_dir: Path) -> EvolutionState | None:
             f"version {SCHEMA_VERSION}; upgrade HELIX or use a different run dir."
         )
 
-    budget_data = data.get("budget", {})
-    budget = BudgetState(
-        evaluations=budget_data.get("evaluations", 0),
-        input_tokens=budget_data.get("input_tokens", 0),
-        output_tokens=budget_data.get("output_tokens", 0),
-        cached_input_tokens=budget_data.get("cached_input_tokens", 0),
-        cache_creation_input_tokens=budget_data.get("cache_creation_input_tokens", 0),
-        cache_read_input_tokens=budget_data.get("cache_read_input_tokens", 0),
-        reasoning_tokens=budget_data.get("reasoning_tokens", 0),
-        cost_usd=budget_data.get("cost_usd", 0.0),
-    )
+    raw_budget = data.get("budget", {})
+    budget_data = raw_budget if isinstance(raw_budget, Mapping) else {}
+    budget = _budget_state_from_mapping(budget_data)
+
+    raw_batches = data.get("proposal_batches", [])
+    if not isinstance(raw_batches, list):
+        raise ValueError("state.json proposal_batches must be a list")
+    proposal_batches: list[ProposalBatchRecord] = []
+    for raw_batch in raw_batches:
+        if not isinstance(raw_batch, Mapping):
+            raise ValueError("state.json proposal batch must be an object")
+        proposal_batches.append(ProposalBatchRecord.from_dict(raw_batch))
+    raw_scheduler_state = data.get("scheduler_state", {})
+    if not isinstance(raw_scheduler_state, Mapping):
+        raise ValueError("state.json scheduler_state must be an object")
+    normalized_scheduler_state = _to_json_safe(raw_scheduler_state)
+    assert isinstance(normalized_scheduler_state, dict)
 
     # Migrate legacy frontier_type: default to "instance" (HELIX's
     # historical single-axis behaviour) for states written before the
@@ -253,6 +1054,8 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         active_frontier=data.get("active_frontier", {}),
         frontier_type=frontier_type,
         resume_semantics=data.get("resume_semantics", {}),
+        proposal_batches=proposal_batches,
+        scheduler_state=normalized_scheduler_state,
         schema_version=SCHEMA_VERSION,
     )
 

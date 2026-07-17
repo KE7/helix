@@ -16,7 +16,18 @@ import pytest
 
 from helix.exceptions import RateLimitError, ResumeIncompatibleError
 from helix.mutator import MutationError, invoke_claude_code, _looks_like_rate_limit
-from helix.state import BudgetState, EvolutionState, load_state, save_state
+from helix.state import (
+    BudgetState,
+    EvolutionState,
+    ProposalBatchRecord,
+    ProposalTaskRecord,
+    checkpoint_batch_before_dispatch,
+    checkpoint_batch_task,
+    load_state,
+    reconcile_interrupted_batches,
+    reserved_candidate_ids,
+    save_state,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +45,29 @@ def make_state(
         instance_scores={},
         budget=BudgetState(evaluations=5),
         config_hash="abc123",
+    )
+
+
+def make_proposal_batch() -> ProposalBatchRecord:
+    batch_id = "g3-b0"
+    return ProposalBatchRecord(
+        batch_id=batch_id,
+        generation=3,
+        p=2,
+        n=2,
+        tasks=[
+            ProposalTaskRecord(
+                batch_id=batch_id,
+                p=2,
+                n=2,
+                task_index=index,
+                parent_group=index // 2,
+                mutation_index=index % 2,
+                parent_id="g1-s1" if index < 2 else "g2-s2",
+                child_id=f"g3-s{10 + index}",
+            )
+            for index in range(4)
+        ],
     )
 
 
@@ -121,6 +155,157 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
     # The seed was evaluated successfully so it should be in the frontier
     assert "g0-s0" in loaded.frontier, "Seed should be in frontier after successful seed eval"
 
+
+def test_interrupted_batch_reconciles_every_planned_id_without_rewind(
+    tmp_path: Path,
+) -> None:
+    """Resume preserves applied/charged facts and cleans every other slot."""
+    state = EvolutionState(
+        generation=3,
+        frontier=["g0-s0", "g1-s1", "g2-s2"],
+        instance_scores={},
+        budget=BudgetState(evaluations=15),
+        config_hash="h",
+        mutation_counter=13,
+    )
+    batch = checkpoint_batch_before_dispatch(state, tmp_path, make_proposal_batch())
+    worktrees_dir = tmp_path / ".helix" / "worktrees"
+    worktrees_dir.mkdir(parents=True)
+    for task in batch.tasks[:3]:
+        (worktrees_dir / task.child_id).mkdir()
+
+    # Crash windows: slot 0 reached frontier before its task marker; slot 1
+    # was charged and evaluated; slots 2/3 were running/not started.
+    state.frontier.append(batch.tasks[0].child_id)
+    checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=1,
+        status="evaluated",
+        budget_charge=BudgetState(evaluations=4),
+        budget_accounted=True,
+    )
+    checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=2,
+        status="running",
+    )
+    removed: list[str] = []
+    saver_calls = 0
+
+    def cleanup(child_id: str, path: Path) -> bool:
+        path.rmdir()
+        removed.append(child_id)
+        return True
+
+    def saver(value: EvolutionState) -> None:
+        nonlocal saver_calls
+        saver_calls += 1
+        save_state(value, tmp_path)
+
+    reports = reconcile_interrupted_batches(
+        state,
+        tmp_path,
+        worktrees_dir=worktrees_dir,
+        cleanup_worktree=cleanup,
+        saver=saver,
+    )
+
+    assert len(reports) == 1
+    report = reports[0]
+    assert report.reserved_child_ids == tuple(task.child_id for task in batch.tasks)
+    assert report.applied_child_ids == (batch.tasks[0].child_id,)
+    assert report.accounted_child_ids == (batch.tasks[1].child_id,)
+    assert report.cleaned_child_ids == (
+        batch.tasks[1].child_id,
+        batch.tasks[2].child_id,
+    )
+    assert report.missing_child_ids == (batch.tasks[3].child_id,)
+    assert removed == [batch.tasks[1].child_id, batch.tasks[2].child_id]
+    assert (worktrees_dir / batch.tasks[0].child_id).exists()
+    assert batch.phase == "interrupted"
+    assert all(task.is_terminal() for task in batch.tasks)
+    assert state.mutation_counter == 13
+    assert state.budget.evaluations == 15
+    assert set(task.child_id for task in batch.tasks) <= reserved_candidate_ids(state)
+    assert saver_calls == 1
+
+    # Reconciliation itself is idempotent and never re-cleans or re-charges.
+    assert reconcile_interrupted_batches(
+        state,
+        tmp_path,
+        worktrees_dir=worktrees_dir,
+        cleanup_worktree=cleanup,
+        saver=saver,
+    ) == []
+    assert saver_calls == 1
+
+
+def test_interrupted_cleanup_is_verified_and_retryable(tmp_path: Path) -> None:
+    state = EvolutionState(
+        generation=1,
+        frontier=["g0-s0"],
+        instance_scores={},
+        budget=BudgetState(),
+        config_hash="h",
+        mutation_counter=1,
+    )
+    batch_id = "g1-b0"
+    batch = ProposalBatchRecord(
+        batch_id=batch_id,
+        generation=1,
+        p=1,
+        n=1,
+        tasks=[
+            ProposalTaskRecord(
+                batch_id=batch_id,
+                p=1,
+                n=1,
+                task_index=0,
+                parent_group=0,
+                mutation_index=0,
+                parent_id="g0-s0",
+                child_id="g1-s1",
+            )
+        ],
+    )
+    checkpoint_batch_before_dispatch(state, tmp_path, batch)
+    worktrees_dir = tmp_path / ".helix" / "worktrees"
+    child_path = worktrees_dir / "g1-s1"
+    child_path.mkdir(parents=True)
+
+    first = reconcile_interrupted_batches(
+        state,
+        tmp_path,
+        worktrees_dir=worktrees_dir,
+        cleanup_worktree=lambda _child_id, _path: True,
+    )
+    assert first[0].cleanup_failed_child_ids == ("g1-s1",)
+    assert child_path.exists()
+    assert batch.tasks[0].cleanup == "failed"
+
+    def remove(_child_id: str, path: Path) -> bool:
+        path.rmdir()
+        return True
+
+    second = reconcile_interrupted_batches(
+        state,
+        tmp_path,
+        worktrees_dir=worktrees_dir,
+        cleanup_worktree=remove,
+    )
+    assert second[0].cleaned_child_ids == ("g1-s1",)
+    assert not child_path.exists()
+    assert batch.tasks[0].cleanup == "removed"
+    assert reconcile_interrupted_batches(
+        state,
+        tmp_path,
+        worktrees_dir=worktrees_dir,
+        cleanup_worktree=remove,
+    ) == []
 
 # ---------------------------------------------------------------------------
 # test_rate_limit_triggers_clean_exit

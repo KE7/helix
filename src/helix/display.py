@@ -14,7 +14,7 @@ from rich.table import Table
 
 if TYPE_CHECKING:
     from helix.population import EvalResult, ParetoFrontier
-    from helix.state import BudgetState
+    from helix.state import BudgetState, ProposalBatchRecord
     from helix.config import EvolutionConfig
 
 
@@ -113,6 +113,7 @@ class HelixPhase(Enum):
     MERGE = "Merging candidates"
     PARETO_UPDATE = "Updating Pareto frontier"
     CLEANUP = "Cleaning up dominated candidates"
+    PROPOSAL_BATCH = "Applying proposal batch"
 
 
 # Module-level console that persists across calls
@@ -393,6 +394,72 @@ def render_generation(
         border_style="blue",
     )
     console.print(panel)
+
+
+def render_proposal_batch_table(
+    batch: "ProposalBatchRecord",
+    *,
+    require_terminal: bool = True,
+) -> Table:
+    """Build a parent-major per-slot batch summary table.
+
+    Completed batch rendering is deliberately strict: by default a missing
+    terminal status or cleanup result raises rather than silently omitting the
+    slot.  Set ``require_terminal=False`` only for a live/in-progress view.
+    """
+    batch.validate_plan()
+    if require_terminal:
+        nonterminal = [task.task_index for task in batch.tasks if not task.is_terminal()]
+        if nonterminal:
+            raise ValueError(
+                f"Cannot render completed proposal batch {batch.batch_id!r}; "
+                "nonterminal slots: "
+                + ", ".join(str(index) for index in nonterminal)
+            )
+
+    table = Table(
+        title=(
+            f"Proposal Batch {batch.batch_id} "
+            f"({batch.p}×{batch.n}, {len(batch.tasks)} slots)"
+        ),
+        show_header=True,
+        header_style="bold magenta",
+        show_lines=True,
+    )
+    table.add_column("Slot", justify="right", no_wrap=True)
+    table.add_column("Parent", style="cyan", no_wrap=True)
+    table.add_column("Child", style="cyan", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Δ", justify="right", no_wrap=True)
+    table.add_column("Selection", no_wrap=True)
+    table.add_column("Cleanup", no_wrap=True)
+
+    status_styles = {
+        "applied": "green bold",
+        "rejected": "yellow",
+        "skipped": "yellow",
+        "failed": "red bold",
+        "tampered": "red bold",
+        "interrupted": "red",
+    }
+    for task in batch.tasks:
+        status_style = status_styles.get(task.status, "dim")
+        delta = "—" if task.score_delta is None else f"{task.score_delta:+.4f}"
+        table.add_row(
+            f"{task.task_index} ({task.parent_group},{task.mutation_index})",
+            task.parent_id,
+            task.child_id,
+            f"[{status_style}]{task.status}[/{status_style}]",
+            delta,
+            task.selection,
+            task.cleanup,
+        )
+    return table
+
+
+def render_proposal_batch(batch: "ProposalBatchRecord") -> None:
+    """Print a terminal summary containing every planned proposal slot."""
+    console.print(render_proposal_batch_table(batch))
 
 
 def render_frontier_table(
