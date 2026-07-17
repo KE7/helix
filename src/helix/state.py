@@ -33,6 +33,7 @@ class BudgetState:
     examples evaluated; single-task/no-example paths add 0/1
     (cached=0, uncached evaluator call=1 because no per-example ids exist).
     """
+
     evaluations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -60,7 +61,9 @@ ProposalSelectionResult = Literal[
 ProposalCleanupResult = Literal[
     "pending", "not_required", "removed", "missing", "failed"
 ]
-ProposalBatchPhase = Literal["planned", "dispatched", "applying", "complete", "interrupted"]
+ProposalBatchPhase = Literal[
+    "planned", "dispatched", "applying", "complete", "interrupted"
+]
 
 TERMINAL_PROPOSAL_STATUSES: frozenset[ProposalTaskStatus] = frozenset(
     {"skipped", "failed", "tampered", "rejected", "applied", "interrupted"}
@@ -249,7 +252,9 @@ class ProposalBatchRecord:
             if task.child_id in child_ids:
                 raise ValueError(f"Duplicate planned child_id: {task.child_id}")
             child_ids.add(task.child_id)
-            previous_parent = group_parents.setdefault(task.parent_group, task.parent_id)
+            previous_parent = group_parents.setdefault(
+                task.parent_group, task.parent_id
+            )
             if previous_parent != task.parent_id:
                 raise ValueError(
                     f"Parent group {task.parent_group} contains different parents"
@@ -310,9 +315,7 @@ class ProposalBatchRecord:
                 else None
             ),
             max_evaluations=int(data.get("max_evaluations", 0)),
-            max_in_flight_evaluations=int(
-                data.get("max_in_flight_evaluations", 0)
-            ),
+            max_in_flight_evaluations=int(data.get("max_in_flight_evaluations", 0)),
             maximum_overshoot=int(data.get("maximum_overshoot", 0)),
             budget_after_apply=None if raw_after is None else int(raw_after),
         )
@@ -374,9 +377,12 @@ class EvolutionState:
     Tracks current generation, Pareto frontier, scores, budgets, and
     operation counters. Serialized to .helix/state.json for resumption.
     """
+
     generation: int
     frontier: list[str]
-    instance_scores: dict[str, Any]  # dict[str, dict[str, float]] — candidate_id -> instance -> score
+    instance_scores: dict[
+        str, Any
+    ]  # dict[str, dict[str, float]] — candidate_id -> instance -> score
     budget: BudgetState
     config_hash: str
     mutation_counter: int = 0
@@ -614,9 +620,7 @@ def reserved_candidate_ids(state: EvolutionState) -> set[str]:
     """Return frontier and planned child IDs that may never be issued again."""
     reserved = set(state.frontier)
     reserved.update(
-        task.child_id
-        for batch in state.proposal_batches
-        for task in batch.tasks
+        task.child_id for batch in state.proposal_batches for task in batch.tasks
     )
     return reserved
 
@@ -718,9 +722,7 @@ _ALLOWED_TASK_TRANSITIONS: dict[ProposalTaskStatus, frozenset[ProposalTaskStatus
             "interrupted",
         }
     ),
-    "evaluated": frozenset(
-        {"evaluated", "rejected", "applied", "interrupted"}
-    ),
+    "evaluated": frozenset({"evaluated", "rejected", "applied", "interrupted"}),
     "skipped": frozenset({"skipped"}),
     "failed": frozenset({"failed"}),
     "tampered": frozenset({"tampered"}),
@@ -846,9 +848,7 @@ def checkpoint_batch_after_apply(
             f"Cannot complete proposal batch {batch_id!r}; cleanup failed for slots: "
             + ", ".join(str(index) for index in cleanup_failed)
         )
-    unaccounted = [
-        task.task_index for task in batch.tasks if not task.budget_accounted
-    ]
+    unaccounted = [task.task_index for task in batch.tasks if not task.budget_accounted]
     if unaccounted:
         raise ValueError(
             f"Cannot complete proposal batch {batch_id!r}; unaccounted slots: "
@@ -874,9 +874,7 @@ def checkpoint_batch_after_apply(
         raise ValueError(
             f"Proposal batch {batch_id!r} ended below its pre-dispatch budget"
         )
-    recorded_in_flight = sum(
-        task.budget_charge.evaluations for task in batch.tasks
-    )
+    recorded_in_flight = sum(task.budget_charge.evaluations for task in batch.tasks)
     if recorded_in_flight != actual_in_flight:
         raise ValueError(
             f"Proposal batch {batch_id!r} recorded {recorded_in_flight} "
@@ -900,7 +898,7 @@ def checkpoint_batch_after_apply(
         raise ValueError(
             f"Proposal batch {batch_id!r} overshot by {actual_overshoot}; "
             f"checkpoint bound is {batch.maximum_overshoot}"
-    )
+        )
     batch.phase = "complete"
     batch.budget_after_apply = evaluations_at_end
     _persist_checkpoint(state, base_dir, saver)
@@ -953,7 +951,11 @@ def reconcile_interrupted_batches(
         for task in batch.tasks:
             reserved_ids.append(task.child_id)
 
-            if task.applied or task.status == "applied" or task.child_id in state.frontier:
+            if (
+                task.applied
+                or task.status == "applied"
+                or task.child_id in state.frontier
+            ):
                 task.status = "applied"
                 task.selection = "selected"
                 task.cleanup = "not_required"
@@ -1040,8 +1042,7 @@ def reconcile_interrupted_batches(
                     durable_total = getattr(durable_end, field_name)
                     baseline = getattr(before, field_name)
                     recorded = sum(
-                        getattr(task.budget_charge, field_name)
-                        for task in batch.tasks
+                        getattr(task.budget_charge, field_name) for task in batch.tasks
                     )
                     residual = durable_total - baseline - recorded
                     tolerance = 1e-12 if field_name == "cost_usd" else 0
@@ -1051,7 +1052,9 @@ def reconcile_interrupted_batches(
                             f"over-recorded {field_name}: baseline={baseline}, "
                             f"recorded={recorded}, durable_total={durable_total}"
                         )
-                    residuals[field_name] = 0 if abs(residual) <= tolerance else residual
+                    residuals[field_name] = (
+                        0 if abs(residual) <= tolerance else residual
+                    )
 
                 residual_task = unaccounted[0]
                 for field_name, residual in residuals.items():

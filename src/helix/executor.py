@@ -707,9 +707,7 @@ def run_evaluator_batch(
 
     pool_workers = min(max_workers, len(leader_indices))
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
-        futures = {
-            pool.submit(_run_leader, idx): idx for idx in leader_indices
-        }
+        futures = {pool.submit(_run_leader, idx): idx for idx in leader_indices}
         # ``future.result()`` re-raises whatever the worker raised.  Capture all
         # post-dispatch failures as positional outcomes; returning partial
         # successes is what lets the caller conserve accounting before it
@@ -763,9 +761,7 @@ def run_evaluator_batch(
             leader_result, _count = leader_outcome[leader]
             results[i] = EvalBatchResult(
                 item=item,
-                result=_clone_result_for_follower(
-                    leader_result, item.candidate.id
-                ),
+                result=_clone_result_for_follower(leader_result, item.candidate.id),
                 error=None,
                 num_actual_evaluations=0,
                 deduplicated_from=leader,

@@ -142,7 +142,6 @@ def test_ordinary_evaluator_failure_is_persisted_per_slot(tmp_path: Path) -> Non
         patch("helix.evolution.run_evaluator", side_effect=fake_run_evaluator),
         patch("helix.evolution.HelixLiveDisplay", return_value=mock_ctx),
     ):
-
         run_evolution(config, project_root, base_dir)
 
     # State and the complete ordered failure ledger remain durable.
@@ -152,7 +151,9 @@ def test_ordinary_evaluator_failure_is_persisted_per_slot(tmp_path: Path) -> Non
     loaded = load_state(project_root)
     assert loaded is not None, "Could not load state after crash"
     # The seed was evaluated successfully so it should be in the frontier
-    assert "g0-s0" in loaded.frontier, "Seed should be in frontier after successful seed eval"
+    assert "g0-s0" in loaded.frontier, (
+        "Seed should be in frontier after successful seed eval"
+    )
     assert len(loaded.proposal_batches) == 3
     assert all(batch.phase == "complete" for batch in loaded.proposal_batches)
     assert all(
@@ -244,13 +245,16 @@ def test_interrupted_batch_reconciles_every_planned_id_without_rewind(
     assert saver_calls == 1
 
     # Reconciliation itself is idempotent and never re-cleans or re-charges.
-    assert reconcile_interrupted_batches(
-        state,
-        tmp_path,
-        worktrees_dir=worktrees_dir,
-        cleanup_worktree=cleanup,
-        saver=saver,
-    ) == []
+    assert (
+        reconcile_interrupted_batches(
+            state,
+            tmp_path,
+            worktrees_dir=worktrees_dir,
+            cleanup_worktree=cleanup,
+            saver=saver,
+        )
+        == []
+    )
     assert saver_calls == 1
 
 
@@ -310,12 +314,16 @@ def test_interrupted_cleanup_is_verified_and_retryable(tmp_path: Path) -> None:
     assert second[0].cleaned_child_ids == ("g1-s1",)
     assert not child_path.exists()
     assert batch.tasks[0].cleanup == "removed"
-    assert reconcile_interrupted_batches(
-        state,
-        tmp_path,
-        worktrees_dir=worktrees_dir,
-        cleanup_worktree=remove,
-    ) == []
+    assert (
+        reconcile_interrupted_batches(
+            state,
+            tmp_path,
+            worktrees_dir=worktrees_dir,
+            cleanup_worktree=remove,
+        )
+        == []
+    )
+
 
 # ---------------------------------------------------------------------------
 # test_rate_limit_triggers_clean_exit
@@ -370,11 +378,13 @@ def test_rate_limit_in_json_result(tmp_path: Path) -> None:
 
     config = AgentConfig()
 
-    json_payload = json.dumps({
-        "is_error": True,
-        "error": "Claude is overloaded",
-        "result": "",
-    })
+    json_payload = json.dumps(
+        {
+            "is_error": True,
+            "error": "Claude is overloaded",
+            "result": "",
+        }
+    )
     fake_result = MagicMock()
     fake_result.returncode = 0
     fake_result.stderr = ""
@@ -437,7 +447,9 @@ def test_resume_skips_missing_worktrees(tmp_path: Path, capsys) -> None:
     )
 
 
-def test_resume_keyboard_interrupt_preserves_state_and_prints_clean_hint(tmp_path: Path) -> None:
+def test_resume_keyboard_interrupt_preserves_state_and_prints_clean_hint(
+    tmp_path: Path,
+) -> None:
     """CLI resume should exit cleanly on Ctrl+C and guide the user toward resume/clean."""
     from click.testing import CliRunner
     from helix.cli import cli
@@ -791,7 +803,9 @@ def test_evolve_success_prints_clean_hint(tmp_path: Path) -> None:
         'objective = "test"\n\n[evaluator]\ncommand = "echo 1"\n'
     )
 
-    with patch("helix.evolution.run_evolution", return_value=MagicMock()) as mock_evolve:
+    with patch(
+        "helix.evolution.run_evolution", return_value=MagicMock()
+    ) as mock_evolve:
         runner = CliRunner()
         result = runner.invoke(cli, ["evolve", "--dir", str(project_root)])
 
@@ -799,4 +813,6 @@ def test_evolve_success_prints_clean_hint(tmp_path: Path) -> None:
     assert "helix clean" in result.output.lower(), result.output
 
     # run_evolution should still have been called
-    assert mock_evolve.called, "run_evolution should be called even after dropping worktrees"
+    assert mock_evolve.called, (
+        "run_evolution should be called even after dropping worktrees"
+    )

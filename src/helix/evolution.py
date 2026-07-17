@@ -526,8 +526,12 @@ def _reconcile_incomplete_attempts_on_resume(
     if not incomplete_ids:
         return False
 
-    first_generation = min(_gen_from_id(candidate_id) for candidate_id in incomplete_ids)
-    first_counter = min(_proposal_counter_from_id(candidate_id) for candidate_id in incomplete_ids)
+    first_generation = min(
+        _gen_from_id(candidate_id) for candidate_id in incomplete_ids
+    )
+    first_counter = min(
+        _proposal_counter_from_id(candidate_id) for candidate_id in incomplete_ids
+    )
 
     for candidate_id in sorted(incomplete_ids):
         wt_path = worktrees_dir / candidate_id
@@ -580,9 +584,7 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
     try:
         remove_worktree(candidate)
     except Exception as exc:
-        print_warning(
-            f"Could not remove worktree for {label} {candidate.id}: {exc}"
-        )
+        print_warning(f"Could not remove worktree for {label} {candidate.id}: {exc}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,9 +691,7 @@ def _plan_pxn_tasks(
     def _select_parent() -> Candidate:
         nonlocal selected_groups, advanced_for_current_task, selected_parent
         if selected_groups > 0:
-            budget_api.advance_proposal_counter(
-                state, source="parallel_proposal"
-            )
+            budget_api.advance_proposal_counter(state, source="parallel_proposal")
             advanced_for_current_task = True
         selected_parent = frontier.select_parent()
         selected_groups += 1
@@ -700,9 +700,7 @@ def _plan_pxn_tasks(
     def _sample_minibatch() -> Sequence[str] | None:
         nonlocal sampled_tasks, advanced_for_current_task
         if sampled_tasks > 0 and not advanced_for_current_task:
-            budget_api.advance_proposal_counter(
-                state, source="parallel_proposal"
-            )
+            budget_api.advance_proposal_counter(state, source="parallel_proposal")
         advanced_for_current_task = False
         sampled_tasks += 1
         if batch_sampler is None or train_loader is None:
@@ -862,14 +860,11 @@ def _restore_scheduler_checkpoint(
     if isinstance(raw_ids, list):
         batch_sampler.shuffled_ids = [str(value) for value in raw_ids]
     batch_sampler.epoch = int(raw_sampler.get("epoch", -1))
-    batch_sampler.last_trainset_size = int(
-        raw_sampler.get("last_trainset_size", 0)
-    )
+    batch_sampler.last_trainset_size = int(raw_sampler.get("last_trainset_size", 0))
 
     raw_frequencies = raw_sampler.get("id_frequencies", {})
-    if (
-        isinstance(batch_sampler, EpochShuffledBatchSampler)
-        and isinstance(raw_frequencies, Mapping)
+    if isinstance(batch_sampler, EpochShuffledBatchSampler) and isinstance(
+        raw_frequencies, Mapping
     ):
         batch_sampler.id_freqs = Counter(
             {str(key): int(value) for key, value in raw_frequencies.items()}
@@ -933,7 +928,9 @@ def _save_proposal_terminal_records(
 ) -> None:
     """Persist currently terminal proposal slots in planned task order."""
 
-    ordered = [records[task.batch_index] for task in tasks if task.batch_index in records]
+    ordered = [
+        records[task.batch_index] for task in tasks if task.batch_index in records
+    ]
     batch_dir = base_dir / "proposal_batches"
     _atomic_write_json(batch_dir / f"g{generation}.json", ordered)
 
@@ -1583,7 +1580,9 @@ def _build_helix_result(
                 ),
                 parents=candidate_parents,
                 operation=entry.operation if entry is not None else candidate.operation,
-                generation=entry.generation if entry is not None else candidate.generation,
+                generation=entry.generation
+                if entry is not None
+                else candidate.generation,
                 discovered_at_evaluation=state.num_metric_calls_by_discovery.get(cid),
                 is_non_dominated=cid in non_dominated,
             )
@@ -1631,10 +1630,7 @@ def run_evolution(
     # supported stopping conditions.  max_generations defaults to 10 and is
     # always a positive int; this guard fires only if a caller explicitly sets
     # it to <= 0 while leaving max_evaluations disabled.
-    if (
-        config.evolution.max_generations <= 0
-        and config.evolution.max_evaluations <= 0
-    ):
+    if config.evolution.max_generations <= 0 and config.evolution.max_evaluations <= 0:
         raise ValueError(
             "At least one stopping condition is required: set "
             "config.evolution.max_generations to a positive integer, or "
@@ -1877,8 +1873,7 @@ def _run_evolution_impl(
             remove_worktree(candidate)
         except Exception as exc:
             print_warning(
-                f"Could not remove interrupted batch worktree "
-                f"{candidate_id}: {exc}"
+                f"Could not remove interrupted batch worktree {candidate_id}: {exc}"
             )
             return False
         return not worktree_path.exists()
@@ -1904,13 +1899,8 @@ def _run_evolution_impl(
                     continue
                 if task_record.child_id not in state.frontier:
                     state.frontier.append(task_record.child_id)
-                    state.instance_scores[task_record.child_id] = (
-                        result.instance_scores
-                    )
-                if (
-                    task_record.child_id
-                    not in state.num_metric_calls_by_discovery
-                ):
+                    state.instance_scores[task_record.child_id] = result.instance_scores
+                if task_record.child_id not in state.num_metric_calls_by_discovery:
                     budget_api.record_discovery_budget(
                         state,
                         task_record.child_id,
@@ -1921,9 +1911,9 @@ def _run_evolution_impl(
                     and state.total_merge_invocations
                     < config.evolution.max_merge_invocations
                 ):
-                    state.scheduler_state["pending_merges_due"] = int(
-                        state.scheduler_state.get("pending_merges_due", 0)
-                    ) + 1
+                    state.scheduler_state["pending_merges_due"] = (
+                        int(state.scheduler_state.get("pending_merges_due", 0)) + 1
+                    )
                 state.scheduler_state["last_iter_found_new_program"] = True
                 checkpoint_batch_task(
                     state,
@@ -2434,7 +2424,9 @@ def _run_evolution_impl(
                                 f"Merge {merge_id} touched protected evaluator files "
                                 f"({', '.join(merge_tamper)}) -- rejecting."
                             )
-                            _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
+                            _safe_remove_worktree(
+                                merged, label="tamper-rejected merge candidate"
+                            )
                         else:
                             candidates[merged.id] = merged
                             record_entry(
@@ -2471,7 +2463,9 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} produced a previously-seen "
                                     f"output (desc {merged_sha[:8]}) -- skipping."
                                 )
-                                _safe_remove_worktree(merged, label="duplicate-desc merge candidate")
+                                _safe_remove_worktree(
+                                    merged, label="duplicate-desc merge candidate"
+                                )
                                 if merged.id in candidates:
                                     del candidates[merged.id]
                                 _save_state(state)
@@ -2607,9 +2601,7 @@ def _run_evolution_impl(
                                     break
 
                                 merges_due -= 1
-                                state.scheduler_state["pending_merges_due"] = (
-                                    merges_due
-                                )
+                                state.scheduler_state["pending_merges_due"] = merges_due
                                 budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
                                 _sync_frontier_state()
@@ -2626,7 +2618,9 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
                                     f"max parent {required_score:.4f} -- rejecting."
                                 )
-                                _safe_remove_worktree(merged, label="score-rejected merge candidate")
+                                _safe_remove_worktree(
+                                    merged, label="score-rejected merge candidate"
+                                )
                                 if merged.id in candidates:
                                     del candidates[merged.id]
 
@@ -2667,12 +2661,7 @@ def _run_evolution_impl(
             )
             batch_id = f"g{gen}-proposals"
             max_in_flight_evaluations = sum(
-                2
-                * (
-                    len(task.minibatch_ids)
-                    if task.minibatch_ids is not None
-                    else 1
-                )
+                2 * (len(task.minibatch_ids) if task.minibatch_ids is not None else 1)
                 + len(stage_val_example_ids)
                 + (len(full_val_example_ids) if full_val_example_ids else 1)
                 for task in tasks
@@ -2726,13 +2715,9 @@ def _run_evolution_impl(
             proposal_outcomes: dict[int, TerminalProposalOutcome] = {}
             cleaned_child_ids: set[str] = set()
             cleanup_results: dict[str, ProposalCleanupResult] = {}
-            task_budget_charges = {
-                task.batch_index: BudgetState() for task in tasks
-            }
+            task_budget_charges = {task.batch_index: BudgetState() for task in tasks}
             parent_ready: dict[int, tuple[EvalResult, int]] = {}
-            child_ready: dict[
-                int, tuple[ProposalTask, EvalResult, int, Candidate]
-            ] = {}
+            child_ready: dict[int, tuple[ProposalTask, EvalResult, int, Candidate]] = {}
             evaluated_proposals: list[EvaluatedProposal] = []
             selected_proposals: list[SelectedProposal] = []
             _gen_skip_records: list[dict[str, Any]] = []
@@ -2853,9 +2838,7 @@ def _run_evolution_impl(
                 charge.input_tokens += usage.input_tokens
                 charge.output_tokens += usage.output_tokens
                 charge.cached_input_tokens += usage.cached_input_tokens
-                charge.cache_creation_input_tokens += (
-                    usage.cache_creation_input_tokens
-                )
+                charge.cache_creation_input_tokens += usage.cache_creation_input_tokens
                 charge.cache_read_input_tokens += usage.cache_read_input_tokens
                 charge.reasoning_tokens += usage.reasoning_tokens
                 charge.cost_usd += usage.cost_usd
@@ -2937,8 +2920,7 @@ def _run_evolution_impl(
                         task=task,
                         stage="parent_evaluation",
                         message=(
-                            f"{type(parent_call.error).__name__}: "
-                            f"{parent_call.error}"
+                            f"{type(parent_call.error).__name__}: {parent_call.error}"
                         ),
                     )
                     proposal_outcomes[task.batch_index] = proposal_outcome
@@ -2985,12 +2967,9 @@ def _run_evolution_impl(
                     )
                 _add_evaluation_charge(task, charged)
 
-                if (
-                    config.evolution.perfect_score_threshold is not None
-                    and all(
-                        score >= config.evolution.perfect_score_threshold
-                        for score in parent_result.instance_scores.values()
-                    )
+                if config.evolution.perfect_score_threshold is not None and all(
+                    score >= config.evolution.perfect_score_threshold
+                    for score in parent_result.instance_scores.values()
                 ):
                     proposal_outcome = SkippedProposal(
                         task=task,
@@ -3155,9 +3134,7 @@ def _run_evolution_impl(
             )
             fatal_mutation_error: BaseException | None = None
             mutation_children: list[Candidate] = []
-            for mutation_item, mutation_call in zip(
-                mutation_inputs, mutation_calls
-            ):
+            for mutation_item, mutation_call in zip(mutation_inputs, mutation_calls):
                 task, (parent_result, parent_n_uncached) = mutation_item
                 if mutation_call.error is not None:
                     proposal_outcome = FailedProposal(
@@ -3200,9 +3177,7 @@ def _run_evolution_impl(
                     continue
 
                 assert mutation_call.value is not None
-                child, tampered_paths, post_error, pre_cleanup = (
-                    mutation_call.value
-                )
+                child, tampered_paths, post_error, pre_cleanup = mutation_call.value
                 if child is None:
                     proposal_outcome = FailedProposal(
                         task=task,
@@ -3439,8 +3414,7 @@ def _run_evolution_impl(
                         task=task,
                         stage="child_evaluation",
                         message=(
-                            f"{type(child_call.error).__name__}: "
-                            f"{child_call.error}"
+                            f"{type(child_call.error).__name__}: {child_call.error}"
                         ),
                         parent_eval_result=parent_result,
                         child_candidate=child,
@@ -3537,8 +3511,7 @@ def _run_evolution_impl(
                 cast(ProposalAcceptanceCriterion, acceptance),
             )
             selected_ids = {
-                selected.proposal.child_candidate.id
-                for selected in selected_proposals
+                selected.proposal.child_candidate.id for selected in selected_proposals
             }
 
             # Persist and clean every evaluated child not selected.  The
@@ -3843,9 +3816,7 @@ def _run_evolution_impl(
                     ),
                     split="val",
                     instance_ids=(
-                        tuple(full_val_example_ids)
-                        if full_val_example_ids
-                        else None
+                        tuple(full_val_example_ids) if full_val_example_ids else None
                     ),
                 )
                 for selected in validation_ready
