@@ -51,7 +51,6 @@ from helix.display import (
 from helix.exceptions import (
     HelixError,
     PromptArtifactCollisionError,
-    RateLimitError,
     ResumeIncompatibleError,
     print_helix_error,
 )

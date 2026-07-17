@@ -76,8 +76,8 @@ def make_proposal_batch() -> ProposalBatchRecord:
 # ---------------------------------------------------------------------------
 
 
-def test_state_saved_before_crash(tmp_path: Path) -> None:
-    """State.json must be written before an exception propagates out of run_evolution."""
+def test_ordinary_evaluator_failure_is_persisted_per_slot(tmp_path: Path) -> None:
+    """Ordinary evaluator errors terminalize their slots without aborting."""
     from helix.config import (
         AgentConfig,
         DatasetConfig,
@@ -119,9 +119,10 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         asi={},
     )
 
-    boom_error = RuntimeError("simulated crash mid-generation")
+    evaluator_error = RuntimeError("simulated evaluator failure")
 
-    # Patch create_seed_worktree and run_evaluator so we control when to crash.
+    # Seed evaluation succeeds; every proposal parent evaluation fails in an
+    # ordinary, slot-local way.
     call_count = [0]
 
     def fake_run_evaluator(candidate, cfg, split=None, instances=None, **kwargs):
@@ -129,8 +130,7 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         if call_count[0] == 1:
             # First call = seed evaluation — succeed
             return seed_result
-        # Second call (gen 1 train eval) — crash
-        raise boom_error
+        raise evaluator_error
 
     # Make HelixProgress a no-op context manager
     mock_ctx = MagicMock()
@@ -143,10 +143,9 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         patch("helix.evolution.HelixLiveDisplay", return_value=mock_ctx),
     ):
 
-        with pytest.raises(RuntimeError, match="simulated crash"):
-            run_evolution(config, project_root, base_dir)
+        run_evolution(config, project_root, base_dir)
 
-    # State file must have been written even though an exception propagated
+    # State and the complete ordered failure ledger remain durable.
     state_file = project_root / ".helix" / "state.json"
     assert state_file.exists(), "state.json was not written before crash propagated"
 
@@ -154,6 +153,16 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
     assert loaded is not None, "Could not load state after crash"
     # The seed was evaluated successfully so it should be in the frontier
     assert "g0-s0" in loaded.frontier, "Seed should be in frontier after successful seed eval"
+    assert len(loaded.proposal_batches) == 3
+    assert all(batch.phase == "complete" for batch in loaded.proposal_batches)
+    assert all(
+        task.status == "failed"
+        and task.budget_accounted
+        and task.detail is not None
+        and "parent_eval" in task.detail
+        for batch in loaded.proposal_batches
+        for task in batch.tasks
+    )
 
 
 def test_interrupted_batch_reconciles_every_planned_id_without_rewind(

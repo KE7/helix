@@ -647,10 +647,10 @@ class TestGatingInEvolutionLoop:
         seed (which loses on every axis) is dominated.
         """
         seed = make_candidate("g0-s0")
-        child_a = make_candidate("g1-s1", generation=1)
-        child_b = make_candidate("g2-s1", generation=2)
         all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].side_effect = [child_a, child_b]
+        all_mocks["mutate"].side_effect = lambda **kwargs: make_candidate(
+            kwargs["new_id"], generation=int(kwargs["new_id"].split("-")[0][1:])
+        )
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
             # Each child wins on a different instance key; child_b's sum
@@ -659,7 +659,7 @@ class TestGatingInEvolutionLoop:
             scores = {
                 "g0-s0": {"i1": 0.1, "i2": 0.1},
                 "g1-s1": {"i1": 0.9, "i2": 0.1},
-                "g2-s1": {"i1": 0.2, "i2": 0.95},
+                "g2-s2": {"i1": 0.2, "i2": 0.95},
             }[candidate.id]
             return make_eval_result(candidate.id, scores)
 
@@ -668,11 +668,11 @@ class TestGatingInEvolutionLoop:
         config = make_config(max_generations=2, max_evaluations=10000)
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        assert set(result.non_dominated_ids) == {"g1-s1", "g2-s1"}
+        assert set(result.non_dominated_ids) == {"g1-s1", "g2-s2"}
         # ``non_dominated_ids`` is sorted for stability.
         assert result.non_dominated_ids == sorted(result.non_dominated_ids)
         flagged = {s.id for s in result.candidate_summaries if s.is_non_dominated}
-        assert flagged == {"g1-s1", "g2-s1"}
+        assert flagged == {"g1-s1", "g2-s2"}
 
     def test_helix_result_to_dict_round_trips_through_json(
         self, mocker, tmp_path, all_mocks,
@@ -1029,9 +1029,13 @@ class TestLlmUsageBudgetIntegration:
             tmp_path / ".helix",
         )
 
-        # The real backend dispatch must have been hit exactly once.
-        assert mock_run.call_count == 1
-        assert mock_run.call_args.args[0][0] == "claude"
+        # Content-key computation may issue git subprocess probes through the
+        # same patched module; the intended Claude backend dispatch remains
+        # exactly one command.
+        claude_calls = [
+            call for call in mock_run.call_args_list if call.args[0][0] == "claude"
+        ]
+        assert len(claude_calls) == 1
 
         seed_calls = _filter_charge_calls(
             spy, source="seed_generation", candidate_id="g0-s0"
@@ -1154,15 +1158,16 @@ class TestMergeBehavior:
         candidates — so seed and child need complementary instance scores.
         """
         seed = make_candidate("g0-s0")
-        child = make_candidate("g1-s1", generation=1)
         all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = child
+        all_mocks["mutate"].side_effect = lambda **kwargs: make_candidate(
+            kwargs["new_id"], generation=int(kwargs["new_id"].split("-")[0][1:])
+        )
         all_mocks["merge"].return_value = None  # merge attempt made but returns None
         # find_merge_triplet returns a valid triplet so merge fires
         all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            if candidate.id == "g1-s1":
+            if candidate.id != "g0-s0":
                 # Complementary instance scores: child better on i1 but worse
                 # on i2 → neither candidate dominates the other → both
                 # non-dominated → merge can fire.
@@ -1240,13 +1245,14 @@ class TestMergeBehavior:
         so merge() is never called.
         """
         seed = make_candidate("g0-s0")
-        child = make_candidate("g1-s1", generation=1)
         all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = child
+        all_mocks["mutate"].side_effect = lambda **kwargs: make_candidate(
+            kwargs["new_id"], generation=int(kwargs["new_id"].split("-")[0][1:])
+        )
 
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            if candidate.id == "g1-s1":
-                return make_eval_result("g1-s1", {"i1": 0.9})
+            if candidate.id != "g0-s0":
+                return make_eval_result(candidate.id, {"i1": 0.9})
             return make_eval_result(candidate.id, {"i1": 0.5})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -1280,16 +1286,14 @@ class TestMergeBehavior:
         legibility.
         """
         seed = make_candidate("g0-s0")
-        merged_cand = make_candidate("g1-m1", generation=1)
-        children = [make_candidate(f"g{i}-s1", generation=i) for i in range(1, 4)]
-        child_iter = iter(children)
+        merged_cand = make_candidate("g2-m1", generation=2)
         all_mocks["create_seed_worktree"].return_value = seed
 
         def make_child(*args, **kwargs):
-            try:
-                return next(child_iter)
-            except StopIteration:
-                return None
+            child_id = kwargs["new_id"]
+            return make_candidate(
+                child_id, generation=int(child_id.split("-")[0][1:])
+            )
 
         all_mocks["mutate"].side_effect = make_child
         # Merge succeeds (returns candidate), so acceptance check will run.
@@ -2014,9 +2018,10 @@ class TestMergeBehavior:
         is satisfied.
         """
         seed = make_candidate("g0-s0")
-        child = make_candidate("g1-s1", generation=1)
         all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = child
+        all_mocks["mutate"].side_effect = lambda **kwargs: make_candidate(
+            kwargs["new_id"], generation=int(kwargs["new_id"].split("-")[0][1:])
+        )
         # Only seed + 1 child → lineage has 2 entries → gate trips.
         all_mocks["load_lineage"].return_value = {
             "g0-s0": LineageEntry(
@@ -2038,7 +2043,7 @@ class TestMergeBehavior:
         }
 
         def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
-            if candidate.id == "g1-s1":
+            if candidate.id != "g0-s0":
                 scores = {"1": 0.9, "2": 0.5}
             else:
                 scores = {"1": 0.5, "2": 0.9}
