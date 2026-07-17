@@ -2196,6 +2196,8 @@ class TestUnifiedPxNScheduler:
                 if candidate.id.endswith("s1"):
                     time.sleep(0.04)
                 return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {eid: 0.8 for eid in instance_ids})
             return _make_result(candidate.id, {"v": 0.8})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -2266,6 +2268,8 @@ class TestUnifiedPxNScheduler:
                 else:
                     score = 0.9
                 return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {eid: 0.8 for eid in instance_ids})
             return _make_result(candidate.id, {"v": 0.8})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -2321,13 +2325,15 @@ class TestUnifiedPxNScheduler:
                 return _make_result(candidate.id, {eid: score for eid in instance_ids})
             if candidate.id != seed.id:
                 full_validated_children.append(candidate.id)
+            if instance_ids is not None:
+                return _make_result(candidate.id, {eid: 0.8 for eid in instance_ids})
             return _make_result(candidate.id, {"v": 0.8})
 
         all_mocks["run_evaluator"].side_effect = run_eval
         config = _make_minibatch_config(
             train_path,
             minibatch_size=1,
-            max_evaluations=5,
+            max_evaluations=7,
             num_parallel_proposals=1,
             mutations_per_parent=3,
             max_workers=3,
@@ -2336,9 +2342,9 @@ class TestUnifiedPxNScheduler:
 
         state = all_mocks["save_state"].call_args.args[0]
         batch = state.proposal_batches[-1]
-        assert state.budget.evaluations == 7
-        assert batch.budget_before_dispatch == 1
-        assert batch.budget_after_apply == 7
+        assert state.budget.evaluations == 9
+        assert batch.budget_before_dispatch == 3
+        assert batch.budget_after_apply == 9
         assert [task.budget_charge.evaluations for task in batch.tasks] == [2, 2, 2]
         assert all(task.status == "rejected" for task in batch.tasks)
         assert all(task.selection == "selected" for task in batch.tasks)
@@ -2385,6 +2391,8 @@ class TestUnifiedPxNScheduler:
             if split == "train" and instance_ids is not None:
                 score = 0.1 if candidate.id == seed.id else 0.9
                 return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            if instance_ids is not None:
+                return _make_result(candidate.id, {eid: 0.8 for eid in instance_ids})
             return _make_result(candidate.id, {"v": 0.8})
 
         all_mocks["run_evaluator"].side_effect = run_eval
