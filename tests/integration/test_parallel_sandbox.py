@@ -169,3 +169,71 @@ def test_parallel_sandboxes_overlap_isolate_state_and_cleanup(
     assert (candidates[1] / "result.txt").read_text() == "candidate-1\n"
     assert all(not workspace.parent.exists() for workspace in workspaces)
     assert all(_docker("inspect", name).returncode != 0 for name in container_names)
+
+
+@pytest.mark.parametrize(
+    ("command", "timeout_seconds", "expected_returncode"),
+    [
+        (["sh", "-c", "exit 7"], 10, 7),
+        (["sh", "-c", "sleep 5"], 1, None),
+    ],
+    ids=["nonzero-exit", "timeout"],
+)
+def test_sandbox_failure_paths_remove_container_and_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: list[str],
+    timeout_seconds: int,
+    expected_returncode: int | None,
+) -> None:
+    """Daemon-backed failures leave neither containers nor temp workspaces."""
+    _require_local_docker_fixture()
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+
+    observed: list[tuple[str, Path]] = []
+    original_docker_args = sandbox_module._docker_args
+
+    def record_docker_args(*args: Any, **kwargs: Any) -> list[str]:
+        docker_args = original_docker_args(*args, **kwargs)
+        name = docker_args[docker_args.index("--name") + 1]
+        mount = docker_args[docker_args.index("-v") + 1]
+        workspace = Path(mount.removesuffix(":/workspace:rw"))
+        observed.append((name, workspace))
+        return docker_args
+
+    monkeypatch.setattr(sandbox_module, "_docker_args", record_docker_args)
+    sandbox = SandboxConfig(
+        enabled=True,
+        image=_FIXTURE_IMAGE,
+        network="none",
+        timeout_seconds=timeout_seconds,
+    )
+
+    if expected_returncode is None:
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_sandboxed_command(
+                command,
+                cwd=candidate,
+                env={},
+                sandbox=sandbox,
+                scope="evaluator",
+                sync_back=True,
+                image=_FIXTURE_IMAGE,
+            )
+    else:
+        result = run_sandboxed_command(
+            command,
+            cwd=candidate,
+            env={},
+            sandbox=sandbox,
+            scope="evaluator",
+            sync_back=True,
+            image=_FIXTURE_IMAGE,
+        )
+        assert result.returncode == expected_returncode
+
+    assert len(observed) == 1
+    container_name, workspace = observed[0]
+    assert not workspace.parent.exists()
+    assert _docker("inspect", container_name).returncode != 0
