@@ -1920,6 +1920,7 @@ def _run_evolution_impl(
             if any(
                 not task_record.is_terminal()
                 or task_record.cleanup == "failed"
+                or not task_record.budget_accounted
                 for task_record in interrupted_batch.tasks
             ):
                 continue

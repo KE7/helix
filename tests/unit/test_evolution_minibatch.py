@@ -116,6 +116,9 @@ def _make_minibatch_config(
     max_generations: int = 1,
     max_evaluations: int = 1000,
     num_parallel_proposals: int = 1,
+    mutations_per_parent: int = 1,
+    proposal_selection: str = "all_improvements",
+    proposal_top_k: int | None = None,
     cache_evaluation: bool = True,
     acceptance_criterion: str = "strict_improvement",
     max_workers: int | None = None,
@@ -126,6 +129,9 @@ def _make_minibatch_config(
         perfect_score_threshold=None,
         minibatch_size=minibatch_size,
         num_parallel_proposals=num_parallel_proposals,
+        mutations_per_parent=mutations_per_parent,
+        proposal_selection=proposal_selection,
+        proposal_top_k=proposal_top_k,
         cache_evaluation=cache_evaluation,
         acceptance_criterion=acceptance_criterion,
         val_stage_size=val_stage_size,
@@ -783,8 +789,7 @@ class TestMinibatchGateIntegration:
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
 
-        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         parent_minibatches: list[list[str]] = []
 
@@ -1552,8 +1557,7 @@ class TestParentMinibatchParallelism:
         train_path = _write_train_jsonl(tmp_path, n=6)
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
-        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         import time
 
@@ -1637,8 +1641,7 @@ class TestMaxWorkersBoundsParentEvalPool:
         train_path = _write_train_jsonl(tmp_path, n=6)
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
-        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         concurrency_lock = threading.Lock()
         current_parent_evals = 0
@@ -1696,8 +1699,7 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
         train_path = _write_train_jsonl(tmp_path, n=6)
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
-        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         parent_eval_attempts: list[bool] = []
         mutate_calls: list[str] = []
@@ -1733,7 +1735,7 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
 
         def _mutate_record(**kw: Any) -> Candidate:
             mutate_calls.append(kw.get("new_id", ""))
-            return _make_candidate(next(mut_ids))
+            return _make_candidate(kw["new_id"])
 
         all_mocks["mutate"].side_effect = _mutate_record
 
@@ -1775,8 +1777,7 @@ class TestParentMinibatchBudgetCharge:
         train_path = _write_train_jsonl(tmp_path, n=2)  # 2 ids → minibatch always [0,1]
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
-        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3", "g1-s4"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         # All mutated children produce the same worktree path as seed so that
         # we can more easily route scores; scores chosen so child < parent and
@@ -2536,8 +2537,7 @@ class TestAtomicProposalWorker:
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
 
-        mut_ids = iter(["g1-s1", "g1-s2"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         main_thread_id = threading.get_ident()
         parent_eval_threads: set[int] = set()
@@ -2665,7 +2665,6 @@ class TestAtomicProposalWorker:
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
 
-        mut_ids = iter(["g1-s1", "g1-s2"])
         _lock = threading.Lock()
         _call_counter: list[int] = [0]
 
@@ -2675,7 +2674,7 @@ class TestAtomicProposalWorker:
                 is_first = _call_counter[0] == 1
             if is_first:
                 raise RuntimeError("simulated LLM failure — atomic-worker isolation test")
-            return _make_candidate(next(mut_ids))
+            return _make_candidate(kw["new_id"])
 
         all_mocks["mutate"].side_effect = _mutate_fail_first
 
@@ -2733,8 +2732,7 @@ class TestAtomicProposalWorker:
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
 
-        mut_ids = iter(["g1-s1", "g1-s2", "g1-s3"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         main_thread_id = threading.get_ident()
         parent_eval_threads: set[int] = set()
@@ -2800,8 +2798,7 @@ class TestAtomicProposalWorker:
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
 
-        mut_ids = iter(["g1-s1", "g1-s2"])
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
 
         def run_eval(
             candidate: Candidate,
