@@ -89,6 +89,132 @@ _SYNTHETIC_STRUCTURED_ENDPOINTS = [
 ]
 
 
+_SYNTHETIC_ENDPOINT_COMPONENT_CASES = [
+    pytest.param(
+        "https://example.invalid/execute?synthetic-query-bare-sentinel",
+        ("synthetic-query-bare-sentinel",),
+        id="query-bare",
+    ),
+    pytest.param(
+        "https://example.invalid/execute?synthetic-query-blank-sentinel=",
+        (
+            "synthetic-query-blank-sentinel=",
+            "synthetic-query-blank-sentinel",
+        ),
+        id="query-blank-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute?"
+        "synthetic-query-key-sentinel=synthetic-query-value-sentinel",
+        (
+            "synthetic-query-key-sentinel=synthetic-query-value-sentinel",
+            "synthetic-query-key-sentinel",
+            "synthetic-query-value-sentinel",
+        ),
+        id="query-key-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute?"
+        "synthetic-query%2Fkey-sentinel=synthetic-query%2Fvalue-sentinel",
+        (
+            "synthetic-query%2Fkey-sentinel=synthetic-query%2Fvalue-sentinel",
+            "synthetic-query%2Fkey-sentinel",
+            "synthetic-query/key-sentinel",
+            "synthetic-query%2Fvalue-sentinel",
+            "synthetic-query/value-sentinel",
+        ),
+        id="query-percent-decoded-key-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute?"
+        "synthetic+query+key+sentinel=synthetic+query+value+sentinel",
+        (
+            "synthetic+query+key+sentinel=synthetic+query+value+sentinel",
+            "synthetic+query+key+sentinel",
+            "synthetic query key sentinel",
+            "synthetic+query+value+sentinel",
+            "synthetic query value sentinel",
+        ),
+        id="query-plus-decoded-key-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute?"
+        "synthetic-query-first-key=synthetic-query-first-value&"
+        "synthetic-query-second-bare",
+        (
+            "synthetic-query-first-key=synthetic-query-first-value&"
+            "synthetic-query-second-bare",
+            "synthetic-query-first-key=synthetic-query-first-value",
+            "synthetic-query-first-key",
+            "synthetic-query-first-value",
+            "synthetic-query-second-bare",
+        ),
+        id="query-segments",
+    ),
+    pytest.param(
+        "https://example.invalid/execute#synthetic-fragment-bare-sentinel",
+        ("synthetic-fragment-bare-sentinel",),
+        id="fragment-bare",
+    ),
+    pytest.param(
+        "https://example.invalid/execute#synthetic-fragment-blank-sentinel=",
+        (
+            "synthetic-fragment-blank-sentinel=",
+            "synthetic-fragment-blank-sentinel",
+        ),
+        id="fragment-blank-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute#"
+        "synthetic-fragment-key-sentinel=synthetic-fragment-value-sentinel",
+        (
+            "synthetic-fragment-key-sentinel=synthetic-fragment-value-sentinel",
+            "synthetic-fragment-key-sentinel",
+            "synthetic-fragment-value-sentinel",
+        ),
+        id="fragment-key-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute#"
+        "synthetic-fragment%2Fkey-sentinel=synthetic-fragment%2Fvalue-sentinel",
+        (
+            "synthetic-fragment%2Fkey-sentinel=synthetic-fragment%2Fvalue-sentinel",
+            "synthetic-fragment%2Fkey-sentinel",
+            "synthetic-fragment/key-sentinel",
+            "synthetic-fragment%2Fvalue-sentinel",
+            "synthetic-fragment/value-sentinel",
+        ),
+        id="fragment-percent-decoded-key-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute#"
+        "synthetic+fragment+key+sentinel=synthetic+fragment+value+sentinel",
+        (
+            "synthetic+fragment+key+sentinel=synthetic+fragment+value+sentinel",
+            "synthetic+fragment+key+sentinel",
+            "synthetic fragment key sentinel",
+            "synthetic+fragment+value+sentinel",
+            "synthetic fragment value sentinel",
+        ),
+        id="fragment-plus-decoded-key-value",
+    ),
+    pytest.param(
+        "https://example.invalid/execute#"
+        "synthetic-fragment-first-key=synthetic-fragment-first-value&"
+        "synthetic-fragment-second-bare",
+        (
+            "synthetic-fragment-first-key=synthetic-fragment-first-value&"
+            "synthetic-fragment-second-bare",
+            "synthetic-fragment-first-key=synthetic-fragment-first-value",
+            "synthetic-fragment-first-key",
+            "synthetic-fragment-first-value",
+            "synthetic-fragment-second-bare",
+        ),
+        id="fragment-segments",
+    ),
+]
+
+
 def _endpoint_duplicated_argv(
     endpoint: str,
     raw_component: str,
@@ -440,6 +566,184 @@ def test_docker_argv_redaction_preserves_key_for_all_env_forms(env_args):
 
 
 @pytest.mark.parametrize(
+    ("endpoint", "components"), _SYNTHETIC_ENDPOINT_COMPONENT_CASES
+)
+def test_endpoint_component_redaction_values_cover_structured_fields(
+    endpoint: str, components: tuple[str, ...]
+):
+    values = sandbox_module._endpoint_component_redaction_values(endpoint)
+
+    assert set(components) <= values
+    assert "" not in values
+    assert not {"https", "example.invalid", "/execute"} & values
+
+
+def test_short_query_key_redaction_does_not_corrupt_harmless_url_context():
+    endpoint = "https://example.invalid/execute?x=synthetic-short-key-value-sentinel"
+    values = sandbox_module._endpoint_component_redaction_values(endpoint)
+    diagnostic = "https://example.invalid/execute failed for query key x"
+
+    rendered = sandbox_module._redact_diagnostic_output(
+        diagnostic, tuple(sorted(values, key=len, reverse=True))
+    )
+
+    assert "x" in values
+    assert rendered == (
+        "https://example.invalid/execute failed for query key <redacted>"
+    )
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["short-separated", "long-separated", "short-joined", "long-joined"],
+)
+@pytest.mark.parametrize(
+    ("endpoint", "components"), _SYNTHETIC_ENDPOINT_COMPONENT_CASES
+)
+def test_docker_argv_redacts_all_endpoint_component_variants(
+    endpoint: str, components: tuple[str, ...], form: str
+):
+    raw_args = [
+        "docker",
+        "run",
+        *_endpoint_env_args(endpoint, form),
+        f"--endpoint={endpoint}",
+        *(f"--duplicate-{index}={value}" for index, value in enumerate(components)),
+        "--url-context=https://example.invalid/execute",
+        "synthetic-runner:latest",
+    ]
+    original_args = list(raw_args)
+
+    redacted = sandbox_module._redact_docker_argv(raw_args)
+    rendered = repr(redacted)
+
+    assert endpoint not in rendered
+    assert all(component not in rendered for component in components)
+    assert "HELIX_EVALUATOR_ENDPOINT=<redacted>" in rendered
+    assert "--endpoint=<redacted>" in redacted
+    assert all(
+        f"--duplicate-{index}=<redacted>" in redacted
+        for index in range(len(components))
+    )
+    assert "--url-context=https://example.invalid/execute" in redacted
+    assert raw_args == original_args
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["short-separated", "long-separated", "short-joined", "long-joined"],
+)
+@pytest.mark.parametrize(
+    ("endpoint", "components"), _SYNTHETIC_ENDPOINT_COMPONENT_CASES
+)
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "timeout", "called-process"])
+def test_docker_process_component_redaction_covers_every_diagnostic_surface(
+    mocker,
+    endpoint: str,
+    components: tuple[str, ...],
+    form: str,
+    outcome: str,
+):
+    raw_args = [
+        "docker",
+        "run",
+        *_endpoint_env_args(endpoint, form),
+        f"--endpoint={endpoint}",
+        *(f"--duplicate-{index}={value}" for index, value in enumerate(components)),
+        f"--explicit={_SYNTHETIC_PRIOR_SECRET}",
+        "--url-context=https://example.invalid/execute",
+        "synthetic-runner:latest",
+    ]
+    original_args = list(raw_args)
+    captured_subprocess_args: list[list[str]] = []
+    secret_payload = " | ".join((endpoint, *components, _SYNTHETIC_PRIOR_SECRET))
+    stdout = (
+        "synthetic successful functional output"
+        if outcome == "success"
+        else f"synthetic diagnostic stdout: {secret_payload}"
+    )
+    stderr = (
+        "synthetic successful functional stderr"
+        if outcome == "success"
+        else f"synthetic diagnostic stderr: {secret_payload}"
+    )
+
+    def fake_run(args, **kwargs):
+        captured_subprocess_args.append(list(args))
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(
+                args, timeout=1, output=stdout, stderr=stderr
+            )
+        if outcome == "called-process":
+            raise subprocess.CalledProcessError(125, args, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(
+            args,
+            0 if outcome == "success" else 9,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    sentinels = (endpoint, *components, _SYNTHETIC_PRIOR_SECRET)
+
+    if outcome in {"timeout", "called-process"}:
+        expected_exception = (
+            subprocess.TimeoutExpired
+            if outcome == "timeout"
+            else subprocess.CalledProcessError
+        )
+        with pytest.raises(expected_exception) as captured:
+            _run_docker(
+                raw_args,
+                check=outcome == "called-process",
+                redaction_values=[_SYNTHETIC_PRIOR_SECRET],
+            )
+        exc = captured.value
+        renderings = [
+            str(exc),
+            repr(exc),
+            repr(exc.cmd),
+            repr(exc.args),
+            str(exc.output),
+            str(exc.stderr),
+        ]
+        safe_args = exc.cmd
+    else:
+        result = _run_docker(
+            raw_args,
+            check=False,
+            redaction_values=[_SYNTHETIC_PRIOR_SECRET],
+        )
+        safe_args = result.args
+        if outcome == "success":
+            assert result.stdout == stdout
+            assert result.stderr == stderr
+            renderings = [repr(result.args)]
+        else:
+            renderings = [
+                str(result),
+                repr(result),
+                repr(result.args),
+                str(result.stdout),
+                str(result.stderr),
+            ]
+
+    assert all(
+        sentinel not in rendering for sentinel in sentinels for rendering in renderings
+    )
+    assert "HELIX_EVALUATOR_ENDPOINT=<redacted>" in repr(safe_args)
+    assert "--endpoint=<redacted>" in safe_args
+    assert "--explicit=<redacted>" in safe_args
+    assert all(
+        f"--duplicate-{index}=<redacted>" in safe_args
+        for index in range(len(components))
+    )
+    assert "--url-context=https://example.invalid/execute" in safe_args
+    assert captured_subprocess_args == [original_args]
+    assert raw_args == original_args
+
+
+@pytest.mark.parametrize(
     ("endpoint", "raw_component", "decoded_component", "form"),
     _SYNTHETIC_STRUCTURED_ENDPOINTS,
 )
@@ -709,7 +1013,7 @@ def test_endpoint_redaction_preserves_harmless_url_context(mocker):
 
     result = _run_docker(raw_args, check=False)
 
-    assert result.stdout == ("synthetic.invalid/evaluate failed: opaque=<redacted>")
+    assert result.stdout == ("synthetic.invalid/evaluate failed: <redacted>")
 
 
 @pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])

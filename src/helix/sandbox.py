@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 _REDACTED_DOCKER_ENV_VALUE = "<redacted>"
+_SHORT_REDACTION_VALUE_MAX_LENGTH = 3
 
 
 HELIX_ARTIFACT_NAMES = {
@@ -670,10 +672,10 @@ def _docker_diagnostic_redaction_values(
 def _endpoint_component_redaction_values(endpoint: str) -> set[str]:
     """Return sensitive structured pieces of an evaluator endpoint URL.
 
-    A failed URL client may print only userinfo, a query value, or a fragment,
-    so scrubbing the complete environment value is insufficient.  Limit the
-    derived values to those URL components rather than hiding harmless scheme,
-    host, or path text that remains useful in diagnostics.
+    A failed URL client may print only userinfo or an isolated raw/decoded
+    query or fragment field.  Scrub complete structured fields, ``&``
+    segments, and both sides of key/value pairs without hiding the harmless
+    scheme, host, or path text that remains useful in diagnostics.
     """
     try:
         parsed = urlsplit(endpoint)
@@ -682,19 +684,26 @@ def _endpoint_component_redaction_values(endpoint: str) -> set[str]:
             for value in (
                 parsed.username,
                 parsed.password,
+                parsed.query,
                 parsed.fragment,
             )
             if value
         }
-        for pair in parsed.query.split("&"):
-            _key, separator, raw_value = pair.partition("=")
-            if separator and raw_value:
-                values.add(raw_value)
         for field in (parsed.query, parsed.fragment):
+            for segment in field.split("&"):
+                if not segment:
+                    continue
+                values.add(segment)
+                raw_key, separator, raw_value = segment.partition("=")
+                if raw_key:
+                    values.add(raw_key)
+                if separator and raw_value:
+                    values.add(raw_value)
             values.update(
-                value
-                for _key, value in parse_qsl(field, keep_blank_values=True)
-                if value
+                component
+                for key, value in parse_qsl(field, keep_blank_values=True)
+                for component in (key, value)
+                if component
             )
         values.update(unquote(value) for value in tuple(values))
     except (UnicodeError, ValueError):
@@ -703,14 +712,34 @@ def _endpoint_component_redaction_values(endpoint: str) -> set[str]:
 
 
 def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
-    """Replace known Docker env secrets in text/bytes diagnostic output."""
+    """Replace known Docker env secrets in text/bytes diagnostic output.
+
+    Very short alphanumeric URL keys are matched only at word boundaries. This
+    still removes a duplicated ``--flag=x`` value without replacing every
+    occurrence of ``x`` inside harmless diagnostic words or URL context.
+    """
     if isinstance(value, str):
         for secret in secrets:
-            value = value.replace(secret, _REDACTED_DOCKER_ENV_VALUE)
+            if len(secret) <= _SHORT_REDACTION_VALUE_MAX_LENGTH and secret.isalnum():
+                value = re.sub(
+                    rf"(?<!\w){re.escape(secret)}(?!\w)",
+                    _REDACTED_DOCKER_ENV_VALUE,
+                    value,
+                )
+            else:
+                value = value.replace(secret, _REDACTED_DOCKER_ENV_VALUE)
     elif isinstance(value, bytes):
         replacement = _REDACTED_DOCKER_ENV_VALUE.encode()
         for secret in secrets:
-            value = value.replace(secret.encode(), replacement)
+            encoded_secret = secret.encode()
+            if len(secret) <= _SHORT_REDACTION_VALUE_MAX_LENGTH and secret.isalnum():
+                value = re.sub(
+                    rb"(?<!\w)" + re.escape(encoded_secret) + rb"(?!\w)",
+                    replacement,
+                    value,
+                )
+            else:
+                value = value.replace(encoded_secret, replacement)
     return value
 
 
@@ -722,7 +751,8 @@ def _redact_docker_argv(
     Every literal Docker environment value is replaced, including values whose
     key does not look secret.  This avoids heuristic gaps in command/exception
     rendering while retaining the key names needed to diagnose configuration.
-    Known values are also scrubbed wherever they recur in another argv token.
+    Known values are also scrubbed wherever safely identifiable in another
+    argv token.
     """
     values = _docker_diagnostic_redaction_values(args, redaction_values)
     redacted = list(args)
