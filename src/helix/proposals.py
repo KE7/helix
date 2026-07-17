@@ -99,23 +99,36 @@ class EvaluatedProposal:
     parent_n_uncached: int = 0
     child_n_uncached: int = 0
 
+    def _scores_for_task(self, result: EvalResult) -> list[float]:
+        """Return scores in task order, retaining padded ID multiplicity.
+
+        ``EvalResult.instance_scores`` is a mapping and therefore has one
+        entry per unique example ID.  The epoch sampler may pad a minibatch by
+        repeating an ID, so the task's immutable ID tuple is the authoritative
+        positional view for acceptance and ranking.
+        """
+
+        if self.task.minibatch_ids is None:
+            return list(result.instance_scores.values())
+        return [result.instance_scores[eid] for eid in self.task.minibatch_ids]
+
     @property
     def subsample_scores_before(self) -> list[float]:
         """GEPA-compatible view used by HELIX acceptance criteria."""
 
-        return list(self.parent_eval_result.instance_scores.values())
+        return self._scores_for_task(self.parent_eval_result)
 
     @property
     def subsample_scores_after(self) -> list[float]:
         """GEPA-compatible view used by HELIX acceptance criteria."""
 
-        return list(self.child_eval_result.instance_scores.values())
+        return self._scores_for_task(self.child_eval_result)
 
     @property
     def improvement(self) -> float:
         """Return the child's minibatch score gain over its parent."""
 
-        return self.child_eval_result.sum_score() - self.parent_eval_result.sum_score()
+        return sum(self.subsample_scores_after) - sum(self.subsample_scores_before)
 
 
 @dataclass(frozen=True, slots=True)

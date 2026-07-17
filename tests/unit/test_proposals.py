@@ -43,31 +43,34 @@ def make_candidate(candidate_id: str) -> Candidate:
     )
 
 
-def make_eval(candidate_id: str, score: float) -> EvalResult:
+def make_eval(
+    candidate_id: str, score: float, example_id: str = "example"
+) -> EvalResult:
     return EvalResult(
         candidate_id=candidate_id,
         scores={"score": score},
         asi={},
-        instance_scores={"example": score},
+        instance_scores={example_id: score},
     )
 
 
 def make_evaluated(index: int, before: float, after: float) -> EvaluatedProposal:
     parent = make_candidate(f"parent-{index}")
     child = make_candidate(f"child-{index}")
+    example_id = f"example-{index}"
     task = ProposalTask(
         batch_index=index,
         parent_group_index=index,
         mutation_index=0,
         parent_candidate=parent,
-        minibatch_ids=(f"example-{index}",),
+        minibatch_ids=(example_id,),
         reserved_child_id=child.id,
     )
     return EvaluatedProposal(
         task=task,
-        parent_eval_result=make_eval(parent.id, before),
+        parent_eval_result=make_eval(parent.id, before, example_id),
         child_candidate=child,
-        child_eval_result=make_eval(child.id, after),
+        child_eval_result=make_eval(child.id, after, example_id),
     )
 
 
@@ -123,9 +126,7 @@ class TestSamplingStrategies:
             reserve_child_id=reserve,
         )
 
-        assert tasks == [
-            ProposalTask(0, 0, 0, parent, ("mb-0",), "g1-s0")
-        ]
+        assert tasks == [ProposalTask(0, 0, 0, parent, ("mb-0",), "g1-s0")]
         with pytest.raises(FrozenInstanceError):
             setattr(tasks[0], "batch_index", 10)
 
