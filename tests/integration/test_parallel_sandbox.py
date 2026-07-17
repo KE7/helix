@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import queue
 import subprocess
 import threading
@@ -19,7 +20,9 @@ from helix.sandbox import run_sandboxed_command
 
 pytestmark = pytest.mark.docker_integration
 
-_FIXTURE_IMAGE = "helix-runner-base:latest"
+_FIXTURE_IMAGE = os.environ.get(
+    "HELIX_DOCKER_TEST_IMAGE", "helix-runner-base:latest"
+)
 
 
 def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -55,6 +58,7 @@ def _wait_until_running(container_names: list[str]) -> None:
         )
         if status.returncode == 0 and status.stdout.splitlines() == ["true", "true"]:
             return
+        time.sleep(0.05)
     raise AssertionError(
         "parallel sandbox containers did not become simultaneously active: "
         + ", ".join(container_names)

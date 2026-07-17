@@ -43,5 +43,13 @@ jobs:
       - run: uv sync --all-extras
       - name: Verify Docker daemon
         run: docker info
+      - name: Build sandbox fixture image
+        run: >-
+          docker build
+          --tag helix-parallel-sandbox-fixture:local
+          --file tests/integration/parallel-sandbox.Dockerfile
+          tests/integration
       - name: Run parallel sandbox integration test
+        env:
+          HELIX_DOCKER_TEST_IMAGE: helix-parallel-sandbox-fixture:local
         run: uv run pytest -m docker_integration tests/integration/test_parallel_sandbox.py -q
