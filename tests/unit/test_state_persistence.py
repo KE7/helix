@@ -601,6 +601,8 @@ def test_post_apply_checkpoint_requires_and_persists_every_terminal_slot(
         task_index=0,
         status="applied",
         selection="selected",
+        budget_charge=BudgetState(evaluations=0),
+        budget_accounted=True,
         applied=True,
     )
     for task_index, status, cleanup in (
@@ -615,6 +617,8 @@ def test_post_apply_checkpoint_requires_and_persists_every_terminal_slot(
             task_index=task_index,
             status=status,  # type: ignore[arg-type]
             cleanup=cleanup,  # type: ignore[arg-type]
+            budget_charge=BudgetState(evaluations=0),
+            budget_accounted=True,
         )
 
     saver_calls: list[EvolutionState] = []
@@ -634,6 +638,37 @@ def test_post_apply_checkpoint_requires_and_persists_every_terminal_slot(
     assert completed.budget_after_apply == 19
     assert completed.all_tasks_terminal()
     assert saver_calls == [state]
+
+
+def test_post_apply_checkpoint_rejects_task_budget_drift(tmp_path: Path) -> None:
+    state = EvolutionState(
+        generation=4,
+        frontier=["g0-s0"],
+        instance_scores={},
+        budget=BudgetState(evaluations=5),
+        config_hash="h",
+    )
+    batch = checkpoint_batch_before_dispatch(
+        state,
+        tmp_path,
+        _make_batch(),
+        max_in_flight_evaluations=8,
+    )
+    state.budget.evaluations = 7
+    for task_index in range(4):
+        checkpoint_batch_task(
+            state,
+            tmp_path,
+            batch_id=batch.batch_id,
+            task_index=task_index,
+            status="failed",
+            cleanup="missing",
+            budget_charge=BudgetState(evaluations=0),
+            budget_accounted=True,
+        )
+
+    with pytest.raises(ValueError, match="global budget advanced by 2"):
+        checkpoint_batch_after_apply(state, tmp_path, batch_id=batch.batch_id)
 
 
 def test_scheduler_checkpoint_roundtrips_rng_and_sampler_position(

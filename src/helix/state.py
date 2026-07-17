@@ -825,10 +825,27 @@ def checkpoint_batch_after_apply(
             f"Cannot complete proposal batch {batch_id!r}; cleanup failed for slots: "
             + ", ".join(str(index) for index in cleanup_failed)
         )
+    unaccounted = [
+        task.task_index for task in batch.tasks if not task.budget_accounted
+    ]
+    if unaccounted:
+        raise ValueError(
+            f"Cannot complete proposal batch {batch_id!r}; unaccounted slots: "
+            + ", ".join(str(index) for index in unaccounted)
+        )
     actual_in_flight = state.budget.evaluations - batch.budget_before_dispatch
     if actual_in_flight < 0:
         raise ValueError(
             f"Proposal batch {batch_id!r} ended below its pre-dispatch budget"
+        )
+    recorded_in_flight = sum(
+        task.budget_charge.evaluations for task in batch.tasks
+    )
+    if recorded_in_flight != actual_in_flight:
+        raise ValueError(
+            f"Proposal batch {batch_id!r} recorded {recorded_in_flight} "
+            f"evaluation(s) across its tasks, but the global budget advanced "
+            f"by {actual_in_flight}"
         )
     if (
         batch.max_in_flight_evaluations > 0
