@@ -123,7 +123,10 @@ perfect_score_threshold = 1.0
 max_evaluations = -1
 
 minibatch_size = 3
-num_parallel_proposals = 4  # or "auto"
+num_parallel_proposals = 4    # P — parent-selection attempts (int >= 1, or "auto")
+mutations_per_parent = 1      # N — mutations per selected parent (int >= 1)
+proposal_selection = "all_improvements"  # all_improvements | best_improvement | top_k
+# proposal_top_k = 2          # required only for proposal_selection = "top_k"; 1..P*N
 max_workers = 32
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
@@ -146,9 +149,23 @@ Important choices:
   `optimize_anything`'s multi-axis intent.
 - Non-`instance` frontiers need `score_parser = "helix_result"` and
   per-example `side_info["scores"]`.
-- `num_parallel_proposals` controls concurrent agent mutations per generation.
-  Keep it low for expensive agent backends.
-- `max_workers` bounds evaluation/mutation thread pools.
+- `num_parallel_proposals` is `P`: the number of parent-selection attempts per
+  step in the unified P×N proposal scheduler. `mutations_per_parent` is `N`: the
+  number of independent reflective mutations sampled for each selected parent. A
+  step plans at most `P * N` children. Keep both low for expensive agent
+  backends. Integer `P` and `N` must each be `>= 1`; `P` also accepts `"auto"`,
+  which resolves to `max(1, max_workers // minibatch_size)`.
+- `mutations_per_parent` defaults to `1`, so an existing `num_parallel_proposals
+  = K` run is exactly the K-by-1 case (`P=K, N=1`) — the same parent-per-slot
+  behavior as before, with no legacy runtime branch or migration.
+- `proposal_selection` chooses which evaluated children survive: `all_improvements`
+  (default) keeps every proposal that passes acceptance, `best_improvement` keeps
+  the single largest score delta, and `top_k` keeps the `proposal_top_k` largest
+  passing deltas.
+- `proposal_top_k` is required only when `proposal_selection = "top_k"` and must
+  be within `1..P*N`; it is rejected for the other selection modes.
+- `max_workers` bounds evaluation/mutation thread pools and must be `>= 1`.
+  `P*N` may exceed `max_workers`; the extra tasks queue behind the worker bound.
 - Enable `merge_enabled` only when candidate changes can be meaningfully merged.
 
 ## Agent

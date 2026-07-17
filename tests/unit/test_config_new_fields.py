@@ -200,6 +200,263 @@ class TestEvolutionConfigNewFields:
 
 
 # ---------------------------------------------------------------------------
+# Unified P*N proposal scheduler: mutations_per_parent (N), proposal_selection,
+# proposal_top_k, and the effective P*N validation (Step 1 of the parallel
+# proposals plan).
+# ---------------------------------------------------------------------------
+
+
+class TestProposalSchedulerFields:
+    def test_defaults_are_k_by_1(self):
+        """Omitting the new fields is exactly the K-by-1 case: P defaults to 1,
+        N defaults to 1, and selection defaults to all_improvements."""
+        cfg = EvolutionConfig()
+        assert cfg.num_parallel_proposals == 1  # P
+        assert cfg.mutations_per_parent == 1  # N
+        assert cfg.proposal_selection == "all_improvements"
+        assert cfg.proposal_top_k is None
+
+    def test_omitted_n_matches_explicit_n_one(self):
+        """An existing K-slot run (N omitted) is identical to an explicit
+        N=1 K-by-1 configuration for every existing K value."""
+        for k in (1, 2, 4, 8):
+            omitted = EvolutionConfig(num_parallel_proposals=k)
+            explicit = EvolutionConfig(
+                num_parallel_proposals=k, mutations_per_parent=1
+            )
+            assert omitted.num_parallel_proposals == k
+            assert omitted.mutations_per_parent == 1
+            assert (
+                omitted.model_dump() == explicit.model_dump()
+            ), f"omitted vs explicit N=1 diverged for K={k}"
+
+    def test_override_pn_fields(self):
+        cfg = EvolutionConfig(
+            num_parallel_proposals=2,
+            mutations_per_parent=3,
+            proposal_selection="top_k",
+            proposal_top_k=4,
+        )
+        assert cfg.num_parallel_proposals == 2
+        assert cfg.mutations_per_parent == 3
+        assert cfg.proposal_selection == "top_k"
+        assert cfg.proposal_top_k == 4
+
+    # -- mutations_per_parent (N) bounds ----------------------------------
+
+    def test_mutations_per_parent_default_is_one(self):
+        assert EvolutionConfig().mutations_per_parent == 1
+
+    @pytest.mark.parametrize("n", [0, -1, -5])
+    def test_mutations_per_parent_rejects_non_positive(self, n):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(mutations_per_parent=n)
+
+    def test_mutations_per_parent_accepts_large(self):
+        assert EvolutionConfig(mutations_per_parent=16).mutations_per_parent == 16
+
+    # -- num_parallel_proposals (P) bounds --------------------------------
+
+    @pytest.mark.parametrize("p", [0, -1, -3])
+    def test_num_parallel_proposals_rejects_non_positive(self, p):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(num_parallel_proposals=p)
+
+    def test_num_parallel_proposals_accepts_one(self):
+        assert EvolutionConfig(num_parallel_proposals=1).num_parallel_proposals == 1
+
+    # -- max_workers bounds ------------------------------------------------
+
+    @pytest.mark.parametrize("w", [0, -1, -32])
+    def test_max_workers_rejects_non_positive(self, w):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(max_workers=w)
+
+    def test_max_workers_accepts_one(self):
+        assert EvolutionConfig(max_workers=1).max_workers == 1
+
+    # -- proposal_selection ------------------------------------------------
+
+    def test_proposal_selection_default(self):
+        assert EvolutionConfig().proposal_selection == "all_improvements"
+
+    @pytest.mark.parametrize(
+        "strategy", ["all_improvements", "best_improvement", "top_k"]
+    )
+    def test_proposal_selection_accepts_supported(self, strategy):
+        kwargs = {"proposal_selection": strategy}
+        if strategy == "top_k":
+            kwargs["proposal_top_k"] = 1
+        cfg = EvolutionConfig(**kwargs)
+        assert cfg.proposal_selection == strategy
+
+    def test_proposal_selection_rejects_unknown(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(proposal_selection="pareto")  # type: ignore[arg-type]
+
+    # -- proposal_top_k: required only / valid only for top_k -------------
+
+    def test_top_k_required_for_top_k_selection(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(proposal_selection="top_k")
+
+    def test_top_k_rejected_for_all_improvements(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(
+                proposal_selection="all_improvements", proposal_top_k=1
+            )
+
+    def test_top_k_rejected_for_best_improvement(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(
+                proposal_selection="best_improvement", proposal_top_k=1
+            )
+
+    def test_top_k_none_ok_for_non_top_k_modes(self):
+        assert (
+            EvolutionConfig(proposal_selection="best_improvement").proposal_top_k
+            is None
+        )
+
+    # -- proposal_top_k: within 1..P*N ------------------------------------
+
+    def test_top_k_within_effective_pn(self):
+        # P=2, N=3 => P*N = 6; top_k in 1..6 accepted.
+        for k in range(1, 7):
+            cfg = EvolutionConfig(
+                num_parallel_proposals=2,
+                mutations_per_parent=3,
+                proposal_selection="top_k",
+                proposal_top_k=k,
+            )
+            assert cfg.proposal_top_k == k
+
+    def test_top_k_rejects_zero_and_negative(self):
+        for k in (0, -1):
+            with pytest.raises(ValidationError):
+                EvolutionConfig(
+                    num_parallel_proposals=2,
+                    mutations_per_parent=3,
+                    proposal_selection="top_k",
+                    proposal_top_k=k,
+                )
+
+    def test_top_k_rejects_above_pn(self):
+        # P=2, N=3 => P*N = 6; top_k=7 exceeds the effective width.
+        with pytest.raises(ValidationError):
+            EvolutionConfig(
+                num_parallel_proposals=2,
+                mutations_per_parent=3,
+                proposal_selection="top_k",
+                proposal_top_k=7,
+            )
+
+    def test_top_k_equals_pn_upper_bound_ok(self):
+        cfg = EvolutionConfig(
+            num_parallel_proposals=4,
+            mutations_per_parent=1,
+            proposal_selection="top_k",
+            proposal_top_k=4,
+        )
+        assert cfg.proposal_top_k == 4
+
+    def test_top_k_uses_resolved_auto_p_for_bound(self):
+        # "auto" with max_workers=9, minibatch_size=3 => P=3; N=2 => P*N=6.
+        cfg = EvolutionConfig(
+            num_parallel_proposals="auto",
+            max_workers=9,
+            minibatch_size=3,
+            mutations_per_parent=2,
+            proposal_selection="top_k",
+            proposal_top_k=6,
+        )
+        assert cfg.num_parallel_proposals == 3
+        assert cfg.proposal_top_k == 6
+        # 7 would exceed the resolved P*N of 6.
+        with pytest.raises(ValidationError):
+            EvolutionConfig(
+                num_parallel_proposals="auto",
+                max_workers=9,
+                minibatch_size=3,
+                mutations_per_parent=2,
+                proposal_selection="top_k",
+                proposal_top_k=7,
+            )
+
+    # -- TOML round trips --------------------------------------------------
+
+    def test_toml_loads_pn_fields(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "P by N"
+
+            [evaluator]
+            command = "pytest"
+
+            [evolution]
+            num_parallel_proposals = 2
+            mutations_per_parent = 2
+            proposal_selection = "top_k"
+            proposal_top_k = 3
+        """)
+        )
+        cfg = load_config(toml)
+        assert cfg.evolution.num_parallel_proposals == 2
+        assert cfg.evolution.mutations_per_parent == 2
+        assert cfg.evolution.proposal_selection == "top_k"
+        assert cfg.evolution.proposal_top_k == 3
+
+    def test_toml_defaults_when_omitted(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "Defaults"
+
+            [evaluator]
+            command = "pytest"
+        """)
+        )
+        cfg = load_config(toml)
+        assert cfg.evolution.num_parallel_proposals == 1
+        assert cfg.evolution.mutations_per_parent == 1
+        assert cfg.evolution.proposal_selection == "all_improvements"
+        assert cfg.evolution.proposal_top_k is None
+
+    def test_toml_invalid_top_k_combo_rejected_at_load(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "Bad top_k"
+
+            [evaluator]
+            command = "pytest"
+
+            [evolution]
+            num_parallel_proposals = 1
+            mutations_per_parent = 1
+            proposal_selection = "top_k"
+            proposal_top_k = 5
+        """)
+        )
+        with pytest.raises(SystemExit):
+            load_config(toml)
+
+    def test_model_dump_roundtrip_pn_fields(self):
+        cfg = EvolutionConfig(
+            num_parallel_proposals=2,
+            mutations_per_parent=3,
+            proposal_selection="top_k",
+            proposal_top_k=5,
+        )
+        restored = EvolutionConfig.model_validate(cfg.model_dump())
+        assert restored.num_parallel_proposals == 2
+        assert restored.mutations_per_parent == 3
+        assert restored.proposal_selection == "top_k"
+        assert restored.proposal_top_k == 5
+
+
+# ---------------------------------------------------------------------------
 # evolution.frontier_type — GEPA multi-axis Pareto dimensionality
 # ---------------------------------------------------------------------------
 

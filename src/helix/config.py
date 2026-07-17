@@ -325,10 +325,47 @@ class EvolutionConfig(BaseModel):
     num_parallel_proposals: int | Literal["auto"] = Field(
         default=1,
         description=(
-            "Number of concurrent mutation proposals per iteration. "
+            "P — number of parent-selection attempts per iteration in the "
+            "unified P*N proposal scheduler. This is the same value the "
+            "current loop already uses: it selects one parent per slot, so "
+            "an existing num_parallel_proposals=K run is exactly the K-by-1 "
+            "case (P=K, N=1); there is no legacy runtime branch. "
             "GEPA parity: EngineConfig.num_parallel_proposals. "
             "Set to 'auto' to derive from max_workers // minibatch_size, "
-            "matching GEPA's optimize_anything._resolve_num_parallel_proposals."
+            "matching GEPA's optimize_anything._resolve_num_parallel_proposals. "
+            "Integer values must be >= 1."
+        ),
+    )
+    mutations_per_parent: int = Field(
+        default=1,
+        description=(
+            "N — number of independently sampled reflective mutations for "
+            "each selected parent in the unified P*N proposal scheduler. A "
+            "full step plans at most num_parallel_proposals * "
+            "mutations_per_parent (P*N) children. Defaults to 1, so every "
+            "existing num_parallel_proposals=K configuration lands on the "
+            "K-by-1 case with the existing behavior preserved. Must be >= 1."
+        ),
+    )
+    proposal_selection: Literal[
+        "all_improvements", "best_improvement", "top_k"
+    ] = Field(
+        default="all_improvements",
+        description=(
+            "Selection strategy applied to the evaluated child proposals of "
+            "one step. 'all_improvements' (default) keeps every proposal that "
+            "passes the acceptance gate; 'best_improvement' keeps the single "
+            "largest score delta; 'top_k' keeps the proposal_top_k largest "
+            "passing deltas in stable order."
+        ),
+    )
+    proposal_top_k: int | None = Field(
+        default=None,
+        description=(
+            "Number of proposals kept when proposal_selection='top_k'. "
+            "Required only for that mode and must be within 1..P*N "
+            "(num_parallel_proposals * mutations_per_parent). Rejected for "
+            "the other selection modes."
         ),
     )
     minibatch_size: int = Field(
@@ -440,13 +477,61 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
-        # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
-        # ``max(1, max_workers // minibatch_size)`` once at construction
-        # time so every downstream consumer sees a plain int.  Mirrors
+        # ``max_workers`` bounds every eval/mutation pool and feeds the
+        # ``num_parallel_proposals="auto"`` derivation, so validate it first.
+        # The prior Pydantic model accepted invalid zero/negative values; the
+        # unified P*N scheduler closes that gap.
+        if self.max_workers < 1:
+            raise ValueError(
+                f"evolution.max_workers must be >= 1 (got {self.max_workers})"
+            )
+        # Resolve P (``num_parallel_proposals``) to a plain int.  The existing
+        # value *is* P in the unified P*N scheduler: the current loop already
+        # selects one parent per slot, so ``num_parallel_proposals=K`` is the
+        # K-by-1 case.  GEPA parity: resolve ``"auto"`` to
+        # ``max(1, max_workers // minibatch_size)`` once at construction time
+        # so every downstream consumer sees a plain int.  Mirrors
         # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
-        if self.num_parallel_proposals == "auto":
-            self.num_parallel_proposals = max(
-                1, self.max_workers // max(1, self.minibatch_size)
+        raw_p = self.num_parallel_proposals
+        if isinstance(raw_p, int):
+            if raw_p < 1:
+                raise ValueError(
+                    "evolution.num_parallel_proposals must be >= 1 "
+                    f"(got {raw_p})"
+                )
+            effective_p = raw_p
+        else:  # "auto"
+            effective_p = max(1, self.max_workers // max(1, self.minibatch_size))
+            self.num_parallel_proposals = effective_p
+        # ``mutations_per_parent`` is N; N defaults to 1 so omitting it keeps
+        # the K-by-1 behavior byte-for-byte.
+        if self.mutations_per_parent < 1:
+            raise ValueError(
+                "evolution.mutations_per_parent must be >= 1 "
+                f"(got {self.mutations_per_parent})"
+            )
+        # ``proposal_top_k`` is required and bounded to 1..P*N only for the
+        # ``top_k`` selection strategy; it is rejected for the other modes.
+        effective_pn = effective_p * self.mutations_per_parent
+        if self.proposal_selection == "top_k":
+            if self.proposal_top_k is None:
+                raise ValueError(
+                    "evolution.proposal_top_k is required when "
+                    "evolution.proposal_selection='top_k'"
+                )
+            if not 1 <= self.proposal_top_k <= effective_pn:
+                raise ValueError(
+                    "evolution.proposal_top_k must be within "
+                    f"1..{effective_pn} (P*N = num_parallel_proposals * "
+                    "mutations_per_parent) when "
+                    "evolution.proposal_selection='top_k' "
+                    f"(got {self.proposal_top_k})"
+                )
+        elif self.proposal_top_k is not None:
+            raise ValueError(
+                "evolution.proposal_top_k is only valid when "
+                "evolution.proposal_selection='top_k' (got "
+                f"proposal_selection={self.proposal_selection!r})"
             )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(
