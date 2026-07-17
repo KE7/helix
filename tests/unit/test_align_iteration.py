@@ -152,12 +152,10 @@ class TestMergeFallthroughToMutation:
         ``if triplet is not None`` nesting), consuming the iteration.
         """
         seed = make_candidate("g0-s0")
-        child1 = make_candidate("g1-s1", generation=1)
-        child2 = make_candidate("g2-s1", generation=2)
         all_mocks["create_seed_worktree"].return_value = seed
-        children = iter([child1, child2])
-        all_mocks["mutate"].side_effect = lambda *a, **kw: next(
-            children, None
+        all_mocks["mutate"].side_effect = lambda *a, **kw: make_candidate(
+            kw["new_id"],
+            generation=int(kw["new_id"].split("-", 1)[0][1:]),
         )
 
         # A valid triplet is returned, so the merge attempt proceeds
