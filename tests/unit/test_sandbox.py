@@ -27,7 +27,32 @@ from helix.sandbox import (
 
 
 _SYNTHETIC_SECRET = "synthetic-sentinel-secret-for-redaction-tests"
+_SYNTHETIC_ENDPOINT_FRAGMENT = "synthetic-endpoint-fragment-for-redaction-tests"
 _NON_HEURISTIC_ENV_KEY = "SYNTHETIC_SETTING"
+
+
+def _endpoint_env_args(endpoint: str, form: str) -> list[str]:
+    assignment = f"HELIX_EVALUATOR_ENDPOINT={endpoint}"
+    if form == "short-separated":
+        return ["-e", assignment]
+    if form == "long-separated":
+        return ["--env", assignment]
+    if form == "short-joined":
+        return [f"-e{assignment}"]
+    if form == "long-joined":
+        return [f"--env={assignment}"]
+    raise AssertionError(f"unexpected synthetic env form: {form}")
+
+
+_SYNTHETIC_ENDPOINTS = [
+    f"https://{_SYNTHETIC_ENDPOINT_FRAGMENT}@synthetic.invalid/evaluate",
+    (
+        "https://synthetic-user:"
+        f"{_SYNTHETIC_ENDPOINT_FRAGMENT}@synthetic.invalid/evaluate"
+    ),
+    (f"https://synthetic.invalid/evaluate?opaque={_SYNTHETIC_ENDPOINT_FRAGMENT}"),
+    f"https://synthetic.invalid/evaluate#{_SYNTHETIC_ENDPOINT_FRAGMENT}",
+]
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
@@ -362,6 +387,129 @@ def test_docker_argv_redaction_preserves_key_for_all_env_forms(env_args):
     assert "SYNTHETIC_API_KEY=<redacted>" in rendered
 
 
+@pytest.mark.parametrize(
+    "form",
+    ["short-separated", "long-separated", "short-joined", "long-joined"],
+)
+@pytest.mark.parametrize(
+    "endpoint",
+    _SYNTHETIC_ENDPOINTS,
+    ids=["username", "password", "query-value", "fragment"],
+)
+@pytest.mark.parametrize("failure", ["timeout", "called-process"])
+def test_endpoint_fragment_redacted_from_subprocess_exception(
+    mocker, form: str, endpoint: str, failure: str
+):
+    raw_args = [
+        "docker",
+        "run",
+        *_endpoint_env_args(endpoint, form),
+        "synthetic-runner:latest",
+    ]
+
+    def fake_run(args, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(
+                args,
+                timeout=1,
+                output=f"stdout: {_SYNTHETIC_ENDPOINT_FRAGMENT}",
+                stderr=f"stderr: {_SYNTHETIC_ENDPOINT_FRAGMENT}",
+            )
+        raise subprocess.CalledProcessError(
+            125,
+            args,
+            output=f"stdout: {_SYNTHETIC_ENDPOINT_FRAGMENT}",
+            stderr=f"stderr: {_SYNTHETIC_ENDPOINT_FRAGMENT}",
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    expected_exception = (
+        subprocess.TimeoutExpired
+        if failure == "timeout"
+        else subprocess.CalledProcessError
+    )
+
+    with pytest.raises(expected_exception) as captured:
+        _run_docker(raw_args)
+
+    exc = captured.value
+    renderings = [
+        str(exc),
+        repr(exc),
+        repr(exc.cmd),
+        repr(exc.args),
+        str(exc.output),
+        str(exc.stderr),
+        f"healthcheck exception: {type(exc).__name__}: {exc}",
+    ]
+    assert all(_SYNTHETIC_ENDPOINT_FRAGMENT not in item for item in renderings)
+    assert "HELIX_EVALUATOR_ENDPOINT=<redacted>" in repr(exc.cmd)
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["short-separated", "long-separated", "short-joined", "long-joined"],
+)
+@pytest.mark.parametrize(
+    "endpoint",
+    _SYNTHETIC_ENDPOINTS,
+    ids=["username", "password", "query-value", "fragment"],
+)
+def test_endpoint_fragment_redacted_from_nonzero_diagnostic(
+    mocker, form: str, endpoint: str
+):
+    raw_args = [
+        "docker",
+        "run",
+        *_endpoint_env_args(endpoint, form),
+        "synthetic-runner:latest",
+    ]
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            raw_args,
+            9,
+            stdout=f"stdout: {_SYNTHETIC_ENDPOINT_FRAGMENT}",
+            stderr=f"stderr: {_SYNTHETIC_ENDPOINT_FRAGMENT}",
+        ),
+    )
+
+    result = _run_docker(raw_args, check=False)
+
+    renderings = [repr(result), str(result.stdout), str(result.stderr)]
+    assert all(_SYNTHETIC_ENDPOINT_FRAGMENT not in item for item in renderings)
+    assert "HELIX_EVALUATOR_ENDPOINT=<redacted>" in repr(result.args)
+
+
+def test_endpoint_redaction_preserves_harmless_url_context(mocker):
+    endpoint = (
+        f"https://synthetic.invalid/evaluate?opaque={_SYNTHETIC_ENDPOINT_FRAGMENT}"
+    )
+    raw_args = [
+        "docker",
+        "run",
+        "-e",
+        f"HELIX_EVALUATOR_ENDPOINT={endpoint}",
+        "synthetic-runner:latest",
+    ]
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            raw_args,
+            9,
+            stdout=(
+                "synthetic.invalid/evaluate failed: opaque="
+                f"{_SYNTHETIC_ENDPOINT_FRAGMENT}"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = _run_docker(raw_args, check=False)
+
+    assert result.stdout == ("synthetic.invalid/evaluate failed: opaque=<redacted>")
+
+
 @pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
 def test_timeout_exception_redacts_docker_env_in_all_renderings(
     tmp_path: Path, mocker, as_bytes: bool
@@ -607,6 +755,42 @@ def test_sidecar_service_exit_logs_redact_sidecar_startup_env(mocker):
     assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in rendered
 
 
+@pytest.mark.parametrize("failure_phase", ["container-start", "service-wait"])
+def test_sidecar_logs_redact_endpoint_fragment(mocker, failure_phase: str):
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="false exited\n", stderr=""
+            )
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=f"sidecar detail: {_SYNTHETIC_ENDPOINT_FRAGMENT}\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    if failure_phase == "service-wait":
+        mocker.patch("helix.sandbox._wait_for_container_running")
+    sidecar = EvaluatorSidecarConfig(
+        image="synthetic-sidecar:latest",
+        command="python -m synthetic_server",
+        endpoint=(
+            f"https://synthetic.invalid/evaluate?opaque={_SYNTHETIC_ENDPOINT_FRAGMENT}"
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        with start_evaluator_sidecar(sidecar):
+            pass
+
+    rendered = str(captured.value)
+    assert _SYNTHETIC_ENDPOINT_FRAGMENT not in rendered
+    assert "stdout:\nsidecar detail: <redacted>" in rendered
+
+
 def test_sidecar_healthcheck_timeout_redacts_endpoint_and_startup_env(mocker):
     def fake_run(args, **kwargs):
         if args[:2] == ["docker", "inspect"]:
@@ -617,7 +801,10 @@ def test_sidecar_healthcheck_timeout_redacts_endpoint_and_startup_env(mocker):
             return subprocess.CompletedProcess(
                 args,
                 8,
-                stdout=f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}\n",
+                stdout=(
+                    f"healthcheck detail: {_SYNTHETIC_ENDPOINT_FRAGMENT}\n"
+                    f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}\n"
+                ),
                 stderr="",
             )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -626,7 +813,9 @@ def test_sidecar_healthcheck_timeout_redacts_endpoint_and_startup_env(mocker):
     mocker.patch("helix.sandbox._wait_for_container_running")
     mocker.patch("helix.sandbox.time.monotonic", side_effect=[0.0, 0.0, 2.0])
     mocker.patch("helix.sandbox.time.sleep")
-    endpoint = f"https://synthetic.invalid/evaluate?sentinel={_SYNTHETIC_SECRET}"
+    endpoint = (
+        f"https://synthetic.invalid/evaluate?opaque={_SYNTHETIC_ENDPOINT_FRAGMENT}"
+    )
     sidecar = EvaluatorSidecarConfig(
         image="synthetic-sidecar:latest",
         command="python -m synthetic_server",
@@ -643,6 +832,7 @@ def test_sidecar_healthcheck_timeout_redacts_endpoint_and_startup_env(mocker):
 
     rendered = str(captured.value)
     assert endpoint not in rendered
+    assert _SYNTHETIC_ENDPOINT_FRAGMENT not in rendered
     assert _SYNTHETIC_SECRET not in rendered
     assert rendered.splitlines()[0] == (
         "Evaluator sidecar endpoint did not become reachable within 1s: "

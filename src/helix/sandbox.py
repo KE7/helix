@@ -18,6 +18,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
@@ -657,9 +658,48 @@ def _docker_diagnostic_redaction_values(
     an earlier Docker invocation when later output (such as ``docker logs``)
     is rendered as part of the same failure.
     """
-    values = {value for _key, value in _docker_env_assignments(args) if value}
+    assignments = _docker_env_assignments(args)
+    values = {value for _key, value in assignments if value}
+    for key, value in assignments:
+        if key == "HELIX_EVALUATOR_ENDPOINT":
+            values.update(_endpoint_component_redaction_values(value))
     values.update(value for value in explicit_values if value)
     return tuple(sorted(values, key=len, reverse=True))
+
+
+def _endpoint_component_redaction_values(endpoint: str) -> set[str]:
+    """Return sensitive structured pieces of an evaluator endpoint URL.
+
+    A failed URL client may print only userinfo, a query value, or a fragment,
+    so scrubbing the complete environment value is insufficient.  Limit the
+    derived values to those URL components rather than hiding harmless scheme,
+    host, or path text that remains useful in diagnostics.
+    """
+    try:
+        parsed = urlsplit(endpoint)
+        values = {
+            value
+            for value in (
+                parsed.username,
+                parsed.password,
+                parsed.fragment,
+            )
+            if value
+        }
+        for pair in parsed.query.split("&"):
+            _key, separator, raw_value = pair.partition("=")
+            if separator and raw_value:
+                values.add(raw_value)
+        for field in (parsed.query, parsed.fragment):
+            values.update(
+                value
+                for _key, value in parse_qsl(field, keep_blank_values=True)
+                if value
+            )
+        values.update(unquote(value) for value in tuple(values))
+    except (UnicodeError, ValueError):
+        return set()
+    return {value for value in values if value}
 
 
 def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
@@ -976,7 +1016,14 @@ def start_evaluator_sidecar(
             args.extend(["-e", f"{key}={value}"])
         args.append(sidecar.image)
         args.extend(shlex.split(sidecar.command))
-        redaction_values = _docker_diagnostic_redaction_values(args)
+        redaction_values = _docker_diagnostic_redaction_values(
+            _healthcheck_docker_args(
+                sidecar,
+                network=network,
+                extra_hosts=extra_hosts,
+            ),
+            _docker_diagnostic_redaction_values(args),
+        )
         _run_docker(args)
         _wait_for_container_running(
             container_name,
