@@ -27,22 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 _REDACTED_DOCKER_ENV_VALUE = "<redacted>"
-_SENSITIVE_ENV_KEY_PARTS = frozenset(
-    {
-        "AUTH",
-        "COOKIE",
-        "CREDENTIAL",
-        "CREDENTIALS",
-        "KEY",
-        "PASS",
-        "PASSWD",
-        "PASSWORD",
-        "PRIVATE",
-        "SECRET",
-        "SESSION",
-        "TOKEN",
-    }
-)
 
 
 HELIX_ARTIFACT_NAMES = {
@@ -663,18 +647,18 @@ def _docker_env_assignments(args: Sequence[str]) -> list[tuple[str, str]]:
     return assignments
 
 
-def _is_sensitive_env_key(key: str) -> bool:
-    parts = {part for part in key.upper().replace("-", "_").split("_") if part}
-    return bool(parts & _SENSITIVE_ENV_KEY_PARTS)
+def _docker_diagnostic_redaction_values(
+    args: Sequence[str], explicit_values: Sequence[str] = ()
+) -> tuple[str, ...]:
+    """Return literal Docker env values to scrub from failure diagnostics.
 
-
-def _sensitive_docker_env_values(args: Sequence[str]) -> tuple[str, ...]:
-    """Return non-empty secret values, longest first, for output scrubbing."""
-    values = {
-        value
-        for key, value in _docker_env_assignments(args)
-        if value and _is_sensitive_env_key(key)
-    }
+    Any explicit ``KEY=VALUE`` passed to Docker can carry sensitive data,
+    regardless of how the key is named.  Callers may also supply values from
+    an earlier Docker invocation when later output (such as ``docker logs``)
+    is rendered as part of the same failure.
+    """
+    values = {value for _key, value in _docker_env_assignments(args) if value}
+    values.update(value for value in explicit_values if value)
     return tuple(sorted(values, key=len, reverse=True))
 
 
@@ -724,19 +708,21 @@ def _redact_docker_argv(args: Sequence[str]) -> list[str]:
 def _redact_subprocess_exception(
     exc: subprocess.CalledProcessError | subprocess.TimeoutExpired,
     args: Sequence[str],
+    *,
+    redaction_values: Sequence[str] = (),
 ) -> None:
     """Sanitize a subprocess exception in place, including indirect rendering."""
     safe_args = _redact_docker_argv(args)
-    secrets = _sensitive_docker_env_values(args)
+    values = _docker_diagnostic_redaction_values(args, redaction_values)
     exc.cmd = safe_args
     if isinstance(exc, subprocess.CalledProcessError):
         exc.args = (exc.returncode, safe_args)
-        exc.output = _redact_diagnostic_output(exc.output, secrets)
-        exc.stderr = _redact_diagnostic_output(exc.stderr, secrets)
+        exc.output = _redact_diagnostic_output(exc.output, values)
+        exc.stderr = _redact_diagnostic_output(exc.stderr, values)
     else:
         exc.args = (safe_args, exc.timeout)
-        exc.output = _redact_diagnostic_output(exc.output, secrets)
-        exc.stderr = _redact_diagnostic_output(exc.stderr, secrets)
+        exc.output = _redact_diagnostic_output(exc.output, values)
+        exc.stderr = _redact_diagnostic_output(exc.stderr, values)
 
 
 def _run_docker_process(
@@ -747,9 +733,17 @@ def _run_docker_process(
     cwd: str | None = None,
     input_text: str | None = None,
     timeout: float | None = None,
+    redaction_values: Sequence[str] = (),
+    diagnostic_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run Docker and sanitize every returned or raised diagnostic object."""
-    secrets = _sensitive_docker_env_values(args)
+    """Run Docker, sanitizing argv and any output used as a diagnostic.
+
+    Successful functional stdout/stderr is preserved by default.  Failure
+    output is always scrubbed, and callers that intentionally consume a
+    successful command's output as diagnostics can opt in with
+    ``diagnostic_output=True``.
+    """
+    values = _docker_diagnostic_redaction_values(args, redaction_values)
     try:
         result = subprocess.run(
             args,
@@ -762,11 +756,12 @@ def _run_docker_process(
             timeout=timeout,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        _redact_subprocess_exception(exc, args)
+        _redact_subprocess_exception(exc, args, redaction_values=redaction_values)
         raise
     result.args = _redact_docker_argv(args)
-    result.stdout = _redact_diagnostic_output(result.stdout, secrets)
-    result.stderr = _redact_diagnostic_output(result.stderr, secrets)
+    if result.returncode != 0 or diagnostic_output:
+        result.stdout = _redact_diagnostic_output(result.stdout, values)
+        result.stderr = _redact_diagnostic_output(result.stderr, values)
     return result
 
 
@@ -774,8 +769,15 @@ def _run_docker(
     args: list[str],
     *,
     check: bool = True,
+    redaction_values: Sequence[str] = (),
+    diagnostic_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    return _run_docker_process(args, check=check)
+    return _run_docker_process(
+        args,
+        check=check,
+        redaction_values=redaction_values,
+        diagnostic_output=diagnostic_output,
+    )
 
 
 def _build_add_host_args(
@@ -791,7 +793,12 @@ def _build_add_host_args(
     return args
 
 
-def _wait_for_container_running(container_name: str, timeout_seconds: int) -> None:
+def _wait_for_container_running(
+    container_name: str,
+    timeout_seconds: int,
+    *,
+    redaction_values: Sequence[str] = (),
+) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_stderr = ""
     while time.monotonic() < deadline:
@@ -804,13 +811,19 @@ def _wait_for_container_running(container_name: str, timeout_seconds: int) -> No
                 container_name,
             ],
             check=False,
+            redaction_values=redaction_values,
         )
         if result.returncode == 0:
             status = result.stdout.strip().split()
             if status[:1] == ["true"]:
                 return
             if len(status) > 1 and status[1] in {"exited", "dead"}:
-                logs = _run_docker(["docker", "logs", container_name], check=False)
+                logs = _run_docker(
+                    ["docker", "logs", container_name],
+                    check=False,
+                    redaction_values=redaction_values,
+                    diagnostic_output=True,
+                )
                 raise RuntimeError(
                     "Evaluator sidecar exited before it became ready.\n"
                     f"stdout:\n{logs.stdout}\nstderr:\n{logs.stderr}"
@@ -874,6 +887,7 @@ def _wait_for_sidecar_service(
     network: str,
     container_name: str,
     extra_hosts: dict[str, str] | None = None,
+    redaction_values: Sequence[str] = (),
 ) -> None:
     deadline = time.monotonic() + sidecar.startup_timeout_seconds
     last_output = ""
@@ -887,11 +901,17 @@ def _wait_for_sidecar_service(
                 container_name,
             ],
             check=False,
+            redaction_values=redaction_values,
         )
         if status.returncode == 0:
             parts = status.stdout.strip().split()
             if len(parts) > 1 and parts[1] in {"exited", "dead"}:
-                logs = _run_docker(["docker", "logs", container_name], check=False)
+                logs = _run_docker(
+                    ["docker", "logs", container_name],
+                    check=False,
+                    redaction_values=redaction_values,
+                    diagnostic_output=True,
+                )
                 raise RuntimeError(
                     "Evaluator sidecar exited before its endpoint became ready.\n"
                     f"stdout:\n{logs.stdout}\nstderr:\n{logs.stderr}"
@@ -903,6 +923,7 @@ def _wait_for_sidecar_service(
                 extra_hosts=extra_hosts,
             ),
             check=False,
+            redaction_values=redaction_values,
         )
         if result.returncode == 0:
             return
@@ -954,13 +975,19 @@ def start_evaluator_sidecar(
             args.extend(["-e", f"{key}={value}"])
         args.append(sidecar.image)
         args.extend(shlex.split(sidecar.command))
+        redaction_values = _docker_diagnostic_redaction_values(args)
         _run_docker(args)
-        _wait_for_container_running(container_name, sidecar.startup_timeout_seconds)
+        _wait_for_container_running(
+            container_name,
+            sidecar.startup_timeout_seconds,
+            redaction_values=redaction_values,
+        )
         _wait_for_sidecar_service(
             sidecar,
             network=network,
             container_name=container_name,
             extra_hosts=extra_hosts,
+            redaction_values=redaction_values,
         )
         runtime = EvaluatorSidecarRuntime(
             network=network,

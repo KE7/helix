@@ -27,6 +27,7 @@ from helix.sandbox import (
 
 
 _SYNTHETIC_SECRET = "synthetic-sentinel-secret-for-redaction-tests"
+_NON_HEURISTIC_ENV_KEY = "SYNTHETIC_SETTING"
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
@@ -361,18 +362,26 @@ def test_docker_argv_redaction_preserves_key_for_all_env_forms(env_args):
     assert "SYNTHETIC_API_KEY=<redacted>" in rendered
 
 
-def test_timeout_exception_redacts_docker_env_in_all_renderings(tmp_path: Path, mocker):
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
+def test_timeout_exception_redacts_docker_env_in_all_renderings(
+    tmp_path: Path, mocker, as_bytes: bool
+):
     source = tmp_path / "candidate"
     source.mkdir()
     (source / "main.py").write_text("print('hi')\n")
+    stdout: str | bytes = f"stdout echoed {_SYNTHETIC_SECRET}"
+    stderr: str | bytes = f"stderr echoed {_SYNTHETIC_SECRET}"
+    if as_bytes:
+        stdout = stdout.encode()
+        stderr = stderr.encode()
 
     def fake_run(args, **kwargs):
         if args[:2] == ["docker", "run"] and "--name" in args:
             raise subprocess.TimeoutExpired(
                 args,
                 timeout=1,
-                output=f"stdout echoed {_SYNTHETIC_SECRET}",
-                stderr=f"stderr echoed {_SYNTHETIC_SECRET}",
+                output=stdout,
+                stderr=stderr,
             )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
@@ -383,7 +392,7 @@ def test_timeout_exception_redacts_docker_env_in_all_renderings(tmp_path: Path, 
         run_sandboxed_command(
             ["sh", "-c", "true"],
             cwd=source,
-            env={"SYNTHETIC_API_KEY": _SYNTHETIC_SECRET},
+            env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
             sandbox=SandboxConfig(enabled=True, timeout_seconds=1),
             scope="evaluator",
             sync_back=False,
@@ -401,7 +410,7 @@ def test_timeout_exception_redacts_docker_env_in_all_renderings(tmp_path: Path, 
         f"worker exception: {type(exc).__name__}: {exc}",
     ]
     assert all(_SYNTHETIC_SECRET not in item for item in renderings)
-    assert "SYNTHETIC_API_KEY=<redacted>" in repr(exc.cmd)
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in repr(exc.cmd)
 
 
 def test_nonzero_result_redacts_docker_argv_and_output_diagnostics(
@@ -427,7 +436,7 @@ def test_nonzero_result_redacts_docker_argv_and_output_diagnostics(
     result = run_sandboxed_command(
         ["sh", "-c", "exit 7"],
         cwd=source,
-        env={"SYNTHETIC_API_KEY": _SYNTHETIC_SECRET},
+        env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
         sandbox=SandboxConfig(enabled=True),
         scope="evaluator",
         sync_back=False,
@@ -436,7 +445,7 @@ def test_nonzero_result_redacts_docker_argv_and_output_diagnostics(
 
     renderings = [repr(result), repr(result.args), result.stdout, result.stderr]
     assert all(_SYNTHETIC_SECRET not in item for item in renderings)
-    assert "SYNTHETIC_API_KEY=<redacted>" in repr(result.args)
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in repr(result.args)
     assert result.returncode == 7
 
 
@@ -445,7 +454,7 @@ def test_called_process_exception_redacts_docker_env_and_indirect_context(mocker
         "docker",
         "run",
         "--env",
-        f"SYNTHETIC_API_KEY={_SYNTHETIC_SECRET}",
+        f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}",
         "fixture:latest",
     ]
 
@@ -453,8 +462,8 @@ def test_called_process_exception_redacts_docker_env_and_indirect_context(mocker
         raise subprocess.CalledProcessError(
             125,
             args,
-            output=f"stdout echoed {_SYNTHETIC_SECRET}",
-            stderr=f"stderr echoed {_SYNTHETIC_SECRET}",
+            output=f"stdout echoed {_SYNTHETIC_SECRET}".encode(),
+            stderr=f"stderr echoed {_SYNTHETIC_SECRET}".encode(),
         )
 
     mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
@@ -473,7 +482,167 @@ def test_called_process_exception_redacts_docker_env_and_indirect_context(mocker
         f"sidecar setup failed: {exc}",
     ]
     assert all(_SYNTHETIC_SECRET not in item for item in renderings)
-    assert "SYNTHETIC_API_KEY=<redacted>" in repr(exc.cmd)
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in repr(exc.cmd)
+
+
+def test_successful_result_preserves_functional_output_while_redacting_argv(mocker):
+    env_key = "SYNTHETIC_API_KEY"
+    raw_args = [
+        "docker",
+        "run",
+        "-e",
+        f"{env_key}={_SYNTHETIC_SECRET}",
+        "fixture:latest",
+    ]
+    stdout = f"functional output {_SYNTHETIC_SECRET}"
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        return_value=subprocess.CompletedProcess(raw_args, 0, stdout=stdout, stderr=""),
+    )
+
+    result = _run_docker(raw_args)
+
+    assert result.stdout == stdout
+    assert _SYNTHETIC_SECRET not in repr(result.args)
+    assert f"{env_key}=<redacted>" in repr(result.args)
+
+
+@pytest.mark.parametrize(
+    "env_args",
+    [
+        ["-e", f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}"],
+        ["--env", f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}"],
+        [f"-e{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}"],
+        [f"--env={_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}"],
+    ],
+)
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
+def test_nonzero_diagnostic_output_redacts_all_env_forms(
+    mocker, env_args: list[str], as_bytes: bool
+):
+    raw_args = ["docker", "run", *env_args, "fixture:latest"]
+    output: str | bytes = f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}"
+    if as_bytes:
+        output = output.encode()
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        return_value=subprocess.CompletedProcess(
+            raw_args, 9, stdout=output, stderr=output
+        ),
+    )
+
+    result = _run_docker(raw_args, check=False)
+
+    renderings = [repr(result), str(result.stdout), str(result.stderr)]
+    assert all(_SYNTHETIC_SECRET not in item for item in renderings)
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in str(result.stdout)
+
+
+def test_container_running_exit_logs_redact_sidecar_startup_env(mocker):
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="false exited\n", stderr=""
+            )
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    sidecar = EvaluatorSidecarConfig(
+        image="synthetic-sidecar:latest",
+        command="python -m synthetic_server",
+        endpoint="http://helix-evaluator:8080/evaluate",
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        with start_evaluator_sidecar(
+            sidecar,
+            fixed_env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
+        ):
+            pass
+
+    rendered = str(captured.value)
+    assert _SYNTHETIC_SECRET not in rendered
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in rendered
+
+
+def test_sidecar_service_exit_logs_redact_sidecar_startup_env(mocker):
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="false exited\n", stderr=""
+            )
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="",
+                stderr=f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}\n",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._wait_for_container_running")
+    sidecar = EvaluatorSidecarConfig(
+        image="synthetic-sidecar:latest",
+        command="python -m synthetic_server",
+        endpoint="http://helix-evaluator:8080/evaluate",
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        with start_evaluator_sidecar(
+            sidecar,
+            fixed_env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
+        ):
+            pass
+
+    rendered = str(captured.value)
+    assert _SYNTHETIC_SECRET not in rendered
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in rendered
+
+
+def test_sidecar_healthcheck_failure_redacts_sidecar_startup_env(mocker):
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="true running\n", stderr=""
+            )
+        if any(item.startswith("HELIX_EVALUATOR_ENDPOINT=") for item in args):
+            return subprocess.CompletedProcess(
+                args,
+                8,
+                stdout=f"{_NON_HEURISTIC_ENV_KEY}={_SYNTHETIC_SECRET}\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._wait_for_container_running")
+    mocker.patch("helix.sandbox.time.monotonic", side_effect=[0.0, 0.0, 2.0])
+    mocker.patch("helix.sandbox.time.sleep")
+    sidecar = EvaluatorSidecarConfig(
+        image="synthetic-sidecar:latest",
+        command="python -m synthetic_server",
+        endpoint="http://helix-evaluator:8080/evaluate",
+        startup_timeout_seconds=1,
+    )
+
+    with pytest.raises(TimeoutError) as captured:
+        with start_evaluator_sidecar(
+            sidecar,
+            fixed_env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
+        ):
+            pass
+
+    rendered = str(captured.value)
+    assert _SYNTHETIC_SECRET not in rendered
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in rendered
 
 
 def test_sidecar_runtime_nested_same_runtime_restores_outer():
@@ -531,7 +700,7 @@ def test_sidecar_healthcheck_uses_runner_image_and_endpoint():
 def test_start_evaluator_sidecar_injects_fixed_env(mocker):
     calls: list[list[str]] = []
 
-    def fake_run_docker(args, *, check=True):
+    def fake_run_docker(args, **kwargs):
         calls.append(args)
         if args[:2] == ["docker", "inspect"]:
             return subprocess.CompletedProcess(
