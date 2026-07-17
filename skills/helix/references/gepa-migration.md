@@ -264,11 +264,12 @@ will be cancelled exactly at the cap.
 
 Omitting `mutations_per_parent` is exactly N=1, so every existing K-wide config
 and `"auto"` resolution remains K×1. Legacy state files without batch records
-load as K×1. New checkpoints record every planned slot and cleanup result;
-resume reconciles all reserved IDs/worktrees and does not recharge completed
-work or reinsert selected candidates. P, N, and proposal-selection settings are
-resume semantics: do not change them inside an existing run directory. Start a
-new run when changing batch shape or selection policy.
+still load, with N defaulting to one when omitted. New checkpoints record every
+planned slot and cleanup result; resume reconciles the saved active batch and
+all reserved IDs/worktrees without recharging completed work or reinserting a
+selected candidate. P, N, proposal selection, and worker count affect future
+batches rather than the meaning of saved scores, so a resumed run may change
+them. Use a new run directory when comparing scheduler settings experimentally.
 
 ## Candidate Representation
 

@@ -489,12 +489,14 @@ hard cancellation boundary.
 Existing `num_parallel_proposals = K` configurations are already the **K×1**
 case: omitting N is identical to setting `mutations_per_parent = 1`, including
 for `num_parallel_proposals = "auto"`. There is no legacy scheduler or
-deprecation path. Existing state files still load; missing batch metadata is
-interpreted as K×1. New state checkpoints persist the batch shape, task slots,
-selection mode, and terminal/cleanup status so an interrupted batch can
-reconcile every reserved ID and worktree without double charging or inserting a
-candidate twice. Changing P, N, or selection semantics while resuming an
-in-progress run is rejected; start a clean run when changing those settings.
+deprecation path. Existing state files still load, and N defaults to one when
+their configuration omitted it. New state checkpoints persist each active
+batch's P×N shape, task slots, selection result, and terminal/cleanup status so
+resume reconciles that saved batch before planning more work, without double
+charging or inserting a candidate twice. P, N, selection mode, and worker count
+govern only future batches, so they may be changed between resumes; start a
+clean run instead when you need controlled comparisons between scheduler
+settings.
 
 ### Docker Sandboxing
 
