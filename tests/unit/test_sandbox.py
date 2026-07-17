@@ -50,9 +50,7 @@ def _is_workspace_chown_only(args: list[str]) -> bool:
 
 
 def _is_workspace_permission_relax(args: list[str]) -> bool:
-    return args[:2] == ["docker", "run"] and any(
-        "chmod a+rwX" in item for item in args
-    )
+    return args[:2] == ["docker", "run"] and any("chmod a+rwX" in item for item in args)
 
 
 def test_resolve_sandbox_image_defaults_from_backend():
@@ -867,9 +865,7 @@ def test_agent_sync_skips_relax_when_host_owner_available(tmp_path: Path, mocker
     assert [call for call in calls if _is_workspace_chown_only(call)]
 
 
-def test_safe_rmtree_uses_relax_helper_when_host_owner_missing(
-    tmp_path: Path, mocker
-):
+def test_safe_rmtree_uses_relax_helper_when_host_owner_missing(tmp_path: Path, mocker):
     """``_safe_rmtree`` must invoke the relax helper (not chown) when the host
     owner is unavailable, then retry the rmtree."""
     from helix.sandbox import _safe_rmtree

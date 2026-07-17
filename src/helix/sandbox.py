@@ -428,14 +428,18 @@ def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
         if not source.exists():
             return
     except OSError as exc:
-        logger.warning("skipping inaccessible backend transcript artifacts %s: %s", source, exc)
+        logger.warning(
+            "skipping inaccessible backend transcript artifacts %s: %s", source, exc
+        )
         return
     target = dst / ".helix_artifacts" / "backend_transcripts"
     target.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copytree(source, target, dirs_exist_ok=True)
     except OSError as exc:
-        logger.warning("skipping backend transcript artifact copy from %s: %s", source, exc)
+        logger.warning(
+            "skipping backend transcript artifact copy from %s: %s", source, exc
+        )
 
 
 def _init_synthetic_git_repo(workspace: Path) -> None:
@@ -707,9 +711,7 @@ def _redact_docker_argv(args: Sequence[str]) -> list[str]:
             assignment = arg.removeprefix("--env=")
             if "=" in assignment:
                 key, _value = assignment.split("=", 1)
-                redacted[index] = (
-                    f"--env={key}={_REDACTED_DOCKER_ENV_VALUE}"
-                )
+                redacted[index] = f"--env={key}={_REDACTED_DOCKER_ENV_VALUE}"
         elif arg.startswith("-e") and arg != "-e":
             assignment = arg[2:]
             if "=" in assignment:
