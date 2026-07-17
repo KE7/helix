@@ -7,6 +7,7 @@ environments where no global git config exists.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import subprocess
 from pathlib import Path
@@ -198,6 +199,39 @@ class TestCloneCandidate:
         _, base_dir, seed = self._seed(tmp_path, monkeypatch)
         child = clone_candidate(seed, "g1-s2", base_dir)
         assert child.worktree_path == str(base_dir / "g1-s2")
+
+    def test_concurrent_clone_and_remove_leave_git_metadata_clean(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        repo_root, base_dir, seed = self._seed(tmp_path, monkeypatch)
+        child_ids = [f"g1-s{index}" for index in range(8)]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            children = list(
+                pool.map(
+                    lambda child_id: clone_candidate(seed, child_id, base_dir),
+                    child_ids,
+                )
+            )
+
+        registered = _run(
+            ["git", "worktree", "list", "--porcelain"], repo_root
+        ).stdout
+        assert all(str(base_dir / child_id) in registered for child_id in child_ids)
+        assert all((base_dir / child_id).is_dir() for child_id in child_ids)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(remove_worktree, children))
+
+        registered_after = _run(
+            ["git", "worktree", "list", "--porcelain"], repo_root
+        ).stdout
+        branches_after = _run(
+            ["git", "branch", "--list", "helix/g1-s*"], repo_root
+        ).stdout
+        assert all(str(base_dir / child_id) not in registered_after for child_id in child_ids)
+        assert all(not (base_dir / child_id).exists() for child_id in child_ids)
+        assert branches_after.strip() == ""
 
 
 class TestSnapshotCandidate:
