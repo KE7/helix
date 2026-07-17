@@ -1914,6 +1914,22 @@ def _run_evolution_impl(
             cleanup_worktree=_cleanup_interrupted_batch_worktree,
             saver=_save_state,
         )
+        for interrupted_batch in state.proposal_batches:
+            if interrupted_batch.phase == "complete":
+                continue
+            if any(
+                not task_record.is_terminal()
+                or task_record.cleanup == "failed"
+                for task_record in interrupted_batch.tasks
+            ):
+                continue
+            completed_batch = checkpoint_batch_after_apply(
+                state,
+                project_root,
+                batch_id=interrupted_batch.batch_id,
+                saver=_save_state,
+            )
+            TRACE.emit_proposal_batch_terminal(completed_batch)
         if _reconcile_incomplete_attempts_on_resume(
             state=state,
             base_dir=base_dir,
