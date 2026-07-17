@@ -28,6 +28,7 @@ from helix.sandbox import (
 
 _SYNTHETIC_SECRET = "synthetic-sentinel-secret-for-redaction-tests"
 _SYNTHETIC_ENDPOINT_FRAGMENT = "synthetic-endpoint-fragment-for-redaction-tests"
+_SYNTHETIC_PRIOR_SECRET = "synthetic-prior-invocation-redaction-value"
 _NON_HEURISTIC_ENV_KEY = "SYNTHETIC_SETTING"
 
 
@@ -53,6 +54,57 @@ _SYNTHETIC_ENDPOINTS = [
     (f"https://synthetic.invalid/evaluate?opaque={_SYNTHETIC_ENDPOINT_FRAGMENT}"),
     f"https://synthetic.invalid/evaluate#{_SYNTHETIC_ENDPOINT_FRAGMENT}",
 ]
+
+
+_SYNTHETIC_STRUCTURED_ENDPOINTS = [
+    pytest.param(
+        "https://synthetic-user%2Bdecoded@synthetic.invalid/evaluate",
+        "synthetic-user%2Bdecoded",
+        "synthetic-user+decoded",
+        "short-separated",
+        id="username",
+    ),
+    pytest.param(
+        "https://synthetic-user:synthetic-password%2Fdecoded@"
+        "synthetic.invalid/evaluate",
+        "synthetic-password%2Fdecoded",
+        "synthetic-password/decoded",
+        "long-separated",
+        id="password",
+    ),
+    pytest.param(
+        "https://synthetic.invalid/evaluate?opaque=synthetic-query%3Fdecoded",
+        "synthetic-query%3Fdecoded",
+        "synthetic-query?decoded",
+        "short-joined",
+        id="query-value",
+    ),
+    pytest.param(
+        "https://synthetic.invalid/evaluate#synthetic-fragment%23decoded",
+        "synthetic-fragment%23decoded",
+        "synthetic-fragment#decoded",
+        "long-joined",
+        id="fragment",
+    ),
+]
+
+
+def _endpoint_duplicated_argv(
+    endpoint: str,
+    raw_component: str,
+    decoded_component: str,
+    form: str,
+) -> list[str]:
+    return [
+        "docker",
+        "run",
+        *_endpoint_env_args(endpoint, form),
+        f"--endpoint={endpoint}",
+        f"--raw-component={raw_component}",
+        f"--decoded-component={decoded_component}",
+        "synthetic-runner:latest",
+        f"--healthcheck=probe {raw_component} {decoded_component}",
+    ]
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
@@ -385,6 +437,156 @@ def test_docker_argv_redaction_preserves_key_for_all_env_forms(env_args):
 
     assert _SYNTHETIC_SECRET not in rendered
     assert "SYNTHETIC_API_KEY=<redacted>" in rendered
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "raw_component", "decoded_component", "form"),
+    _SYNTHETIC_STRUCTURED_ENDPOINTS,
+)
+def test_docker_argv_redacts_endpoint_and_components_duplicated_in_other_tokens(
+    endpoint: str,
+    raw_component: str,
+    decoded_component: str,
+    form: str,
+):
+    raw_args = _endpoint_duplicated_argv(
+        endpoint, raw_component, decoded_component, form
+    )
+
+    rendered = repr(sandbox_module._redact_docker_argv(raw_args))
+
+    for sentinel in (endpoint, raw_component, decoded_component):
+        assert sentinel not in rendered
+    assert "HELIX_EVALUATOR_ENDPOINT=<redacted>" in rendered
+    assert "--endpoint=<redacted>" in rendered
+    assert "--raw-component=<redacted>" in rendered
+    assert "--decoded-component=<redacted>" in rendered
+    assert "--healthcheck=probe <redacted> <redacted>" in rendered
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "raw_component", "decoded_component", "form"),
+    _SYNTHETIC_STRUCTURED_ENDPOINTS,
+)
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "timeout", "called-process"])
+def test_docker_process_redacts_duplicated_endpoint_values_from_diagnostics(
+    mocker,
+    endpoint: str,
+    raw_component: str,
+    decoded_component: str,
+    form: str,
+    outcome: str,
+):
+    raw_args = _endpoint_duplicated_argv(
+        endpoint, raw_component, decoded_component, form
+    )
+    raw_args.append(f"--prior-token={_SYNTHETIC_PRIOR_SECRET}")
+    original_args = list(raw_args)
+    captured_subprocess_args: list[list[str]] = []
+    stdout = (
+        f"functional stdout: {endpoint} {decoded_component} {_SYNTHETIC_PRIOR_SECRET}"
+    )
+    stderr = f"functional stderr: {raw_component}"
+
+    def fake_run(args, **kwargs):
+        captured_subprocess_args.append(list(args))
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(
+                args, timeout=1, output=stdout, stderr=stderr
+            )
+        if outcome == "called-process":
+            raise subprocess.CalledProcessError(125, args, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(
+            args,
+            0 if outcome == "success" else 9,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    sentinels = (
+        endpoint,
+        raw_component,
+        decoded_component,
+        _SYNTHETIC_PRIOR_SECRET,
+    )
+
+    if outcome in {"timeout", "called-process"}:
+        expected_exception = (
+            subprocess.TimeoutExpired
+            if outcome == "timeout"
+            else subprocess.CalledProcessError
+        )
+        with pytest.raises(expected_exception) as captured:
+            _run_docker(
+                raw_args,
+                check=outcome == "called-process",
+                redaction_values=[_SYNTHETIC_PRIOR_SECRET],
+            )
+        exc = captured.value
+        renderings = [
+            str(exc),
+            repr(exc),
+            repr(exc.cmd),
+            repr(exc.args),
+            str(exc.output),
+            str(exc.stderr),
+            f"subprocess diagnostic: {type(exc).__name__}: {exc}",
+        ]
+        assert all(
+            sentinel not in rendering
+            for sentinel in sentinels
+            for rendering in renderings
+        )
+        safe_args = repr(exc.cmd)
+    else:
+        result = _run_docker(
+            raw_args,
+            check=False,
+            redaction_values=[_SYNTHETIC_PRIOR_SECRET],
+        )
+        safe_args = repr(result.args)
+        assert all(sentinel not in safe_args for sentinel in sentinels)
+        if outcome == "success":
+            assert result.stdout == stdout
+            assert result.stderr == stderr
+        else:
+            renderings = [repr(result), str(result.stdout), str(result.stderr)]
+            assert all(
+                sentinel not in rendering
+                for sentinel in sentinels
+                for rendering in renderings
+            )
+
+    assert "HELIX_EVALUATOR_ENDPOINT=<redacted>" in safe_args
+    assert "--endpoint=<redacted>" in safe_args
+    assert "--raw-component=<redacted>" in safe_args
+    assert "--decoded-component=<redacted>" in safe_args
+    assert "--prior-token=<redacted>" in safe_args
+    assert captured_subprocess_args == [original_args]
+    assert raw_args == original_args
+
+
+def test_explicit_prior_invocation_redaction_values_are_scrubbed_from_argv():
+    raw_args = [
+        "docker",
+        "logs",
+        "synthetic-container",
+        f"--token={_SYNTHETIC_PRIOR_SECRET}",
+        f"--healthcheck=probe {_SYNTHETIC_PRIOR_SECRET}",
+    ]
+    original_args = list(raw_args)
+
+    rendered = repr(
+        sandbox_module._redact_docker_argv(
+            raw_args, redaction_values=[_SYNTHETIC_PRIOR_SECRET]
+        )
+    )
+
+    assert _SYNTHETIC_PRIOR_SECRET not in rendered
+    assert "--token=<redacted>" in rendered
+    assert "--healthcheck=probe <redacted>" in rendered
+    assert raw_args == original_args
 
 
 @pytest.mark.parametrize(

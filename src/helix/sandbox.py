@@ -714,13 +714,17 @@ def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
     return value
 
 
-def _redact_docker_argv(args: Sequence[str]) -> list[str]:
+def _redact_docker_argv(
+    args: Sequence[str], *, redaction_values: Sequence[str] = ()
+) -> list[str]:
     """Render Docker argv safely while preserving environment key context.
 
     Every literal Docker environment value is replaced, including values whose
     key does not look secret.  This avoids heuristic gaps in command/exception
     rendering while retaining the key names needed to diagnose configuration.
+    Known values are also scrubbed wherever they recur in another argv token.
     """
+    values = _docker_diagnostic_redaction_values(args, redaction_values)
     redacted = list(args)
     index = 0
     while index < len(redacted):
@@ -742,6 +746,8 @@ def _redact_docker_argv(args: Sequence[str]) -> list[str]:
                 key, _value = assignment.split("=", 1)
                 redacted[index] = f"-e{key}={_REDACTED_DOCKER_ENV_VALUE}"
         index += 1
+    for index, arg in enumerate(redacted):
+        redacted[index] = _redact_diagnostic_output(arg, values)
     return redacted
 
 
@@ -752,7 +758,7 @@ def _redact_subprocess_exception(
     redaction_values: Sequence[str] = (),
 ) -> None:
     """Sanitize a subprocess exception in place, including indirect rendering."""
-    safe_args = _redact_docker_argv(args)
+    safe_args = _redact_docker_argv(args, redaction_values=redaction_values)
     values = _docker_diagnostic_redaction_values(args, redaction_values)
     exc.cmd = safe_args
     if isinstance(exc, subprocess.CalledProcessError):
@@ -798,7 +804,7 @@ def _run_docker_process(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         _redact_subprocess_exception(exc, args, redaction_values=redaction_values)
         raise
-    result.args = _redact_docker_argv(args)
+    result.args = _redact_docker_argv(args, redaction_values=redaction_values)
     if result.returncode != 0 or diagnostic_output:
         result.stdout = _redact_diagnostic_output(result.stdout, values)
         result.stderr = _redact_diagnostic_output(result.stderr, values)
