@@ -1220,6 +1220,8 @@ def _cached_evaluate_batch(
                 split=split,
                 instance_ids=example_ids,
             )
+        missing = set(example_ids) - set(result.instance_scores)
+        assert not missing, f"Evaluator result missing ids: {sorted(missing)}"
         return result, len(example_ids)
 
     # Cached branch — delegate to the GEPA-parity helper on the cache
@@ -1819,6 +1821,50 @@ def _run_evolution_impl(
             return False
         return not worktree_path.exists()
 
+    def _recover_selected_evaluated_tasks() -> None:
+        """Finish the crash window between selected-eval and frontier apply."""
+
+        assert state is not None
+        for batch in state.proposal_batches:
+            for task_record in batch.tasks:
+                if not (
+                    task_record.status == "evaluated"
+                    and task_record.selection == "selected"
+                    and not task_record.applied
+                ):
+                    continue
+                result = _load_evaluation(base_dir, task_record.child_id)
+                worktree_path = worktrees_dir / task_record.child_id
+                if result is None or not worktree_path.exists():
+                    # Generic interrupted-batch reconciliation will
+                    # terminalize and clean an unrecoverable slot.
+                    continue
+                if task_record.child_id not in state.frontier:
+                    state.frontier.append(task_record.child_id)
+                    state.instance_scores[task_record.child_id] = (
+                        result.instance_scores
+                    )
+                if (
+                    task_record.child_id
+                    not in state.num_metric_calls_by_discovery
+                ):
+                    budget_api.record_discovery_budget(
+                        state,
+                        task_record.child_id,
+                    )
+                checkpoint_batch_task(
+                    state,
+                    project_root,
+                    batch_id=batch.batch_id,
+                    task_index=task_record.task_index,
+                    status="applied",
+                    selection="selected",
+                    cleanup="not_required",
+                    applied=True,
+                    detail="resume recovered selected evaluated task",
+                    saver=_save_state,
+                )
+
     if state is None:
         state = EvolutionState(
             generation=0,
@@ -1860,6 +1906,7 @@ def _run_evolution_impl(
                 "Config hash differs from the saved state; resuming with the current "
                 "config while keeping the existing frontier and history."
             )
+        _recover_selected_evaluated_tasks()
         reconcile_interrupted_batches(
             state,
             project_root,
@@ -2654,17 +2701,7 @@ def _run_evolution_impl(
                     if isinstance(outcome, EvaluatedProposal)
                     else None
                 )
-                charge = task_budget_charges[task.batch_index]
-                persisted_charge = BudgetState(
-                    evaluations=charge.evaluations,
-                    input_tokens=charge.input_tokens,
-                    output_tokens=charge.output_tokens,
-                    cached_input_tokens=charge.cached_input_tokens,
-                    cache_creation_input_tokens=charge.cache_creation_input_tokens,
-                    cache_read_input_tokens=charge.cache_read_input_tokens,
-                    reasoning_tokens=charge.reasoning_tokens,
-                    cost_usd=charge.cost_usd,
-                )
+                persisted_charge = _task_budget_snapshot(task)
                 checkpoint_batch_task(
                     state,
                     project_root,
@@ -2704,6 +2741,19 @@ def _run_evolution_impl(
                 charge.cache_read_input_tokens += usage.cache_read_input_tokens
                 charge.reasoning_tokens += usage.reasoning_tokens
                 charge.cost_usd += usage.cost_usd
+
+            def _task_budget_snapshot(task: ProposalTask) -> BudgetState:
+                charge = task_budget_charges[task.batch_index]
+                return BudgetState(
+                    evaluations=charge.evaluations,
+                    input_tokens=charge.input_tokens,
+                    output_tokens=charge.output_tokens,
+                    cached_input_tokens=charge.cached_input_tokens,
+                    cache_creation_input_tokens=charge.cache_creation_input_tokens,
+                    cache_read_input_tokens=charge.cache_read_input_tokens,
+                    reasoning_tokens=charge.reasoning_tokens,
+                    cost_usd=charge.cost_usd,
+                )
 
             # ---- Parent scoring batch ------------------------------------
             # The same parent can appear in more than one group, and siblings
@@ -3734,14 +3784,36 @@ def _run_evolution_impl(
                 )
                 raise fatal_full_error
 
-            # Apply successful full validations in selector order.  No budget
-            # check may break this loop: every dispatched result was already
-            # completed and charged above.
+            # Journal every successful full validation in selector order
+            # before inserting any selected child into the frontier.  This
+            # closes the sibling crash window: once application starts, every
+            # selected child has a durable evaluation artifact, full budget
+            # charge, and resume-recoverable selected/evaluated task record.
             set_phase(HelixPhase.PARETO_UPDATE)
             for selected, val_result in full_results:
                 proposal = selected.proposal
-                child = proposal.child_candidate
                 _save_evaluation(base_dir, val_result)
+                checkpoint_batch_task(
+                    state,
+                    project_root,
+                    batch_id=batch_id,
+                    task_index=proposal.task.batch_index,
+                    status="evaluated",
+                    score_delta=selected.improvement,
+                    selection="selected",
+                    cleanup="not_required",
+                    budget_charge=_task_budget_snapshot(proposal.task),
+                    budget_accounted=True,
+                    applied=False,
+                    saver=_save_state,
+                )
+
+            # Apply the already-journaled children deterministically.  No
+            # budget check may break this loop: every dispatched result was
+            # completed, charged, and made recoverable above.
+            for selected, val_result in full_results:
+                proposal = selected.proposal
+                child = proposal.child_candidate
                 frontier.add(child, val_result)
                 _sync_frontier_state()
                 state.instance_scores[child.id] = val_result.instance_scores
@@ -3790,12 +3862,13 @@ def _run_evolution_impl(
                 tasks=tasks,
                 records=terminal_records,
             )
-            checkpoint_batch_after_apply(
+            completed_batch = checkpoint_batch_after_apply(
                 state,
                 project_root,
                 batch_id=batch_id,
                 saver=_save_state,
             )
+            TRACE.emit_proposal_batch_terminal(completed_batch)
             if _gen_skip_records:
                 _save_skip_record(
                     base_dir,
