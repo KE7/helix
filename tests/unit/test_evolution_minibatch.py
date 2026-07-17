@@ -2066,6 +2066,619 @@ class TestStrictInstanceScoresAccess:
         with pytest.raises(AssertionError, match="missing ids"):
             run_evolution(config, tmp_path, tmp_path / ".helix")
 
+
+# ---------------------------------------------------------------------------
+# Unified P*N scheduler and durable-ledger regressions
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedPxNScheduler:
+    def test_k_by_one_preserves_legacy_rng_and_id_interleaving(
+        self, tmp_path: Path
+    ) -> None:
+        """K*1 planning matches the historical select/sample/reserve loop."""
+        import random
+
+        from helix import budget as budget_api
+        from helix.batch_sampler import EpochShuffledBatchSampler
+        from helix.evolution import _plan_pxn_tasks
+
+        train_path = _write_train_jsonl(tmp_path, n=7)
+        loader = HelixDataLoader(train_path)
+
+        def make_frontier(rng: random.Random) -> ParetoFrontier:
+            frontier = ParetoFrontier(rng=rng)
+            frontier.add(
+                _make_candidate("parent-a"),
+                _make_result("parent-a", {"left": 1.0, "right": 0.0}),
+            )
+            frontier.add(
+                _make_candidate("parent-b"),
+                _make_result("parent-b", {"left": 0.0, "right": 1.0}),
+            )
+            return frontier
+
+        planned_rng = random.Random(91)
+        planned_frontier = make_frontier(planned_rng)
+        planned_sampler = EpochShuffledBatchSampler[str](2, rng=planned_rng)
+        planned_state = EvolutionState(
+            generation=4,
+            frontier=["parent-a", "parent-b"],
+            instance_scores={},
+            budget=BudgetState(),
+            config_hash="test",
+            i=0,
+        )
+        planned = _plan_pxn_tasks(
+            p=3,
+            n=1,
+            frontier=planned_frontier,
+            batch_sampler=planned_sampler,
+            train_loader=loader,
+            state=planned_state,
+            generation=4,
+        )
+
+        legacy_rng = random.Random(91)
+        legacy_frontier = make_frontier(legacy_rng)
+        legacy_sampler = EpochShuffledBatchSampler[str](2, rng=legacy_rng)
+        legacy_state = EvolutionState(
+            generation=4,
+            frontier=["parent-a", "parent-b"],
+            instance_scores={},
+            budget=BudgetState(),
+            config_hash="test",
+            i=0,
+        )
+        legacy: list[tuple[str, tuple[str, ...], str]] = []
+        for group_index in range(3):
+            if group_index:
+                budget_api.advance_proposal_counter(
+                    legacy_state, source="parallel_proposal"
+                )
+            parent = legacy_frontier.select_parent()
+            minibatch = tuple(
+                legacy_sampler.next_minibatch_ids(loader, legacy_state)
+            )
+            child_id = budget_api.next_mutation_id(legacy_state, 4)
+            legacy.append((parent.id, minibatch, child_id))
+
+        assert [
+            (task.parent_candidate.id, task.minibatch_ids, task.reserved_child_id)
+            for task in planned
+        ] == legacy
+        assert [task.batch_index for task in planned] == [0, 1, 2]
+        assert [task.parent_group_index for task in planned] == [0, 1, 2]
+        assert [task.mutation_index for task in planned] == [0, 0, 0]
+        assert planned_state.i == legacy_state.i == 2
+
+    def test_p2_n3_reverse_completion_is_parent_major_and_worker_bounded(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Reverse worker completion cannot perturb IDs, lineage, or ledger order."""
+        import threading
+        import time
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        lock = threading.Lock()
+        active_mutations = 0
+        peak_mutations = 0
+        mutation_completions: list[str] = []
+
+        def mutate_reverse(**kwargs: Any) -> Candidate:
+            nonlocal active_mutations, peak_mutations
+            child_id = str(kwargs["new_id"])
+            with lock:
+                active_mutations += 1
+                peak_mutations = max(peak_mutations, active_mutations)
+            try:
+                time.sleep(0.06 if child_id.endswith("s1") else 0.005)
+                return _make_candidate(child_id)
+            finally:
+                with lock:
+                    mutation_completions.append(child_id)
+                    active_mutations -= 1
+
+        all_mocks["mutate"].side_effect = mutate_reverse
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if split == "train" and instance_ids is not None:
+                score = 0.1 if candidate.id == seed.id else 0.9
+                if candidate.id.endswith("s1"):
+                    time.sleep(0.04)
+                return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            return _make_result(candidate.id, {"v": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            num_parallel_proposals=2,
+            mutations_per_parent=3,
+            max_workers=2,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        state = all_mocks["save_state"].call_args.args[0]
+        batch = state.proposal_batches[-1]
+        child_ids = [task.child_id for task in batch.tasks]
+        assert child_ids == [f"g1-s{index}" for index in range(1, 7)]
+        assert [task.parent_group for task in batch.tasks] == [0, 0, 0, 1, 1, 1]
+        assert [task.mutation_index for task in batch.tasks] == [0, 1, 2, 0, 1, 2]
+        assert [task.parent_id for task in batch.tasks] == [seed.id] * 6
+        assert all(task.status == "applied" for task in batch.tasks)
+        assert all(task.budget_accounted for task in batch.tasks)
+        assert batch.phase == "complete"
+        assert sum(task.budget_charge.evaluations for task in batch.tasks) == (
+            batch.budget_after_apply - batch.budget_before_dispatch
+        )
+        assert mutation_completions[0] == "g1-s2"
+        assert peak_mutations == 2
+
+        mutation_lineage_ids = [
+            call.args[1].id
+            for call in all_mocks["record_entry"].call_args_list
+            if call.args[1].operation == "mutate"
+        ]
+        assert mutation_lineage_ids == child_ids
+
+    def test_p2_n3_partial_failures_are_isolated_and_terminal(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Mutation and evaluator failures affect only their reserved slots."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def mutate_partial(**kwargs: Any) -> Candidate | None:
+            child_id = str(kwargs["new_id"])
+            if child_id == "g1-s2":
+                raise RuntimeError("ordinary mutation failure")
+            if child_id == "g1-s4":
+                return None
+            return _make_candidate(child_id)
+
+        all_mocks["mutate"].side_effect = mutate_partial
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if split == "train" and instance_ids is not None:
+                if candidate.id == seed.id:
+                    score = 0.2
+                elif candidate.id == "g1-s3":
+                    raise RuntimeError("ordinary evaluator failure")
+                elif candidate.id == "g1-s5":
+                    score = 0.1
+                else:
+                    score = 0.9
+                return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            return _make_result(candidate.id, {"v": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            num_parallel_proposals=2,
+            mutations_per_parent=3,
+            max_workers=3,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        state = all_mocks["save_state"].call_args.args[0]
+        batch = state.proposal_batches[-1]
+        assert [task.status for task in batch.tasks] == [
+            "applied",
+            "failed",
+            "failed",
+            "failed",
+            "rejected",
+            "applied",
+        ]
+        assert all(task.is_terminal() for task in batch.tasks)
+        assert all(task.budget_accounted for task in batch.tasks)
+        assert batch.phase == "complete"
+        removed_ids = {
+            call.args[0].id for call in all_mocks["remove_worktree"].call_args_list
+        }
+        assert removed_ids == {"g1-s3", "g1-s5"}
+
+    def test_dispatched_child_batch_drains_before_budget_stop_and_cleans_all(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Crossing the cap after child dispatch accounts and cleans every slot."""
+        train_path = _write_train_jsonl(tmp_path, n=3)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].side_effect = lambda **kwargs: _make_candidate(
+            kwargs["new_id"]
+        )
+
+        full_validated_children: list[str] = []
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if split == "train" and instance_ids is not None:
+                score = 0.1 if candidate.id == seed.id else 0.9
+                return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            if candidate.id != seed.id:
+                full_validated_children.append(candidate.id)
+            return _make_result(candidate.id, {"v": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            max_evaluations=5,
+            num_parallel_proposals=1,
+            mutations_per_parent=3,
+            max_workers=3,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        state = all_mocks["save_state"].call_args.args[0]
+        batch = state.proposal_batches[-1]
+        assert state.budget.evaluations == 7
+        assert batch.budget_before_dispatch == 1
+        assert batch.budget_after_apply == 7
+        assert [task.budget_charge.evaluations for task in batch.tasks] == [2, 2, 2]
+        assert all(task.status == "rejected" for task in batch.tasks)
+        assert all(task.selection == "selected" for task in batch.tasks)
+        assert all(task.cleanup in {"missing", "removed"} for task in batch.tasks)
+        assert all(task.budget_accounted for task in batch.tasks)
+        assert batch.phase == "complete"
+        assert full_validated_children == []
+        removed_ids = [
+            call.args[0].id for call in all_mocks["remove_worktree"].call_args_list
+        ]
+        assert removed_ids == ["g1-s1", "g1-s2", "g1-s3"]
+
+    def test_selected_evaluated_resume_is_idempotent(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """All journaled siblings recover once after a crash before first apply."""
+        from copy import deepcopy
+
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        worktrees_dir.mkdir(parents=True)
+
+        seed = _make_candidate("g0-s0")
+        seed.worktree_path = str(worktrees_dir / seed.id)
+        Path(seed.worktree_path).mkdir()
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def mutate_with_worktree(**kwargs: Any) -> Candidate:
+            child = _make_candidate(str(kwargs["new_id"]))
+            child.worktree_path = str(worktrees_dir / child.id)
+            Path(child.worktree_path).mkdir(exist_ok=True)
+            return child
+
+        all_mocks["mutate"].side_effect = mutate_with_worktree
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if split == "train" and instance_ids is not None:
+                score = 0.1 if candidate.id == seed.id else 0.9
+                return _make_result(candidate.id, {eid: score for eid in instance_ids})
+            return _make_result(candidate.id, {"v": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        saved_evaluations: dict[str, EvalResult] = {}
+
+        def save_evaluation(_base: Path, result: EvalResult) -> None:
+            saved_evaluations[result.candidate_id] = deepcopy(result)
+
+        def load_evaluation(_base: Path, candidate_id: str) -> EvalResult | None:
+            result = saved_evaluations.get(candidate_id)
+            return None if result is None else deepcopy(result)
+
+        all_mocks["_save_evaluation"].side_effect = save_evaluation
+        all_mocks["_load_evaluation"].side_effect = load_evaluation
+
+        persisted: list[EvolutionState] = []
+        durable_snapshots: list[EvolutionState] = []
+
+        def capture_state(state: EvolutionState, _path: Path) -> None:
+            snapshot = deepcopy(state)
+            durable_snapshots.append(snapshot)
+            persisted[:] = [snapshot]
+
+        all_mocks["save_state"].side_effect = capture_state
+
+        original_add = ParetoFrontier.add
+        crash_before_first_child_apply = [True]
+
+        def add_with_one_crash(
+            frontier: ParetoFrontier,
+            candidate: Candidate,
+            result: EvalResult,
+        ) -> None:
+            if candidate.id != seed.id and crash_before_first_child_apply[0]:
+                crash_before_first_child_apply[0] = False
+                raise RuntimeError("simulated crash before first selected apply")
+            original_add(frontier, candidate, result)
+
+        mocker.patch.object(ParetoFrontier, "add", new=add_with_one_crash)
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            num_parallel_proposals=1,
+            mutations_per_parent=2,
+            max_workers=2,
+        )
+
+        with pytest.raises(RuntimeError, match="before first selected apply"):
+            run_evolution(config, tmp_path, base_dir)
+
+        interrupted = deepcopy(persisted[0])
+        interrupted_batch = interrupted.proposal_batches[-1]
+        assert [task.status for task in interrupted_batch.tasks] == [
+            "evaluated",
+            "evaluated",
+        ]
+        assert all(task.selection == "selected" for task in interrupted_batch.tasks)
+        assert all(task.budget_accounted for task in interrupted_batch.tasks)
+        # The all-selected barrier has exactly one durable shape: no state
+        # save may expose full global charges with only a prefix of siblings
+        # selected/evaluated.
+        for snapshot in durable_snapshots:
+            if not snapshot.proposal_batches:
+                continue
+            statuses = [
+                task.status for task in snapshot.proposal_batches[-1].tasks
+            ]
+            assert statuses not in (["evaluated", "running"], ["running", "evaluated"])
+        budget_after_crash = interrupted.budget.evaluations
+
+        all_mocks["load_state"].side_effect = lambda _path: deepcopy(persisted[0])
+        run_evolution(config, tmp_path, base_dir)
+        recovered = deepcopy(persisted[0])
+        recovered_frontier = list(recovered.frontier)
+        cleanup_calls_after_first_resume = all_mocks["remove_worktree"].call_count
+
+        assert recovered_frontier == ["g0-s0", "g1-s1", "g1-s2"]
+        assert recovered.budget.evaluations == budget_after_crash
+        assert recovered.proposal_batches[-1].phase == "complete"
+        assert all(
+            task.status == "applied"
+            for task in recovered.proposal_batches[-1].tasks
+        )
+        assert cleanup_calls_after_first_resume == 0
+
+        run_evolution(config, tmp_path, base_dir)
+        resumed_again = persisted[0]
+        assert resumed_again.frontier == recovered_frontier
+        assert len(resumed_again.frontier) == len(set(resumed_again.frontier))
+        assert resumed_again.budget.evaluations == budget_after_crash
+        assert all(
+            resumed_again.num_metric_calls_by_discovery[candidate_id]
+            == recovered.num_metric_calls_by_discovery[candidate_id]
+            for candidate_id in ("g1-s1", "g1-s2")
+        )
+        assert all_mocks["remove_worktree"].call_count == 0
+
+    def test_recovered_acceptances_restore_deferred_merge_semantics(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Recovered selected children trigger the next merge just like live accepts."""
+        from copy import deepcopy
+
+        from helix.state import ProposalBatchRecord, ProposalTaskRecord
+
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        for candidate_id in ("g0-s0", "g1-s1", "g1-s2"):
+            (worktrees_dir / candidate_id).mkdir(parents=True, exist_ok=True)
+
+        batch = ProposalBatchRecord(
+            batch_id="g1-proposals",
+            generation=1,
+            p=1,
+            n=2,
+            phase="applying",
+            budget_before_dispatch=1,
+            max_evaluations=1000,
+            max_in_flight_evaluations=6,
+            maximum_overshoot=0,
+            tasks=[
+                ProposalTaskRecord(
+                    batch_id="g1-proposals",
+                    p=1,
+                    n=2,
+                    task_index=index,
+                    parent_group=0,
+                    mutation_index=index,
+                    parent_id="g0-s0",
+                    child_id=f"g1-s{index + 1}",
+                    status="evaluated",
+                    score_delta=0.4,
+                    selection="selected",
+                    cleanup="not_required",
+                    budget_charge=BudgetState(evaluations=3),
+                    budget_accounted=True,
+                )
+                for index in range(2)
+            ],
+        )
+        resumed_state = EvolutionState(
+            generation=1,
+            frontier=["g0-s0"],
+            instance_scores={"g0-s0": {"v": 0.5}},
+            budget=BudgetState(evaluations=7),
+            config_hash="legacy-test",
+            mutation_counter=2,
+            i=1,
+            proposal_batches=[batch],
+        )
+        all_mocks["load_state"].return_value = deepcopy(resumed_state)
+
+        saved_results = {
+            "g0-s0": _make_result("g0-s0", {"v": 0.5}),
+            "g1-s1": _make_result("g1-s1", {"v": 0.8}),
+            "g1-s2": _make_result("g1-s2", {"v": 0.8}),
+        }
+        all_mocks["_load_evaluation"].side_effect = (
+            lambda _base, candidate_id: deepcopy(saved_results.get(candidate_id))
+        )
+        all_mocks["load_lineage"].return_value = {
+            "placeholder-a": None,
+            "placeholder-b": None,
+            "placeholder-c": None,
+        }
+        all_mocks["find_merge_triplet"].return_value = (
+            "g1-s1",
+            "g1-s2",
+            "g0-s0",
+        )
+        merged = _make_candidate("g2-m1")
+        all_mocks["merge"].return_value = merged
+        all_mocks["snapshot_candidate"].return_value = "merge-sha"
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            score = 0.9 if candidate.id == merged.id else 0.8
+            if instance_ids is not None:
+                return _make_result(
+                    candidate.id, {eid: score for eid in instance_ids}
+                )
+            return _make_result(candidate.id, {"v": score})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=1,
+            max_generations=2,
+            max_evaluations=1000,
+        )
+        config.evolution.merge_enabled = True
+        config.evolution.max_merge_invocations = 1
+        run_evolution(config, tmp_path, base_dir)
+
+        all_mocks["merge"].assert_called_once()
+        all_mocks["mutate"].assert_not_called()
+        state = all_mocks["save_state"].call_args.args[0]
+        assert state.total_merge_invocations == 1
+        assert state.scheduler_state["pending_merges_due"] == 1
+        assert state.scheduler_state["last_iter_found_new_program"] is False
+
+    def test_wrong_mutation_id_cleans_live_child_before_fatal_error(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """A post-return reserved-ID violation cannot orphan its worktree."""
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        wrong_path = tmp_path / ".helix" / "worktrees" / "wrong-id"
+        wrong_path.mkdir(parents=True)
+        wrong_child = _make_candidate("wrong-id")
+        wrong_child.worktree_path = str(wrong_path)
+        all_mocks["mutate"].return_value = wrong_child
+        all_mocks["remove_worktree"].side_effect = lambda child: Path(
+            child.worktree_path
+        ).rmdir()
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {eid: 0.2 for eid in instance_ids})
+            return _make_result(candidate.id, {"v": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(train_path, minibatch_size=1)
+        with pytest.raises(ValueError, match="reserved id"):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert not wrong_path.exists()
+        all_mocks["remove_worktree"].assert_called_once_with(wrong_child)
+        state = all_mocks["save_state"].call_args.args[0]
+        task = state.proposal_batches[-1].tasks[0]
+        assert task.status == "failed"
+        assert task.cleanup == "removed"
+        assert task.budget_accounted
+
+    def test_tamper_detector_exception_cleans_live_child_per_slot(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """An ordinary detector failure remains local and leaves no worktree."""
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        child_path = tmp_path / ".helix" / "worktrees" / "g1-s1"
+        child_path.mkdir(parents=True)
+        child = _make_candidate("g1-s1")
+        child.worktree_path = str(child_path)
+        all_mocks["mutate"].return_value = child
+        all_mocks["remove_worktree"].side_effect = lambda candidate: Path(
+            candidate.worktree_path
+        ).rmdir()
+        mocker.patch(
+            "helix.evolution._detect_evaluator_tamper",
+            side_effect=RuntimeError("tamper detector unavailable"),
+        )
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                return _make_result(candidate.id, {eid: 0.2 for eid in instance_ids})
+            return _make_result(candidate.id, {"v": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(train_path, minibatch_size=1)
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert not child_path.exists()
+        all_mocks["remove_worktree"].assert_called_once_with(child)
+        state = all_mocks["save_state"].call_args.args[0]
+        batch = state.proposal_batches[-1]
+        assert batch.phase == "complete"
+        assert batch.tasks[0].status == "failed"
+        assert batch.tasks[0].cleanup == "removed"
+        assert batch.tasks[0].budget_accounted
+
+
+class TestStrictCachedInstanceScoresAccess:
     def test_missing_id_in_cached_evaluator_raises(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:

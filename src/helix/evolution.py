@@ -730,6 +730,7 @@ def _plan_pxn_tasks(
 def _scheduler_checkpoint(
     rng: _random.Random,
     batch_sampler: BatchSampler[str] | None,
+    runtime_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Snapshot the shared frontier/sampler RNG and sampler schedule."""
 
@@ -765,7 +766,7 @@ def _scheduler_checkpoint(
                 },
             }
 
-    return build_scheduler_checkpoint(
+    checkpoint = build_scheduler_checkpoint(
         frontier_rng_state=rng.getstate(),
         sampler_rng_state=sampler_rng_state,
         sampler_epoch=sampler_epoch,
@@ -774,6 +775,14 @@ def _scheduler_checkpoint(
         sampler_id_frequencies=id_frequencies,
         sampler_fallback=fallback,
     )
+    if runtime_state is not None:
+        for key in (
+            "pending_merges_due",
+            "last_iter_found_new_program",
+        ):
+            if key in runtime_state:
+                checkpoint[key] = runtime_state[key]
+    return checkpoint
 
 
 def _restore_scheduler_checkpoint(
@@ -1821,10 +1830,11 @@ def _run_evolution_impl(
             return False
         return not worktree_path.exists()
 
-    def _recover_selected_evaluated_tasks() -> None:
+    def _recover_selected_evaluated_tasks() -> int:
         """Finish the crash window between selected-eval and frontier apply."""
 
         assert state is not None
+        recovered_acceptances = 0
         for batch in state.proposal_batches:
             for task_record in batch.tasks:
                 if not (
@@ -1852,6 +1862,16 @@ def _run_evolution_impl(
                         state,
                         task_record.child_id,
                     )
+                recovered_acceptances += 1
+                if (
+                    config.evolution.merge_enabled
+                    and state.total_merge_invocations
+                    < config.evolution.max_merge_invocations
+                ):
+                    state.scheduler_state["pending_merges_due"] = int(
+                        state.scheduler_state.get("pending_merges_due", 0)
+                    ) + 1
+                state.scheduler_state["last_iter_found_new_program"] = True
                 checkpoint_batch_task(
                     state,
                     project_root,
@@ -1864,7 +1884,9 @@ def _run_evolution_impl(
                     detail="resume recovered selected evaluated task",
                     saver=_save_state,
                 )
+        return recovered_acceptances
 
+    recovered_acceptances = 0
     if state is None:
         state = EvolutionState(
             generation=0,
@@ -1906,7 +1928,7 @@ def _run_evolution_impl(
                 "Config hash differs from the saved state; resuming with the current "
                 "config while keeping the existing frontier and history."
             )
-        _recover_selected_evaluated_tasks()
+        recovered_acceptances = _recover_selected_evaluated_tasks()
         reconcile_interrupted_batches(
             state,
             project_root,
@@ -2099,14 +2121,16 @@ def _run_evolution_impl(
         start_gen = state.generation + 1
         # GEPA parity: discovery-based merge trigger.  merges_due increments
         # when a new candidate is accepted to the frontier.
-        merges_due = 0
+        merges_due = int(state.scheduler_state.get("pending_merges_due", 0))
         # GEPA parity (M1): merge only fires when the *previous* iteration
         # found (accepted) a new program.  This prevents consecutive merge-only
         # generations after a rejected merge.  Mirrors GEPA engine.py:666.
-        last_iter_found_new_program = False
+        last_iter_found_new_program = bool(
+            state.scheduler_state.get("last_iter_found_new_program", False)
+        )
         # Mutation counters for display
         mutations_attempted = 0
-        mutations_accepted = 0
+        mutations_accepted = recovered_acceptances
 
         gen = start_gen - 1
         while gen < config.evolution.max_generations:
@@ -2175,6 +2199,7 @@ def _run_evolution_impl(
                 # GEPA parity (M1): clear the flag so consecutive merge-only
                 # generations cannot fire (mirrors engine.py:668,740).
                 last_iter_found_new_program = False
+                state.scheduler_state["last_iter_found_new_program"] = False
 
                 lineage = load_lineage(lineage_path)
                 score_map: dict[str, float] = {}
@@ -2509,6 +2534,9 @@ def _run_evolution_impl(
                                     break
 
                                 merges_due -= 1
+                                state.scheduler_state["pending_merges_due"] = (
+                                    merges_due
+                                )
                                 budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
                                 _sync_frontier_state()
@@ -2542,6 +2570,7 @@ def _run_evolution_impl(
                 # but gate conditions not met (merges_due==0 or last_iter_found=False).
                 # GEPA engine.py:739-740 always clears before reflective mutation.
                 last_iter_found_new_program = False
+                state.scheduler_state["last_iter_found_new_program"] = False
             # =============================================================
             # Phase 2: Unified P*N mutation scheduler
             #
@@ -2578,7 +2607,11 @@ def _run_evolution_impl(
             checkpoint_scheduler_state(
                 state,
                 project_root,
-                _scheduler_checkpoint(rng, batch_sampler),
+                _scheduler_checkpoint(
+                    rng,
+                    batch_sampler,
+                    state.scheduler_state,
+                ),
                 saver=_save_state,
             )
             proposal_batch = ProposalBatchRecord(
@@ -2983,7 +3016,12 @@ def _run_evolution_impl(
 
             def _mutate_one(
                 item: tuple[ProposalTask, tuple[EvalResult, int]],
-            ) -> tuple[Candidate | None, tuple[str, ...]]:
+            ) -> tuple[
+                Candidate | None,
+                tuple[str, ...],
+                BaseException | None,
+                ProposalCleanupResult | None,
+            ]:
                 task, (parent_result, _) = item
                 child = mutate(
                     parent=task.parent_candidate,
@@ -2999,22 +3037,47 @@ def _run_evolution_impl(
                     ),
                 )
                 if child is None:
-                    return None, ()
-                if child.id != task.reserved_child_id:
-                    raise ValueError(
-                        "Mutation returned candidate id "
-                        f"{child.id!r}; reserved id was "
-                        f"{task.reserved_child_id!r}."
+                    return None, (), None, None
+                try:
+                    if child.id != task.reserved_child_id:
+                        raise ValueError(
+                            "Mutation returned candidate id "
+                            f"{child.id!r}; reserved id was "
+                            f"{task.reserved_child_id!r}."
+                        )
+                    tampered = tuple(
+                        _detect_evaluator_tamper(
+                            child,
+                            evaluator_manifest,
+                            config,
+                            project_root,
+                        )
                     )
-                tampered = tuple(
-                    _detect_evaluator_tamper(
-                        child,
-                        evaluator_manifest,
-                        config,
-                        project_root,
-                    )
-                )
-                return child, tampered
+                except BaseException as exc:
+                    # mutate() has already created a live worktree/branch.  A
+                    # reserved-ID contract failure or tamper-detector error
+                    # must retain the child long enough to clean and journal
+                    # it instead of being reduced to an exception-only pool
+                    # result.
+                    worktree_path = Path(child.worktree_path)
+                    existed = worktree_path.exists()
+                    try:
+                        remove_worktree(child)
+                    except Exception as cleanup_exc:
+                        print_warning(
+                            "Could not remove post-mutation-validation "
+                            f"candidate {child.id}: {cleanup_exc}"
+                        )
+                        cleanup: ProposalCleanupResult = "failed"
+                    else:
+                        if existed and worktree_path.exists():
+                            cleanup = "failed"
+                        elif existed:
+                            cleanup = "removed"
+                        else:
+                            cleanup = "missing"
+                    return child, (), exc, cleanup
+                return child, tampered, None, None
 
             set_phase(HelixPhase.MUTATION)
             mutation_calls = _run_bounded_ordered(
@@ -3069,7 +3132,9 @@ def _run_evolution_impl(
                     continue
 
                 assert mutation_call.value is not None
-                child, tampered_paths = mutation_call.value
+                child, tampered_paths, post_error, pre_cleanup = (
+                    mutation_call.value
+                )
                 if child is None:
                     proposal_outcome = FailedProposal(
                         task=task,
@@ -3084,6 +3149,38 @@ def _run_evolution_impl(
                         status="failed",
                         reason="mutation_returned_none",
                     )
+                    continue
+
+                if pre_cleanup is not None:
+                    cleaned_child_ids.add(child.id)
+                    cleanup_results[child.id] = pre_cleanup
+                if post_error is not None:
+                    proposal_outcome = FailedProposal(
+                        task=task,
+                        stage="mutation",
+                        message=f"{type(post_error).__name__}: {post_error}",
+                        parent_eval_result=parent_result,
+                        child_candidate=child,
+                        parent_n_uncached=parent_n_uncached,
+                    )
+                    proposal_outcomes[task.batch_index] = proposal_outcome
+                    _record_terminal(
+                        task,
+                        status=(
+                            "fatal"
+                            if _is_fatal_proposal_exception(post_error)
+                            else "failed"
+                        ),
+                        reason="post_mutation_validation",
+                        child=child,
+                    )
+                    if _is_fatal_proposal_exception(post_error):
+                        fatal_mutation_error = fatal_mutation_error or post_error
+                    else:
+                        print_warning(
+                            f"Post-mutation validation for {child.id} failed: "
+                            f"{type(post_error).__name__}: {post_error}"
+                        )
                     continue
 
                 mutation_children.append(child)
@@ -3807,9 +3904,18 @@ def _run_evolution_impl(
             # selected child has a durable evaluation artifact, full budget
             # charge, and resume-recoverable selected/evaluated task record.
             set_phase(HelixPhase.PARETO_UPDATE)
-            for selected, val_result in full_results:
-                proposal = selected.proposal
+            for _, val_result in full_results:
                 _save_evaluation(base_dir, val_result)
+
+            def _defer_selected_barrier_save(_state: EvolutionState) -> None:
+                # checkpoint_batch_task still validates and updates each
+                # record in memory, but no partial sibling ledger may become
+                # durable.  The single _save_state below is the atomic
+                # all-selected barrier.
+                return
+
+            for selected, _ in full_results:
+                proposal = selected.proposal
                 checkpoint_batch_task(
                     state,
                     project_root,
@@ -3822,8 +3928,10 @@ def _run_evolution_impl(
                     budget_charge=_task_budget_snapshot(proposal.task),
                     budget_accounted=True,
                     applied=False,
-                    saver=_save_state,
+                    saver=_defer_selected_barrier_save,
                 )
+            if full_results:
+                _save_state(state)
 
             # Apply the already-journaled children deterministically.  No
             # budget check may break this loop: every dispatched result was
@@ -3840,19 +3948,21 @@ def _run_evolution_impl(
                     candidate_id=child.id,
                     score=val_result.aggregate_score(),
                 )
-                _record_terminal(
-                    proposal.task,
-                    status="accepted",
-                    reason="selected",
-                    child=child,
-                )
                 if (
                     config.evolution.merge_enabled
                     and state.total_merge_invocations
                     < config.evolution.max_merge_invocations
                 ):
                     merges_due += 1
+                    state.scheduler_state["pending_merges_due"] = merges_due
                 last_iter_found_new_program = True
+                state.scheduler_state["last_iter_found_new_program"] = True
+                _record_terminal(
+                    proposal.task,
+                    status="accepted",
+                    reason="selected",
+                    child=child,
+                )
                 mutations_accepted += 1
                 live.update(
                     mutations_attempted=mutations_attempted,
