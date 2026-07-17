@@ -931,7 +931,8 @@ def _wait_for_sidecar_service(
         time.sleep(0.5)
     raise TimeoutError(
         "Evaluator sidecar endpoint did not become reachable within "
-        f"{sidecar.startup_timeout_seconds}s: {sidecar.endpoint}\n{last_output}"
+        f"{sidecar.startup_timeout_seconds}s: "
+        f"HELIX_EVALUATOR_ENDPOINT={_REDACTED_DOCKER_ENV_VALUE}\n{last_output}"
     )
 
 

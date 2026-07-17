@@ -607,7 +607,7 @@ def test_sidecar_service_exit_logs_redact_sidecar_startup_env(mocker):
     assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in rendered
 
 
-def test_sidecar_healthcheck_failure_redacts_sidecar_startup_env(mocker):
+def test_sidecar_healthcheck_timeout_redacts_endpoint_and_startup_env(mocker):
     def fake_run(args, **kwargs):
         if args[:2] == ["docker", "inspect"]:
             return subprocess.CompletedProcess(
@@ -626,10 +626,11 @@ def test_sidecar_healthcheck_failure_redacts_sidecar_startup_env(mocker):
     mocker.patch("helix.sandbox._wait_for_container_running")
     mocker.patch("helix.sandbox.time.monotonic", side_effect=[0.0, 0.0, 2.0])
     mocker.patch("helix.sandbox.time.sleep")
+    endpoint = f"https://synthetic.invalid/evaluate?sentinel={_SYNTHETIC_SECRET}"
     sidecar = EvaluatorSidecarConfig(
         image="synthetic-sidecar:latest",
         command="python -m synthetic_server",
-        endpoint="http://helix-evaluator:8080/evaluate",
+        endpoint=endpoint,
         startup_timeout_seconds=1,
     )
 
@@ -641,7 +642,12 @@ def test_sidecar_healthcheck_failure_redacts_sidecar_startup_env(mocker):
             pass
 
     rendered = str(captured.value)
+    assert endpoint not in rendered
     assert _SYNTHETIC_SECRET not in rendered
+    assert rendered.splitlines()[0] == (
+        "Evaluator sidecar endpoint did not become reachable within 1s: "
+        "HELIX_EVALUATOR_ENDPOINT=<redacted>"
+    )
     assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in rendered
 
 
