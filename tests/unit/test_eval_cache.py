@@ -1,7 +1,11 @@
 """Unit tests for helix.eval_cache."""
+
 from __future__ import annotations
 
 import dataclasses
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -100,8 +104,8 @@ def test_evaluate_with_cache_full_calls_evaluator_only_for_uncached() -> None:
         side_info = [{"feedback": f"log{eid}"} for eid in batch]
         return outs, scores, obj, side_info
 
-    outputs, scores, obj_by_id, side_info_by_id, n_uncached = cache.evaluate_with_cache_full(
-        cand, [1, 2, 3], fetcher, evaluator
+    outputs, scores, obj_by_id, side_info_by_id, n_uncached = (
+        cache.evaluate_with_cache_full(cand, [1, 2, 3], fetcher, evaluator)
     )
 
     assert calls == [[2, 3]]
@@ -156,6 +160,136 @@ def test_evaluate_with_cache_full_second_call_fully_cached() -> None:
         2: {"feedback": "log2"},
         3: {"feedback": "log3"},
     }
+
+
+def test_overlapping_concurrent_batches_compute_each_cache_key_once() -> None:
+    """Overlapping keys single-flight while independent misses stay parallel."""
+
+    cache: EvaluationCache[str, int] = EvaluationCache()
+    candidate = {"content_key": "same-tree", "split": "train"}
+    start = threading.Barrier(2)
+    evaluators_running = threading.Barrier(2)
+    calls_lock = threading.Lock()
+    calls: list[list[int]] = []
+
+    def fetcher(ids: list[int]) -> list[int]:
+        return list(ids)
+
+    def evaluator(
+        batch: list[int], _candidate: dict[str, str]
+    ) -> tuple[list[str], list[float], None, None]:
+        with calls_lock:
+            calls.append(list(batch))
+        # Both batches retain an independent miss, so keyed coordination must
+        # let both evaluators enter concurrently.  A global compute lock would
+        # time out here instead of satisfying the barrier.
+        evaluators_running.wait(timeout=5)
+        return [f"out-{eid}" for eid in batch], [eid / 10 for eid in batch], None, None
+
+    def evaluate(ids: list[int]) -> tuple[dict[int, str], dict[int, float], int]:
+        start.wait(timeout=5)
+        outputs, scores, _, _, n_uncached = cache.evaluate_with_cache_full(
+            candidate,
+            ids,
+            fetcher,
+            evaluator,
+        )
+        return outputs, scores, n_uncached
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(evaluate, [1, 2])
+        second = pool.submit(evaluate, [2, 3])
+        results = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert results[0][:2] == (
+        {1: "out-1", 2: "out-2"},
+        {1: 0.1, 2: 0.2},
+    )
+    assert results[1][:2] == (
+        {2: "out-2", 3: "out-3"},
+        {2: 0.2, 3: 0.3},
+    )
+    assert sorted(result[2] for result in results) == [1, 2]
+    assert sum(result[2] for result in results) == 3
+    assert Counter(eid for batch in calls for eid in batch) == Counter(
+        {1: 1, 2: 1, 3: 1}
+    )
+    assert cache._in_flight == {}
+
+
+def test_failed_singleflight_owner_wakes_waiter_for_retry() -> None:
+    """An owner failure releases its key; a blocked waiter retries it."""
+
+    cache: EvaluationCache[str, int] = EvaluationCache()
+    candidate = {"content_key": "same-tree", "split": "train"}
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+    waiter_is_waiting = threading.Event()
+    attempts_lock = threading.Lock()
+    attempts = 0
+
+    def fetcher(ids: list[int]) -> list[int]:
+        return list(ids)
+
+    def evaluator(
+        batch: list[int], _candidate: dict[str, str]
+    ) -> tuple[list[str], list[float], None, None]:
+        nonlocal attempts
+        with attempts_lock:
+            attempts += 1
+            attempt = attempts
+        if attempt == 1:
+            owner_started.set()
+            assert release_owner.wait(timeout=5)
+            raise RuntimeError("transient evaluator failure")
+        return [f"out-{eid}" for eid in batch], [eid / 10 for eid in batch], None, None
+
+    def evaluate() -> tuple[dict[int, str], dict[int, float], int]:
+        outputs, scores, _, _, n_uncached = cache.evaluate_with_cache_full(
+            candidate,
+            [7],
+            fetcher,
+            evaluator,
+        )
+        return outputs, scores, n_uncached
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(evaluate)
+        assert owner_started.wait(timeout=5)
+
+        # Instrument the concrete per-key event so the test deterministically
+        # observes the second call blocked as a waiter before failing the owner.
+        with cache._lock:
+            (flight,) = cache._in_flight.values()
+        original_wait = flight.wait
+
+        def observed_wait(timeout: float | None = None) -> bool:
+            waiter_is_waiting.set()
+            return original_wait(timeout)
+
+        setattr(flight, "wait", observed_wait)
+        waiter = pool.submit(evaluate)
+        assert waiter_is_waiting.wait(timeout=5)
+        release_owner.set()
+
+        with pytest.raises(RuntimeError, match="transient evaluator failure"):
+            owner.result(timeout=5)
+        outputs, scores, n_uncached = waiter.result(timeout=5)
+
+    assert (outputs, scores, n_uncached) == ({7: "out-7"}, {7: 0.7}, 1)
+    assert attempts == 2
+    assert cache._in_flight == {}
+
+    # The successful retry populated the normal cache; no poison marker or
+    # stale coordination entry can force another evaluation.
+    outputs, scores, _, _, n_uncached = cache.evaluate_with_cache_full(
+        candidate,
+        [7],
+        fetcher,
+        evaluator,
+    )
+    assert (outputs, scores, n_uncached) == ({7: "out-7"}, {7: 0.7}, 0)
+    assert attempts == 2
 
 
 def test_candidate_hash_order_independent() -> None:

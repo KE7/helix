@@ -1,8 +1,11 @@
-"""HELIX evaluation cache — GEPA parity.
+"""HELIX evaluation cache — GEPA parity with concurrent single-flight.
 
-Line-for-line port of the cache layer described in
-/tmp/gepa_eval_spec.md §3 (originally at gepa/core/state.py:27-130).
+The cache data model follows the layer described in /tmp/gepa_eval_spec.md §3
+(originally at gepa/core/state.py:27-130).  HELIX additionally coordinates
+concurrent cache misses per candidate-content/example key so parallel batches
+cannot evaluate the same missing example twice.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -39,9 +42,7 @@ def _candidate_hash(candidate: dict[str, str]) -> CandidateHash:
 
     GEPA §3.1: ``sha256(json.dumps(sorted(candidate.items())))``.
     """
-    return hashlib.sha256(
-        json.dumps(sorted(candidate.items())).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(sorted(candidate.items())).encode()).hexdigest()
 
 
 @dataclass
@@ -57,11 +58,19 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
     _cache: dict[CacheKey, CachedEvaluation[RolloutOutput]] = field(
         default_factory=dict
     )
-    # Thread safety (audit-mutation §C4 / audit-budget-caching §C1): the
-    # parent-minibatch eval now runs inside a ThreadPoolExecutor (see
-    # evolution.py parent-eval parallel stage), so concurrent readers/writers
-    # can race on ``_cache``.  A single lock serialises every access.
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    # A bounded registry of keys currently being computed.  Entries exist only
+    # for cache misses owned by active calls and are removed on both success and
+    # failure.  Per-key events let overlapping batches share work without
+    # serialising evaluations for independent examples.
+    _in_flight: dict[CacheKey, threading.Event] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+    # Thread safety (audit-mutation §C4 / audit-budget-caching §C1): protect
+    # both the persisted cache contents and the ephemeral single-flight
+    # registry.  Evaluator work and event waits always happen outside the lock.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
 
     def get(
         self, candidate: dict[str, str], example_id: DataId
@@ -157,55 +166,126 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         dict[DataId, dict[str, Any]] | None,
         int,
     ]:
-        cached, uncached_ids = self.get_batch(candidate, example_ids)
-        outputs_by_id: dict[DataId, RolloutOutput] = {
-            eid: c.output for eid, c in cached.items()
-        }
-        scores_by_id: dict[DataId, float] = {
-            eid: c.score for eid, c in cached.items()
-        }
+        candidate_hash = _candidate_hash(candidate)
+        outputs_by_id: dict[DataId, RolloutOutput] = {}
+        scores_by_id: dict[DataId, float] = {}
         objective_by_id: dict[DataId, dict[str, float]] | None = None
-        for eid, c in cached.items():
-            if c.objective_scores is not None:
-                if objective_by_id is None:
-                    objective_by_id = {}
-                objective_by_id[eid] = c.objective_scores
         side_info_by_id: dict[DataId, dict[str, Any]] | None = None
-        for eid, c in cached.items():
-            if c.side_info is not None:
-                if side_info_by_id is None:
-                    side_info_by_id = {}
-                side_info_by_id[eid] = c.side_info
-        if uncached_ids:
-            batch = fetcher(uncached_ids)
-            outputs, scores, obj_scores, side_infos = evaluator(batch, candidate)
-            _validate_batch_cardinality(
-                uncached_ids,
-                outputs,
-                scores,
-                obj_scores,
-                side_infos,
-            )
-            for idx, eid in enumerate(uncached_ids):
-                outputs_by_id[eid] = outputs[idx]
-                scores_by_id[eid] = scores[idx]
-                if obj_scores is not None:
+        num_actual_evaluations = 0
+        first_partition = True
+
+        # A call can own some missing keys while waiting for another call's
+        # overlapping keys.  Compute the owned subset first so independent
+        # examples keep running concurrently, then observe or retry any keys
+        # whose owner failed.
+        while True:
+            cached: dict[DataId, CachedEvaluation[RolloutOutput]] = {}
+            owned_ids: list[DataId] = []
+            owned: dict[CacheKey, threading.Event] = {}
+            waiting: dict[CacheKey, threading.Event] = {}
+
+            with self._lock:
+                for eid in example_ids:
+                    key: CacheKey = (candidate_hash, eid)
+                    entry = self._cache.get(key)
+                    if entry is not None:
+                        cached[eid] = entry
+                        continue
+
+                    # Preserve repeated slots within the owner's own batch.
+                    # The cache intentionally collapses results by example id,
+                    # but the evaluator and usage count retain multiplicity.
+                    if key in owned:
+                        owned_ids.append(eid)
+                        continue
+
+                    flight = self._in_flight.get(key)
+                    if flight is None:
+                        flight = threading.Event()
+                        self._in_flight[key] = flight
+                        owned[key] = flight
+                        owned_ids.append(eid)
+                    else:
+                        waiting[key] = flight
+
+            if first_partition:
+                TRACE.emit(
+                    EventType.CACHE_GET,
+                    candidate_id=candidate_hash,
+                    example_ids=list(example_ids),
+                    hit_ids=list(cached.keys()),
+                    miss_ids=[eid for eid in example_ids if eid not in cached],
+                )
+                first_partition = False
+
+            for eid, entry in cached.items():
+                outputs_by_id[eid] = entry.output
+                scores_by_id[eid] = entry.score
+                if entry.objective_scores is not None:
                     if objective_by_id is None:
                         objective_by_id = {}
-                    objective_by_id[eid] = obj_scores[idx]
-                if side_infos is not None:
+                    objective_by_id[eid] = entry.objective_scores
+                if entry.side_info is not None:
                     if side_info_by_id is None:
                         side_info_by_id = {}
-                    side_info_by_id[eid] = side_infos[idx]
-            self.put_batch(
-                candidate,
-                uncached_ids,
-                outputs,
-                scores,
-                obj_scores,
-                side_infos,
-            )
-        return outputs_by_id, scores_by_id, objective_by_id, side_info_by_id, len(uncached_ids)
+                    side_info_by_id[eid] = entry.side_info
+
+            if not owned_ids and not waiting:
+                break
+
+            if owned_ids:
+                try:
+                    batch = fetcher(owned_ids)
+                    outputs, scores, obj_scores, side_infos = evaluator(
+                        batch, candidate
+                    )
+                    _validate_batch_cardinality(
+                        owned_ids,
+                        outputs,
+                        scores,
+                        obj_scores,
+                        side_infos,
+                    )
+                    # Keep the established public write path (including its
+                    # cardinality guard and trace event), then wake waiters only
+                    # after every result is visible in the cache.
+                    self.put_batch(
+                        candidate,
+                        owned_ids,
+                        outputs,
+                        scores,
+                        obj_scores,
+                        side_infos,
+                    )
+                except BaseException:
+                    self._release_owned(owned)
+                    raise
+
+                self._release_owned(owned)
+                num_actual_evaluations += len(owned_ids)
+
+            # Owners publish cache entries before signalling.  If an owner
+            # failed, its event is still signalled after removing the claim;
+            # the next loop then claims and retries the still-missing key.
+            for flight in waiting.values():
+                flight.wait()
+
+        return (
+            outputs_by_id,
+            scores_by_id,
+            objective_by_id,
+            side_info_by_id,
+            num_actual_evaluations,
+        )
+
+    def _release_owned(self, owned: dict[CacheKey, threading.Event]) -> None:
+        """Drop completed claims and wake all waiters for those keys."""
+
+        with self._lock:
+            for key, flight in owned.items():
+                if self._in_flight.get(key) is flight:
+                    del self._in_flight[key]
+                flight.set()
 
 
 def _validate_batch_cardinality(
