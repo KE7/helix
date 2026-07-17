@@ -409,12 +409,13 @@ def render_proposal_batch_table(
     """
     batch.validate_plan()
     if require_terminal:
-        nonterminal = [task.task_index for task in batch.tasks if not task.is_terminal()]
+        nonterminal = [
+            task.task_index for task in batch.tasks if not task.is_terminal()
+        ]
         if nonterminal:
             raise ValueError(
                 f"Cannot render completed proposal batch {batch.batch_id!r}; "
-                "nonterminal slots: "
-                + ", ".join(str(index) for index in nonterminal)
+                "nonterminal slots: " + ", ".join(str(index) for index in nonterminal)
             )
 
     table = Table(

@@ -262,7 +262,10 @@ class TestMinibatchGateIntegration:
         all_mocks["run_evaluator"].side_effect = run_eval
 
         config = _make_minibatch_config(
-            train_path, minibatch_size=2, max_generations=1, max_evaluations=100,
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -305,7 +308,10 @@ class TestMinibatchGateIntegration:
         all_mocks["run_evaluator"].side_effect = run_eval
 
         config = _make_minibatch_config(
-            train_path, minibatch_size=2, max_generations=1, max_evaluations=100,
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -321,9 +327,9 @@ class TestMinibatchGateIntegration:
         attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
         assert attempt_path.exists()
         attempt = json.loads(attempt_path.read_text())
-        child_train_ids = [
-            c[2] for c in calls if c[0] == "g1-s1" and c[1] == "train"
-        ][0]
+        child_train_ids = [c[2] for c in calls if c[0] == "g1-s1" and c[1] == "train"][
+            0
+        ]
         assert attempt["candidate_id"] == "g1-s1"
         assert attempt["attempt"] == {
             "status": "rejected",
@@ -511,7 +517,9 @@ class TestMinibatchGateIntegration:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
-        assert attempt_path.exists(), "attempts/g1-s1.json should be written on train_gate reject"
+        assert attempt_path.exists(), (
+            "attempts/g1-s1.json should be written on train_gate reject"
+        )
         attempt = json.loads(attempt_path.read_text())
         assert attempt["candidate_id"] == "g1-s1"
         assert attempt["attempt"]["status"] == "rejected"
@@ -551,7 +559,9 @@ class TestMinibatchGateIntegration:
                 if split == "train":
                     # Parent scores low on minibatch; child scores high → passes gate.
                     if candidate.id == seed.id:
-                        return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
+                        return _make_result(
+                            candidate.id, {i: 0.1 for i in instance_ids}
+                        )
                     return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
                 # val evals
                 if split == "val":
@@ -577,7 +587,9 @@ class TestMinibatchGateIntegration:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
-        assert attempt_path.exists(), "attempts/g1-s1.json should be written on val_stage reject"
+        assert attempt_path.exists(), (
+            "attempts/g1-s1.json should be written on val_stage reject"
+        )
         attempt = json.loads(attempt_path.read_text())
         assert attempt["candidate_id"] == "g1-s1"
         assert attempt["attempt"]["status"] == "rejected"
@@ -612,11 +624,7 @@ class TestMinibatchGateIntegration:
             instance_ids: list[str] | None = None,
             **kwargs: Any,
         ) -> EvalResult:
-            if (
-                candidate.id == "g1-s1"
-                and split == "val"
-                and instance_ids is not None
-            ):
+            if candidate.id == "g1-s1" and split == "val" and instance_ids is not None:
                 child_val_calls.append(list(instance_ids))
             if instance_ids is not None:
                 if candidate.id == seed.id:
@@ -627,7 +635,10 @@ class TestMinibatchGateIntegration:
         all_mocks["run_evaluator"].side_effect = run_eval
 
         config = _make_minibatch_config(
-            train_path, minibatch_size=2, max_generations=1, max_evaluations=100,
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=100,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -655,16 +666,28 @@ class TestMinibatchGateIntegration:
         ) -> EvalResult:
             if split == "val" and instance_ids is not None and candidate.id == "g1-s1":
                 child_val_calls.append(list(instance_ids))
-            if split == "val" and instance_ids == ["0", "1", "2", "3"] and candidate.id == seed.id:
-                return _make_result(candidate.id, {"0": 0.8, "1": 0.8, "2": 0.8, "3": 0.8})
+            if (
+                split == "val"
+                and instance_ids == ["0", "1", "2", "3"]
+                and candidate.id == seed.id
+            ):
+                return _make_result(
+                    candidate.id, {"0": 0.8, "1": 0.8, "2": 0.8, "3": 0.8}
+                )
             if split == "train" and instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
-            if split == "val" and instance_ids == ["0", "1"] and candidate.id == "g1-s1":
+            if (
+                split == "val"
+                and instance_ids == ["0", "1"]
+                and candidate.id == "g1-s1"
+            ):
                 return _make_result(candidate.id, {"0": 0.1, "1": 0.1})
             if split == "val" and instance_ids is not None and candidate.id == "g1-s1":
-                pytest.fail(f"Unexpected child full-val call after stage reject: {instance_ids}")
+                pytest.fail(
+                    f"Unexpected child full-val call after stage reject: {instance_ids}"
+                )
             return _make_result(candidate.id, {"v1": 0.0})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -703,15 +726,29 @@ class TestMinibatchGateIntegration:
         ) -> EvalResult:
             if split == "val" and instance_ids is not None and candidate.id == "g1-s1":
                 child_val_calls.append(list(instance_ids))
-            if split == "val" and instance_ids == ["0", "1", "2", "3"] and candidate.id == seed.id:
-                return _make_result(candidate.id, {"0": 0.2, "1": 0.2, "2": 0.2, "3": 0.2})
+            if (
+                split == "val"
+                and instance_ids == ["0", "1", "2", "3"]
+                and candidate.id == seed.id
+            ):
+                return _make_result(
+                    candidate.id, {"0": 0.2, "1": 0.2, "2": 0.2, "3": 0.2}
+                )
             if split == "train" and instance_ids is not None:
                 if candidate.id == seed.id:
                     return _make_result(candidate.id, {i: 0.1 for i in instance_ids})
                 return _make_result(candidate.id, {i: 0.9 for i in instance_ids})
-            if split == "val" and instance_ids == ["0", "1"] and candidate.id == "g1-s1":
+            if (
+                split == "val"
+                and instance_ids == ["0", "1"]
+                and candidate.id == "g1-s1"
+            ):
                 return _make_result(candidate.id, {"0": 0.8, "1": 0.8})
-            if split == "val" and instance_ids == ["2", "3"] and candidate.id == "g1-s1":
+            if (
+                split == "val"
+                and instance_ids == ["2", "3"]
+                and candidate.id == "g1-s1"
+            ):
                 return _make_result(candidate.id, {"2": 0.7, "3": 0.6})
             return _make_result(candidate.id, {"v1": 0.0})
 
@@ -895,9 +932,7 @@ class TestMinibatchGateIntegration:
             **kwargs: Any,
         ) -> EvalResult:
             if instance_ids is not None:
-                return _make_result(
-                    candidate.id, {i: 0.5 for i in instance_ids}
-                )
+                return _make_result(candidate.id, {i: 0.5 for i in instance_ids})
             return _make_result(candidate.id, {"v1": 0.5})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -965,7 +1000,12 @@ class TestCachedEvaluateBatch:
         write_batch_mock = mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1", "2"],
+            cache,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         assert run_eval_mock.call_count == 0, (
@@ -1000,7 +1040,12 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand_b, ["0", "1"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand_b,
+            ["0", "1"],
+            cache,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         assert num_actual == 0
@@ -1049,7 +1094,12 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand_b, ["0", "1"], cache, self._trivial_config(), "train", tmp_path,
+            cand_b,
+            ["0", "1"],
+            cache,
+            self._trivial_config(),
+            "train",
+            tmp_path,
         )
 
         assert num_actual == 0
@@ -1108,7 +1158,12 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand_b, ["0", "1"], cache, self._trivial_config(), "train", tmp_path,
+            cand_b,
+            ["0", "1"],
+            cache,
+            self._trivial_config(),
+            "train",
+            tmp_path,
         )
 
         assert seen_instance_ids == [["0", "1"]]
@@ -1170,7 +1225,12 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1", "2"],
+            cache,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         assert seen_instance_ids == [["0", "1", "2"]], (
@@ -1202,10 +1262,20 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         first, first_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1"],
+            None,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
         second, second_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1"],
+            None,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         assert seen_instance_ids == [["0", "1"], ["0", "1"]]
@@ -1248,12 +1318,15 @@ class TestCachedEvaluateBatch:
             written_batches.append(list(example_ids))
 
         mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
-        mocker.patch(
-            "helix.evolution._write_helix_batch", side_effect=fake_write
-        )
+        mocker.patch("helix.evolution._write_helix_batch", side_effect=fake_write)
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1", "2"],
+            cache,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         # Evaluator called exactly once, with only the missing id.
@@ -1327,17 +1400,19 @@ class TestCachedEvaluateBatch:
                     {"trajectory": f"fresh_trace_{eid}", "rollout_id": f"fresh__{eid}"}
                     for eid in ids
                 ],
-                objective_scores=[
-                    {"obj_alpha": 0.22, "obj_beta": 0.5}
-                    for _ in ids
-                ],
+                objective_scores=[{"obj_alpha": 0.22, "obj_beta": 0.5} for _ in ids],
             )
 
         mocker.patch("helix.evolution.run_evaluator", side_effect=fake_run)
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1", "2"], cache, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1", "2"],
+            cache,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         # instance_scores merge: cached 0/2 + fresh 1 (established
@@ -1350,18 +1425,18 @@ class TestCachedEvaluateBatch:
         # ``example_ids``:
         assert result.objective_scores is not None
         assert result.objective_scores == [
-            {"obj_alpha": 0.11, "obj_beta": 0.8},     # cached id "0"
-            {"obj_alpha": 0.22, "obj_beta": 0.5},     # fresh id "1"
-            {"obj_alpha": 0.33, "obj_beta": 0.1},     # cached id "2"
+            {"obj_alpha": 0.11, "obj_beta": 0.8},  # cached id "0"
+            {"obj_alpha": 0.22, "obj_beta": 0.5},  # fresh id "1"
+            {"obj_alpha": 0.33, "obj_beta": 0.1},  # cached id "2"
         ]
 
         # per_example_side_info round-trips by example id through the cache;
         # the fresh miss position gets the dict we returned from fake_run.
         assert result.per_example_side_info is not None
         assert result.per_example_side_info == [
-            {"trajectory": "cached_trace_0", "rollout_id": "cached__0"},       # cached "0"
-            {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},         # fresh "1"
-            {"trajectory": "cached_trace_2", "rollout_id": "cached__2"},       # cached "2"
+            {"trajectory": "cached_trace_0", "rollout_id": "cached__0"},  # cached "0"
+            {"trajectory": "fresh_trace_1", "rollout_id": "fresh__1"},  # fresh "1"
+            {"trajectory": "cached_trace_2", "rollout_id": "cached__2"},  # cached "2"
         ]
 
     def test_cache_populates_after_fresh_eval(self, mocker: Any) -> None:
@@ -1393,7 +1468,12 @@ class TestCachedEvaluateBatch:
 
         # First call: full miss → evaluator runs once.
         first_result, first_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "train", Path("/tmp"),
+            cand,
+            ["0", "1"],
+            cache,
+            cfg,
+            "train",
+            Path("/tmp"),
         )
         assert call_count["n"] == 1
         assert first_num_actual == 2
@@ -1401,7 +1481,12 @@ class TestCachedEvaluateBatch:
 
         # Second call with the same (candidate, ids): full hit → no re-run.
         second_result, second_num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], cache, cfg, "train", Path("/tmp"),
+            cand,
+            ["0", "1"],
+            cache,
+            cfg,
+            "train",
+            Path("/tmp"),
         )
         assert call_count["n"] == 1, (
             "Evaluator must not be invoked a second time for cached ids"
@@ -1439,7 +1524,12 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0"], cache, self._trivial_config(), "val", Path("/tmp"),
+            cand,
+            ["0"],
+            cache,
+            self._trivial_config(),
+            "val",
+            Path("/tmp"),
         )
 
         assert seen_splits == ["val"]
@@ -1470,7 +1560,12 @@ class TestCachedEvaluateBatch:
         mocker.patch("helix.evolution._write_helix_batch")
 
         result, num_actual = _cached_evaluate_batch(
-            cand, ["0", "1"], None, self._trivial_config(), "train", Path("/tmp"),
+            cand,
+            ["0", "1"],
+            None,
+            self._trivial_config(),
+            "train",
+            Path("/tmp"),
         )
 
         assert seen_instance_ids == [["0", "1"]]
@@ -1508,9 +1603,7 @@ class TestWriteHelixBatchStringIds:
         # Explicit: every element is a str (no silent numeric coercion).
         assert all(isinstance(x, str) for x in written)
 
-    def test_stringified_int_ids_still_written_as_strings(
-        self, tmp_path: Path
-    ) -> None:
+    def test_stringified_int_ids_still_written_as_strings(self, tmp_path: Path) -> None:
         """The default ``_RangeDataLoader`` emits ``"0"``, ``"1"``, … — these
         now round-trip as strings too, not ints.  Evaluators that previously
         relied on reading ``list[int]`` must cast on their side."""
@@ -2028,8 +2121,7 @@ class TestEvaluationCacheThreadSafety:
             cache.put_batch(cand, ids, [None] * 50, [float(i) for i in range(50)])
 
         threads = [
-            threading.Thread(target=worker, args=(f"c-{k}", k * 100))
-            for k in range(8)
+            threading.Thread(target=worker, args=(f"c-{k}", k * 100)) for k in range(8)
         ]
         for t in threads:
             t.start()
@@ -2221,9 +2313,7 @@ class TestUnifiedPxNScheduler:
                     legacy_state, source="parallel_proposal"
                 )
             parent = legacy_frontier.select_parent()
-            minibatch = tuple(
-                legacy_sampler.next_minibatch_ids(loader, legacy_state)
-            )
+            minibatch = tuple(legacy_sampler.next_minibatch_ids(loader, legacy_state))
             child_id = budget_api.next_mutation_id(legacy_state, 4)
             legacy.append((parent.id, minibatch, child_id))
 
@@ -2584,9 +2674,7 @@ class TestUnifiedPxNScheduler:
         for snapshot in durable_snapshots:
             if not snapshot.proposal_batches:
                 continue
-            statuses = [
-                task.status for task in snapshot.proposal_batches[-1].tasks
-            ]
+            statuses = [task.status for task in snapshot.proposal_batches[-1].tasks]
             assert statuses not in (["evaluated", "running"], ["running", "evaluated"])
         budget_after_crash = interrupted.budget.evaluations
 
@@ -2600,8 +2688,7 @@ class TestUnifiedPxNScheduler:
         assert recovered.budget.evaluations == budget_after_crash
         assert recovered.proposal_batches[-1].phase == "complete"
         assert all(
-            task.status == "applied"
-            for task in recovered.proposal_batches[-1].tasks
+            task.status == "applied" for task in recovered.proposal_batches[-1].tasks
         )
         assert cleanup_calls_after_first_resume == 0
 
@@ -2678,8 +2765,8 @@ class TestUnifiedPxNScheduler:
             "g1-s1": _make_result("g1-s1", {"v": 0.8}),
             "g1-s2": _make_result("g1-s2", {"v": 0.8}),
         }
-        all_mocks["_load_evaluation"].side_effect = (
-            lambda _base, candidate_id: deepcopy(saved_results.get(candidate_id))
+        all_mocks["_load_evaluation"].side_effect = lambda _base, candidate_id: (
+            deepcopy(saved_results.get(candidate_id))
         )
         all_mocks["load_lineage"].return_value = {
             "placeholder-a": None,
@@ -2704,9 +2791,7 @@ class TestUnifiedPxNScheduler:
         ) -> EvalResult:
             score = 0.9 if candidate.id == merged.id else 0.8
             if instance_ids is not None:
-                return _make_result(
-                    candidate.id, {eid: score for eid in instance_ids}
-                )
+                return _make_result(candidate.id, {eid: score for eid in instance_ids})
             return _make_result(candidate.id, {"v": score})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -2974,7 +3059,9 @@ class TestResumeAttemptReconciliation:
         assert state.frontier == ["g0-s0", "g1-s1"]
         assert state.active_frontier == {"x": ["g1-s1"]}
         remove_mock.assert_called_once()
-        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        remaining_ids = {
+            record["id"] for record in json.loads(lineage_path.read_text())
+        }
         assert remaining_ids == {"g0-s0", "g1-s1"}
 
     def test_orphan_worktree_without_lineage_is_removed(
@@ -3023,7 +3110,9 @@ class TestResumeAttemptReconciliation:
         assert state.generation == 4
         assert state.mutation_counter == 4
         remove_mock.assert_called_once()
-        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        remaining_ids = {
+            record["id"] for record in json.loads(lineage_path.read_text())
+        }
         assert remaining_ids == {"g1-s1"}
 
     def test_historical_missing_worktree_entries_are_left_intact(
@@ -3079,7 +3168,9 @@ class TestResumeAttemptReconciliation:
         assert state.generation == 2
         assert state.mutation_counter == 2
         remove_mock.assert_not_called()
-        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        remaining_ids = {
+            record["id"] for record in json.loads(lineage_path.read_text())
+        }
         assert remaining_ids == {"g0-s0", "g2-s2"}
 
 
@@ -3190,7 +3281,7 @@ class TestStoppingConditionValidation:
             evaluator=EvaluatorConfig(command="pytest -q"),
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
-                max_generations=0,   # loop bound disabled
+                max_generations=0,  # loop bound disabled
                 max_evaluations=-1,  # budget cap disabled
             ),
         )
@@ -3207,7 +3298,7 @@ class TestStoppingConditionValidation:
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
                 max_generations=-1,  # loop bound disabled
-                max_evaluations=0,   # also disabled
+                max_evaluations=0,  # also disabled
             ),
         )
         with pytest.raises(ValueError, match="stopping condition"):
@@ -3243,6 +3334,8 @@ class TestStoppingConditionValidation:
         )
         # Must NOT raise — max_generations=1 is a valid stopping condition.
         run_evolution(config, tmp_path, tmp_path / ".helix")
+
+
 # ---------------------------------------------------------------------------
 # Atomic Proposal Worker Tests
 #
@@ -3420,7 +3513,9 @@ class TestAtomicProposalWorker:
                 _call_counter[0] += 1
                 is_first = _call_counter[0] == 1
             if is_first:
-                raise RuntimeError("simulated LLM failure — atomic-worker isolation test")
+                raise RuntimeError(
+                    "simulated LLM failure — atomic-worker isolation test"
+                )
             return _make_candidate(kw["new_id"])
 
         all_mocks["mutate"].side_effect = _mutate_fail_first

@@ -638,7 +638,10 @@ class TestGatingInEvolutionLoop:
         assert result.candidate_summaries[-1].to_dict()["parents"] == ["g0-s0"]
 
     def test_helix_result_keeps_multiple_non_dominated_candidates(
-        self, mocker, tmp_path, all_mocks,
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,
     ):
         """Two complementary children should both be flagged non-dominated.
 
@@ -675,7 +678,10 @@ class TestGatingInEvolutionLoop:
         assert flagged == {"g1-s1", "g2-s2"}
 
     def test_helix_result_to_dict_round_trips_through_json(
-        self, mocker, tmp_path, all_mocks,
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,
     ):
         """``HelixResult.to_dict()`` must be JSON-serialisable end to end.
 
@@ -745,16 +751,28 @@ class TestGatingInEvolutionLoop:
         # Static lineage seen by ``_build_helix_result`` at end-of-run.
         all_mocks["load_lineage"].return_value = {
             "g0-s0": LineageEntry(
-                id="g0-s0", parent=None, parents=[], operation="seed",
-                generation=0, files_changed=[],
+                id="g0-s0",
+                parent=None,
+                parents=[],
+                operation="seed",
+                generation=0,
+                files_changed=[],
             ),
             "g1-s1": LineageEntry(
-                id="g1-s1", parent="g0-s0", parents=["g0-s0"],
-                operation="mutate", generation=1, files_changed=["solve.py"],
+                id="g1-s1",
+                parent="g0-s0",
+                parents=["g0-s0"],
+                operation="mutate",
+                generation=1,
+                files_changed=["solve.py"],
             ),
             "g2-m1": LineageEntry(
-                id="g2-m1", parent="g0-s0", parents=["g0-s0", "g1-s1"],
-                operation="merge", generation=2, files_changed=["solve.py"],
+                id="g2-m1",
+                parent="g0-s0",
+                parents=["g0-s0", "g1-s1"],
+                operation="merge",
+                generation=2,
+                files_changed=["solve.py"],
             ),
         }
 
@@ -785,9 +803,7 @@ class TestGatingInEvolutionLoop:
 
         assert "g2-m1" in result.parents, "merged candidate missing from result"
         assert result.parents["g2-m1"] == ["g0-s0", "g1-s1"]
-        merged_summary = next(
-            s for s in result.candidate_summaries if s.id == "g2-m1"
-        )
+        merged_summary = next(s for s in result.candidate_summaries if s.id == "g2-m1")
         assert merged_summary.operation == "merge"
         assert merged_summary.parents == ["g0-s0", "g1-s1"]
 
@@ -809,7 +825,9 @@ class TestGatingInEvolutionLoop:
         def run_eval(candidate, config, split=None, instances=None, **kwargs):
             return make_eval_result(
                 candidate.id,
-                {"i1": 0.9, "i2": 0.9} if candidate.id == "g1-s1" else {"i1": 0.3, "i2": 0.3},
+                {"i1": 0.9, "i2": 0.9}
+                if candidate.id == "g1-s1"
+                else {"i1": 0.3, "i2": 0.3},
             )
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -822,7 +840,10 @@ class TestGatingInEvolutionLoop:
             result.run_dir = "/elsewhere"
 
     def test_helix_result_budget_does_not_alias_state(
-        self, mocker, tmp_path, all_mocks,
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,
     ):
         """``_build_helix_result`` must shallow-copy ``state.budget``.
 
@@ -862,11 +883,15 @@ class TestGatingInEvolutionLoop:
         # The snapshot is itself frozen-by-convention via the ``HelixResult``
         # ``frozen=True`` wrapper — reassigning ``result.budget`` raises.
         from dataclasses import FrozenInstanceError
+
         with pytest.raises(FrozenInstanceError):
             result.budget = scratch
 
     def test_helix_result_score_views_recompute_from_summaries(
-        self, mocker, tmp_path, all_mocks,
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,
     ):
         """Score-view properties must recompute from ``candidate_summaries``.
 
@@ -1144,9 +1169,7 @@ class TestMergeBehavior:
     # production ``next_mutation_id`` allocates a fresh id per gen, so the
     # duplicate-discovery warning would never fire there.  Filter it here
     # to keep the suite quiet without weakening the production guard.
-    @pytest.mark.filterwarnings(
-        "ignore:discovery budget already recorded:UserWarning"
-    )
+    @pytest.mark.filterwarnings("ignore:discovery budget already recorded:UserWarning")
     def test_merge_fires_when_new_program_accepted(self, mocker, tmp_path, all_mocks):
         """Merge is triggered in the NEXT generation after acceptance (GEPA parity).
 
@@ -1291,9 +1314,7 @@ class TestMergeBehavior:
 
         def make_child(*args, **kwargs):
             child_id = kwargs["new_id"]
-            return make_candidate(
-                child_id, generation=int(child_id.split("-")[0][1:])
-            )
+            return make_candidate(child_id, generation=int(child_id.split("-")[0][1:]))
 
         all_mocks["mutate"].side_effect = make_child
         # Merge succeeds (returns candidate), so acceptance check will run.
@@ -2562,9 +2583,7 @@ class TestActiveFrontierSyncOnObjectiveMode:
             ),
         }
 
-        snapshot_spy = mocker.spy(
-            ParetoFrontier, "active_frontier_snapshot"
-        )
+        snapshot_spy = mocker.spy(ParetoFrontier, "active_frontier_snapshot")
 
         config = HelixConfig(
             objective="Improve the code",

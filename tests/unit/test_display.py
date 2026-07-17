@@ -161,7 +161,9 @@ class TestUsageStatsSerialization:
         assert restored.input_tokens == original.input_tokens
         assert restored.output_tokens == original.output_tokens
         assert restored.cached_input_tokens == original.cached_input_tokens
-        assert restored.cache_creation_input_tokens == original.cache_creation_input_tokens
+        assert (
+            restored.cache_creation_input_tokens == original.cache_creation_input_tokens
+        )
         assert restored.cache_read_input_tokens == original.cache_read_input_tokens
         assert restored.reasoning_tokens == original.reasoning_tokens
         assert restored.num_turns == original.num_turns
@@ -213,9 +215,9 @@ class TestUsageStatsSerialization:
         """from_dict must coerce int/float defensively."""
         stats = UsageStats.from_dict(
             {
-                "input_tokens": "11",   # str → int
-                "cost_usd": "0.31",     # str → float
-                "output_tokens": 7.9,   # float → int (truncates)
+                "input_tokens": "11",  # str → int
+                "cost_usd": "0.31",  # str → float
+                "output_tokens": 7.9,  # float → int (truncates)
             }
         )
         assert stats.input_tokens == 11
@@ -340,9 +342,7 @@ def test_trace_emits_exactly_one_terminal_event_per_batch_slot() -> None:
         TRACE.emit_proposal_batch_terminal(batch)
 
     terminal_events = [
-        event
-        for event in events
-        if event.type is EventType.PROPOSAL_TASK_TERMINAL
+        event for event in events if event.type is EventType.PROPOSAL_TASK_TERMINAL
     ]
     assert len(terminal_events) == batch.p * batch.n
     assert [event.task_index for event in terminal_events] == [0, 1, 2, 3]

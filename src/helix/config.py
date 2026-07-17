@@ -347,17 +347,17 @@ class EvolutionConfig(BaseModel):
             "K-by-1 case with the existing behavior preserved. Must be >= 1."
         ),
     )
-    proposal_selection: Literal[
-        "all_improvements", "best_improvement", "top_k"
-    ] = Field(
-        default="all_improvements",
-        description=(
-            "Selection strategy applied to the evaluated child proposals of "
-            "one step. 'all_improvements' (default) keeps every proposal that "
-            "passes the acceptance gate; 'best_improvement' keeps the single "
-            "largest score delta; 'top_k' keeps the proposal_top_k largest "
-            "passing deltas in stable order."
-        ),
+    proposal_selection: Literal["all_improvements", "best_improvement", "top_k"] = (
+        Field(
+            default="all_improvements",
+            description=(
+                "Selection strategy applied to the evaluated child proposals of "
+                "one step. 'all_improvements' (default) keeps every proposal that "
+                "passes the acceptance gate; 'best_improvement' keeps the single "
+                "largest score delta; 'top_k' keeps the proposal_top_k largest "
+                "passing deltas in stable order."
+            ),
+        )
     )
     proposal_top_k: int | None = Field(
         default=None,
@@ -496,8 +496,7 @@ class EvolutionConfig(BaseModel):
         if isinstance(raw_p, int):
             if raw_p < 1:
                 raise ValueError(
-                    "evolution.num_parallel_proposals must be >= 1 "
-                    f"(got {raw_p})"
+                    f"evolution.num_parallel_proposals must be >= 1 (got {raw_p})"
                 )
             effective_p = raw_p
         else:  # "auto"

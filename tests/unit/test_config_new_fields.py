@@ -221,14 +221,12 @@ class TestProposalSchedulerFields:
         N=1 K-by-1 configuration for every existing K value."""
         for k in (1, 2, 4, 8):
             omitted = EvolutionConfig(num_parallel_proposals=k)
-            explicit = EvolutionConfig(
-                num_parallel_proposals=k, mutations_per_parent=1
-            )
+            explicit = EvolutionConfig(num_parallel_proposals=k, mutations_per_parent=1)
             assert omitted.num_parallel_proposals == k
             assert omitted.mutations_per_parent == 1
-            assert (
-                omitted.model_dump() == explicit.model_dump()
-            ), f"omitted vs explicit N=1 diverged for K={k}"
+            assert omitted.model_dump() == explicit.model_dump(), (
+                f"omitted vs explicit N=1 diverged for K={k}"
+            )
 
     def test_override_pn_fields(self):
         cfg = EvolutionConfig(
@@ -302,15 +300,11 @@ class TestProposalSchedulerFields:
 
     def test_top_k_rejected_for_all_improvements(self):
         with pytest.raises(ValidationError):
-            EvolutionConfig(
-                proposal_selection="all_improvements", proposal_top_k=1
-            )
+            EvolutionConfig(proposal_selection="all_improvements", proposal_top_k=1)
 
     def test_top_k_rejected_for_best_improvement(self):
         with pytest.raises(ValidationError):
-            EvolutionConfig(
-                proposal_selection="best_improvement", proposal_top_k=1
-            )
+            EvolutionConfig(proposal_selection="best_improvement", proposal_top_k=1)
 
     def test_top_k_none_ok_for_non_top_k_modes(self):
         assert (

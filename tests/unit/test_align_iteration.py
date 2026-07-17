@@ -19,6 +19,7 @@ Covers three audit findings:
 All tests run with ``val_stage_size=None`` (default) to exercise the
 GEPA-parity configuration specified in the task directive.
 """
+
 from __future__ import annotations
 
 from helix.evolution import run_evolution
@@ -46,7 +47,10 @@ class TestPerfectScoreContinues:
     """
 
     def test_perfect_score_does_not_terminate_run(
-        self, mocker, tmp_path, all_mocks  # noqa: F811
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,  # noqa: F811
     ):
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
@@ -82,7 +86,10 @@ class TestPerfectScoreContinues:
         all_mocks["mutate"].assert_not_called()
 
     def test_perfect_score_uses_per_example_all_not_mean(
-        self, mocker, tmp_path, all_mocks  # noqa: F811
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,  # noqa: F811
     ):
         """GEPA parity (M1) — audit-init-engine.md B2.
 
@@ -101,14 +108,10 @@ class TestPerfectScoreContinues:
             if candidate.id == "g1-s1":
                 # Child is irrelevant to the M1 criterion; we just need it
                 # to pass gating so the run completes cleanly.
-                return make_eval_result(
-                    "g1-s1", {"i1": 0.6, "i2": 1.0, "i3": 1.0}
-                )
+                return make_eval_result("g1-s1", {"i1": 0.6, "i2": 1.0, "i3": 1.0})
             # Parent seed: mean = 0.833 >= 0.8 (old check fires) but
             # min = 0.5 < 0.8 (GEPA all() check does NOT fire).
-            return make_eval_result(
-                candidate.id, {"i1": 0.5, "i2": 1.0, "i3": 1.0}
-            )
+            return make_eval_result(candidate.id, {"i1": 0.5, "i2": 1.0, "i3": 1.0})
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
@@ -141,7 +144,10 @@ class TestMergeFallthroughToMutation:
     """
 
     def test_merge_op_failure_falls_through_to_mutation(
-        self, mocker, tmp_path, all_mocks  # noqa: F811
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,  # noqa: F811
     ):
         """``merge()`` returns None (Claude Code / subprocess failure) →
         no merged candidate instantiated → no eval → GEPA falls through
@@ -162,7 +168,9 @@ class TestMergeFallthroughToMutation:
         # to calling ``merge(...)``.  But merge(...) returns None, so
         # no merged candidate is created and no eval runs.
         all_mocks["find_merge_triplet"].return_value = (
-            "g0-s0", "g1-s1", "g0-s0",
+            "g0-s0",
+            "g1-s1",
+            "g0-s0",
         )
         all_mocks["merge"].return_value = None
 
@@ -202,7 +210,10 @@ class TestMergeFallthroughToMutation:
         all_mocks["merge"].assert_called_once()
 
     def test_merge_actually_attempted_still_consumes_iteration(
-        self, mocker, tmp_path, all_mocks  # noqa: F811
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,  # noqa: F811
     ):
         """Guard rail: when a merge IS attempted (eval runs), the iteration
         is still consumed (GEPA engine.py:719 on accept, 737 on reject).
@@ -215,12 +226,12 @@ class TestMergeFallthroughToMutation:
         merged = make_candidate("g2-m1", generation=2)
         children = iter([child])
         all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].side_effect = lambda *a, **kw: next(
-            children, None
-        )
+        all_mocks["mutate"].side_effect = lambda *a, **kw: next(children, None)
         all_mocks["merge"].return_value = merged
         all_mocks["find_merge_triplet"].return_value = (
-            "g0-s0", "g1-s1", "g0-s0",
+            "g0-s0",
+            "g1-s1",
+            "g0-s0",
         )
 
         def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
@@ -274,7 +285,11 @@ class TestLegacyGatingUsesSumOnly:
     """
 
     def test_degrades_is_not_called_in_legacy_path(
-        self, mocker, tmp_path, all_mocks, monkeypatch  # noqa: F811
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,
+        monkeypatch,  # noqa: F811
     ):
         from helix import evolution as _evo
 
@@ -314,7 +329,10 @@ class TestLegacyGatingUsesSumOnly:
         )
 
     def test_legacy_accepts_strict_improvement(
-        self, mocker, tmp_path, all_mocks  # noqa: F811
+        self,
+        mocker,
+        tmp_path,
+        all_mocks,  # noqa: F811
     ):
         """GEPA sum-score acceptance requires strict improvement only.
         A child with parent_sum=0.5 child_sum=0.55 must be accepted.

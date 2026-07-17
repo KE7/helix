@@ -385,7 +385,9 @@ def test_resume_preserves_cache_and_discovery_across_saves(tmp_path: Path) -> No
     loaded_state.generation = 2
     loaded_state.mutation_counter = 2
     loaded_state.frontier.append("g2-s2")
-    loaded_state.num_metric_calls_by_discovery["g2-s2"] = loaded_state.budget.evaluations
+    loaded_state.num_metric_calls_by_discovery["g2-s2"] = (
+        loaded_state.budget.evaluations
+    )
     fresh_cache.put({"prompt.md": "v2"}, "task_b", output="o2", score=0.9)
     save_state(loaded_state, tmp_path)
     save_eval_cache(fresh_cache._cache, tmp_path)
@@ -447,7 +449,9 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
     )
 
 
-def test_legacy_state_load_followed_by_save_writes_versioned_payload(tmp_path: Path) -> None:
+def test_legacy_state_load_followed_by_save_writes_versioned_payload(
+    tmp_path: Path,
+) -> None:
     """Loading a legacy v0 state.json and re-saving must promote it to the
     current schema_version with new-field defaults present.
 

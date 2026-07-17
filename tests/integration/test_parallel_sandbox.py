@@ -20,9 +20,7 @@ from helix.sandbox import run_sandboxed_command
 
 pytestmark = pytest.mark.docker_integration
 
-_FIXTURE_IMAGE = os.environ.get(
-    "HELIX_DOCKER_TEST_IMAGE", "helix-runner-base:latest"
-)
+_FIXTURE_IMAGE = os.environ.get("HELIX_DOCKER_TEST_IMAGE", "helix-runner-base:latest")
 
 
 def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:

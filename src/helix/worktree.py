@@ -249,6 +249,7 @@ def _warn_uncommitted_changes(repo_root: Path) -> None:
     if result.returncode == 0 and result.stdout.strip():
         # Local import avoids any circular-import risk at module load time.
         from helix.display import console  # noqa: PLC0415
+
         console.print(
             f"[yellow]⚠️  You have uncommitted changes in {repo_root}. "
             f"HELIX will snapshot the current working tree into the seed "
@@ -305,7 +306,9 @@ def _snapshot_dirty_working_tree(repo_root: Path, worktree_path: Path) -> bool:
         check=True,
         capture_output=True,
     )
-    for raw_path in untracked_proc.stdout.decode("utf-8", errors="surrogateescape").split("\x00"):
+    for raw_path in untracked_proc.stdout.decode(
+        "utf-8", errors="surrogateescape"
+    ).split("\x00"):
         if not raw_path:
             continue
         rel_path = Path(raw_path)
@@ -394,7 +397,13 @@ def create_empty_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
         )
         # Create an empty initial commit so HEAD is valid.
         _run(
-            ["git", "commit", "--allow-empty", "-m", "helix: empty seed (seedless mode)"],
+            [
+                "git",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "helix: empty seed (seedless mode)",
+            ],
             cwd=repo_root,
             operation="git commit --allow-empty (seedless)",
             env={**os.environ, **helix_git_env()},

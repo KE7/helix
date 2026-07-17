@@ -66,7 +66,9 @@ def _make_repo(path: Path) -> None:
 
 
 class TestCreateSeedWorktree:
-    def test_creates_worktree_from_non_git_dir(self, tmp_path: Path, monkeypatch) -> None:
+    def test_creates_worktree_from_non_git_dir(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """create_seed_worktree should initialise a repo when none exists."""
         monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")
@@ -92,7 +94,9 @@ class TestCreateSeedWorktree:
         assert wt_path.exists()
         assert wt_path.is_dir()
 
-    def test_creates_worktree_from_existing_repo(self, tmp_path: Path, monkeypatch) -> None:
+    def test_creates_worktree_from_existing_repo(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """create_seed_worktree should work on an existing git repo."""
         monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")
@@ -108,7 +112,9 @@ class TestCreateSeedWorktree:
         assert (base_dir / "g0-s0").is_dir()
         assert candidate.worktree_path == str(base_dir / "g0-s0")
 
-    def test_seed_worktree_contains_source_files(self, tmp_path: Path, monkeypatch) -> None:
+    def test_seed_worktree_contains_source_files(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")
         monkeypatch.setenv("GIT_COMMITTER_NAME", "HELIX Test")
@@ -152,7 +158,9 @@ class TestCreateSeedWorktree:
 
         repo_head = _run(["git", "rev-parse", "HEAD"], repo_root).stdout.strip()
         seed_head = _run(["git", "rev-parse", "HEAD"], wt_path).stdout.strip()
-        assert seed_head != repo_head, "Dirty snapshot should be committed in the seed worktree"
+        assert seed_head != repo_head, (
+            "Dirty snapshot should be committed in the seed worktree"
+        )
 
         child = clone_candidate(seed, "g1-s0", base_dir)
         child_path = Path(child.worktree_path)
@@ -190,7 +198,9 @@ class TestCloneCandidate:
         assert wt_path.exists()
         assert wt_path.is_dir()
 
-    def test_clone_worktree_contains_parent_files(self, tmp_path: Path, monkeypatch) -> None:
+    def test_clone_worktree_contains_parent_files(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         _, base_dir, seed = self._seed(tmp_path, monkeypatch)
         child = clone_candidate(seed, "g1-s1", base_dir)
         assert (Path(child.worktree_path) / "README.md").exists()
@@ -214,9 +224,7 @@ class TestCloneCandidate:
                 )
             )
 
-        registered = _run(
-            ["git", "worktree", "list", "--porcelain"], repo_root
-        ).stdout
+        registered = _run(["git", "worktree", "list", "--porcelain"], repo_root).stdout
         assert all(str(base_dir / child_id) in registered for child_id in child_ids)
         assert all((base_dir / child_id).is_dir() for child_id in child_ids)
 
@@ -229,7 +237,9 @@ class TestCloneCandidate:
         branches_after = _run(
             ["git", "branch", "--list", "helix/g1-s*"], repo_root
         ).stdout
-        assert all(str(base_dir / child_id) not in registered_after for child_id in child_ids)
+        assert all(
+            str(base_dir / child_id) not in registered_after for child_id in child_ids
+        )
         assert all(not (base_dir / child_id).exists() for child_id in child_ids)
         assert branches_after.strip() == ""
 
@@ -363,7 +373,9 @@ class TestRemoveWorktree:
 
 
 class TestGetDiff:
-    def test_diff_is_empty_for_identical_candidates(self, tmp_path: Path, monkeypatch) -> None:
+    def test_diff_is_empty_for_identical_candidates(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")
         monkeypatch.setenv("GIT_COMMITTER_NAME", "HELIX Test")
@@ -467,7 +479,9 @@ class TestEnsureGitRepoIdentity:
 
         assert log == "HELIX <helix@noreply>"
 
-    def test_no_global_git_config_still_succeeds(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_global_git_config_still_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """_ensure_git_repo must succeed even when HOME has no .gitconfig at all
         (e.g. pristine CI environments)."""
         fake_home = tmp_path / "home_no_config"
@@ -539,7 +553,9 @@ class TestEnsureGitRepoIdentity:
 
 
 class TestSnapshotCandidateIdentity:
-    def test_snapshot_commit_author_is_helix(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_snapshot_commit_author_is_helix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """snapshot_candidate must author commits as HELIX <helix@noreply>."""
         monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
         monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")

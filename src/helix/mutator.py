@@ -769,9 +769,7 @@ def _build_backend_args(
             # is valid TOML basic-string syntax for all printable ASCII — safe
             # for any realistic effort value.  See ``codex exec --help`` for
             # the full ``-c`` interface.
-            args.extend(
-                ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
-            )
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(config.effort)}"])
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 

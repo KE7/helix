@@ -11,6 +11,7 @@ Event points are sprinkled throughout ``evolution.py``, ``eval_cache.py``,
 differential harness consumes these events to assert runtime parity against
 the GEPA reference engine.
 """
+
 from __future__ import annotations
 
 import inspect
@@ -113,7 +114,9 @@ class TraceBus:
         if not self.enabled:
             return
         batch.validate_plan()
-        nonterminal = [task.task_index for task in batch.tasks if not task.is_terminal()]
+        nonterminal = [
+            task.task_index for task in batch.tasks if not task.is_terminal()
+        ]
         if nonterminal:
             raise ValueError(
                 f"Cannot trace proposal batch {batch.batch_id!r}; nonterminal slots: "

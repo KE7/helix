@@ -94,7 +94,7 @@ class TestBuildMutationPrompt:
         er = make_eval_result(
             asi={
                 "stdout": (
-                    "HELIX_RESULT=[[1.0, {\"task_completed\": true}]]\n"
+                    'HELIX_RESULT=[[1.0, {"task_completed": true}]]\n'
                     "human fallback line\n"
                 ),
                 "stderr": "",
@@ -1643,7 +1643,8 @@ class TestCountCodexStdoutToolEvents:
 
         stdout = tmp_path / "stdout.jsonl"
         stdout.write_text(
-            json.dumps({"type": "thread.started", "thread_id": "abc"}) + "\n"
+            json.dumps({"type": "thread.started", "thread_id": "abc"})
+            + "\n"
             + json.dumps(
                 {
                     "type": "item.completed",
@@ -1681,8 +1682,10 @@ class TestCountCodexStdoutToolEvents:
 
         stdout = tmp_path / "stdout.jsonl"
         stdout.write_text(
-            json.dumps({"type": "thread.started"}) + "\n"
-            + json.dumps({"type": "turn.completed"}) + "\n"
+            json.dumps({"type": "thread.started"})
+            + "\n"
+            + json.dumps({"type": "turn.completed"})
+            + "\n"
         )
 
         count, names = _count_codex_stdout_tool_events(stdout)
@@ -1702,9 +1705,7 @@ class TestCountCodexStdoutToolEvents:
 class TestCountCursorStdoutToolEvents:
     """Tests for ``_count_cursor_stdout_tool_events``."""
 
-    def test_counts_only_started_events_not_completed(
-        self, tmp_path: Path
-    ) -> None:
+    def test_counts_only_started_events_not_completed(self, tmp_path: Path) -> None:
         from helix.mutator import _count_cursor_stdout_tool_events
 
         stdout = tmp_path / "stdout.jsonl"
@@ -1859,9 +1860,7 @@ class TestCountTranscriptToolEventsDispatcher:
         assert count == 0
         assert names == []
 
-    def test_missing_file_returns_zero_for_known_backend(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_file_returns_zero_for_known_backend(self, tmp_path: Path) -> None:
         from helix.mutator import _count_transcript_tool_events
 
         count, names = _count_transcript_tool_events(
@@ -1897,9 +1896,7 @@ class TestCountTranscriptToolEventsDispatcher:
         from helix.mutator import _count_transcript_tool_events
 
         stdout = tmp_path / "stdout.jsonl"
-        stdout.write_text(
-            json.dumps({"type": "tool_use", "tool_name": "grep"}) + "\n"
-        )
+        stdout.write_text(json.dumps({"type": "tool_use", "tool_name": "grep"}) + "\n")
 
         count, names = _count_transcript_tool_events(stdout, "gemini")
 
@@ -1920,7 +1917,9 @@ class TestTranscriptToolPatchesUsageInArtifact:
         )
 
         # Set up a fake transcript with 3 tool_use events
-        transcript_root = tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        transcript_root = (
+            tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        )
         transcript_root.mkdir(parents=True)
         (transcript_root / "sess_tool.jsonl").write_text(
             json.dumps(
@@ -2064,13 +2063,16 @@ class TestOpenCodeSubprocessIsolation:
         )
 
         invoke_claude_code(
-            str(tmp_path), "prompt", AgentConfig(backend="opencode"),
+            str(tmp_path),
+            "prompt",
+            AgentConfig(backend="opencode"),
             passthrough_env=["PATH", "HOME"],
         )
 
         env = mock_run.call_args[1]["env"]
         # PATH and HOME are passed through from the parent process environment
         import os
+
         if "PATH" in os.environ:
             assert "PATH" in env, "PATH must survive the env scrub for opencode"
         if "HOME" in os.environ:
@@ -2086,9 +2088,7 @@ class TestOpenCodeSubprocessIsolation:
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
 
         for backend in ("claude", "codex", "cursor", "gemini"):
-            invoke_claude_code(
-                str(tmp_path), "prompt", AgentConfig(backend=backend)
-            )
+            invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend=backend))
             env = mock_run.call_args[1]["env"]
             assert "XDG_DATA_HOME" not in env, (
                 f"XDG_DATA_HOME must not be injected for {backend} backend"
@@ -2103,9 +2103,7 @@ class TestOpenCodeSubprocessIsolation:
             returncode=0,
         )
 
-        invoke_claude_code(
-            str(tmp_path), "prompt", AgentConfig(backend="opencode")
-        )
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="opencode"))
 
         gitignore_path = tmp_path / ".gitignore"
         assert gitignore_path.exists(), ".gitignore must be created in the worktree"
