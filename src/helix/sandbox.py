@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
@@ -17,13 +17,32 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+_REDACTED_DOCKER_ENV_VALUE = "<redacted>"
+_SENSITIVE_ENV_KEY_PARTS = frozenset(
+    {
+        "AUTH",
+        "COOKIE",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "KEY",
+        "PASS",
+        "PASSWD",
+        "PASSWORD",
+        "PRIVATE",
+        "SECRET",
+        "SESSION",
+        "TOKEN",
+    }
+)
 
 
 HELIX_ARTIFACT_NAMES = {
@@ -509,13 +528,7 @@ def _run_workspace_helper(
     ]
     if extra_args:
         args.extend(extra_args)
-    result = subprocess.run(
-        args,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=_docker_host_env(),
-    )
+    result = _run_docker_process(args, check=False)
     if result.returncode != 0:
         logger.warning(
             "docker workspace helper %s failed for %s: rc=%s stderr=%s",
@@ -570,7 +583,7 @@ def _host_owner() -> str | None:
     if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
         return None
     try:
-        info = subprocess.run(
+        info = _run_docker_process(
             [
                 "docker",
                 "info",
@@ -578,9 +591,6 @@ def _host_owner() -> str | None:
                 "{{.OperatingSystem}}|{{.SecurityOptions}}|{{.Name}}",
             ],
             check=False,
-            capture_output=True,
-            text=True,
-            env=_docker_host_env(),
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
@@ -623,18 +633,147 @@ def _docker_host_env() -> dict[str, str]:
     return env
 
 
+def _docker_env_assignments(args: Sequence[str]) -> list[tuple[str, str]]:
+    """Return literal ``KEY=VALUE`` assignments passed to ``docker run``.
+
+    Docker accepts environment values as ``-e KEY=VALUE``, ``--env KEY=VALUE``,
+    ``-eKEY=VALUE``, and ``--env=KEY=VALUE``.  Keeping this parser next to the
+    subprocess boundary ensures every diagnostic path applies the same policy.
+    """
+    assignments: list[tuple[str, str]] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        assignment: str | None = None
+        if arg in {"-e", "--env"} and index + 1 < len(args):
+            assignment = args[index + 1]
+            index += 1
+        elif arg.startswith("--env="):
+            assignment = arg.removeprefix("--env=")
+        elif arg.startswith("-e") and arg != "-e":
+            assignment = arg[2:]
+        if assignment is not None and "=" in assignment:
+            key, value = assignment.split("=", 1)
+            assignments.append((key, value))
+        index += 1
+    return assignments
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    parts = {part for part in key.upper().replace("-", "_").split("_") if part}
+    return bool(parts & _SENSITIVE_ENV_KEY_PARTS)
+
+
+def _sensitive_docker_env_values(args: Sequence[str]) -> tuple[str, ...]:
+    """Return non-empty secret values, longest first, for output scrubbing."""
+    values = {
+        value
+        for key, value in _docker_env_assignments(args)
+        if value and _is_sensitive_env_key(key)
+    }
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
+    """Replace known Docker env secrets in text/bytes diagnostic output."""
+    if isinstance(value, str):
+        for secret in secrets:
+            value = value.replace(secret, _REDACTED_DOCKER_ENV_VALUE)
+    elif isinstance(value, bytes):
+        replacement = _REDACTED_DOCKER_ENV_VALUE.encode()
+        for secret in secrets:
+            value = value.replace(secret.encode(), replacement)
+    return value
+
+
+def _redact_docker_argv(args: Sequence[str]) -> list[str]:
+    """Render Docker argv safely while preserving environment key context.
+
+    Every literal Docker environment value is replaced, including values whose
+    key does not look secret.  This avoids heuristic gaps in command/exception
+    rendering while retaining the key names needed to diagnose configuration.
+    """
+    redacted = list(args)
+    index = 0
+    while index < len(redacted):
+        arg = redacted[index]
+        if arg in {"-e", "--env"} and index + 1 < len(redacted):
+            assignment = redacted[index + 1]
+            if "=" in assignment:
+                key, _value = assignment.split("=", 1)
+                redacted[index + 1] = f"{key}={_REDACTED_DOCKER_ENV_VALUE}"
+            index += 1
+        elif arg.startswith("--env="):
+            assignment = arg.removeprefix("--env=")
+            if "=" in assignment:
+                key, _value = assignment.split("=", 1)
+                redacted[index] = (
+                    f"--env={key}={_REDACTED_DOCKER_ENV_VALUE}"
+                )
+        elif arg.startswith("-e") and arg != "-e":
+            assignment = arg[2:]
+            if "=" in assignment:
+                key, _value = assignment.split("=", 1)
+                redacted[index] = f"-e{key}={_REDACTED_DOCKER_ENV_VALUE}"
+        index += 1
+    return redacted
+
+
+def _redact_subprocess_exception(
+    exc: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    args: Sequence[str],
+) -> None:
+    """Sanitize a subprocess exception in place, including indirect rendering."""
+    safe_args = _redact_docker_argv(args)
+    secrets = _sensitive_docker_env_values(args)
+    exc.cmd = safe_args
+    if isinstance(exc, subprocess.CalledProcessError):
+        exc.args = (exc.returncode, safe_args)
+        exc.output = _redact_diagnostic_output(exc.output, secrets)
+        exc.stderr = _redact_diagnostic_output(exc.stderr, secrets)
+    else:
+        exc.args = (safe_args, exc.timeout)
+        exc.output = _redact_diagnostic_output(exc.output, secrets)
+        exc.stderr = _redact_diagnostic_output(exc.stderr, secrets)
+
+
+def _run_docker_process(
+    args: list[str],
+    *,
+    check: bool = False,
+    capture_output: bool = True,
+    cwd: str | None = None,
+    input_text: str | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run Docker and sanitize every returned or raised diagnostic object."""
+    secrets = _sensitive_docker_env_values(args)
+    try:
+        result = subprocess.run(
+            args,
+            check=check,
+            capture_output=capture_output,
+            text=True,
+            cwd=cwd,
+            input=input_text,
+            env=_docker_host_env(),
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        _redact_subprocess_exception(exc, args)
+        raise
+    result.args = _redact_docker_argv(args)
+    result.stdout = _redact_diagnostic_output(result.stdout, secrets)
+    result.stderr = _redact_diagnostic_output(result.stderr, secrets)
+    return result
+
+
 def _run_docker(
     args: list[str],
     *,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        check=check,
-        capture_output=True,
-        text=True,
-        env=_docker_host_env(),
-    )
+    return _run_docker_process(args, check=check)
 
 
 def _build_add_host_args(
@@ -961,13 +1100,10 @@ def run_sandboxed_commands(
                 )
                 try:
                     results.append(
-                        subprocess.run(
+                        _run_docker_process(
                             docker_cmd,
                             cwd=str(source),
-                            capture_output=True,
-                            text=True,
-                            input=input_text,
-                            env=_docker_host_env(),
+                            input_text=input_text,
                             timeout=sandbox.timeout_seconds,
                         )
                     )
@@ -1095,8 +1231,8 @@ def run_sandbox_auth_command(
         interactive=interactive,
     )
     if interactive:
-        return subprocess.run(args, text=True)
-    return subprocess.run(args, capture_output=True, text=True)
+        return _run_docker_process(args, capture_output=False)
+    return _run_docker_process(args)
 
 
 def run_command(

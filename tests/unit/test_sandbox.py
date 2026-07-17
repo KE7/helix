@@ -9,10 +9,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import helix.sandbox as sandbox_module
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
     EvaluatorSidecarRuntime,
     _healthcheck_docker_args,
+    _run_docker,
     current_evaluator_sidecar_runtime,
     evaluator_sidecar_runtime,
     resolve_sandbox_image,
@@ -22,6 +24,9 @@ from helix.sandbox import (
     sandbox_auth_volume_name,
     start_evaluator_sidecar,
 )
+
+
+_SYNTHETIC_SECRET = "synthetic-sentinel-secret-for-redaction-tests"
 
 
 def _is_workspace_chown(args: list[str]) -> bool:
@@ -336,6 +341,141 @@ def test_sandbox_exception_forces_container_and_workspace_cleanup(
     assert cleanup_names == [container_name]
     assert workspace is not None
     assert not workspace.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "env_args",
+    [
+        ["-e", f"SYNTHETIC_API_KEY={_SYNTHETIC_SECRET}"],
+        ["--env", f"SYNTHETIC_API_KEY={_SYNTHETIC_SECRET}"],
+        [f"-eSYNTHETIC_API_KEY={_SYNTHETIC_SECRET}"],
+        [f"--env=SYNTHETIC_API_KEY={_SYNTHETIC_SECRET}"],
+    ],
+)
+def test_docker_argv_redaction_preserves_key_for_all_env_forms(env_args):
+    rendered = repr(
+        sandbox_module._redact_docker_argv(
+            ["docker", "run", *env_args, "fixture:latest"]
+        )
+    )
+
+    assert _SYNTHETIC_SECRET not in rendered
+    assert "SYNTHETIC_API_KEY=<redacted>" in rendered
+
+
+def test_timeout_exception_redacts_docker_env_in_all_renderings(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("print('hi')\n")
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and "--name" in args:
+            raise subprocess.TimeoutExpired(
+                args,
+                timeout=1,
+                output=f"stdout echoed {_SYNTHETIC_SECRET}",
+                stderr=f"stderr echoed {_SYNTHETIC_SECRET}",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    with pytest.raises(subprocess.TimeoutExpired) as captured:
+        run_sandboxed_command(
+            ["sh", "-c", "true"],
+            cwd=source,
+            env={"SYNTHETIC_API_KEY": _SYNTHETIC_SECRET},
+            sandbox=SandboxConfig(enabled=True, timeout_seconds=1),
+            scope="evaluator",
+            sync_back=False,
+            image="helix-test:latest",
+        )
+
+    exc = captured.value
+    renderings = [
+        str(exc),
+        repr(exc),
+        repr(exc.cmd),
+        repr(exc.args),
+        str(exc.output),
+        str(exc.stderr),
+        f"worker exception: {type(exc).__name__}: {exc}",
+    ]
+    assert all(_SYNTHETIC_SECRET not in item for item in renderings)
+    assert "SYNTHETIC_API_KEY=<redacted>" in repr(exc.cmd)
+
+
+def test_nonzero_result_redacts_docker_argv_and_output_diagnostics(
+    tmp_path: Path, mocker
+):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("print('hi')\n")
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and "--name" in args:
+            return subprocess.CompletedProcess(
+                args,
+                7,
+                stdout=f"stdout echoed {_SYNTHETIC_SECRET}",
+                stderr=f"stderr echoed {_SYNTHETIC_SECRET}",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    result = run_sandboxed_command(
+        ["sh", "-c", "exit 7"],
+        cwd=source,
+        env={"SYNTHETIC_API_KEY": _SYNTHETIC_SECRET},
+        sandbox=SandboxConfig(enabled=True),
+        scope="evaluator",
+        sync_back=False,
+        image="helix-test:latest",
+    )
+
+    renderings = [repr(result), repr(result.args), result.stdout, result.stderr]
+    assert all(_SYNTHETIC_SECRET not in item for item in renderings)
+    assert "SYNTHETIC_API_KEY=<redacted>" in repr(result.args)
+    assert result.returncode == 7
+
+
+def test_called_process_exception_redacts_docker_env_and_indirect_context(mocker):
+    raw_args = [
+        "docker",
+        "run",
+        "--env",
+        f"SYNTHETIC_API_KEY={_SYNTHETIC_SECRET}",
+        "fixture:latest",
+    ]
+
+    def fake_run(args, **kwargs):
+        raise subprocess.CalledProcessError(
+            125,
+            args,
+            output=f"stdout echoed {_SYNTHETIC_SECRET}",
+            stderr=f"stderr echoed {_SYNTHETIC_SECRET}",
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError) as captured:
+        _run_docker(raw_args)
+
+    exc = captured.value
+    renderings = [
+        str(exc),
+        repr(exc),
+        repr(exc.cmd),
+        repr(exc.args),
+        str(exc.output),
+        str(exc.stderr),
+        f"sidecar setup failed: {exc}",
+    ]
+    assert all(_SYNTHETIC_SECRET not in item for item in renderings)
+    assert "SYNTHETIC_API_KEY=<redacted>" in repr(exc.cmd)
 
 
 def test_sidecar_runtime_nested_same_runtime_restores_outer():
