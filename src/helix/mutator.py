@@ -1573,7 +1573,7 @@ def invoke_claude_code(
     _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
-    if backend == "opencode" and (sandbox is None or not sandbox.enabled):
+    if backend == "opencode":
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
         # OpenCode stores its session database at:
@@ -1587,16 +1587,18 @@ def invoke_claude_code(
         #   "Failed to run the query 'PRAGMA journal_mode = WAL'"
         # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while g1-s2 succeeded).
         #
-        # Fix: set XDG_DATA_HOME to a per-candidate directory.  OpenCode respects
-        # XDG_DATA_HOME and will create an isolated database at:
-        #   <worktree>/.helix_opencode_state/opencode/opencode.db
-        # Each parallel worker gets its own fresh database; no contention.
-        #
-        # The sandbox branch is excluded: container isolation already provides
-        # per-candidate filesystem separation, so XDG_DATA_HOME would be redundant.
-        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
-        opencode_state_dir.mkdir(parents=True, exist_ok=True)
-        backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
+        # Fix: set XDG_DATA_HOME to storage owned by this proposal. OpenCode
+        # respects XDG_DATA_HOME and creates its database below ``opencode/``.
+        # Sandboxed agents share ``/home/node`` through the backend auth volume,
+        # so their default ~/.local/share directory is *not* isolated. Put the
+        # database in the candidate-specific /workspace mount instead. Direct
+        # subprocesses use the equivalent directory in their real worktree.
+        if sandbox is not None and sandbox.enabled:
+            backend_env["XDG_DATA_HOME"] = "/workspace/.helix_opencode_state"
+        else:
+            opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
+            opencode_state_dir.mkdir(parents=True, exist_ok=True)
+            backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
         result = run_sandboxed_command(
@@ -1763,27 +1765,29 @@ def mutate(
         The new candidate on success, or ``None`` if mutation failed.
     """
     child = clone_candidate(parent, new_id, base_dir)
-    child.operation = "mutate"
-    if prepare_worktree is not None:
-        prepare_worktree(child)
-
-    prompt = build_mutation_prompt(
-        config.objective,
-        eval_result,
-        background,
-        config.agent.max_turns,
-    )
-
-    # Persist the rendered prompt to the worktree for post-hoc inspection:
-    # what did the mutator actually see on this generation?  Sits next to
-    # ``helix_batch.json`` in the worktree root.  The leading dot and the
-    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
-    # keep it out of the candidate git tree — otherwise it'd leak into
-    # every subsequent mutation's diff and the mutator would see its own
-    # prior prompt file as part of the codebase.
-    prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
-
     try:
+        child.operation = "mutate"
+        if prepare_worktree is not None:
+            prepare_worktree(child)
+
+        prompt = build_mutation_prompt(
+            config.objective,
+            eval_result,
+            background,
+            config.agent.max_turns,
+        )
+
+        # Persist the rendered prompt to the worktree for post-hoc inspection:
+        # what did the mutator actually see on this generation?  Sits next to
+        # ``helix_batch.json`` in the worktree root.  The leading dot and the
+        # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
+        # keep it out of the candidate git tree — otherwise it'd leak into
+        # every subsequent mutation's diff and the mutator would see its own
+        # prior prompt file as part of the codebase.
+        prompt_artifact_name = _write_mutation_prompt_artifact(
+            child.worktree_path, prompt
+        )
+
         _, usage = invoke_claude_code(
             child.worktree_path,
             prompt,
@@ -1802,10 +1806,9 @@ def mutate(
         except Exception:
             pass
         return None
-    except RateLimitError:
-        # Rate limit — clean up orphaned worktree, then re-raise so the parallel
-        # futures handler in evolution.py can log it and continue with a smaller
-        # proposal set.
+    except Exception:
+        # Rate limits and fatal setup/security failures must propagate to the
+        # batch coordinator unchanged, but never leave this worktree orphaned.
         try:
             remove_worktree(child)
         except Exception:

@@ -9,10 +9,17 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from helix.exceptions import GitError, HelixError, print_helix_error
 from helix.population import Candidate
+
+
+# ``git worktree`` mutates common-repository metadata even when each candidate
+# has a distinct path and branch. Proposal workers share this process, so keep
+# prune/add/remove/branch-delete transactions from interleaving.
+_worktree_metadata_lock = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
@@ -393,26 +400,26 @@ def create_empty_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
             env={**os.environ, **helix_git_env()},
         )
 
-    # Prune stale worktree registrations before creating new ones.
-    subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
-
     seed_id = "g0-s0"
     worktree_path = base_dir / seed_id
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        _run(
-            ["git", "worktree", "add", str(worktree_path), "--detach", "HEAD"],
-            cwd=repo_root,
-            operation=f"create empty seed worktree at {worktree_path}",
-        )
-    except GitError as exc:
-        exc.suggestion = (
-            f"Could not create empty seed worktree at {worktree_path}. "
-            f"Try: git worktree prune && rm -rf {worktree_path}, then retry."
-        )
-        print_helix_error(exc)
-        raise
+    with _worktree_metadata_lock:
+        # Prune and add are one common-metadata transaction.
+        subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
+        try:
+            _run(
+                ["git", "worktree", "add", str(worktree_path), "--detach", "HEAD"],
+                cwd=repo_root,
+                operation=f"create empty seed worktree at {worktree_path}",
+            )
+        except GitError as exc:
+            exc.suggestion = (
+                f"Could not create empty seed worktree at {worktree_path}. "
+                f"Try: git worktree prune && rm -rf {worktree_path}, then retry."
+            )
+            print_helix_error(exc)
+            raise
 
     return Candidate(
         id=seed_id,
@@ -452,28 +459,28 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     # Fix 6: Abort early if stale helix/* branches exist from a previous run.
     _check_no_stale_helix_branches(repo_root)
 
-    # Prune stale worktree registrations before creating new ones
-    subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
-
     seed_id = "g0-s0"
     worktree_path = base_dir / seed_id
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        _run(
-            ["git", "worktree", "add", str(worktree_path), "--detach", "HEAD"],
-            cwd=repo_root,
-            operation=f"create seed worktree at {worktree_path}",
-        )
-    except GitError as exc:
-        exc.suggestion = (
-            f"Could not create seed worktree at {worktree_path}. "
-            f"Try: git worktree prune && rm -rf {worktree_path}, then retry. "
-            f"If the path already exists as a worktree, also try: "
-            f"git worktree remove --force {worktree_path}"
-        )
-        print_helix_error(exc)
-        raise
+    with _worktree_metadata_lock:
+        # Prune and add are one common-metadata transaction.
+        subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
+        try:
+            _run(
+                ["git", "worktree", "add", str(worktree_path), "--detach", "HEAD"],
+                cwd=repo_root,
+                operation=f"create seed worktree at {worktree_path}",
+            )
+        except GitError as exc:
+            exc.suggestion = (
+                f"Could not create seed worktree at {worktree_path}. "
+                f"Try: git worktree prune && rm -rf {worktree_path}, then retry. "
+                f"If the path already exists as a worktree, also try: "
+                f"git worktree remove --force {worktree_path}"
+            )
+            print_helix_error(exc)
+            raise
 
     candidate = Candidate(
         id=seed_id,
@@ -537,32 +544,35 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
     )
     commit_sha = head_result.stdout.strip()
 
-    # Prune stale worktree registrations (safe — only removes metadata for missing paths)
-    subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
-
-    try:
-        _run(
-            [
-                "git", "worktree", "add",
-                str(new_worktree_path),
-                "-b", new_branch,
-                commit_sha,
-            ],
-            cwd=repo_root,
-            operation=f"clone candidate {parent.id} -> {new_id}",
-        )
-    except GitError as exc:
-        exc.suggestion = (
-            f"Could not create worktree for {new_id} (branch {new_branch}). "
-            f"If a stale branch exists, try: git branch -D {new_branch} && "
-            f"git worktree prune. "
-            f"If the worktree path already exists, try: "
-            f"git worktree remove --force {new_worktree_path} && "
-            f"git worktree prune. "
-            f"Then retry the evolution."
-        )
-        print_helix_error(exc)
-        raise
+    with _worktree_metadata_lock:
+        # Prune and add are one common-metadata transaction.
+        subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
+        try:
+            _run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    str(new_worktree_path),
+                    "-b",
+                    new_branch,
+                    commit_sha,
+                ],
+                cwd=repo_root,
+                operation=f"clone candidate {parent.id} -> {new_id}",
+            )
+        except GitError as exc:
+            exc.suggestion = (
+                f"Could not create worktree for {new_id} (branch {new_branch}). "
+                f"If a stale branch exists, try: git branch -D {new_branch} && "
+                f"git worktree prune. "
+                f"If the worktree path already exists, try: "
+                f"git worktree remove --force {new_worktree_path} && "
+                f"git worktree prune. "
+                f"Then retry the evolution."
+            )
+            print_helix_error(exc)
+            raise
 
     # Parse generation from new_id (format: g<gen>-s<slot>)
     try:
@@ -659,20 +669,21 @@ def remove_worktree(candidate: Candidate) -> None:
     else:
         repo_root = wt
 
-    _run(
-        ["git", "worktree", "remove", "--force", str(wt)],
-        cwd=repo_root,
-        operation=f"remove worktree {candidate.id}",
-    )
+    with _worktree_metadata_lock:
+        _run(
+            ["git", "worktree", "remove", "--force", str(wt)],
+            cwd=repo_root,
+            operation=f"remove worktree {candidate.id}",
+        )
 
-    # Delete the tracking branch; ignore errors (branch may not exist)
-    branch = f"helix/{candidate.id}"
-    _run(
-        ["git", "branch", "-D", branch],
-        cwd=repo_root,
-        check=False,
-        operation=f"delete branch {branch}",
-    )
+        # Delete the tracking branch; ignore errors (branch may not exist).
+        branch = f"helix/{candidate.id}"
+        _run(
+            ["git", "branch", "-D", branch],
+            cwd=repo_root,
+            check=False,
+            operation=f"delete branch {branch}",
+        )
 
 
 def get_diff(candidate_a: Candidate, candidate_b: Candidate) -> str:

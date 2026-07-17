@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -210,8 +212,6 @@ def test_sidecar_runtime_switches_evaluator_to_private_network(tmp_path: Path, m
 
 
 def test_sidecar_runtime_is_visible_to_worker_threads():
-    import concurrent.futures
-
     runtime = EvaluatorSidecarRuntime(
         network="helix-eval-private",
         container_name="helix-evaluator-test",
@@ -229,6 +229,113 @@ def test_sidecar_runtime_is_visible_to_worker_threads():
     assert seen == [runtime]
     # Stack must be empty after the context manager exits.
     assert current_evaluator_sidecar_runtime() is None
+
+
+def test_parallel_sandboxes_use_distinct_mounts_and_sidecar_runtime(
+    tmp_path: Path, mocker
+):
+    """Parallel evaluators inherit the sidecar and get disposable containers."""
+    sources = [tmp_path / "candidate-a", tmp_path / "candidate-b"]
+    for index, source in enumerate(sources):
+        source.mkdir()
+        (source / "candidate.txt").write_text(f"candidate-{index}\n")
+
+    primary_runs: list[list[str]] = []
+    cleanup_runs: list[list[str]] = []
+    lock = threading.Lock()
+    overlap = threading.Barrier(2)
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and "--name" in args:
+            with lock:
+                primary_runs.append(args)
+            overlap.wait(timeout=10)
+        elif args[:3] == ["docker", "rm", "-f"]:
+            with lock:
+                cleanup_runs.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+    runtime = EvaluatorSidecarRuntime(
+        network="helix-eval-private",
+        container_name="helix-evaluator-test",
+        endpoint="http://helix-evaluator:8080/evaluate",
+    )
+
+    with evaluator_sidecar_runtime(runtime):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    run_sandboxed_command,
+                    ["sh", "-c", "true"],
+                    cwd=source,
+                    env={},
+                    sandbox=SandboxConfig(enabled=True),
+                    scope="evaluator",
+                    sync_back=False,
+                    image="helix-test:latest",
+                )
+                for source in sources
+            ]
+            for future in futures:
+                assert future.result(timeout=15).returncode == 0
+
+    assert len(primary_runs) == 2
+    mounts = {call[call.index("-v") + 1] for call in primary_runs}
+    assert len(mounts) == 2
+    assert all(mount.endswith(":/workspace:rw") for mount in mounts)
+    container_names = {call[call.index("--name") + 1] for call in primary_runs}
+    assert len(container_names) == 2
+    assert all("--rm" in call for call in primary_runs)
+    assert all(
+        call[call.index("--network") + 1] == runtime.network for call in primary_runs
+    )
+    assert all(
+        f"HELIX_EVALUATOR_ENDPOINT={runtime.endpoint}" in call for call in primary_runs
+    )
+    assert {call[-1] for call in cleanup_runs} == container_names
+    assert current_evaluator_sidecar_runtime() is None
+
+
+def test_sandbox_exception_forces_container_and_workspace_cleanup(
+    tmp_path: Path, mocker
+):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("print('hi')\n")
+    container_name: str | None = None
+    workspace: Path | None = None
+    cleanup_names: list[str] = []
+
+    def fake_run(args, **kwargs):
+        nonlocal container_name, workspace
+        if args[:2] == ["docker", "run"] and "--name" in args:
+            container_name = args[args.index("--name") + 1]
+            workspace = Path(args[args.index("-v") + 1].split(":/workspace:rw", 1)[0])
+            raise subprocess.TimeoutExpired(args, timeout=1)
+        if args[:3] == ["docker", "rm", "-f"]:
+            cleanup_names.append(args[-1])
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_sandboxed_command(
+            ["sh", "-c", "true"],
+            cwd=source,
+            env={},
+            sandbox=SandboxConfig(enabled=True, timeout_seconds=1),
+            scope="evaluator",
+            sync_back=False,
+            image="helix-test:latest",
+        )
+
+    assert container_name is not None
+    assert cleanup_names == [container_name]
+    assert workspace is not None
+    assert not workspace.parent.exists()
 
 
 def test_sidecar_runtime_nested_same_runtime_restores_outer():

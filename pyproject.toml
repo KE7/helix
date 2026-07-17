@@ -83,4 +83,5 @@ timeout = 60
 timeout_method = "thread"
 markers = [
     "diff_harness: GEPA differential-testing harness (phases 2-4)",
+    "docker_integration: requires a real Docker daemon and local fixture image",
 ]

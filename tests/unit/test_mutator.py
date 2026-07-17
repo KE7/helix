@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 from pathlib import Path
+import subprocess
+import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -11,6 +14,8 @@ import pytest
 
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
+from helix.display import UsageStats
+from helix.exceptions import PromptArtifactCollisionError
 from helix.mutator import (
     MutationError,
     BACKEND_RESULT_ARTIFACT_NAME,
@@ -1164,11 +1169,12 @@ class TestMutate:
             "helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, {})
         )
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
-        mocker.patch("helix.mutator.remove_worktree")
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
 
         result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
 
         assert result is child
+        mock_remove.assert_not_called()
 
     def test_sets_operation_to_mutate(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
@@ -1226,6 +1232,145 @@ class TestMutate:
         mutate(parent, er, "g1-s0", config, Path("/tmp"))
 
         mock_remove.assert_called_once_with(child)
+
+    def test_removes_worktree_and_preserves_preparation_error(
+        self, tmp_path: Path, mocker
+    ):
+        """Any fatal failure after clone cleans up and propagates unchanged."""
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
+        failure = RuntimeError("candidate preparation failed")
+
+        def fail_preparation(candidate: Candidate) -> None:
+            assert candidate is child
+            raise failure
+
+        with pytest.raises(RuntimeError) as exc_info:
+            mutate(
+                parent,
+                er,
+                "g1-s0",
+                config,
+                Path("/tmp"),
+                prepare_worktree=fail_preparation,
+            )
+
+        assert exc_info.value is failure
+        mock_remove.assert_called_once_with(child)
+
+    def test_prompt_collision_cleans_worktree_and_preserves_error(
+        self, tmp_path: Path, mocker
+    ):
+        parent = make_candidate("g0-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        failure = PromptArtifactCollisionError("reserved prompt path exists")
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator._write_mutation_prompt_artifact", side_effect=failure
+        )
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
+
+        with pytest.raises(PromptArtifactCollisionError) as exc_info:
+            mutate(
+                parent,
+                make_eval_result(),
+                "g1-s0",
+                make_config(),
+                Path("/tmp"),
+            )
+
+        assert exc_info.value is failure
+        mock_remove.assert_called_once_with(child)
+
+    def test_parallel_mutations_use_distinct_real_git_worktrees(
+        self, tmp_path: Path, mocker
+    ):
+        """Two overlapping proposal calls clone and operate in separate worktrees."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.name", "HELIX Test"], cwd=repo, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "helix-test@example.invalid"],
+            cwd=repo,
+            check=True,
+        )
+        (repo / "candidate.py").write_text("value = 1\n")
+        subprocess.run(["git", "add", "candidate.py"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
+
+        parent = make_candidate("g0-s0", str(repo))
+        eval_result = make_eval_result()
+        config = make_config()
+        base_dir = tmp_path / "worktrees"
+        overlap = threading.Barrier(2)
+        lock = threading.Lock()
+        active = 0
+        peak_active = 0
+        seen_paths: set[str] = set()
+
+        def fake_invoke(
+            worktree_path: str, prompt: str, agent_config: AgentConfig, **kwargs: Any
+        ) -> tuple[dict[str, Any], UsageStats]:
+            del prompt, agent_config, kwargs
+            nonlocal active, peak_active
+            assert Path(worktree_path).is_dir()
+            with lock:
+                seen_paths.add(worktree_path)
+                active += 1
+                peak_active = max(peak_active, active)
+            try:
+                overlap.wait(timeout=10)
+            finally:
+                with lock:
+                    active -= 1
+            return {}, UsageStats()
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+
+        children: list[Candidate] = []
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(
+                        mutate,
+                        parent,
+                        eval_result,
+                        child_id,
+                        config,
+                        base_dir,
+                    )
+                    for child_id in ("g1-s0", "g1-s1")
+                ]
+                results = [future.result(timeout=15) for future in futures]
+            children = [child for child in results if child is not None]
+
+            assert len(children) == 2
+            assert peak_active == 2
+            assert seen_paths == {
+                str(base_dir / "g1-s0"),
+                str(base_dir / "g1-s1"),
+            }
+            assert len({child.worktree_path for child in children}) == 2
+            assert all(
+                (Path(child.worktree_path) / ".git").exists() for child in children
+            )
+        finally:
+            from helix.worktree import remove_worktree
+
+            for child in children:
+                remove_worktree(child)
 
     def test_snapshot_not_called_by_mutate_on_success(self, tmp_path: Path, mocker):
         """mutate() must NOT call snapshot_candidate — the caller owns that step.
@@ -1858,6 +2003,29 @@ class TestOpenCodeSubprocessIsolation:
         assert xdg.startswith(str(tmp_path)), (
             f"XDG_DATA_HOME={xdg!r} should be under the candidate worktree {tmp_path}"
         )
+
+    def test_opencode_sandbox_state_uses_isolated_workspace(
+        self, tmp_path: Path, mocker
+    ):
+        """The shared auth home must not also hold sandboxed OpenCode state."""
+        mock_run = mocker.patch(
+            "helix.mutator.run_sandboxed_command",
+            return_value=subprocess.CompletedProcess(
+                args=["opencode"], returncode=0, stdout="{}", stderr=""
+            ),
+        )
+
+        invoke_claude_code(
+            str(tmp_path),
+            "fix the bug",
+            AgentConfig(backend="opencode"),
+            sandbox=SandboxConfig(enabled=True, image="helix-test:latest"),
+        )
+
+        assert mock_run.call_args.kwargs["env"]["XDG_DATA_HOME"] == (
+            "/workspace/.helix_opencode_state"
+        )
+        assert not (tmp_path / ".helix_opencode_state").exists()
 
     def test_opencode_subprocess_isolation_unique_per_candidate(
         self, tmp_path: Path, mocker
