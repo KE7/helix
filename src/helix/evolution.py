@@ -56,6 +56,7 @@ from helix.exceptions import (
 from helix.executor import (
     EvalBatchItem,
     EvalBatchResult,
+    record_evaluator_units,
     run_evaluator,
     run_evaluator_batch,
 )
@@ -1231,11 +1232,13 @@ def _cached_eval(
     than HELIX's lineage id so equivalent candidates can reuse results.
     """
     if cache is None:
+        record_evaluator_units(1)
         return run_evaluator(candidate, config, split=split), False
     candidate_key = _candidate_content_key(candidate)
     cached = cache.get(candidate_key, split)
     if cached is not None:
         return EvalResult.from_dict(cached), True
+    record_evaluator_units(1)
     result = run_evaluator(candidate, config, split=split)
     cache.put(candidate_key, split, result.to_dict())
     return result, False
@@ -1276,6 +1279,7 @@ def _cached_evaluate_batch(
         with _worktree_lock(candidate.worktree_path):
             _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, example_ids)
+            record_evaluator_units(len(example_ids))
             result = run_evaluator(
                 candidate,
                 config,
@@ -1324,6 +1328,11 @@ def _cached_evaluate_batch(
         with _worktree_lock(candidate.worktree_path):
             _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, batch)
+            # The cache invokes this adapter only for keys this call owns.
+            # Report immediately before dispatch so a failed single-flight
+            # owner retains its actual units while waiters remain uncharged
+            # until they claim and retry a still-missing key themselves.
+            record_evaluator_units(len(batch))
             fresh = run_evaluator(
                 candidate,
                 config,
@@ -2876,17 +2885,15 @@ def _run_evolution_impl(
                 source: str,
                 counts_examples: bool,
             ) -> None:
-                """Journal one successful drained result before any phase save.
+                """Journal one drained outcome before any phase save.
 
                 Evaluator workers populate the shared cache before the ordered main
-                thread consumes their results.  Every successful positional result in
-                a drained batch must therefore be charged before the first sibling can
-                checkpoint state plus that cache.  ``num_actual_evaluations`` is the
-                runtime distinction: cache hits and deduplicated followers report zero,
-                while executed leaders report their actual metric-call count.
+                thread consumes their results.  Every positional outcome in a drained
+                batch must therefore be charged before the first sibling can checkpoint
+                state plus that cache.  ``num_actual_evaluations`` is the runtime
+                distinction: cache hits and deduplicated followers report zero, while
+                executed leaders retain their actual metric-call count even on error.
                 """
-                if call.error is not None:
-                    return
                 if counts_examples:
                     charged = budget_api.charge_evaluation(
                         state,

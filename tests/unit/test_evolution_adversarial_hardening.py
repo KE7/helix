@@ -322,8 +322,9 @@ def test_cached_sibling_completed_before_checkpoint_is_charged_once_on_resume(
     assert recovered_task.status == "running"
     assert not recovered_task.budget_accounted
     assert recovered_task.budget_charge.evaluations == 1
-    # Seed=1, one deduplicated parent evaluation=1, and the successful child=1.
-    assert persisted.budget.evaluations == 3
+    # Seed=1, one deduplicated parent evaluation=1, failed child=1, and
+    # successful child=1.  The failure cannot erase its dispatched unit.
+    assert persisted.budget.evaluations == 4
 
     child_calls_before_cache_recovery = sum(
         candidate_id == "g1-s2" and split == "train"
@@ -363,7 +364,7 @@ def test_cached_sibling_completed_before_checkpoint_is_charged_once_on_resume(
     assert resumed_batch.phase == "complete"
     assert resumed_task.budget_accounted
     assert resumed_task.budget_charge.evaluations == 1
-    assert resumed.budget.evaluations == 3
+    assert resumed.budget.evaluations == 4
     assert sum(task.budget_charge.evaluations for task in resumed_batch.tasks) == (
         resumed.budget.evaluations - resumed_batch.budget_before_dispatch
     )
@@ -713,12 +714,14 @@ def test_fatal_full_evaluator_preserves_negative_success_and_dedup_siblings(
     persisted = load_state(project_root)
     assert persisted is not None
     batch = persisted.proposal_batches[0]
-    assert persisted.budget.evaluations == 8
+    assert persisted.budget.evaluations == 12
     assert batch.budget_state_before_dispatch is not None
     assert sum(task.budget_charge.evaluations for task in batch.tasks) == (
         persisted.budget.evaluations - batch.budget_state_before_dispatch.evaluations
     )
-    assert [task.budget_charge.evaluations for task in batch.tasks] == [2, 1, 3, 0]
+    # The fatal and negative-count full-validation leaders each dispatched two
+    # real units before returning an error; both remain charged to their owner.
+    assert [task.budget_charge.evaluations for task in batch.tasks] == [4, 3, 3, 0]
     assert all(task.budget_accounted for task in batch.tasks)
     assert all(task.cleanup in {"removed", "missing"} for task in batch.tasks)
     assert sorted(removed) == ["g1-s1", "g1-s2", "g1-s3", "g1-s4"]

@@ -20,6 +20,7 @@ from helix.executor import (
     EvalBatchItem,
     EvalBatchResult,
     make_default_batch_runner,
+    record_evaluator_units,
     run_evaluator,
     run_evaluator_batch,
 )
@@ -537,6 +538,27 @@ class TestRunEvaluatorBatchDedup:
 
 
 class TestRunEvaluatorBatchFailures:
+    def test_failed_leader_progress_is_isolated_per_concurrent_worker(self):
+        start = threading.Barrier(2)
+
+        def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
+            units = 1 if item.candidate.id == "one" else 3
+            record_evaluator_units(units)
+            start.wait(timeout=2)
+            raise RuntimeError(item.candidate.id)
+
+        results = run_evaluator_batch(
+            [
+                make_item("one", "/w-one", instance_ids=("1",)),
+                make_item("three", "/w-three", instance_ids=("1", "2", "3")),
+            ],
+            runner,
+            max_workers=2,
+        )
+
+        assert [result.num_actual_evaluations for result in results] == [1, 3]
+        assert [str(result.error) for result in results] == ["one", "three"]
+
     def test_ordinary_failure_is_isolated(self):
         class Boom(Exception):
             pass
@@ -744,6 +766,51 @@ class TestRunEvaluatorBatchCardinalityAndConfig:
 
 
 class TestMakeDefaultBatchRunner:
+    def test_failed_minibatch_leader_reports_attempted_units(self, mocker):
+        evaluator = mocker.patch(
+            "helix.executor.run_evaluator",
+            side_effect=RuntimeError("failed after evaluator dispatch"),
+        )
+        runner = make_default_batch_runner(make_config())
+
+        calls = run_evaluator_batch(
+            [
+                make_item(
+                    "leader", "/leader", content_key="K", instance_ids=("1", "2")
+                ),
+                make_item(
+                    "follower",
+                    "/follower",
+                    content_key="K",
+                    instance_ids=("1", "2"),
+                ),
+            ],
+            runner,
+            max_workers=2,
+        )
+
+        assert evaluator.call_count == 1
+        assert isinstance(calls[0].error, RuntimeError)
+        assert calls[0].num_actual_evaluations == 2
+        assert calls[0].deduplicated_from is None
+        assert calls[1].error is calls[0].error
+        assert calls[1].num_actual_evaluations == 0
+        assert calls[1].deduplicated_from == 0
+
+    def test_successful_progress_report_does_not_double_returned_count(self):
+        def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
+            record_evaluator_units(2)
+            return make_eval_result(item.candidate.id), 2
+
+        [call] = run_evaluator_batch(
+            [make_item("a", "/w", instance_ids=("1", "2"))],
+            runner,
+            max_workers=1,
+        )
+
+        assert call.error is None
+        assert call.num_actual_evaluations == 2
+
     def test_counts_minibatch_and_forwards_args(self, mocker):
         fake = make_eval_result("a", instance_scores={"1": 1.0, "2": 0.0})
         m = mocker.patch("helix.executor.run_evaluator", return_value=fake)

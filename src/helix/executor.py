@@ -11,6 +11,7 @@ import threading
 import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -506,11 +507,12 @@ def run_evaluator(
 # from the key on purpose: two distinct candidates whose committed content,
 # split, and exact ordered minibatch are identical evaluate to the same scores,
 # so only the first (the "leader") is dispatched.  Every later request sharing
-# that key (a "follower") reuses the leader's result and is charged
+# that key (a "follower") reuses the leader's outcome and is charged
 # ``num_actual_evaluations == 0`` so evaluation-budget accounting never
-# double-counts shared work.  ``instance_ids`` is carried and hashed as an
-# ordered tuple because evaluator side information is positional to
-# ``helix_batch.json`` — reordering the minibatch is a *different* request.
+# double-counts shared work, including when the shared outcome is a failure.
+# ``instance_ids`` is carried and hashed as an ordered tuple because evaluator
+# side information is positional to ``helix_batch.json`` — reordering the
+# minibatch is a *different* request.
 
 
 @dataclass(frozen=True)
@@ -550,11 +552,13 @@ class EvalBatchResult:
       integrity error; the rest of the drained batch remains positional so its
       successful work can be accounted before the owner re-raises.
 
-    ``num_actual_evaluations`` is the evaluation-budget charge for this slot:
-    the leader carries the runner's reported count, and every deduplicated
-    follower is charged ``0``.  ``deduplicated_from`` is ``None`` for a leader
-    (the request that actually ran) or the input index of the leader this
-    follower reused.
+    ``num_actual_evaluations`` is the evaluation-budget charge for this slot.
+    A successful leader carries the runner's returned count; a failed leader
+    carries the progress reported with :func:`record_evaluator_units` before
+    the exception; and every deduplicated follower is charged ``0``.  Thus a
+    failure never erases work that already ran and shared work is never charged
+    twice.  ``deduplicated_from`` is ``None`` for a leader (the request that
+    actually ran) or the input index of the leader this follower reused.
     """
 
     item: EvalBatchItem
@@ -570,6 +574,33 @@ class EvalBatchResult:
 # cache hits; tests inject fakes to exercise ordering/dedup/failure/fatal paths
 # without a subprocess.
 BatchEvaluatorRunner: TypeAlias = Callable[[EvalBatchItem], tuple[EvalResult, int]]
+
+# A runner reports actual work at the dispatch boundary, before an evaluator
+# attempt can raise and erase its normal ``(result, count)`` return value.  The
+# context is installed independently in each leader worker, so concurrent
+# leaders cannot leak units into one another.  Outside ``run_evaluator_batch``
+# the helper is intentionally a no-op: the ordinary sequential call sites use
+# their existing direct budget charge.
+_EVALUATION_UNIT_REPORTER: ContextVar[Callable[[int], None] | None] = ContextVar(
+    "helix_evaluation_unit_reporter",
+    default=None,
+)
+
+
+def record_evaluator_units(units: int) -> None:
+    """Record newly dispatched evaluator units for the current batch leader.
+
+    Runner implementations that can fail after dispatch must call this once at
+    the point each group of uncached units becomes actual.  Calls accumulate;
+    cache hits report nothing.  The successful runner return remains the
+    authoritative count for compatibility with existing one-argument runners.
+    """
+    if units < 0:
+        raise ValueError(f"evaluator units must be >= 0, got {units}")
+    reporter = _EVALUATION_UNIT_REPORTER.get()
+    if reporter is not None and units:
+        reporter(units)
+
 
 # Per-worktree serialization: two leaders that share a worktree path must not
 # run concurrently, because the evaluator handoff writes ``helix_batch.json``
@@ -619,6 +650,12 @@ def make_default_batch_runner(config: HelixConfig) -> BatchEvaluatorRunner:
         instance_ids = (
             list(item.instance_ids) if item.instance_ids is not None else None
         )
+        # The default runner has no cache.  Record before invoking the
+        # evaluator so an exception after dispatch retains the attempted work.
+        # Whole-split calls consume one HELIX evaluation-budget unit.
+        record_evaluator_units(
+            len(item.instance_ids) if item.instance_ids is not None else 1
+        )
         result = run_evaluator(
             item.candidate,
             config,
@@ -650,7 +687,9 @@ def run_evaluator_batch(
         runner: The runner seam, ``runner(item) -> (EvalResult, count)``.  Only
             *leaders* (the first item bearing a given
             :attr:`EvalBatchItem.dedup_key`) are handed to the runner; followers
-            reuse the leader's outcome.
+            reuse the leader's outcome.  A runner must call
+            :func:`record_evaluator_units` when uncached work is dispatched if
+            later operations can fail before it returns its count.
         max_workers: Upper bound on concurrent runner invocations.  The pool is
             additionally capped at the number of leaders.  Must be ``>= 1``.
         config: When provided, the evaluator command is validated ONCE before
@@ -666,8 +705,9 @@ def run_evaluator_batch(
         starts.  Once dispatch begins, every runner exception -- including
         ``BaseException`` subclasses and run-fatal integrity failures -- is
         returned in its positional :attr:`EvalBatchResult.error` slot after the
-        executor drains.  The owning evolution phase can then account successful
-        siblings and clean resources before re-raising the fatal error.
+        executor drains.  The owning evolution phase can then account every
+        reported attempt, account successful siblings, and clean resources
+        before re-raising the fatal error.
     """
     # --- Pre-dispatch config validation (propagates; never per-item) --------
     if max_workers < 1:
@@ -699,11 +739,23 @@ def run_evaluator_batch(
     # leader input index -> (result, count) on success, or a captured error.
     leader_outcome: dict[int, tuple[EvalResult, int]] = {}
     leader_error: dict[int, BaseException] = {}
+    leader_reported_units: dict[int, int] = {}
 
     def _run_leader(index: int) -> None:
         item = items[index]
-        with _batch_worktree_lock(item.candidate.worktree_path):
-            leader_outcome[index] = runner(item)
+        reported_units = 0
+
+        def _record(units: int) -> None:
+            nonlocal reported_units
+            reported_units += units
+
+        token = _EVALUATION_UNIT_REPORTER.set(_record)
+        try:
+            with _batch_worktree_lock(item.candidate.worktree_path):
+                leader_outcome[index] = runner(item)
+        finally:
+            _EVALUATION_UNIT_REPORTER.reset(token)
+            leader_reported_units[index] = reported_units
 
     pool_workers = min(max_workers, len(leader_indices))
     with ThreadPoolExecutor(max_workers=pool_workers) as pool:
@@ -736,13 +788,16 @@ def run_evaluator_batch(
         leader = leader_of[i]
         is_leader = leader == i
         if leader in leader_error:
-            # Failed leader → failed slot; followers reuse the same error and
-            # are still charged zero.
+            # A failed leader retains units reported before the exception.
+            # Followers reuse the same error but remain zero-charge: the
+            # leader alone owns the shared evaluator attempt.
             results[i] = EvalBatchResult(
                 item=item,
                 result=None,
                 error=leader_error[leader],
-                num_actual_evaluations=0,
+                num_actual_evaluations=(
+                    leader_reported_units.get(leader, 0) if is_leader else 0
+                ),
                 deduplicated_from=None if is_leader else leader,
             )
         elif is_leader:

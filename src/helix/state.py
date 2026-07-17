@@ -114,9 +114,10 @@ class ProposalTaskRecord:
     """Durable state for one parent-major P-by-N proposal slot.
 
     ``budget_charge`` is a monotonic runtime journal and may advance while the
-    task is still running; ``budget_accounted`` closes that journal as an
-    explicit crash barrier.  A resumed run can therefore conserve completed
-    evaluator work before terminal accounting, and ``applied`` distinguishes a
+    task is still running, including evaluator work whose outcome is a failure;
+    ``budget_accounted`` closes that journal as an explicit crash barrier.  A
+    resumed run can therefore conserve attempted evaluator work before terminal
+    accounting without charging it again, and ``applied`` distinguishes a
     selected result from one already inserted into the frontier.  Candidate IDs
     remain reserved even when the task is interrupted or cleaned up.
     """

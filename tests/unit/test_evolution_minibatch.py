@@ -1932,6 +1932,90 @@ class TestParentMinibatchBudgetCharge:
 
 
 class TestEvaluationCacheThreadSafety:
+    def test_failed_singleflight_owner_and_waiter_report_exact_attempts(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """A failed owner is charged; its waiter charges only owned work and retry."""
+        import threading
+
+        from helix.eval_cache import EvaluationCache
+        from helix.evolution import _cached_evaluate_batch
+        from helix.executor import EvalBatchItem, run_evaluator_batch
+
+        cache: EvaluationCache[object, str] = EvaluationCache()
+        first_seven_started = threading.Event()
+        eight_finished = threading.Event()
+        calls_lock = threading.Lock()
+        calls: list[tuple[str, tuple[str, ...]]] = []
+        seven_attempts = 0
+
+        mocker.patch("helix.evolution._candidate_content_key", return_value="K")
+        mocker.patch("helix.evolution._refresh_protected_evaluator_files")
+        mocker.patch("helix.evolution._write_helix_batch")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            nonlocal seven_attempts
+            ids = tuple(instance_ids or ())
+            with calls_lock:
+                calls.append((candidate.id, ids))
+                if ids == ("7",):
+                    seven_attempts += 1
+                    attempt = seven_attempts
+                else:
+                    attempt = 0
+            if ids == ("7",) and attempt == 1:
+                first_seven_started.set()
+                assert eight_finished.wait(timeout=2)
+                raise RuntimeError("single-flight owner failed")
+            if ids == ("8",):
+                eight_finished.set()
+            return _make_result(candidate.id, {eid: 0.5 for eid in ids})
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=run_eval)
+        config = HelixConfig(
+            objective="single-flight accounting",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+        )
+        first = _make_candidate("first")
+        second = _make_candidate("second")
+        items = [
+            EvalBatchItem(first, "K", "train", ("7",)),
+            EvalBatchItem(second, "K", "train", ("7", "8")),
+        ]
+
+        def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
+            if item.candidate.id == "second":
+                assert first_seven_started.wait(timeout=2)
+            assert item.instance_ids is not None
+            return _cached_evaluate_batch(
+                item.candidate,
+                list(item.instance_ids),
+                cache,
+                config,
+                item.split,
+                tmp_path,
+            )
+
+        results = run_evaluator_batch(items, runner, max_workers=2)
+
+        assert isinstance(results[0].error, RuntimeError)
+        assert results[0].num_actual_evaluations == 1
+        assert results[1].error is None
+        assert results[1].num_actual_evaluations == 2
+        assert sum(result.num_actual_evaluations for result in results) == 3
+        assert calls == [
+            ("first", ("7",)),
+            ("second", ("8",)),
+            ("second", ("7",)),
+        ]
+        assert cache._in_flight == {}
+
     def test_concurrent_put_batch_preserves_all_entries(self) -> None:
         import threading
         from helix.eval_cache import EvaluationCache as MBCache
@@ -2299,6 +2383,48 @@ class TestUnifiedPxNScheduler:
             call.args[0].id for call in all_mocks["remove_worktree"].call_args_list
         }
         assert removed_ids == {"g1-s3", "g1-s5"}
+
+    def test_failed_parent_evaluator_units_are_charged_and_journaled(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """A failed two-example leader still advances the durable budget by two."""
+        train_path = _write_train_jsonl(tmp_path, n=2)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            assert instance_ids == ["0", "1"]
+            if split == "train":
+                raise RuntimeError("failed after two uncached units")
+            return _make_result(candidate.id, {eid: 0.5 for eid in instance_ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+        )
+
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        state = all_mocks["save_state"].call_args.args[0]
+        batch = state.proposal_batches[-1]
+        [task] = batch.tasks
+        assert batch.budget_before_dispatch == 2
+        assert state.budget.evaluations == 4
+        assert batch.budget_after_apply == 4
+        assert task.status == "failed"
+        assert task.budget_charge.evaluations == 2
+        assert task.budget_accounted
+        assert batch.phase == "complete"
+        all_mocks["mutate"].assert_not_called()
 
     def test_dispatched_child_batch_drains_before_budget_stop_and_cleans_all(
         self, tmp_path: Path, all_mocks: dict[str, Any]

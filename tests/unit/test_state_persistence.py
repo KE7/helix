@@ -561,6 +561,47 @@ def test_task_accounted_marker_is_idempotent_without_charging_budget(
         )
 
 
+def test_failed_task_charge_roundtrips_without_double_charge_on_resume(
+    tmp_path: Path,
+) -> None:
+    state = EvolutionState(
+        generation=4,
+        frontier=["g0-s0"],
+        instance_scores={},
+        budget=BudgetState(evaluations=5),
+        config_hash="h",
+    )
+    batch = checkpoint_batch_before_dispatch(state, tmp_path, _make_batch())
+    state.budget.evaluations += 2
+    checkpoint_batch_task(
+        state,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=0,
+        status="failed",
+        cleanup="missing",
+        budget_charge=BudgetState(evaluations=2),
+        budget_accounted=True,
+    )
+
+    resumed = load_state(tmp_path)
+    assert resumed is not None
+    replayed = checkpoint_batch_task(
+        resumed,
+        tmp_path,
+        batch_id=batch.batch_id,
+        task_index=0,
+        status="failed",
+        cleanup="missing",
+        budget_charge=BudgetState(evaluations=2),
+        budget_accounted=True,
+    )
+
+    assert resumed.budget.evaluations == 7
+    assert replayed.budget_charge.evaluations == 2
+    assert replayed.budget_accounted
+
+
 def test_pre_dispatch_rejects_candidate_id_collision(tmp_path: Path) -> None:
     state = EvolutionState(
         generation=4,
