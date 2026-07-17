@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
-from helix.display import UsageStats
+from helix.display import UsageStats, print_warning
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
@@ -1801,16 +1801,25 @@ def mutate(
         print_helix_error(exc)
         try:
             remove_worktree(child)
-        except Exception:
-            pass
+        except Exception as cleanup_exc:
+            # The proposal scheduler owns a durable reservation for ``new_id``
+            # and will retry this cleanup from that identity.  Keep the local
+            # failure visible: returning ``None`` must not make a failed remove
+            # look like a worktree was never created.
+            print_warning(
+                f"Could not remove failed mutation worktree {new_id}: {cleanup_exc}"
+            )
         return None
-    except Exception:
+    except Exception as exc:
         # Rate limits and fatal setup/security failures must propagate to the
         # batch coordinator unchanged, but never leave this worktree orphaned.
         try:
             remove_worktree(child)
-        except Exception:
-            pass
+        except Exception as cleanup_exc:
+            print_warning(
+                f"Could not remove failed mutation worktree {new_id} after "
+                f"{type(exc).__name__}: {cleanup_exc}"
+            )
         raise
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.

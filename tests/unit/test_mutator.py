@@ -1213,6 +1213,75 @@ class TestMutate:
         assert result is None
         mock_remove.assert_called_once_with(child)
 
+    def test_mutation_error_cleanup_failure_leaves_reserved_child_visible(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        """A handled backend failure does not conceal its failed worktree remove."""
+        parent = make_candidate("g0-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=MutationError("backend failed"),
+        )
+        cleanup_error = OSError("git worktree is locked")
+        mock_remove = mocker.patch(
+            "helix.mutator.remove_worktree", side_effect=cleanup_error
+        )
+        mock_warning = mocker.patch("helix.mutator.print_warning")
+
+        result = mutate(
+            parent,
+            make_eval_result(),
+            child.id,
+            make_config(),
+            tmp_path,
+        )
+
+        assert result is None
+        assert child_path.exists()
+        assert child.id == "g1-s0"
+        mock_remove.assert_called_once_with(child)
+        mock_warning.assert_called_once()
+        assert child.id in mock_warning.call_args.args[0]
+        assert str(cleanup_error) in mock_warning.call_args.args[0]
+
+    def test_generic_mutation_failure_preserves_error_and_reports_cleanup_failure(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        """A propagated backend error keeps its type while cleanup remains visible."""
+        parent = make_candidate("g0-s0")
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        backend_error = RuntimeError("backend transport failed")
+        cleanup_error = OSError("git worktree is locked")
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=backend_error)
+        mock_remove = mocker.patch(
+            "helix.mutator.remove_worktree", side_effect=cleanup_error
+        )
+        mock_warning = mocker.patch("helix.mutator.print_warning")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            mutate(
+                parent,
+                make_eval_result(),
+                child.id,
+                make_config(),
+                tmp_path,
+            )
+
+        assert exc_info.value is backend_error
+        assert child_path.exists()
+        mock_remove.assert_called_once_with(child)
+        mock_warning.assert_called_once()
+        assert child.id in mock_warning.call_args.args[0]
+        assert type(backend_error).__name__ in mock_warning.call_args.args[0]
+        assert str(cleanup_error) in mock_warning.call_args.args[0]
+
     def test_removes_worktree_on_failure(self, tmp_path: Path, mocker):
         parent = make_candidate("g0-s0")
         er = make_eval_result()

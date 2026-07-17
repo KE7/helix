@@ -3113,6 +3113,29 @@ def _run_evolution_impl(
                 if task.batch_index in parent_ready and not _budget_break
             ]
 
+            def _live_reserved_mutation_child(
+                task: ProposalTask,
+            ) -> Candidate | None:
+                """Recover a failed mutation's child from its durable slot.
+
+                ``mutate`` intentionally returns ``None`` for a handled
+                ``MutationError``.  Its worktree removal can still fail, so the
+                pre-dispatch child reservation is the authoritative identity
+                for deciding whether cleanup remains required.
+                """
+                worktree_path = worktrees_dir / task.reserved_child_id
+                if not worktree_path.exists():
+                    return None
+                return Candidate(
+                    id=task.reserved_child_id,
+                    worktree_path=str(worktree_path),
+                    branch_name=f"helix/{task.reserved_child_id}",
+                    generation=gen,
+                    parent_id=task.parent_candidate.id,
+                    parent_ids=[task.parent_candidate.id],
+                    operation="mutate",
+                )
+
             def _mutate_one(
                 item: tuple[ProposalTask, tuple[EvalResult, int]],
             ) -> tuple[
@@ -3208,6 +3231,7 @@ def _run_evolution_impl(
                             else "failed"
                         ),
                         reason="mutation",
+                        child=_live_reserved_mutation_child(task),
                     )
                     if _is_fatal_proposal_exception(mutation_call.error):
                         fatal_mutation_error = (
@@ -3243,6 +3267,7 @@ def _run_evolution_impl(
                         task,
                         status="failed",
                         reason="mutation_returned_none",
+                        child=_live_reserved_mutation_child(task),
                     )
                     continue
 

@@ -43,7 +43,7 @@ class _InjectedCrash(BaseException):
 def _patch_runtime(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    mutate: Callable[..., Candidate] | None = None,
+    mutate: Callable[..., Candidate | None] | None = None,
     evaluator: Callable[..., EvalResult] | None = None,
     remove: Callable[[Candidate], None] | None = None,
     content_key: Callable[[Candidate], str] | None = None,
@@ -449,6 +449,96 @@ def test_failed_resume_cleanup_blocks_dispatch_then_retries_idempotently(
     repeated = load_state(project_root)
     assert repeated == recovered
     assert cleanup_attempts == ["g1-s1", "g1-s1"]
+
+
+@pytest.mark.parametrize("failure_mode", ["handled_none", "raised_error"])
+def test_failed_mutation_with_live_worktree_retries_cleanup_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
+) -> None:
+    """A failed mutator cleanup remains a durable, retryable batch barrier."""
+    config = _make_config(p=1, n=1, train_size=1, val_size=1, minibatch_size=1)
+    project_root, base_dir = _new_project(tmp_path)
+    child_dir = base_dir / "worktrees" / "g1-s1"
+
+    def failed_mutate(**kwargs: Any) -> Candidate | None:
+        child_dir.mkdir(parents=True)
+        (child_dir / "partial.txt").write_text("mutation failed\n")
+        if failure_mode == "raised_error":
+            raise RuntimeError("backend transport failed")
+        return None
+
+    cleanup_attempts: list[str] = []
+
+    def flaky_remove(candidate: Candidate) -> None:
+        cleanup_attempts.append(candidate.id)
+        if len(cleanup_attempts) == 1:
+            raise OSError("transient git worktree lock")
+        shutil.rmtree(candidate.worktree_path)
+
+    _patch_runtime(monkeypatch, mutate=failed_mutate, remove=flaky_remove)
+
+    with pytest.raises(ValueError, match="cleanup failed for slots: 0"):
+        evolution.run_evolution(config, project_root, base_dir)
+
+    failed = load_state(project_root)
+    assert failed is not None
+    failed_batch = failed.proposal_batches[0]
+    failed_task = failed_batch.tasks[0]
+    assert failed_batch.phase == "applying"
+    assert failed_task.status == "failed"
+    assert failed_task.cleanup == "failed"
+    assert failed_task.budget_accounted
+    assert child_dir.exists()
+
+    result = evolution.run_evolution(config, project_root, base_dir)
+    assert result.id == "g0-s0"
+    recovered = load_state(project_root)
+    assert recovered is not None
+    recovered_task = recovered.proposal_batches[0].tasks[0]
+    assert recovered.proposal_batches[0].phase == "complete"
+    assert recovered_task.status == "interrupted"
+    assert recovered_task.cleanup == "removed"
+    assert recovered_task.budget_accounted
+    assert not child_dir.exists()
+    assert cleanup_attempts == ["g1-s1", "g1-s1"]
+
+    evolution.run_evolution(config, project_root, base_dir)
+    assert load_state(project_root) == recovered
+    assert cleanup_attempts == ["g1-s1", "g1-s1"]
+
+
+def test_mutation_none_with_live_worktree_journals_successful_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reserved child identity makes a handled failure's cleanup required."""
+    config = _make_config(p=1, n=1, train_size=1, val_size=1, minibatch_size=1)
+    project_root, base_dir = _new_project(tmp_path)
+    child_dir = base_dir / "worktrees" / "g1-s1"
+
+    def failed_mutate(**kwargs: Any) -> None:
+        child_dir.mkdir(parents=True)
+        return None
+
+    cleanup_attempts: list[str] = []
+
+    def remove(candidate: Candidate) -> None:
+        cleanup_attempts.append(candidate.id)
+        shutil.rmtree(candidate.worktree_path)
+
+    _patch_runtime(monkeypatch, mutate=failed_mutate, remove=remove)
+    result = evolution.run_evolution(config, project_root, base_dir)
+
+    assert result.id == "g0-s0"
+    persisted = load_state(project_root)
+    assert persisted is not None
+    [task] = persisted.proposal_batches[0].tasks
+    assert persisted.proposal_batches[0].phase == "complete"
+    assert task.child_id == "g1-s1"
+    assert task.status == "failed"
+    assert task.cleanup == "removed"
+    assert task.budget_accounted
+    assert cleanup_attempts == [task.child_id]
+    assert not child_dir.exists()
 
 
 def test_interrupted_earlier_batch_is_bounded_by_next_batch_budget_snapshot(
