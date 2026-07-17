@@ -45,6 +45,19 @@ def _endpoint_env_args(endpoint: str, form: str) -> list[str]:
     raise AssertionError(f"unexpected synthetic env form: {form}")
 
 
+def _ordinary_env_args(value: str, form: str) -> list[str]:
+    assignment = f"{_NON_HEURISTIC_ENV_KEY}={value}"
+    if form == "short-separated":
+        return ["-e", assignment]
+    if form == "long-separated":
+        return ["--env", assignment]
+    if form == "short-joined":
+        return [f"-e{assignment}"]
+    if form == "long-joined":
+        return [f"--env={assignment}"]
+    raise AssertionError(f"unexpected synthetic env form: {form}")
+
+
 _SYNTHETIC_ENDPOINTS = [
     f"https://{_SYNTHETIC_ENDPOINT_FRAGMENT}@synthetic.invalid/evaluate",
     (
@@ -578,19 +591,209 @@ def test_endpoint_component_redaction_values_cover_structured_fields(
     assert not {"https", "example.invalid", "/execute"} & values
 
 
-def test_short_query_key_redaction_does_not_corrupt_harmless_url_context():
+@pytest.mark.parametrize("secret", ["x", "abc"])
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
+def test_direct_diagnostic_redaction_substring_scrubs_short_literal_secrets(
+    secret: str, as_bytes: bool
+):
+    diagnostic: str | bytes = f"prefix{secret}suffix"
+    if as_bytes:
+        diagnostic = diagnostic.encode()
+
+    rendered = sandbox_module._redact_diagnostic_output(diagnostic, [secret])
+
+    assert diagnostic not in rendered
+    assert (b"<redacted>" if as_bytes else "<redacted>") in rendered
+
+
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
+def test_short_query_key_redaction_does_not_corrupt_harmless_url_context(
+    as_bytes: bool,
+):
     endpoint = "https://example.invalid/execute?x=synthetic-short-key-value-sentinel"
     values = sandbox_module._endpoint_component_redaction_values(endpoint)
-    diagnostic = "https://example.invalid/execute failed for query key x"
+    diagnostic: str | bytes = (
+        "https://example.invalid/execute prefixxsuffix failed for query key x"
+    )
+    expected: str | bytes = (
+        "https://example.invalid/execute prefixxsuffix failed for query key <redacted>"
+    )
+    if as_bytes:
+        diagnostic = diagnostic.encode()
+        expected = expected.encode()
 
     rendered = sandbox_module._redact_diagnostic_output(
-        diagnostic, tuple(sorted(values, key=len, reverse=True))
+        diagnostic,
+        (),
+        boundary_secrets=tuple(sorted(values, key=len, reverse=True)),
     )
 
     assert "x" in values
-    assert rendered == (
-        "https://example.invalid/execute failed for query key <redacted>"
+    assert rendered == expected
+
+
+@pytest.mark.parametrize("secret", ["x", "abc"])
+@pytest.mark.parametrize(
+    "form",
+    ["short-separated", "long-separated", "short-joined", "long-joined"],
+)
+def test_docker_argv_substring_scrubs_short_ordinary_env_values(secret: str, form: str):
+    raw_args = [
+        "docker",
+        "run",
+        *_ordinary_env_args(secret, form),
+        f"--embedded=prefix{secret}suffix",
+        "fixture:latest",
+    ]
+
+    redacted = sandbox_module._redact_docker_argv(raw_args)
+    embedded_arg = next(arg for arg in redacted if arg.startswith("--embedded="))
+
+    assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in repr(redacted)
+    assert f"prefix{secret}suffix" not in embedded_arg
+    assert "<redacted>" in embedded_arg
+
+
+@pytest.mark.parametrize("secret", ["x", "abc"])
+def test_docker_argv_substring_scrubs_short_explicit_redaction_values(secret: str):
+    raw_args = [
+        "docker",
+        "logs",
+        "fixture",
+        f"--embedded=prefix{secret}suffix",
+    ]
+
+    redacted = sandbox_module._redact_docker_argv(raw_args, redaction_values=[secret])
+    embedded_arg = next(arg for arg in redacted if arg.startswith("--embedded="))
+
+    assert f"prefix{secret}suffix" not in embedded_arg
+    assert "<redacted>" in embedded_arg
+
+
+@pytest.mark.parametrize("secret_source", ["env", "explicit"])
+@pytest.mark.parametrize("secret", ["x", "abc"])
+def test_literal_secret_provenance_overrides_short_endpoint_component_boundaries(
+    secret_source: str, secret: str
+):
+    endpoint = (
+        f"https://example.invalid/execute?{secret}=synthetic-short-key-value-sentinel"
     )
+    raw_args = [
+        "docker",
+        "run",
+        *_endpoint_env_args(endpoint, "short-separated"),
+        f"--embedded=prefix{secret}suffix",
+        "fixture:latest",
+    ]
+    explicit_values: list[str] = []
+    if secret_source == "env":
+        raw_args[2:2] = _ordinary_env_args(secret, "long-joined")
+    else:
+        explicit_values.append(secret)
+
+    redacted = sandbox_module._redact_docker_argv(
+        raw_args, redaction_values=explicit_values
+    )
+    embedded_arg = next(arg for arg in redacted if arg.startswith("--embedded="))
+
+    assert f"prefix{secret}suffix" not in embedded_arg
+    assert "<redacted>" in embedded_arg
+
+
+@pytest.mark.parametrize(
+    "secret_source",
+    [
+        "short-separated",
+        "long-separated",
+        "short-joined",
+        "long-joined",
+        "explicit",
+    ],
+)
+@pytest.mark.parametrize("secret", ["x", "abc"])
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "timeout", "called-process"])
+def test_short_literal_secrets_are_substring_scrubbed_from_every_process_surface(
+    mocker,
+    secret_source: str,
+    secret: str,
+    as_bytes: bool,
+    outcome: str,
+):
+    embedded = f"prefix{secret}suffix"
+    explicit_values: list[str] = []
+    env_args: list[str] = []
+    if secret_source == "explicit":
+        explicit_values.append(secret)
+    else:
+        env_args.extend(_ordinary_env_args(secret, secret_source))
+    raw_args = [
+        "docker",
+        "run",
+        *env_args,
+        f"--embedded={embedded}",
+        "fixture:latest",
+    ]
+    stdout: str | bytes = f"stdout {embedded}"
+    stderr: str | bytes = f"stderr {embedded}"
+    if as_bytes:
+        stdout = stdout.encode()
+        stderr = stderr.encode()
+
+    def fake_run(args, **kwargs):
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(
+                args, timeout=1, output=stdout, stderr=stderr
+            )
+        if outcome == "called-process":
+            raise subprocess.CalledProcessError(125, args, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(
+            args,
+            0 if outcome == "success" else 9,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    if outcome in {"timeout", "called-process"}:
+        expected_exception = (
+            subprocess.TimeoutExpired
+            if outcome == "timeout"
+            else subprocess.CalledProcessError
+        )
+        with pytest.raises(expected_exception) as captured:
+            _run_docker(
+                raw_args,
+                check=outcome == "called-process",
+                redaction_values=explicit_values,
+                diagnostic_output=True,
+            )
+        safe_args = captured.value.cmd
+        actual_stdout = captured.value.output
+        actual_stderr = captured.value.stderr
+    else:
+        result = _run_docker(
+            raw_args,
+            check=False,
+            redaction_values=explicit_values,
+            diagnostic_output=True,
+        )
+        safe_args = result.args
+        actual_stdout = result.stdout
+        actual_stderr = result.stderr
+
+    embedded_arg = next(arg for arg in safe_args if arg.startswith("--embedded="))
+    assert embedded not in embedded_arg
+    assert "<redacted>" in embedded_arg
+    raw_embedded: str | bytes = embedded.encode() if as_bytes else embedded
+    replacement: str | bytes = b"<redacted>" if as_bytes else "<redacted>"
+    assert raw_embedded not in actual_stdout
+    assert raw_embedded not in actual_stderr
+    assert replacement in actual_stdout
+    assert replacement in actual_stderr
+    if secret_source != "explicit":
+        assert f"{_NON_HEURISTIC_ENV_KEY}=<redacted>" in repr(safe_args)
 
 
 @pytest.mark.parametrize(

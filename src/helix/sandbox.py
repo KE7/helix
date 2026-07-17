@@ -32,6 +32,14 @@ _REDACTED_DOCKER_ENV_VALUE = "<redacted>"
 _SHORT_REDACTION_VALUE_MAX_LENGTH = 3
 
 
+@dataclass(frozen=True)
+class _DiagnosticRedactionPolicy:
+    """Secrets grouped by the matching policy their provenance permits."""
+
+    substring_secrets: tuple[str, ...] = ()
+    boundary_secrets: tuple[str, ...] = ()
+
+
 HELIX_ARTIFACT_NAMES = {
     ".helix_backend_result.json",
     ".helix_backend_stdout.txt",
@@ -650,23 +658,46 @@ def _docker_env_assignments(args: Sequence[str]) -> list[tuple[str, str]]:
     return assignments
 
 
-def _docker_diagnostic_redaction_values(
-    args: Sequence[str], explicit_values: Sequence[str] = ()
-) -> tuple[str, ...]:
-    """Return literal Docker env values to scrub from failure diagnostics.
+def _docker_diagnostic_redaction_policy(
+    args: Sequence[str],
+    explicit_values: Sequence[str] = (),
+    inherited_policy: _DiagnosticRedactionPolicy | None = None,
+) -> _DiagnosticRedactionPolicy:
+    """Classify Docker secrets by their required diagnostic matching policy.
 
     Any explicit ``KEY=VALUE`` passed to Docker can carry sensitive data,
     regardless of how the key is named.  Callers may also supply values from
     an earlier Docker invocation when later output (such as ``docker logs``)
-    is rendered as part of the same failure.
+    is rendered as part of the same failure. Literal env and explicit values
+    are always substring-matched. Only short alphanumeric endpoint-derived
+    components use boundaries, unless literal provenance overrides that rule.
     """
     assignments = _docker_env_assignments(args)
-    values = {value for _key, value in assignments if value}
+    substring_secrets = {value for _key, value in assignments if value}
+    substring_secrets.update(value for value in explicit_values if value)
+    derived_secrets: set[str] = set()
     for key, value in assignments:
         if key == "HELIX_EVALUATOR_ENDPOINT":
-            values.update(_endpoint_component_redaction_values(value))
-    values.update(value for value in explicit_values if value)
-    return tuple(sorted(values, key=len, reverse=True))
+            derived_secrets.update(_endpoint_component_redaction_values(value))
+    if inherited_policy is not None:
+        substring_secrets.update(inherited_policy.substring_secrets)
+        derived_secrets.update(inherited_policy.boundary_secrets)
+
+    derived_secrets.difference_update(substring_secrets)
+    boundary_secrets = {
+        secret
+        for secret in derived_secrets
+        if len(secret) <= _SHORT_REDACTION_VALUE_MAX_LENGTH and secret.isalnum()
+    }
+    substring_secrets.update(derived_secrets - boundary_secrets)
+    return _DiagnosticRedactionPolicy(
+        substring_secrets=tuple(
+            sorted(substring_secrets, key=lambda secret: (-len(secret), secret))
+        ),
+        boundary_secrets=tuple(
+            sorted(boundary_secrets, key=lambda secret: (-len(secret), secret))
+        ),
+    )
 
 
 def _endpoint_component_redaction_values(endpoint: str) -> set[str]:
@@ -711,15 +742,23 @@ def _endpoint_component_redaction_values(endpoint: str) -> set[str]:
     return {value for value in values if value}
 
 
-def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
+def _redact_diagnostic_output(
+    value: Any,
+    secrets: Sequence[str],
+    *,
+    boundary_secrets: Sequence[str] = (),
+) -> Any:
     """Replace known Docker env secrets in text/bytes diagnostic output.
 
-    Very short alphanumeric URL keys are matched only at word boundaries. This
-    still removes a duplicated ``--flag=x`` value without replacing every
-    occurrence of ``x`` inside harmless diagnostic words or URL context.
+    ``secrets`` are literal env or explicit values and are always replaced as
+    substrings. ``boundary_secrets`` are endpoint-derived values; only short
+    alphanumeric members use word boundaries so a query key such as ``q`` does
+    not corrupt harmless diagnostic words, hostnames, or paths.
     """
     if isinstance(value, str):
         for secret in secrets:
+            value = value.replace(secret, _REDACTED_DOCKER_ENV_VALUE)
+        for secret in boundary_secrets:
             if len(secret) <= _SHORT_REDACTION_VALUE_MAX_LENGTH and secret.isalnum():
                 value = re.sub(
                     rf"(?<!\w){re.escape(secret)}(?!\w)",
@@ -731,6 +770,8 @@ def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
     elif isinstance(value, bytes):
         replacement = _REDACTED_DOCKER_ENV_VALUE.encode()
         for secret in secrets:
+            value = value.replace(secret.encode(), replacement)
+        for secret in boundary_secrets:
             encoded_secret = secret.encode()
             if len(secret) <= _SHORT_REDACTION_VALUE_MAX_LENGTH and secret.isalnum():
                 value = re.sub(
@@ -744,7 +785,10 @@ def _redact_diagnostic_output(value: Any, secrets: Sequence[str]) -> Any:
 
 
 def _redact_docker_argv(
-    args: Sequence[str], *, redaction_values: Sequence[str] = ()
+    args: Sequence[str],
+    *,
+    redaction_values: Sequence[str] = (),
+    redaction_policy: _DiagnosticRedactionPolicy | None = None,
 ) -> list[str]:
     """Render Docker argv safely while preserving environment key context.
 
@@ -754,7 +798,9 @@ def _redact_docker_argv(
     Known values are also scrubbed wherever safely identifiable in another
     argv token.
     """
-    values = _docker_diagnostic_redaction_values(args, redaction_values)
+    policy = _docker_diagnostic_redaction_policy(
+        args, redaction_values, redaction_policy
+    )
     redacted = list(args)
     index = 0
     while index < len(redacted):
@@ -777,7 +823,11 @@ def _redact_docker_argv(
                 redacted[index] = f"-e{key}={_REDACTED_DOCKER_ENV_VALUE}"
         index += 1
     for index, arg in enumerate(redacted):
-        redacted[index] = _redact_diagnostic_output(arg, values)
+        redacted[index] = _redact_diagnostic_output(
+            arg,
+            policy.substring_secrets,
+            boundary_secrets=policy.boundary_secrets,
+        )
     return redacted
 
 
@@ -786,19 +836,28 @@ def _redact_subprocess_exception(
     args: Sequence[str],
     *,
     redaction_values: Sequence[str] = (),
+    redaction_policy: _DiagnosticRedactionPolicy | None = None,
 ) -> None:
     """Sanitize a subprocess exception in place, including indirect rendering."""
-    safe_args = _redact_docker_argv(args, redaction_values=redaction_values)
-    values = _docker_diagnostic_redaction_values(args, redaction_values)
+    policy = _docker_diagnostic_redaction_policy(
+        args, redaction_values, redaction_policy
+    )
+    safe_args = _redact_docker_argv(args, redaction_policy=policy)
     exc.cmd = safe_args
     if isinstance(exc, subprocess.CalledProcessError):
         exc.args = (exc.returncode, safe_args)
-        exc.output = _redact_diagnostic_output(exc.output, values)
-        exc.stderr = _redact_diagnostic_output(exc.stderr, values)
     else:
         exc.args = (safe_args, exc.timeout)
-        exc.output = _redact_diagnostic_output(exc.output, values)
-        exc.stderr = _redact_diagnostic_output(exc.stderr, values)
+    exc.output = _redact_diagnostic_output(
+        exc.output,
+        policy.substring_secrets,
+        boundary_secrets=policy.boundary_secrets,
+    )
+    exc.stderr = _redact_diagnostic_output(
+        exc.stderr,
+        policy.substring_secrets,
+        boundary_secrets=policy.boundary_secrets,
+    )
 
 
 def _run_docker_process(
@@ -810,6 +869,7 @@ def _run_docker_process(
     input_text: str | None = None,
     timeout: float | None = None,
     redaction_values: Sequence[str] = (),
+    redaction_policy: _DiagnosticRedactionPolicy | None = None,
     diagnostic_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run Docker, sanitizing argv and any output used as a diagnostic.
@@ -819,7 +879,9 @@ def _run_docker_process(
     successful command's output as diagnostics can opt in with
     ``diagnostic_output=True``.
     """
-    values = _docker_diagnostic_redaction_values(args, redaction_values)
+    policy = _docker_diagnostic_redaction_policy(
+        args, redaction_values, redaction_policy
+    )
     try:
         result = subprocess.run(
             args,
@@ -832,12 +894,20 @@ def _run_docker_process(
             timeout=timeout,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        _redact_subprocess_exception(exc, args, redaction_values=redaction_values)
+        _redact_subprocess_exception(exc, args, redaction_policy=policy)
         raise
-    result.args = _redact_docker_argv(args, redaction_values=redaction_values)
+    result.args = _redact_docker_argv(args, redaction_policy=policy)
     if result.returncode != 0 or diagnostic_output:
-        result.stdout = _redact_diagnostic_output(result.stdout, values)
-        result.stderr = _redact_diagnostic_output(result.stderr, values)
+        result.stdout = _redact_diagnostic_output(
+            result.stdout,
+            policy.substring_secrets,
+            boundary_secrets=policy.boundary_secrets,
+        )
+        result.stderr = _redact_diagnostic_output(
+            result.stderr,
+            policy.substring_secrets,
+            boundary_secrets=policy.boundary_secrets,
+        )
     return result
 
 
@@ -846,12 +916,14 @@ def _run_docker(
     *,
     check: bool = True,
     redaction_values: Sequence[str] = (),
+    redaction_policy: _DiagnosticRedactionPolicy | None = None,
     diagnostic_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     return _run_docker_process(
         args,
         check=check,
         redaction_values=redaction_values,
+        redaction_policy=redaction_policy,
         diagnostic_output=diagnostic_output,
     )
 
@@ -873,7 +945,7 @@ def _wait_for_container_running(
     container_name: str,
     timeout_seconds: int,
     *,
-    redaction_values: Sequence[str] = (),
+    redaction_policy: _DiagnosticRedactionPolicy | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_stderr = ""
@@ -887,7 +959,7 @@ def _wait_for_container_running(
                 container_name,
             ],
             check=False,
-            redaction_values=redaction_values,
+            redaction_policy=redaction_policy,
         )
         if result.returncode == 0:
             status = result.stdout.strip().split()
@@ -897,7 +969,7 @@ def _wait_for_container_running(
                 logs = _run_docker(
                     ["docker", "logs", container_name],
                     check=False,
-                    redaction_values=redaction_values,
+                    redaction_policy=redaction_policy,
                     diagnostic_output=True,
                 )
                 raise RuntimeError(
@@ -963,7 +1035,7 @@ def _wait_for_sidecar_service(
     network: str,
     container_name: str,
     extra_hosts: dict[str, str] | None = None,
-    redaction_values: Sequence[str] = (),
+    redaction_policy: _DiagnosticRedactionPolicy | None = None,
 ) -> None:
     deadline = time.monotonic() + sidecar.startup_timeout_seconds
     last_output = ""
@@ -977,7 +1049,7 @@ def _wait_for_sidecar_service(
                 container_name,
             ],
             check=False,
-            redaction_values=redaction_values,
+            redaction_policy=redaction_policy,
         )
         if status.returncode == 0:
             parts = status.stdout.strip().split()
@@ -985,7 +1057,7 @@ def _wait_for_sidecar_service(
                 logs = _run_docker(
                     ["docker", "logs", container_name],
                     check=False,
-                    redaction_values=redaction_values,
+                    redaction_policy=redaction_policy,
                     diagnostic_output=True,
                 )
                 raise RuntimeError(
@@ -999,7 +1071,7 @@ def _wait_for_sidecar_service(
                 extra_hosts=extra_hosts,
             ),
             check=False,
-            redaction_values=redaction_values,
+            redaction_policy=redaction_policy,
         )
         if result.returncode == 0:
             return
@@ -1052,26 +1124,26 @@ def start_evaluator_sidecar(
             args.extend(["-e", f"{key}={value}"])
         args.append(sidecar.image)
         args.extend(shlex.split(sidecar.command))
-        redaction_values = _docker_diagnostic_redaction_values(
+        redaction_policy = _docker_diagnostic_redaction_policy(
             _healthcheck_docker_args(
                 sidecar,
                 network=network,
                 extra_hosts=extra_hosts,
             ),
-            _docker_diagnostic_redaction_values(args),
+            inherited_policy=_docker_diagnostic_redaction_policy(args),
         )
         _run_docker(args)
         _wait_for_container_running(
             container_name,
             sidecar.startup_timeout_seconds,
-            redaction_values=redaction_values,
+            redaction_policy=redaction_policy,
         )
         _wait_for_sidecar_service(
             sidecar,
             network=network,
             container_name=container_name,
             extra_hosts=extra_hosts,
-            redaction_values=redaction_values,
+            redaction_policy=redaction_policy,
         )
         runtime = EvaluatorSidecarRuntime(
             network=network,
