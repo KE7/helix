@@ -68,7 +68,7 @@ This is why a full solver module or a shrinkwrap of an ML kernel behave qualitat
 | 🔧 | **Tool access during mutation** | The configured backend can read, grep, run tests, inspect the codebase, and use the web mid-mutation |
 | ✅ | **Self-verification** | Mutations verify themselves by running commands before committing |
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
-| ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (GEPA parity, bounded by `evolution.max_workers`) |
+| ⚡ | **Parallel proposal batches** | Select P parents and sample N isolated mutations per parent; one global `evolution.max_workers` cap bounds candidate work |
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
 | 💾 | **State persistence & resume** | Crash-safe — resume from any generation with `helix resume` |
 | 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
@@ -390,9 +390,12 @@ merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates
 merge_subsample_size = 5         # stratified val subsample size for merge acceptance (GEPA parity)
-max_workers = 8                  # thread-pool cap for parent-eval + mutation pools
+max_workers = 8                  # global candidate-worker cap across batched phases
                                  # (default: os.cpu_count(), or 32 if that returns None)
-num_parallel_proposals = 1       # parallel mutations per generation; "auto" resolves to max_workers // minibatch_size
+num_parallel_proposals = 1       # P: parent-selection attempts; "auto" resolves to max_workers // minibatch_size
+mutations_per_parent = 1         # N: independently sampled mutations per selected parent
+proposal_selection = "all_improvements" # "all_improvements" | "best_improvement" | "top_k"
+# proposal_top_k = 2             # required only for proposal_selection = "top_k"
 minibatch_size = 3               # train-set minibatch size for reflective mutation
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
@@ -421,6 +424,77 @@ skip_special_files = true        # skip FIFOs/sockets/devices during workspace s
 [worktree]
 base_dir = ".helix/worktrees"
 ```
+
+### Parallel Proposal Batches
+
+HELIX plans proposals as a P×N batch. `num_parallel_proposals` is **P**, the
+number of parent-selection attempts, and `mutations_per_parent` is **N**, the
+number of independently sampled mutations for each selected parent. The
+default remains `P=1, N=1`; one step plans at most `P * N` children.
+
+| Shape | Meaning | Example |
+|---|---|---|
+| **1×1** | Select one parent and create one mutation. | Defaults; no batch expansion. |
+| **1×N** | Select one parent once and create N sibling mutations, each with its own minibatch, ID, and worktree. | `num_parallel_proposals = 1`, `mutations_per_parent = 4` |
+| **P×1** | Make P independent parent-selection attempts and create one mutation for each. | `num_parallel_proposals = 4`, `mutations_per_parent = 1` |
+| **P×N** | Make P parent-selection attempts and create N sibling mutations per selected slot. | P=2 and N=3 plans six children in parent-major order. |
+
+Parent selection is **with replacement**. If two selection attempts return the
+same candidate, they remain two parent groups; HELIX does not collapse them.
+Tasks and candidate IDs are reserved in deterministic parent-major order
+(`p0/n0`, `p0/n1`, ..., `p1/n0`, ...). Worker completion order cannot change
+IDs, lineage, selection ties, or persisted order.
+
+After child minibatch scores are available, `proposal_selection` controls which
+passing improvements continue to full validation:
+
+- `all_improvements` keeps every passing improvement (the default).
+- `best_improvement` keeps the single largest score improvement.
+- `top_k` keeps the largest `proposal_top_k` passing improvements, with stable
+  task order breaking equal-score ties. `proposal_top_k` must be in `1..P*N`
+  and is valid only with `top_k`.
+
+Integer P, N, and `max_workers` must be at least one; `proposal_top_k` must be
+at least one when set.
+
+This is bounded concurrency, not literal model-API batching. HELIX backends are
+multi-turn coding CLI processes, so each mutation still runs in its own
+worktree and, when sandboxing is enabled, its own short-lived container. Parent
+evaluation, mutation, child scoring, and eligible full validation share the
+same global `max_workers` bound. `P*N` may exceed that bound; excess work waits
+in deterministic task order. With a Docker evaluator sidecar, size the daemon
+for one long-lived sidecar plus at most `max_workers` active short-lived
+agent/evaluator containers. Optional `[sandbox]` `cpus`, `memory`, and
+`pids_limit` values apply to **each** short-lived container, so provision for up
+to `max_workers` times those per-container limits; unset CPU/memory values leave
+Docker's daemon defaults in effect. The sidecar is a separate long-lived
+container and is not covered by those short-lived-container limits.
+
+Evaluation budget is charged for every completed uncached evaluation, including
+work that was already in flight when the cap was reached. A cached example
+costs zero units; an uncached example costs one, and an uncached no-example
+evaluator call costs one. HELIX checks `max_evaluations` before dispatching an
+evaluation phase, rather than cancelling sibling work after dispatch. If an
+admitted phase contains `U` total uncached evaluation units, its maximum
+in-flight overshoot is `max(0, U - 1)` units (the worst case starts at one unit
+below the cap). For a cache-cold minibatch phase, `U` is at most
+`P*N*minibatch_size`; for full validation it is at most
+`S*dataset.val_size`, where `S` is the number selected (`S <= P*N`, `S <= 1`
+for `best_improvement`, and `S <= proposal_top_k` for `top_k`). Cache hits,
+deduplicated parent evaluations, skipped perfect parents, and failed mutations
+reduce actual use. Increasing P or N therefore consumes a fixed evaluation
+budget faster even though the cap remains a dispatch boundary rather than a
+hard cancellation boundary.
+
+Existing `num_parallel_proposals = K` configurations are already the **K×1**
+case: omitting N is identical to setting `mutations_per_parent = 1`, including
+for `num_parallel_proposals = "auto"`. There is no legacy scheduler or
+deprecation path. Existing state files still load; missing batch metadata is
+interpreted as K×1. New state checkpoints persist the batch shape, task slots,
+selection mode, and terminal/cleanup status so an interrupted batch can
+reconcile every reserved ID and worktree without double charging or inserting a
+candidate twice. Changing P, N, or selection semantics while resuming an
+in-progress run is rejected; start a clean run when changing those settings.
 
 ### Docker Sandboxing
 
@@ -541,11 +615,11 @@ rejected before evaluation.
 
 ### Per-example Parallelism Inside the Evaluator
 
-HELIX parallelises across proposals (`num_parallel_proposals`) and across
-worktrees, but each evaluator invocation sees one candidate and a batch of
-instance ids as a single subprocess. Per-example parallelism — evaluating
-multiple ids of one candidate concurrently — lives **inside the evaluator**,
-not inside HELIX's engine.
+HELIX parallelises across the P×N proposal tasks and their isolated
+worktrees, up to the global `max_workers` cap. Each evaluator invocation still
+sees one candidate and a batch of instance ids as a single subprocess.
+Per-example parallelism — evaluating multiple ids of one candidate concurrently
+— lives **inside the evaluator**, not inside HELIX's engine.
 
 This is a deliberate architectural split: GEPA's reference adapter fans out
 per-example in-process, which is essentially free; HELIX's subprocess model

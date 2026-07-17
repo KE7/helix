@@ -11,6 +11,7 @@ HELIX project.
 - Single-Task GEPA Mode
 - Multi-Objective Migration
 - Config Translation Example
+- Parallel Proposal Migration
 - Candidate Representation
 - Dataset ID Strategy
 - Docker Sandbox In Migration
@@ -53,7 +54,9 @@ Migration usually means:
 | `side_info` / trajectory | per-example `side_info` in `HELIX_RESULT` |
 | `side_info["scores"]` objective metrics | reserved `side_info["scores"]` dict |
 | `reflection_minibatch_size` | `[evolution].minibatch_size` |
-| `num_parallel_proposals` | `[evolution].num_parallel_proposals` |
+| `num_parallel_proposals` | `[evolution].num_parallel_proposals` (P parent-selection attempts) |
+| mutations per selected parent | `[evolution].mutations_per_parent` (N, default 1) |
+| proposal result selection | `[evolution].proposal_selection`, optional `proposal_top_k` |
 | `max_metric_calls` | `[evolution].max_evaluations` |
 | `frontier_type` | `[evolution].frontier_type` |
 | `cache_evaluation` | `[evolution].cache_evaluation` |
@@ -193,6 +196,7 @@ HELIX:
 [evolution]
 max_evaluations = 500
 num_parallel_proposals = 4
+mutations_per_parent = 1
 max_workers = 32
 frontier_type = "hybrid"
 cache_evaluation = true
@@ -200,6 +204,71 @@ minibatch_size = 3
 merge_enabled = true
 max_merge_invocations = 5
 ```
+
+The explicit `mutations_per_parent = 1` above shows the compatibility mapping:
+an existing four-proposal GEPA/HELIX configuration remains four independent
+parent-selection attempts and one mutation per selected slot.
+
+## Parallel Proposal Migration
+
+HELIX treats `num_parallel_proposals` as P and `mutations_per_parent` as N. A
+step plans at most `P*N` children:
+
+| Desired shape | HELIX configuration | Parent selection |
+|---|---|---|
+| 1×1 | `P=1, N=1` | Once |
+| 1×N, same-parent siblings | `P=1, N=N` | Once; N independent minibatches/mutations |
+| P×1, independent attempts | `P=P, N=1` | P times |
+| P×N | `P=P, N=N` | P times; N children per selected slot |
+
+Selection is with replacement, as in GEPA's P-slot sampling contract. The same
+frontier candidate may therefore appear in multiple parent groups. Do not
+deduplicate those groups in a migrated evaluator or downstream analysis:
+parent-major task order and the group index are part of lineage and resume
+state.
+
+For a two-by-three batch that keeps only the best two improvements:
+
+```toml
+[evolution]
+num_parallel_proposals = 2
+mutations_per_parent = 3
+proposal_selection = "top_k"
+proposal_top_k = 2
+max_workers = 4
+```
+
+The other selection modes are `all_improvements` (default) and
+`best_improvement`. `top_k` requires `proposal_top_k` in `1..P*N`; the field is
+rejected for the other modes.
+
+`max_workers` is a global candidate-worker cap, not an API batch size. HELIX
+runs bounded concurrent coding CLI processes and evaluator subprocesses, each
+against a candidate-specific worktree. In Docker mode that means at most
+`max_workers` active short-lived proposal/evaluator containers for the current
+phase, plus the optional long-lived evaluator sidecar. Tasks beyond the cap
+queue. This differs from systems whose adapter sends one literal batched model
+request. Optional `[sandbox]` `cpus`, `memory`, and `pids_limit` limits apply to
+each short-lived container, so peak configured CPU/memory demand can scale by
+`max_workers`; the sidecar remains a separate long-lived container.
+
+Parallel width accelerates metric-call consumption. Cached examples cost zero;
+each completed uncached example costs one, and an uncached no-example call costs
+one. HELIX admits work at an evaluation-phase boundary and accounts every
+completed in-flight sibling. For an admitted phase containing `U` uncached
+units, the hard worst-case overshoot is `max(0, U - 1)`. Without cache hits, a
+P×N minibatch phase has `U <= P*N*minibatch_size`; selected full validation
+has `U <= S*val_size`, with S bounded by the selection mode. Plan
+`max_evaluations` for that boundary behavior instead of assuming running work
+will be cancelled exactly at the cap.
+
+Omitting `mutations_per_parent` is exactly N=1, so every existing K-wide config
+and `"auto"` resolution remains K×1. Legacy state files without batch records
+load as K×1. New checkpoints record every planned slot and cleanup result;
+resume reconciles all reserved IDs/worktrees and does not recharge completed
+work or reinsert selected candidates. P, N, and proposal-selection settings are
+resume semantics: do not change them inside an existing run directory. Start a
+new run when changing batch shape or selection policy.
 
 ## Candidate Representation
 

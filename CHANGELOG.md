@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- P×N proposal batches: `num_parallel_proposals` selects P parent slots and
+  the new `mutations_per_parent` creates N independently sampled children per
+  slot. Parent selection is with replacement and task application remains
+  deterministic regardless of worker completion order.
+- Proposal selection modes `all_improvements`, `best_improvement`, and `top_k`
+  (with validated `proposal_top_k`) after ordered child minibatch evaluation.
+- Batch-aware state, trace, cleanup, and resume metadata for every planned
+  proposal slot, including interrupted-batch reconciliation.
+- Opt-in, manually dispatched Docker integration CI on Python 3.11 and 3.12 for
+  the daemon-backed parallel sandbox smoke test.
+
+### Changed
+- Existing `num_parallel_proposals = K` configurations now use the unified K×1
+  scheduler. Omitting `mutations_per_parent` remains behaviorally equivalent to
+  N=1; the default remains 1×1.
+- Candidate evaluation and multi-turn coding-agent work use bounded concurrent
+  batches rather than literal model-API batching. One global `max_workers` cap
+  bounds active candidate work and Docker containers within each phase.
+- Evaluation caps are checked before batch dispatch. All completed in-flight
+  uncached work is charged, so an admitted phase with U uncached metric units
+  can overshoot by at most `max(0, U - 1)` units.
+
 ## [0.2.2] - 2026-05-13
 
 ### Added
