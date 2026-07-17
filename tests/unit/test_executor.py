@@ -580,6 +580,79 @@ class TestRunEvaluatorBatchFailures:
         assert results[1].result is None
         assert results[1].num_actual_evaluations == 0
 
+    def test_fatal_leader_returns_successful_and_deduplicated_siblings(self):
+        """A later successful leader drains before an earlier fatal slot returns."""
+        fatal = PromptArtifactCollisionError("collision")
+        successful_leader_finished = threading.Event()
+        completion_order: list[str] = []
+
+        def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
+            if item.candidate.id == "fatal":
+                assert successful_leader_finished.wait(timeout=2)
+                completion_order.append("fatal")
+                raise fatal
+            completion_order.append(item.candidate.id)
+            successful_leader_finished.set()
+            return make_eval_result(item.candidate.id), 3
+
+        items = [
+            make_item("fatal", "/fatal", content_key="F", instance_ids=("1",)),
+            make_item("good", "/good", content_key="K", instance_ids=("1",)),
+            make_item("good-dup", "/dup", content_key="K", instance_ids=("1",)),
+        ]
+        results = run_evaluator_batch(items, runner, max_workers=3)
+
+        assert completion_order == ["good", "fatal"]
+        assert results[0].error is fatal
+        assert results[1].result is not None
+        assert results[1].num_actual_evaluations == 3
+        assert results[2].result is not None
+        assert results[2].deduplicated_from == 1
+        assert results[2].num_actual_evaluations == 0
+        assert sum(result.num_actual_evaluations for result in results) == 3
+
+    def test_original_fatal_precedes_later_negative_count_and_keeps_partials(self):
+        fatal = PromptArtifactCollisionError("primary fatal")
+        negative_finished = threading.Event()
+        good_finished = threading.Event()
+        completion_order: list[str] = []
+
+        def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
+            candidate_id = item.candidate.id
+            if candidate_id == "fatal":
+                assert good_finished.wait(timeout=2)
+                completion_order.append(candidate_id)
+                raise fatal
+            if candidate_id == "negative":
+                completion_order.append(candidate_id)
+                negative_finished.set()
+                return make_eval_result(candidate_id), -7
+            assert candidate_id == "good"
+            assert negative_finished.wait(timeout=2)
+            completion_order.append(candidate_id)
+            good_finished.set()
+            return make_eval_result(candidate_id), 3
+
+        items = [
+            make_item("fatal", "/fatal", content_key="F", instance_ids=("1",)),
+            make_item("negative", "/negative", content_key="N", instance_ids=("1",)),
+            make_item("good", "/good", content_key="K", instance_ids=("1",)),
+            make_item("good-dup", "/dup", content_key="K", instance_ids=("1",)),
+        ]
+        results = run_evaluator_batch(items, runner, max_workers=4)
+
+        assert completion_order == ["negative", "good", "fatal"]
+        assert results[0].error is fatal
+        assert isinstance(results[1].error, ValueError)
+        assert "negative num_actual_evaluations" in str(results[1].error)
+        assert results[1].num_actual_evaluations == 0
+        assert results[2].result is not None
+        assert results[2].num_actual_evaluations == 3
+        assert results[3].result is not None
+        assert results[3].deduplicated_from == 2
+        assert results[3].num_actual_evaluations == 0
+        assert sum(result.num_actual_evaluations for result in results) == 3
+
     @pytest.mark.parametrize(
         "exc",
         [
@@ -589,13 +662,19 @@ class TestRunEvaluatorBatchFailures:
             SystemExit(1),
         ],
     )
-    def test_fatal_exceptions_propagate(self, exc: BaseException):
+    def test_fatal_exceptions_are_returned_for_phase_owned_reraise(
+        self, exc: BaseException
+    ):
         def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
             raise exc
 
         items = [make_item("a", "/wa", instance_ids=("1",))]
-        with pytest.raises(type(exc)):
-            run_evaluator_batch(items, runner, max_workers=1)
+        results = run_evaluator_batch(items, runner, max_workers=1)
+
+        assert len(results) == 1
+        assert results[0].result is None
+        assert results[0].error is exc
+        assert results[0].num_actual_evaluations == 0
 
 
 class TestRunEvaluatorBatchCardinalityAndConfig:
@@ -629,10 +708,14 @@ class TestRunEvaluatorBatchCardinalityAndConfig:
         def runner(item: EvalBatchItem) -> tuple[EvalResult, int]:
             return make_eval_result(item.candidate.id), -1
 
-        with pytest.raises(ValueError, match="negative num_actual_evaluations"):
-            run_evaluator_batch(
-                [make_item("a", "/wa", instance_ids=("1",))], runner, max_workers=1
-            )
+        results = run_evaluator_batch(
+            [make_item("a", "/wa", instance_ids=("1",))], runner, max_workers=1
+        )
+        assert len(results) == 1
+        assert results[0].result is None
+        assert isinstance(results[0].error, ValueError)
+        assert "negative num_actual_evaluations" in str(results[0].error)
+        assert results[0].num_actual_evaluations == 0
 
     def test_result_positional_to_input_with_dedup_and_failure(self):
         class Boom(Exception):

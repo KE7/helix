@@ -9,7 +9,7 @@ import tempfile
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -22,7 +22,7 @@ from helix.population import FrontierType
 # had no schema version on ``state.json``; subsequent bumps mark explicit
 # JSON-native schema additions (the unversioned predecessor is treated as
 # v0; ``load_state`` migrates by default-filling missing fields).
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 
 @dataclass
@@ -206,6 +206,12 @@ class ProposalBatchRecord:
     tasks: list[ProposalTaskRecord]
     phase: ProposalBatchPhase = "planned"
     budget_before_dispatch: int = 0
+    # Full resource snapshot paired with ``budget_before_dispatch``.  The
+    # integer field remains for schema/backward compatibility and the explicit
+    # overshoot contract; this snapshot lets resume conserve token/cost usage
+    # when a process stopped after a worker returned but before its task row was
+    # terminalized.
+    budget_state_before_dispatch: BudgetState | None = None
     max_evaluations: int = 0
     max_in_flight_evaluations: int = 0
     maximum_overshoot: int = 0
@@ -260,6 +266,11 @@ class ProposalBatchRecord:
             "n": self.n,
             "phase": self.phase,
             "budget_before_dispatch": self.budget_before_dispatch,
+            "budget_state_before_dispatch": (
+                asdict(self.budget_state_before_dispatch)
+                if self.budget_state_before_dispatch is not None
+                else None
+            ),
             "max_evaluations": self.max_evaluations,
             "max_in_flight_evaluations": self.max_in_flight_evaluations,
             "maximum_overshoot": self.maximum_overshoot,
@@ -281,6 +292,10 @@ class ProposalBatchRecord:
                 raise ValueError("Proposal batch task must be an object")
             tasks.append(ProposalTaskRecord.from_dict(raw_task))
         raw_after = data.get("budget_after_apply")
+        raw_budget_before = data.get("budget_state_before_dispatch")
+        budget_before_mapping = (
+            raw_budget_before if isinstance(raw_budget_before, Mapping) else None
+        )
         batch = cls(
             batch_id=str(data["batch_id"]),
             generation=int(data["generation"]),
@@ -289,6 +304,11 @@ class ProposalBatchRecord:
             tasks=tasks,
             phase=cast(ProposalBatchPhase, raw_phase),
             budget_before_dispatch=int(data.get("budget_before_dispatch", 0)),
+            budget_state_before_dispatch=(
+                _budget_state_from_mapping(budget_before_mapping)
+                if budget_before_mapping is not None
+                else None
+            ),
             max_evaluations=int(data.get("max_evaluations", 0)),
             max_in_flight_evaluations=int(
                 data.get("max_in_flight_evaluations", 0)
@@ -665,6 +685,7 @@ def checkpoint_batch_before_dispatch(
 
     batch.phase = "dispatched"
     batch.budget_before_dispatch = decision.evaluations_before
+    batch.budget_state_before_dispatch = replace(state.budget)
     batch.max_evaluations = decision.max_evaluations
     batch.max_in_flight_evaluations = decision.max_in_flight_evaluations
     batch.maximum_overshoot = decision.maximum_overshoot
@@ -833,7 +854,22 @@ def checkpoint_batch_after_apply(
             f"Cannot complete proposal batch {batch_id!r}; unaccounted slots: "
             + ", ".join(str(index) for index in unaccounted)
         )
-    actual_in_flight = state.budget.evaluations - batch.budget_before_dispatch
+    batch_index = next(
+        index
+        for index, candidate_batch in enumerate(state.proposal_batches)
+        if candidate_batch is batch
+    )
+    next_batch = (
+        state.proposal_batches[batch_index + 1]
+        if batch_index + 1 < len(state.proposal_batches)
+        else None
+    )
+    evaluations_at_end = (
+        next_batch.budget_before_dispatch
+        if next_batch is not None
+        else state.budget.evaluations
+    )
+    actual_in_flight = evaluations_at_end - batch.budget_before_dispatch
     if actual_in_flight < 0:
         raise ValueError(
             f"Proposal batch {batch_id!r} ended below its pre-dispatch budget"
@@ -858,15 +894,15 @@ def checkpoint_batch_after_apply(
     actual_overshoot = (
         0
         if batch.max_evaluations <= 0
-        else max(0, state.budget.evaluations - batch.max_evaluations)
+        else max(0, evaluations_at_end - batch.max_evaluations)
     )
     if actual_overshoot > batch.maximum_overshoot:
         raise ValueError(
             f"Proposal batch {batch_id!r} overshot by {actual_overshoot}; "
             f"checkpoint bound is {batch.maximum_overshoot}"
-        )
+    )
     batch.phase = "complete"
-    batch.budget_after_apply = state.budget.evaluations
+    batch.budget_after_apply = evaluations_at_end
     _persist_checkpoint(state, base_dir, saver)
     return batch
 
@@ -883,13 +919,24 @@ def reconcile_interrupted_batches(
 
     Applied/frontier children are preserved and marked applied, preventing a
     second frontier insertion.  Every other planned worktree is passed to the
-    caller's Git-aware cleanup callback.  Budget facts are never changed:
-    already-accounted completed work remains charged, while unaccounted work
-    is not guessed at.  All child IDs remain reserved through the ledger.
+    caller's Git-aware cleanup callback.  The authoritative global budget is
+    never changed; once cleanup succeeds, any durable delta not yet present in
+    a task row is attributed deterministically so the batch ledger conserves
+    that total.  All child IDs remain reserved through the ledger.
     """
     reconciled: list[BatchReconciliation] = []
     changed = False
-    for batch in state.proposal_batches:
+    for batch_index, batch in enumerate(state.proposal_batches):
+        next_batch = (
+            state.proposal_batches[batch_index + 1]
+            if batch_index + 1 < len(state.proposal_batches)
+            else None
+        )
+        evaluations_at_end = (
+            next_batch.budget_before_dispatch
+            if next_batch is not None
+            else state.budget.evaluations
+        )
         retry_failed_cleanup = any(
             task.cleanup == "failed" and not task.applied for task in batch.tasks
         )
@@ -905,8 +952,6 @@ def reconcile_interrupted_batches(
         failed_ids: list[str] = []
         for task in batch.tasks:
             reserved_ids.append(task.child_id)
-            if task.budget_accounted:
-                accounted_ids.append(task.child_id)
 
             if task.applied or task.status == "applied" or task.child_id in state.frontier:
                 task.status = "applied"
@@ -943,8 +988,89 @@ def reconcile_interrupted_batches(
                 task.selection = "not_applicable"
             task.applied = False
 
+        # Cleanup is a resume barrier: only after every non-applied worktree is
+        # gone may an interrupted batch be declared fully accounted.  A worker
+        # can finish and update the global durable budget immediately before a
+        # crash prevents its task row from being terminalized.  Preserve that
+        # authoritative global total by assigning the unjournaled residual to
+        # the first unaccounted slot in stable task order, then close every
+        # remaining zero-residual slot.  This never charges the global budget a
+        # second time and is idempotent on later resumes.
+        if not failed_ids:
+            unaccounted = [task for task in batch.tasks if not task.budget_accounted]
+            if unaccounted:
+                before = batch.budget_state_before_dispatch
+                has_full_budget_baseline = before is not None
+                if before is None:
+                    # Legacy ledgers only persisted the evaluation baseline.
+                    # Conserve that field exactly without guessing historical
+                    # token/cost baselines that were never recorded.
+                    before = BudgetState(evaluations=batch.budget_before_dispatch)
+
+                durable_end = (
+                    next_batch.budget_state_before_dispatch
+                    if next_batch is not None
+                    else state.budget
+                )
+                has_full_budget_end = durable_end is not None
+                if durable_end is None:
+                    # A legacy next batch still gives us an exact evaluation
+                    # boundary, but never persisted token/cost counters.
+                    assert next_batch is not None
+                    durable_end = BudgetState(
+                        evaluations=next_batch.budget_before_dispatch
+                    )
+
+                fields = (
+                    (
+                        "evaluations",
+                        "input_tokens",
+                        "output_tokens",
+                        "cached_input_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens",
+                        "reasoning_tokens",
+                        "cost_usd",
+                    )
+                    if has_full_budget_baseline and has_full_budget_end
+                    else ("evaluations",)
+                )
+                residuals: dict[str, int | float] = {}
+                for field_name in fields:
+                    durable_total = getattr(durable_end, field_name)
+                    baseline = getattr(before, field_name)
+                    recorded = sum(
+                        getattr(task.budget_charge, field_name)
+                        for task in batch.tasks
+                    )
+                    residual = durable_total - baseline - recorded
+                    tolerance = 1e-12 if field_name == "cost_usd" else 0
+                    if residual < -tolerance:
+                        raise ValueError(
+                            f"Interrupted proposal batch {batch.batch_id!r} "
+                            f"over-recorded {field_name}: baseline={baseline}, "
+                            f"recorded={recorded}, durable_total={durable_total}"
+                        )
+                    residuals[field_name] = 0 if abs(residual) <= tolerance else residual
+
+                residual_task = unaccounted[0]
+                for field_name, residual in residuals.items():
+                    setattr(
+                        residual_task.budget_charge,
+                        field_name,
+                        getattr(residual_task.budget_charge, field_name) + residual,
+                    )
+                for task in unaccounted:
+                    task.budget_accounted = True
+                    suffix = "resume cleanup and accounting reconciled"
+                    task.detail = f"{task.detail}; {suffix}" if task.detail else suffix
+
+        accounted_ids.extend(
+            task.child_id for task in batch.tasks if task.budget_accounted
+        )
+
         batch.phase = "interrupted"
-        batch.budget_after_apply = state.budget.evaluations
+        batch.budget_after_apply = evaluations_at_end
         reconciled.append(
             BatchReconciliation(
                 batch_id=batch.batch_id,

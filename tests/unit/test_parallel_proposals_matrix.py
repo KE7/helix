@@ -703,14 +703,14 @@ def test_omitted_n_matches_explicit_n1_for_existing_k_by_1_runs(
             "before_worker_dispatch",
             set(),
             {"g1-s1", "g1-s2"},
-            set(),
+            {"g1-s1", "g1-s2"},
             id="before-dispatch",
         ),
         pytest.param(
             "mid_worker",
             {"g1-s1"},
             {"g1-s2"},
-            set(),
+            {"g1-s1", "g1-s2"},
             id="mid-worker",
         ),
         pytest.param(

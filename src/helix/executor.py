@@ -24,12 +24,7 @@ from helix.asi import (
 from helix.eval_cache import EvaluationBatchKey
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
-from helix.exceptions import (
-    EvaluatorError,
-    PromptArtifactCollisionError,
-    ResumeIncompatibleError,
-    format_error_context,
-)
+from helix.exceptions import EvaluatorError, format_error_context
 from helix.parsers import get_parser
 from helix.sandbox import (
     current_evaluator_sidecar_runtime,
@@ -551,8 +546,9 @@ class EvalBatchResult:
     Exactly one of ``result``/``error`` is populated:
 
     * ``result`` set, ``error`` None  → the evaluator succeeded.
-    * ``result`` None, ``error`` set  → an ordinary per-item failure; the rest
-      of the batch is unaffected.
+    * ``result`` None, ``error`` set  → a per-item failure or fatal contract /
+      integrity error; the rest of the drained batch remains positional so its
+      successful work can be accounted before the owner re-raises.
 
     ``num_actual_evaluations`` is the evaluation-budget charge for this slot:
     the leader carries the runner's reported count, and every deduplicated
@@ -563,7 +559,7 @@ class EvalBatchResult:
 
     item: EvalBatchItem
     result: EvalResult | None
-    error: Exception | None
+    error: BaseException | None
     num_actual_evaluations: int
     deduplicated_from: int | None
 
@@ -574,17 +570,6 @@ class EvalBatchResult:
 # cache hits; tests inject fakes to exercise ordering/dedup/failure/fatal paths
 # without a subprocess.
 BatchEvaluatorRunner: TypeAlias = Callable[[EvalBatchItem], tuple[EvalResult, int]]
-
-# Fatal exceptions abort the whole batch instead of being captured as an
-# ordinary per-item failure: a prompt-artifact collision or resume-semantics
-# mismatch invalidates the entire run, and Ctrl-C / interpreter exit must not
-# be swallowed by a worker thread.
-_FATAL_BATCH_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    PromptArtifactCollisionError,
-    ResumeIncompatibleError,
-    KeyboardInterrupt,
-    SystemExit,
-)
 
 # Per-worktree serialization: two leaders that share a worktree path must not
 # run concurrently, because the evaluator handoff writes ``helix_batch.json``
@@ -678,11 +663,11 @@ def run_evaluator_batch(
     Raises:
         The pre-dispatch config error (e.g. :class:`EvaluatorError` from command
         validation, or ``ValueError`` for ``max_workers < 1``) before any work
-        starts; and any fatal runner exception
-        (:class:`PromptArtifactCollisionError`, :class:`ResumeIncompatibleError`,
-        ``KeyboardInterrupt``, ``SystemExit``) that aborts the whole batch.
-        Ordinary runner exceptions are captured per-item in
-        :attr:`EvalBatchResult.error` and do not propagate.
+        starts.  Once dispatch begins, every runner exception -- including
+        ``BaseException`` subclasses and run-fatal integrity failures -- is
+        returned in its positional :attr:`EvalBatchResult.error` slot after the
+        executor drains.  The owning evolution phase can then account successful
+        siblings and clean resources before re-raising the fatal error.
     """
     # --- Pre-dispatch config validation (propagates; never per-item) --------
     if max_workers < 1:
@@ -713,7 +698,7 @@ def run_evaluator_batch(
     # --- Dispatch leaders concurrently, serialized per worktree ------------
     # leader input index -> (result, count) on success, or a captured error.
     leader_outcome: dict[int, tuple[EvalResult, int]] = {}
-    leader_error: dict[int, Exception] = {}
+    leader_error: dict[int, BaseException] = {}
 
     def _run_leader(index: int) -> None:
         item = items[index]
@@ -725,26 +710,28 @@ def run_evaluator_batch(
         futures = {
             pool.submit(_run_leader, idx): idx for idx in leader_indices
         }
-        # ``future.result()`` re-raises whatever the worker raised.  Fatal
-        # exceptions propagate out of this loop (and the ``with`` block waits
-        # for in-flight leaders to drain); ordinary failures are captured.
+        # ``future.result()`` re-raises whatever the worker raised.  Capture all
+        # post-dispatch failures as positional outcomes; returning partial
+        # successes is what lets the caller conserve accounting before it
+        # decides whether a fatal slot must terminate the run.
         for future, idx in futures.items():
             try:
                 future.result()
-            except _FATAL_BATCH_EXCEPTIONS:
-                raise
-            except Exception as exc:  # ordinary per-item failure
+            except BaseException as exc:
                 leader_error[idx] = exc
 
     # --- Validate runner-reported counts before assembly -------------------
-    # A negative evaluation charge is a runner-contract violation; reject the
-    # whole batch rather than emit a nonsensical budget number.
-    for idx, (_res, count) in leader_outcome.items():
+    # A negative evaluation charge is a fatal runner-contract violation, but it
+    # is still a *positional* post-dispatch outcome.  Convert only that leader
+    # to an error so successful siblings survive assembly and the owning phase
+    # can account them before re-raising the ValueError.
+    for idx, (_res, count) in list(leader_outcome.items()):
         if count < 0:
-            raise ValueError(
+            leader_error[idx] = ValueError(
                 "runner reported negative num_actual_evaluations "
                 f"({count}) for item index {idx}"
             )
+            del leader_outcome[idx]
 
     # --- Assemble results in input order ------------------------------------
     for i, item in enumerate(items):

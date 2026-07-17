@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import random as _random
-import shutil
 import shlex
 import subprocess
 import tempfile
@@ -110,7 +109,7 @@ from helix.worktree import (
     remove_worktree,
     snapshot_candidate,
 )
-from helix.evaluator_manifest import (  # noqa: E402  (after helix.worktree intentionally)
+from helix.evaluator_manifest import (  # noqa: E402, F401  (re-exported intentionally)
     # 14 moved symbols — re-exported for backward compatibility and internal use
     _collect_protected_evaluator_paths,
     _copy_protected_path,
@@ -136,6 +135,12 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 _R = TypeVar("_R")
+
+# Deterministic crash-injection seam for state durability tests.  Production
+# leaves this as ``None``.  Tests may install a hook that raises after a chosen
+# completed state+cache save; because it runs only after persistence, the next
+# process observes the exact crash barrier it is meant to reconcile.
+_DURABLE_BARRIER_HOOK: Callable[[str, EvolutionState], None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -782,6 +787,53 @@ def _scheduler_checkpoint(
             if key in runtime_state:
                 checkpoint[key] = runtime_state[key]
     return checkpoint
+
+
+def _checkpoint_scheduler_and_batch_plan(
+    state: EvolutionState,
+    base_dir: Path,
+    *,
+    scheduler_state: Mapping[str, Any],
+    batch: ProposalBatchRecord,
+    max_evaluations: int,
+    max_in_flight_evaluations: int,
+    saver: Callable[[EvolutionState], None],
+) -> ProposalBatchRecord:
+    """Persist scheduler position and its complete P*N plan in one write.
+
+    Task sampling advances the shared RNG, minibatch sampler, proposal counter,
+    and reserved child-id counter together.  Persisting that advanced scheduler
+    before its plan creates an impossible resume image: the next process has
+    consumed randomness and IDs but has no durable record of what they selected.
+    Both state APIs therefore validate/mutate in memory with a deferred saver,
+    followed by exactly one cache-aware durable save containing both facts.
+    """
+
+    previous_scheduler_state = state.scheduler_state
+
+    def _defer_persistence(_state: EvolutionState) -> None:
+        return
+
+    checkpoint_scheduler_state(
+        state,
+        base_dir,
+        scheduler_state,
+        saver=_defer_persistence,
+    )
+    try:
+        persisted_batch = checkpoint_batch_before_dispatch(
+            state,
+            base_dir,
+            batch,
+            max_evaluations=max_evaluations,
+            max_in_flight_evaluations=max_in_flight_evaluations,
+            saver=_defer_persistence,
+        )
+    except BaseException:
+        state.scheduler_state = previous_scheduler_state
+        raise
+    saver(state)
+    return persisted_batch
 
 
 def _restore_scheduler_checkpoint(
@@ -1800,6 +1852,8 @@ def _run_evolution_impl(
         elif not _eval_cache_cleared[0]:
             clear_eval_cache(project_root)
             _eval_cache_cleared[0] = True
+        if _DURABLE_BARRIER_HOOK is not None:
+            _DURABLE_BARRIER_HOOK("state_and_eval_cache", s)
 
     def _sync_frontier_state() -> None:
         assert state is not None
@@ -1928,13 +1982,33 @@ def _run_evolution_impl(
                 "config while keeping the existing frontier and history."
             )
         recovered_acceptances = _recover_selected_evaluated_tasks()
-        reconcile_interrupted_batches(
+        reconciliations = reconcile_interrupted_batches(
             state,
             project_root,
             worktrees_dir=worktrees_dir,
             cleanup_worktree=_cleanup_interrupted_batch_worktree,
             saver=_save_state,
         )
+        cleanup_failures = [
+            candidate_id
+            for reconciliation in reconciliations
+            for candidate_id in reconciliation.cleanup_failed_child_ids
+        ]
+        if cleanup_failures:
+            # Do not reconstruct the frontier or dispatch a later generation
+            # while an interrupted candidate worktree remains live.  The
+            # reconciliation above is already durable and deliberately keeps
+            # cleanup="failed", so a repeated resume retries the same barrier.
+            raise HelixError(
+                "Cannot resume until interrupted proposal cleanup succeeds for: "
+                + ", ".join(cleanup_failures),
+                operation="resume",
+                phase="cleanup_interrupted_proposal_batch",
+                suggestion=(
+                    "Fix the reported worktree cleanup error, then run "
+                    "`helix resume` again; the retry is idempotent."
+                ),
+            )
         for interrupted_batch in state.proposal_batches:
             if interrupted_batch.phase == "complete":
                 continue
@@ -2603,16 +2677,6 @@ def _run_evolution_impl(
                 + (len(full_val_example_ids) if full_val_example_ids else 1)
                 for task in tasks
             )
-            checkpoint_scheduler_state(
-                state,
-                project_root,
-                _scheduler_checkpoint(
-                    rng,
-                    batch_sampler,
-                    state.scheduler_state,
-                ),
-                saver=_save_state,
-            )
             proposal_batch = ProposalBatchRecord(
                 batch_id=batch_id,
                 generation=gen,
@@ -2632,10 +2696,15 @@ def _run_evolution_impl(
                     for task in tasks
                 ],
             )
-            checkpoint_batch_before_dispatch(
+            _checkpoint_scheduler_and_batch_plan(
                 state,
                 project_root,
-                proposal_batch,
+                scheduler_state=_scheduler_checkpoint(
+                    rng,
+                    batch_sampler,
+                    state.scheduler_state,
+                ),
+                batch=proposal_batch,
                 max_evaluations=config.evolution.max_evaluations,
                 max_in_flight_evaluations=max_in_flight_evaluations,
                 saver=_save_state,
@@ -3153,6 +3222,20 @@ def _run_evolution_impl(
                 if pre_cleanup is not None:
                     cleaned_child_ids.add(child.id)
                     cleanup_results[child.id] = pre_cleanup
+                # ``mutate`` completed successfully enough to return a child,
+                # so its backend usage is real even when the child then fails
+                # the reserved-ID contract or the tamper detector raises.  The
+                # stable reserved slot owns this charge; validation must never
+                # erase already-consumed LLM work.
+                if child.usage:
+                    live.update(usage=child.usage)
+                    budget_api.charge_llm_usage(
+                        state,
+                        child.usage,
+                        candidate_id=task.reserved_child_id,
+                        source="mutation",
+                    )
+                    _add_usage_charge(task, child.usage)
                 if post_error is not None:
                     proposal_outcome = FailedProposal(
                         task=task,
@@ -3183,15 +3266,6 @@ def _run_evolution_impl(
                     continue
 
                 mutation_children.append(child)
-                if child.usage:
-                    live.update(usage=child.usage)
-                    budget_api.charge_llm_usage(
-                        state,
-                        child.usage,
-                        candidate_id=child.id,
-                        source="mutation",
-                    )
-                    _add_usage_charge(task, child.usage)
 
                 if tampered_paths:
                     proposal_outcome = TamperedProposal(

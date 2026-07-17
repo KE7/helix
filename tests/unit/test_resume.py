@@ -195,6 +195,7 @@ def test_interrupted_batch_reconciles_every_planned_id_without_rewind(
         budget_charge=BudgetState(evaluations=4),
         budget_accounted=True,
     )
+    state.budget.evaluations += 4
     checkpoint_batch_task(
         state,
         tmp_path,
@@ -227,7 +228,7 @@ def test_interrupted_batch_reconciles_every_planned_id_without_rewind(
     report = reports[0]
     assert report.reserved_child_ids == tuple(task.child_id for task in batch.tasks)
     assert report.applied_child_ids == (batch.tasks[0].child_id,)
-    assert report.accounted_child_ids == (batch.tasks[1].child_id,)
+    assert report.accounted_child_ids == tuple(task.child_id for task in batch.tasks)
     assert report.cleaned_child_ids == (
         batch.tasks[1].child_id,
         batch.tasks[2].child_id,
@@ -238,7 +239,7 @@ def test_interrupted_batch_reconciles_every_planned_id_without_rewind(
     assert batch.phase == "interrupted"
     assert all(task.is_terminal() for task in batch.tasks)
     assert state.mutation_counter == 13
-    assert state.budget.evaluations == 15
+    assert state.budget.evaluations == 19
     assert set(task.child_id for task in batch.tasks) <= reserved_candidate_ids(state)
     assert saver_calls == 1
 
