@@ -12,10 +12,12 @@ import shlex
 import subprocess
 import tempfile
 import threading
-import traceback
-from dataclasses import replace
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Generic, TypeVar
 
 
 from helix.batch_sampler import (
@@ -52,7 +54,7 @@ from helix.exceptions import (
     ResumeIncompatibleError,
     print_helix_error,
 )
-from helix.executor import run_evaluator
+from helix.executor import EvalBatchItem, run_evaluator, run_evaluator_batch
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
@@ -62,6 +64,19 @@ from helix.population import (
     EvalResult,
     HelixResult,
     ParetoFrontier,
+)
+from helix.proposals import (
+    AllImprovements,
+    BestImprovement,
+    EvaluatedProposal,
+    FailedProposal,
+    ProposalTask,
+    PxNSampling,
+    SelectedProposal,
+    SkippedProposal,
+    TamperedProposal,
+    TerminalProposalOutcome,
+    TopKImprovements,
 )
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
@@ -104,6 +119,9 @@ from helix.evaluator_manifest import (  # noqa: E402  (after helix.worktree inte
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +564,188 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
         print_warning(
             f"Could not remove worktree for {label} {candidate.id}: {exc}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _OrderedCallResult(Generic[_R]):
+    """One position in a drained bounded call batch.
+
+    Worker exceptions are values here, rather than control flow, so callers can
+    account and clean every completed slot in sampled order before deciding
+    whether a fatal exception must terminate the run.
+    """
+
+    value: _R | None = None
+    error: BaseException | None = None
+
+
+def _run_bounded_ordered(
+    items: Sequence[_T],
+    worker: Callable[[_T], _R],
+    *,
+    max_workers: int,
+) -> list[_OrderedCallResult[_R]]:
+    """Run ``items`` with a worker bound and restore exact input order.
+
+    The pool is always drained.  In particular, this helper never raises a
+    worker's exception; fatal-vs-slot classification belongs
+    to the phase that owns the corresponding resources and can therefore clean
+    siblings before re-raising.  Run-fatal ``BaseException`` subclasses are
+    retained only until the pool has drained, then immediately re-raised.
+    """
+
+    if not items:
+        return []
+
+    ordered: list[_OrderedCallResult[_R] | None] = [None] * len(items)
+
+    def _capture(item: _T) -> _OrderedCallResult[_R]:
+        try:
+            return _OrderedCallResult(value=worker(item))
+        except BaseException as exc:
+            return _OrderedCallResult(error=exc)
+
+    # Preserve the historical 1x1 path: it does not pay for a thread-pool hop.
+    if len(items) == 1:
+        return [_capture(items[0])]
+
+    worker_count = min(len(items), max_workers)
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures: dict[Future[_OrderedCallResult[_R]], int] = {
+            pool.submit(_capture, item): index for index, item in enumerate(items)
+        }
+        for future in as_completed(futures):
+            ordered[futures[future]] = future.result()
+
+    # Every submitted future completed before the executor context exited.
+    assert all(result is not None for result in ordered)
+    return [result for result in ordered if result is not None]
+
+
+def _is_fatal_proposal_exception(exc: BaseException) -> bool:
+    """Return whether a proposal-stage error invalidates the whole run.
+
+    Evaluator, mutation, rate-limit, container-runtime, and worktree-operation
+    failures are isolated to their slot.  Prompt-artifact collisions are a
+    security boundary, while ``ValueError``/``TypeError`` represent invalid
+    runtime configuration or a broken scheduler contract; those must not be
+    converted into a smaller proposal batch.
+    """
+
+    return not isinstance(exc, Exception) or isinstance(
+        exc,
+        (
+            PromptArtifactCollisionError,
+            ResumeIncompatibleError,
+            ValueError,
+            TypeError,
+        ),
+    )
+
+
+def _plan_pxn_tasks(
+    *,
+    p: int,
+    n: int,
+    frontier: ParetoFrontier,
+    batch_sampler: BatchSampler[str] | None,
+    train_loader: "HelixDataLoader | _RangeDataLoader | None",
+    state: EvolutionState,
+    generation: int,
+) -> list[ProposalTask]:
+    """Select P parents and reserve their N child slots in parent-major order.
+
+    ``state.i`` advances once per task.  At a parent-group boundary it advances
+    immediately before parent selection, which preserves the existing P=K,
+    N=1 RNG/event order; within a group it advances before each additional
+    sibling minibatch.  Parent selection remains with replacement.
+    """
+
+    selected_groups = 0
+    sampled_tasks = 0
+    advanced_for_current_task = False
+    selected_parent: Candidate | None = None
+
+    def _select_parent() -> Candidate:
+        nonlocal selected_groups, advanced_for_current_task, selected_parent
+        if selected_groups > 0:
+            budget_api.advance_proposal_counter(
+                state, source="parallel_proposal"
+            )
+            advanced_for_current_task = True
+        selected_parent = frontier.select_parent()
+        selected_groups += 1
+        return selected_parent
+
+    def _sample_minibatch() -> Sequence[str] | None:
+        nonlocal sampled_tasks, advanced_for_current_task
+        if sampled_tasks > 0 and not advanced_for_current_task:
+            budget_api.advance_proposal_counter(
+                state, source="parallel_proposal"
+            )
+        advanced_for_current_task = False
+        sampled_tasks += 1
+        if batch_sampler is None or train_loader is None:
+            return None
+        ids = batch_sampler.next_minibatch_ids(train_loader, state)
+        assert selected_parent is not None
+        TRACE.emit(
+            EventType.SAMPLE_MINIBATCH,
+            candidate_id=selected_parent.id,
+            example_ids=list(ids),
+            split="train",
+        )
+        return ids
+
+    def _reserve_child_id() -> str:
+        return budget_api.next_mutation_id(state, generation)
+
+    tasks = PxNSampling(p, n).sample_tasks(
+        select_parent=_select_parent,
+        sample_minibatch=_sample_minibatch,
+        reserve_child_id=_reserve_child_id,
+    )
+    assert selected_groups == p
+    assert sampled_tasks == p * n
+    assert len(tasks) == p * n
+    return tasks
+
+
+def _proposal_terminal_record(
+    task: ProposalTask,
+    *,
+    status: str,
+    reason: str,
+    child_id: str | None = None,
+) -> dict[str, Any]:
+    """Return the stable on-disk terminal record for one proposal slot."""
+
+    return {
+        "batch_index": task.batch_index,
+        "parent_group_index": task.parent_group_index,
+        "mutation_index": task.mutation_index,
+        "parent_id": task.parent_candidate.id,
+        "child_id": child_id or task.reserved_child_id,
+        "minibatch_ids": (
+            list(task.minibatch_ids) if task.minibatch_ids is not None else None
+        ),
+        "status": status,
+        "reason": reason,
+    }
+
+
+def _save_proposal_terminal_records(
+    base_dir: Path,
+    *,
+    generation: int,
+    tasks: Sequence[ProposalTask],
+    records: dict[int, dict[str, Any]],
+) -> None:
+    """Persist currently terminal proposal slots in planned task order."""
+
+    ordered = [records[task.batch_index] for task in tasks if task.batch_index in records]
+    batch_dir = base_dir / "proposal_batches"
+    _atomic_write_json(batch_dir / f"g{generation}.json", ordered)
 
 
 def _check_evaluator_script_exists(evaluator_command: str, project_root: Path) -> None:
@@ -2117,778 +2317,1095 @@ def _run_evolution_impl(
                 # GEPA engine.py:739-740 always clears before reflective mutation.
                 last_iter_found_new_program = False
             # =============================================================
-            # Phase 2: Mutation (only when merge did not fire above)
+            # Phase 2: Unified P*N mutation scheduler
             #
-            # GEPA parity (M6): when num_parallel_proposals > 1, run the
-            # GEPA 3-step parallel pipeline (engine.py:381-452):
-            #   1. Sample N parent contexts sequentially
-            #   2. Execute N mutations in ThreadPoolExecutor
-            #   3. Process acceptances SEQUENTIALLY
-            # When num_parallel_proposals == 1, behaviour is identical to
-            # the original single-mutation path.
+            # One iteration plans P parent groups with N sibling mutations per
+            # group.  Each dispatched phase is drained completely; budget
+            # exhaustion only prevents the next phase/batch.
             # =============================================================
 
-            # GEPA parity: ``num_parallel_proposals="auto"`` is resolved to an int
-            # in ``EvolutionConfig.model_post_init`` (mirrors GEPA
-            # optimize_anything._resolve_num_parallel_proposals).  The assert both
-            # documents that invariant and narrows the type for mypy --strict.
-            _np_raw = config.evolution.num_parallel_proposals
-            assert isinstance(_np_raw, int)
-            n_proposals = _np_raw
-
-            # -- Atomic-worker result types (sealed union via class hierarchy) --
-            # Using a proper class hierarchy instead of a single ``kind``-discriminated
-            # dataclass gives mypy --strict the isinstance narrowing it needs to verify
-            # field accesses in the acceptance loop without any asserts or TypeGuards.
-            from dataclasses import dataclass as _dc  # noqa: PLC0415
-
-            # Convenience alias for the pre-sample context tuple shared by all result types.
-            _ProposalCtx = tuple[Candidate, EvalResult | None, list[str] | None, str]
-
-            @_dc
-            class _SkippedResult:
-                """skip-perfect fired — LLM was not called."""
-                presample_ctx: _ProposalCtx
-                parent_eval_result: EvalResult
-                parent_n_uncached: int = 0
-
-            @_dc
-            class _LLMFailedResult:
-                """mutate() raised or returned None; parent_eval_result may be None."""
-                presample_ctx: _ProposalCtx
-                parent_eval_result: EvalResult | None
-                parent_n_uncached: int = 0
-
-            @_dc
-            class _TamperedResult:
-                """LLM produced a child that modified protected evaluator files."""
-                presample_ctx: _ProposalCtx
-                parent_eval_result: EvalResult
-                child: Candidate
-                tampered_paths: list[str]
-                parent_n_uncached: int = 0
-                child_usage: UsageStats | None = None
-
-            @_dc
-            class _SuccessResult:
-                """All steps completed; child_eval_result may be None (no-minibatch path)."""
-                presample_ctx: _ProposalCtx
-                parent_eval_result: EvalResult
-                child: Candidate
-                child_eval_result: EvalResult | None = None
-                parent_n_uncached: int = 0
-                child_n_uncached: int = 0
-                child_usage: UsageStats | None = None
-
-            _ProposalResult = (
-                _SkippedResult | _LLMFailedResult | _TamperedResult | _SuccessResult
+            raw_p = config.evolution.num_parallel_proposals
+            assert isinstance(raw_p, int)
+            p = raw_p
+            n = config.evolution.mutations_per_parent
+            tasks = _plan_pxn_tasks(
+                p=p,
+                n=n,
+                frontier=frontier,
+                batch_sampler=batch_sampler,
+                train_loader=train_loader,
+                state=state,
+                generation=gen,
             )
-
-
-            # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
-            # GEPA core/engine.py:381-452 has three stages:
-            #   1. ``prepare_proposal`` — sequential (parent select + minibatch sample)
-            #   2. ``execute_proposal`` — PARALLEL (parent eval + reflect + child eval)
-            #   3. ``apply_proposal_output`` — sequential (budget + cache write)
-            # HELIX §1a mirrors GEPA's prepare_proposal: candidate selection,
-            # ``state.i`` bump, and minibatch sampling live here.  The parent
-            # minibatch EVAL is moved out to §1b (see below) to parallelise it,
-            # matching GEPA reflective_mutation.py:268 (``eval_curr = adapter.evaluate(...)``)
-            # running inside the thread pool submitted at engine.py:422-426.
-            #
-            # Entries are tuples ``(parent, parent_frontier_result, subsample_ids, new_id)``.
-            presample_contexts: list[
-                tuple[Candidate, EvalResult | None, list[str] | None, str]
-            ] = []
-            _budget_break = False
-
-            for _p_idx in range(n_proposals):
-                if budget_api.budget_exhausted(state, config):
-                    _budget_break = True
-                    break
-
-                # GEPA parity (engine.py:405-410): the FIRST proposal reuses
-                # the iteration slot already created at the top of the outer
-                # loop (state.i bumped at evolution.py loop head).  For each
-                # ADDITIONAL parallel proposal, GEPA bumps state.i again so
-                # the per-proposal counter advances independently of the
-                # outer loop.  The bump is unconditional (no minibatch gate).
-                if _p_idx > 0:
-                    budget_api.advance_proposal_counter(
-                        state, source="parallel_proposal"
-                    )
-
-                parent = frontier.select_parent()
-                parent_frontier_result = frontier._results.get(parent.id)
-
-                # --- Minibatch gate pre-sampling (GEPA §5.1) --------------
-                # Sample subsample ids.  ``state.i`` is now advanced at the
-                # top of the run loop (GEPA engine.py:649) — and again per
-                # extra parallel proposal above (engine.py:408) — so the
-                # sampler always sees the right counter.  The parent-on-
-                # minibatch eval is deferred to §1b so that N parent evals
-                # overlap under ``num_parallel_proposals > 1``
-                # (audit-mutation §C4 MODERATE E).
-                subsample_ids: list[str] | None = None
-                if (
-                    use_minibatch_gate
-                    and train_loader is not None
-                    and batch_sampler is not None
-                ):
-                    subsample_ids = batch_sampler.next_minibatch_ids(
-                        train_loader, state
-                    )
-                    TRACE.emit(
-                        EventType.SAMPLE_MINIBATCH,
-                        candidate_id=parent.id,
-                        example_ids=list(subsample_ids),
-                        split="train",
-                    )
-
-                # g (gen) and s (mutation_counter) advance together under n_proposals=1
-                # / merge_disabled defaults. They diverge when n_proposals > 1 (multiple
-                # s-slots per gen) or when merge fires (gen advances without incrementing s).
-                new_id = budget_api.next_mutation_id(state, gen)
-                presample_contexts.append(
-                    (parent, parent_frontier_result, subsample_ids, new_id)
-                )
-
-
-            # -- _run_proposal_worker closure (atomic per-proposal worker) --
-            # Replaces the old _eval_parent + _do_mutate split closures with a
-            # single atomic worker that runs the full GEPA execute_proposal shape:
-            #   parent_eval (reflective_mutation.py:268) →
-            #   skip-perfect (reflective_mutation.py:308) →
-            #   LLM mutate (reflective_mutation.py:369) →
-            #   tamper check → child_eval (reflective_mutation.py:420).
-            # Budget charging is deferred to the sequential acceptance loop
-            # (apply_proposal_output parity).
-            def _run_proposal_worker(
-                pre_ctx: _ProposalCtx,
-            ) -> "_SkippedResult | _LLMFailedResult | _TamperedResult | _SuccessResult":
-                """Atomic proposal worker — GEPA execute_proposal shape.
-
-                Runs inside a ThreadPoolExecutor. All parameters except pre_ctx
-                are captured from the enclosing scope (config, project_root,
-                frontier, minibatch_cache, eval_cache, worktrees_dir,
-                evaluator_manifest, use_minibatch_gate, gen).
-
-                Thread-safety:
-                - Reads frontier (read-only during worker phase) ✓
-                - Reads config, project_root (immutable) ✓
-                - Writes to per-candidate worktree only (no shared mutable state) ✓
-                - Budget mutations DEFERRED to sequential acceptance loop ✓
-                """
-                _parent, _pfr, _sub_ids, _new_id = pre_ctx
-
-                # ---- Step W1: Parent eval ----
-                # Minibatch path: run parent eval fresh (bypass cache, GEPA parity).
-                # No-minibatch path: run train eval (single-task mode, n=1 in practice).
-                _parent_eval: "EvalResult | None" = None
-                _parent_n_uncached: int = 0
-                if _sub_ids is not None:
-                    try:
-                        # Bypass minibatch_cache — mirrors GEPA reflective_mutation.py:268
-                        _mb, _n = _cached_evaluate_batch(
-                            _parent,
-                            list(_sub_ids),
-                            None,  # bypass minibatch_cache
-                            config,
-                            "train",
-                            project_root,
-                        )
-                        _mb.candidate_id = _parent.id
-                        _parent_eval = _mb
-                        _parent_n_uncached = _n
-                    except Exception as _pe_exc:
-                        print_warning(
-                            f"Parent eval for proposal {_new_id} "
-                            f"(parent: {_parent.id}, gen {gen}) failed: "
-                            f"{type(_pe_exc).__name__}: {_pe_exc} — proposal slot skipped."
-                        )
-                        return _LLMFailedResult(
-                            presample_ctx=pre_ctx,
-                            parent_eval_result=None,
-                            parent_n_uncached=0,
-                        )
-                else:
-                    # No-minibatch path: run train eval inside worker.
-                    # eval_cache is a shared dict; safe for n=1 (single-task mode).
-                    set_phase(HelixPhase.TRAIN_EVALUATION)
-                    _train_result, _train_cached = _cached_eval(
-                        _parent, config, "train", eval_cache
-                    )
-                    _train_result.candidate_id = _parent.id
-                    _parent_eval = _train_result
-                    # Encode was_cached as n_uncached (0 = was_cached, 1 = not cached)
-                    _parent_n_uncached = 0 if _train_cached else 1
-
-                # ---- Step W2: Build eval_for_mutate ----
-                assert _parent_eval is not None
-                _eval_for_mutate = _parent_eval
-
-                # ---- Step W3: Skip-perfect check ----
-                # GEPA parity (reflective_mutation.py:308-327): fires on both
-                # minibatch and no-minibatch paths.  _parent_eval is always set
-                # at this point (minibatch eval OR train eval above).
-                if (
-                    config.evolution.perfect_score_threshold is not None
-                    and _parent_eval is not None
-                    and all(
-                        s >= config.evolution.perfect_score_threshold
-                        for s in _parent_eval.instance_scores.values()
-                    )
-                ):
-                    return _SkippedResult(
-                        presample_ctx=pre_ctx,
-                        parent_eval_result=_parent_eval,
-                        parent_n_uncached=_parent_n_uncached,
-                    )
-
-                # ---- Step W4: LLM mutation ----
-                try:
-                    _child = mutate(
-                        parent=_parent,
-                        eval_result=_eval_for_mutate,
-                        new_id=_new_id,
-                        config=config,
-                        base_dir=worktrees_dir,
-                        background=config.agent.background,
-                        prepare_worktree=lambda cand: (
-                            _refresh_and_snapshot_protected_evaluator_files(
-                                cand, config, project_root
-                            )
-                        ),
-                    )
-                except Exception as _mu_exc:
-                    # Re-raise PromptArtifactCollisionError (fatal for the whole run)
-                    if isinstance(_mu_exc, PromptArtifactCollisionError):
-                        raise
-                    # For HelixError / RateLimitError and other errors, log and return llm_failed
-                    if isinstance(_mu_exc, HelixError):
-                        _mu_exc.operation = (
-                            _mu_exc.operation or f"parallel mutate {_new_id}"
-                        )
-                        print_helix_error(_mu_exc)
-                        if isinstance(_mu_exc, RateLimitError):
-                            logger.error(
-                                "Mutation %s (parent: %s, gen %d) failed after all retries: "
-                                "%s: %s — proposal slot skipped.",
-                                _new_id, _parent.id, gen,
-                                type(_mu_exc).__name__, _mu_exc,
-                            )
-                            print_error(
-                                f"Mutation [bold]{_new_id}[/bold] hit rate limit after all "
-                                f"retries — proposal slot skipped. "
-                                f"Run [cyan]helix resume[/cyan] when rate limits clear."
-                            )
-                    else:
-                        print_error(
-                            f"Parallel mutation {_new_id} (parent: {_parent.id}, gen {gen}) "
-                            f"failed with exception:\n{traceback.format_exc()}"
-                        )
-                    return _LLMFailedResult(
-                        presample_ctx=pre_ctx,
-                        parent_eval_result=_parent_eval,
-                        parent_n_uncached=_parent_n_uncached,
-                    )
-
-                if _child is None:
-                    return _LLMFailedResult(
-                        presample_ctx=pre_ctx,
-                        parent_eval_result=_parent_eval,
-                        parent_n_uncached=_parent_n_uncached,
-                    )
-
-                # ---- Step W5: Tamper check ----
-                _tampered = _detect_evaluator_tamper(
-                    _child, evaluator_manifest, config, project_root
-                )
-                if _tampered:
-                    return _TamperedResult(
-                        presample_ctx=pre_ctx,
-                        parent_eval_result=_parent_eval,
-                        child=_child,
-                        tampered_paths=_tampered,
-                        parent_n_uncached=_parent_n_uncached,
-                        child_usage=_child.usage if _child.usage else None,
-                    )
-
-                # ---- Step W6: Child minibatch eval ----
-                _child_eval: "EvalResult | None" = None
-                _child_n_uncached: int = 0
-                if _sub_ids is not None:
-                    _ce, _cn = _cached_evaluate_batch(
-                        _child,
-                        list(_sub_ids),
-                        minibatch_cache,  # use cache for child (unlike parent bypass)
-                        config,
-                        "train",
-                        project_root,
-                    )
-                    _ce.candidate_id = _child.id
-                    _child_eval = _ce
-                    _child_n_uncached = _cn
-
-                return _SuccessResult(
-                    presample_ctx=pre_ctx,
-                    parent_eval_result=_parent_eval,
-                    child=_child,
-                    child_eval_result=_child_eval,
-                    parent_n_uncached=_parent_n_uncached,
-                    child_n_uncached=_child_n_uncached,
-                    child_usage=_child.usage if _child.usage else None,
-                )
-
-            # ---- Step 2: Atomic workers (GEPA execute_proposal parity) ----
-            # One worker per proposal slot; all run in a single ThreadPoolExecutor.
-            # Each worker executes: parent_eval → skip-perfect → LLM → tamper → child_eval.
-            # Budget charging is deferred to the sequential acceptance loop (Step 3).
-            # GEPA parity: engine.py:422-443, reflective_mutation.py:268,308,369,420.
-
-            if _budget_break and not presample_contexts:
-                print_warning("Budget exhausted mid-generation -- stopping.")
-                _save_state(state)
-                break
-
-            set_phase(HelixPhase.MUTATION)
-
-            worker_results: "list[_ProposalResult | None]" = [None] * len(presample_contexts)
-
-            from concurrent.futures import (  # noqa: PLC0415
-                ThreadPoolExecutor as _TPE,
-                as_completed as _ac,
-            )
-
-            _w_max = min(len(presample_contexts), config.evolution.max_workers)
-            if len(presample_contexts) > 1:
-                with _TPE(max_workers=_w_max) as _wpool:
-                    _wfutures = {
-                        _wpool.submit(_run_proposal_worker, _pctx): _widx
-                        for _widx, _pctx in enumerate(presample_contexts)
-                    }
-                    for _wf in _ac(_wfutures):
-                        _widx = _wfutures[_wf]
-                        try:
-                            worker_results[_widx] = _wf.result()
-                        except PromptArtifactCollisionError:
-                            raise
-                        except Exception as _wexc:
-                            _wpctx = presample_contexts[_widx]
-                            _wid = _wpctx[3]
-                            _wparent = _wpctx[0]
-                            print_warning(
-                                f"Worker for proposal {_wid} "
-                                f"(parent: {_wparent.id}, gen {gen}) "
-                                f"raised an unexpected exception: "
-                                f"{type(_wexc).__name__}: {_wexc} — proposal slot dropped."
-                            )
-                            worker_results[_widx] = _LLMFailedResult(
-                                presample_ctx=_wpctx,
-                                parent_eval_result=None,
-                                parent_n_uncached=0,
-                            )
-            else:
-                # n=1 sequential path (or single surviving slot after budget break)
-                for _idx, _pctx in enumerate(presample_contexts):
-                    worker_results[_idx] = _run_proposal_worker(_pctx)
-
-            # ---- Step 3: Sequential acceptance (sampling order, GEPA engine.py:446-452) ----
-            # Read worker results in pre-sampling order.  Budget mutations, lineage
-            # writes, and frontier updates are all sequential here
-            # (GEPA apply_proposal_output parity, engine.py:449-452).
-
-            _last_eval_result: "EvalResult | None" = None
-            _gen_skip_records: "list[dict[str, Any]]" = []
+            parent_frontier_results = {
+                task.batch_index: frontier.get_result(task.parent_candidate.id)
+                for task in tasks
+            }
+            terminal_records: dict[int, dict[str, Any]] = {}
+            proposal_outcomes: dict[int, TerminalProposalOutcome] = {}
+            cleaned_child_ids: set[str] = set()
+            parent_ready: dict[int, tuple[EvalResult, int]] = {}
+            child_ready: dict[
+                int, tuple[ProposalTask, EvalResult, int, Candidate]
+            ] = {}
+            evaluated_proposals: list[EvaluatedProposal] = []
+            selected_proposals: list[SelectedProposal] = []
+            _gen_skip_records: list[dict[str, Any]] = []
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
+            _last_eval_result: EvalResult | None = None
+            _budget_break = False
 
-            for _p_idx, wr in enumerate(worker_results):
-                if wr is None:
-                    continue
+            def _record_terminal(
+                task: ProposalTask,
+                *,
+                status: str,
+                reason: str,
+                child: Candidate | None = None,
+            ) -> None:
+                terminal_records[task.batch_index] = _proposal_terminal_record(
+                    task,
+                    status=status,
+                    reason=reason,
+                    child_id=child.id if child is not None else None,
+                )
 
-                _parent, _parent_frontier_result, _subsample_ids, _new_id = wr.presample_ctx
+            def _discard_child(child: Candidate, *, label: str) -> None:
+                if child.id in cleaned_child_ids:
+                    return
+                cleaned_child_ids.add(child.id)
+                _safe_remove_worktree(child, label=label)
+                candidates.pop(child.id, None)
 
-                # --- Handle non-success kinds (isinstance narrows wr for mypy) ---
+            # ---- Parent scoring batch ------------------------------------
+            # The same parent can appear in more than one group, and siblings
+            # intentionally carry independently sampled minibatches.
+            parent_batch_items = [
+                EvalBatchItem(
+                    candidate=task.parent_candidate,
+                    content_key=_candidate_content_key(task.parent_candidate),
+                    split="train",
+                    instance_ids=task.minibatch_ids,
+                )
+                for task in tasks
+            ]
 
-                if isinstance(wr, _LLMFailedResult):
-                    # Charge parent eval budget if the parent eval ran successfully
-                    # before the LLM call failed.
-                    if _subsample_ids is not None and wr.parent_eval_result is not None:
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.parent_n_uncached,
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_minibatch",
-                        )
-                    print_warning(f"Mutation {_new_id} failed -- skipping.")
-                    continue
+            def _evaluate_parent(item: EvalBatchItem) -> tuple[EvalResult, int]:
+                if item.instance_ids is not None:
+                    result, n_uncached = _cached_evaluate_batch(
+                        item.candidate,
+                        list(item.instance_ids),
+                        None,  # parent reflection evals are always fresh
+                        config,
+                        item.split,
+                        project_root,
+                    )
+                else:
+                    result, was_cached = _cached_eval(
+                        item.candidate,
+                        config,
+                        item.split,
+                        eval_cache,
+                    )
+                    n_uncached = 0 if was_cached else 1
+                result.candidate_id = item.candidate.id
+                return result, n_uncached
 
-                if isinstance(wr, _SkippedResult):
-                    # Charge parent eval budget (both paths)
-                    if _subsample_ids is not None:
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.parent_n_uncached,
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_minibatch",
-                        )
+            set_phase(HelixPhase.TRAIN_EVALUATION)
+            try:
+                parent_calls = run_evaluator_batch(
+                    parent_batch_items,
+                    _evaluate_parent,
+                    max_workers=config.evolution.max_workers,
+                    config=config,
+                )
+            except BaseException:
+                for task in tasks:
+                    _record_terminal(
+                        task,
+                        status="fatal",
+                        reason="fatal_parent_eval_batch",
+                    )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise
+            fatal_parent_error: BaseException | None = None
+            for task, call in zip(tasks, parent_calls):
+                if call.error is not None:
+                    outcome = FailedProposal(
+                        task=task,
+                        stage="parent_evaluation",
+                        message=f"{type(call.error).__name__}: {call.error}",
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status=(
+                            "fatal"
+                            if _is_fatal_proposal_exception(call.error)
+                            else "failed"
+                        ),
+                        reason="parent_eval",
+                    )
+                    if _is_fatal_proposal_exception(call.error):
+                        fatal_parent_error = fatal_parent_error or call.error
                     else:
-                        # No-minibatch path: worker ran _cached_eval; n_uncached encodes was_cached
-                        budget_api.charge_evaluation(
-                            state,
-                            was_cached=(wr.parent_n_uncached == 0),
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_train_no_minibatch",
+                        print_warning(
+                            f"Parent eval for proposal {task.reserved_child_id} "
+                            f"(parent: {task.parent_candidate.id}, gen {gen}) "
+                            f"failed: {type(call.error).__name__}: {call.error} "
+                            "— proposal slot skipped."
                         )
-                    _gen_skip_records.append({
-                        "generation": gen,
-                        "parent_id": _parent.id,
-                        "reason": "perfect_subsample",
-                        "parent_eval": wr.parent_eval_result.to_dict(),
-                    })
-                    print_info(
-                        f"Iteration {gen}: all subsample scores perfect for parent "
-                        f"{_parent.id}; skipping proposal "
-                        f"(GEPA reflective_mutation.py:308-327)."
-                    )
-                    semantic_skip_count += 1
-                    if _subsample_ids is not None:
-                        retryable_semantic_skip_count += 1
                     continue
 
-                if isinstance(wr, _TamperedResult):
-                    # Charge parent eval budget
-                    if _subsample_ids is not None:
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.parent_n_uncached,
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_minibatch",
-                        )
-                    # Charge LLM usage (mutation happened, even if rejected)
-                    if wr.child_usage:
-                        live.update(usage=wr.child_usage)
-                        budget_api.charge_llm_usage(
-                            state, wr.child_usage,
-                            candidate_id=wr.child.id, source="mutation",
-                        )
-                    print_warning(
-                        f"Mutation {wr.child.id} touched protected evaluator files "
-                        f"({', '.join(wr.tampered_paths)}) -- rejecting."
-                    )
-                    _safe_remove_worktree(wr.child, label="tamper-rejected mutation candidate")
-                    continue
-
-                # wr is _SuccessResult at this point (mypy narrows via isinstance exhaustion)
-                child = wr.child
-
-                # Charge parent eval budget
-                if _subsample_ids is not None and wr.parent_eval_result is not None:
-                    # Minibatch path
+                assert call.result is not None
+                parent_result = call.result
+                parent_result.candidate_id = task.parent_candidate.id
+                parent_n_uncached = call.num_actual_evaluations
+                if task.minibatch_ids is not None:
                     budget_api.charge_evaluation(
                         state,
-                        num_actual_examples=wr.parent_n_uncached,
-                        candidate_id=_parent.id,
+                        num_actual_examples=parent_n_uncached,
+                        candidate_id=task.parent_candidate.id,
                         split="train",
                         source="parent_minibatch",
                     )
                 else:
-                    # No-minibatch path: parent_n_uncached encodes was_cached
-                    # (0 = was cached, 1 = not cached)
                     budget_api.charge_evaluation(
                         state,
-                        was_cached=(wr.parent_n_uncached == 0),
-                        candidate_id=_parent.id,
+                        was_cached=(parent_n_uncached == 0),
+                        candidate_id=task.parent_candidate.id,
                         split="train",
                         source="parent_train_no_minibatch",
                     )
 
-                if budget_api.budget_exhausted(state, config):
-                    print_warning("Budget exhausted mid-generation -- stopping.")
-                    _save_state(state)
-                    _budget_break = True
-                    break
+                if (
+                    config.evolution.perfect_score_threshold is not None
+                    and all(
+                        score >= config.evolution.perfect_score_threshold
+                        for score in parent_result.instance_scores.values()
+                    )
+                ):
+                    outcome = SkippedProposal(
+                        task=task,
+                        parent_eval_result=parent_result,
+                        reason="perfect_subsample",
+                        parent_n_uncached=parent_n_uncached,
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status="skipped",
+                        reason="perfect_subsample",
+                    )
+                    _gen_skip_records.append(
+                        {
+                            "generation": gen,
+                            "parent_id": task.parent_candidate.id,
+                            "reason": "perfect_subsample",
+                            "parent_eval": parent_result.to_dict(),
+                            "batch_index": task.batch_index,
+                            "parent_group_index": task.parent_group_index,
+                            "mutation_index": task.mutation_index,
+                            "child_id": task.reserved_child_id,
+                        }
+                    )
+                    print_info(
+                        f"Iteration {gen}: all subsample scores perfect for parent "
+                        f"{task.parent_candidate.id}; skipping proposal "
+                        f"{task.reserved_child_id}."
+                    )
+                    semantic_skip_count += 1
+                    if task.minibatch_ids is not None:
+                        retryable_semantic_skip_count += 1
+                    continue
 
-                # Charge LLM usage
-                if wr.child_usage:
-                    live.update(usage=wr.child_usage)
-                    budget_api.charge_llm_usage(
-                        state, wr.child_usage, candidate_id=child.id, source="mutation",
+                parent_ready[task.batch_index] = (
+                    parent_result,
+                    parent_n_uncached,
+                )
+
+            _save_proposal_terminal_records(
+                base_dir,
+                generation=gen,
+                tasks=tasks,
+                records=terminal_records,
+            )
+            if fatal_parent_error is not None:
+                for task in tasks:
+                    if task.batch_index in parent_ready:
+                        _record_terminal(
+                            task,
+                            status="discarded",
+                            reason="fatal_sibling_parent_eval",
+                        )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise fatal_parent_error
+
+            # Parent work was fully drained and charged.  If it crossed the
+            # cap, do not start mutation workers; mark every otherwise-ready
+            # slot terminal and stop after persistence.
+            if budget_api.budget_exhausted(state, config):
+                _budget_break = True
+                for task in tasks:
+                    if task.batch_index not in parent_ready:
+                        continue
+                    outcome = FailedProposal(
+                        task=task,
+                        stage="mutation",
+                        message="evaluation budget exhausted before mutation dispatch",
+                        parent_eval_result=parent_ready[task.batch_index][0],
+                        parent_n_uncached=parent_ready[task.batch_index][1],
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status="not_dispatched",
+                        reason="budget_exhausted_before_mutation",
                     )
 
+            # ---- Isolated mutation batch ---------------------------------
+            mutation_inputs = [
+                (task, parent_ready[task.batch_index])
+                for task in tasks
+                if task.batch_index in parent_ready and not _budget_break
+            ]
+
+            def _mutate_one(
+                item: tuple[ProposalTask, tuple[EvalResult, int]],
+            ) -> tuple[Candidate | None, tuple[str, ...]]:
+                task, (parent_result, _) = item
+                child = mutate(
+                    parent=task.parent_candidate,
+                    eval_result=parent_result,
+                    new_id=task.reserved_child_id,
+                    config=config,
+                    base_dir=worktrees_dir,
+                    background=config.agent.background,
+                    prepare_worktree=lambda candidate: (
+                        _refresh_and_snapshot_protected_evaluator_files(
+                            candidate, config, project_root
+                        )
+                    ),
+                )
+                if child is None:
+                    return None, ()
+                if child.id != task.reserved_child_id:
+                    raise ValueError(
+                        "Mutation returned candidate id "
+                        f"{child.id!r}; reserved id was "
+                        f"{task.reserved_child_id!r}."
+                    )
+                tampered = tuple(
+                    _detect_evaluator_tamper(
+                        child,
+                        evaluator_manifest,
+                        config,
+                        project_root,
+                    )
+                )
+                return child, tampered
+
+            set_phase(HelixPhase.MUTATION)
+            mutation_calls = _run_bounded_ordered(
+                mutation_inputs,
+                _mutate_one,
+                max_workers=config.evolution.max_workers,
+            )
+            fatal_mutation_error: BaseException | None = None
+            mutation_children: list[Candidate] = []
+            for item, call in zip(mutation_inputs, mutation_calls):
+                task, (parent_result, parent_n_uncached) = item
+                if call.error is not None:
+                    outcome = FailedProposal(
+                        task=task,
+                        stage="mutation",
+                        message=f"{type(call.error).__name__}: {call.error}",
+                        parent_eval_result=parent_result,
+                        parent_n_uncached=parent_n_uncached,
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status=(
+                            "fatal"
+                            if _is_fatal_proposal_exception(call.error)
+                            else "failed"
+                        ),
+                        reason="mutation",
+                    )
+                    if _is_fatal_proposal_exception(call.error):
+                        fatal_mutation_error = fatal_mutation_error or call.error
+                    elif isinstance(call.error, HelixError):
+                        call.error.operation = (
+                            call.error.operation
+                            or f"parallel mutate {task.reserved_child_id}"
+                        )
+                        print_helix_error(call.error)
+                    else:
+                        print_error(
+                            f"Parallel mutation {task.reserved_child_id} "
+                            f"(parent: {task.parent_candidate.id}, gen {gen}) "
+                            f"failed: {type(call.error).__name__}: {call.error}"
+                        )
+                    continue
+
+                assert call.value is not None
+                child, tampered_paths = call.value
+                if child is None:
+                    outcome = FailedProposal(
+                        task=task,
+                        stage="mutation",
+                        message="mutation returned no candidate",
+                        parent_eval_result=parent_result,
+                        parent_n_uncached=parent_n_uncached,
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status="failed",
+                        reason="mutation_returned_none",
+                    )
+                    continue
+
+                mutation_children.append(child)
+                if child.usage:
+                    live.update(usage=child.usage)
+                    budget_api.charge_llm_usage(
+                        state,
+                        child.usage,
+                        candidate_id=child.id,
+                        source="mutation",
+                    )
+
+                if tampered_paths:
+                    outcome = TamperedProposal(
+                        task=task,
+                        parent_eval_result=parent_result,
+                        child_candidate=child,
+                        tampered_paths=tampered_paths,
+                        parent_n_uncached=parent_n_uncached,
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status="tampered",
+                        reason="protected_evaluator_files",
+                        child=child,
+                    )
+                    print_warning(
+                        f"Mutation {child.id} touched protected evaluator files "
+                        f"({', '.join(tampered_paths)}) — rejecting."
+                    )
+                    _discard_child(
+                        child,
+                        label="tamper-rejected mutation candidate",
+                    )
+                    continue
+
+                child_ready[task.batch_index] = (
+                    task,
+                    parent_result,
+                    parent_n_uncached,
+                    child,
+                )
+
+            # A fatal mutation/setup error ends the run only after every worker
+            # has completed and all sibling worktrees have been removed.
+            if fatal_mutation_error is not None:
+                for child in mutation_children:
+                    _discard_child(
+                        child,
+                        label="sibling of fatal mutation",
+                    )
+                for task, _, _, child in child_ready.values():
+                    _record_terminal(
+                        task,
+                        status="discarded",
+                        reason="fatal_sibling_mutation",
+                        child=child,
+                    )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise fatal_mutation_error
+
+            # Record and snapshot every viable mutation in planned order before
+            # cross-candidate scoring.  This makes content hashes stable for
+            # deduplication and keeps lineage independent of worker completion.
+            for task in tasks:
+                prepared = child_ready.get(task.batch_index)
+                if prepared is None:
+                    continue
+                _, _, _, child = prepared
                 mutations_attempted += 1
                 live.update(mutations_attempted=mutations_attempted)
-
                 candidates[child.id] = child
                 record_entry(
                     lineage_path,
                     LineageEntry(
                         id=child.id,
-                        parent=_parent.id,
-                        parents=[_parent.id],
+                        parent=task.parent_candidate.id,
+                        parents=[task.parent_candidate.id],
                         operation="mutate",
                         generation=gen,
                         files_changed=[],
                     ),
                 )
-                # Save state BEFORE snapshot so that if the commit crashes
-                # (e.g. empty-commit), state is already persisted and resume
-                # can skip re-doing this mutation.
                 _save_state(state)
-                snapshot_candidate(child, f"helix: mutate {child.id}")
+                try:
+                    snapshot_candidate(child, f"helix: mutate {child.id}")
+                except Exception as exc:
+                    outcome = FailedProposal(
+                        task=task,
+                        stage="mutation",
+                        message=f"{type(exc).__name__}: {exc}",
+                        parent_eval_result=prepared[1],
+                        child_candidate=child,
+                        parent_n_uncached=prepared[2],
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status="failed",
+                        reason="snapshot",
+                        child=child,
+                    )
+                    _discard_child(child, label="snapshot-failed candidate")
+                    del child_ready[task.batch_index]
 
-                # --- Gating evaluation ----------------------------------------
-                # Two paths — both gate on GEPA's strict-sum acceptance criterion:
-                # (a) Minibatch gate: child eval already done in worker → use directly.
-                # (b) Legacy no-minibatch: run child eval sequentially here (old behavior).
-                _eval_for_mutate = wr.parent_eval_result  # parent baseline
+            # ---- Child scoring batch -------------------------------------
+            child_inputs = [
+                child_ready[task.batch_index]
+                for task in tasks
+                if task.batch_index in child_ready and not _budget_break
+            ]
 
-                if (
-                    use_minibatch_gate
-                    and _subsample_ids is not None
-                    and wr.parent_eval_result is not None
-                    and wr.child_eval_result is not None
-                ):
-                    # (a) Minibatch path: child eval result already in worker result
-                    gating_result = wr.child_eval_result
-                    _last_eval_result = gating_result
+            child_batch_items = [
+                EvalBatchItem(
+                    candidate=child,
+                    content_key=_candidate_content_key(child),
+                    split="train",
+                    instance_ids=task.minibatch_ids,
+                )
+                for task, _, _, child in child_inputs
+            ]
+
+            def _evaluate_child(item: EvalBatchItem) -> tuple[EvalResult, int]:
+                if item.instance_ids is not None:
+                    result, n_uncached = _cached_evaluate_batch(
+                        item.candidate,
+                        list(item.instance_ids),
+                        minibatch_cache,
+                        config,
+                        item.split,
+                        project_root,
+                    )
+                else:
+                    result, was_cached = _cached_eval(
+                        item.candidate,
+                        config,
+                        item.split,
+                        eval_cache,
+                    )
+                    n_uncached = 0 if was_cached else 1
+                result.candidate_id = item.candidate.id
+                return result, n_uncached
+
+            set_phase(HelixPhase.MUTATION_GATING)
+            try:
+                child_calls = run_evaluator_batch(
+                    child_batch_items,
+                    _evaluate_child,
+                    max_workers=config.evolution.max_workers,
+                    config=config,
+                )
+            except BaseException:
+                for task, _, _, child in child_inputs:
+                    _record_terminal(
+                        task,
+                        status="discarded",
+                        reason="fatal_child_eval_batch",
+                        child=child,
+                    )
+                    _discard_child(
+                        child,
+                        label="fatal child-evaluation batch",
+                    )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise
+            fatal_child_error: BaseException | None = None
+            for item, call in zip(child_inputs, child_calls):
+                task, parent_result, parent_n_uncached, child = item
+                if call.error is not None:
+                    outcome = FailedProposal(
+                        task=task,
+                        stage="child_evaluation",
+                        message=f"{type(call.error).__name__}: {call.error}",
+                        parent_eval_result=parent_result,
+                        child_candidate=child,
+                        parent_n_uncached=parent_n_uncached,
+                    )
+                    proposal_outcomes[task.batch_index] = outcome
+                    _record_terminal(
+                        task,
+                        status=(
+                            "fatal"
+                            if _is_fatal_proposal_exception(call.error)
+                            else "failed"
+                        ),
+                        reason="child_eval",
+                        child=child,
+                    )
+                    if _is_fatal_proposal_exception(call.error):
+                        fatal_child_error = fatal_child_error or call.error
+                    else:
+                        _discard_child(
+                            child,
+                            label="child-evaluation-failed candidate",
+                        )
+                    continue
+
+                assert call.result is not None
+                child_result = call.result
+                child_result.candidate_id = child.id
+                child_n_uncached = call.num_actual_evaluations
+                _last_eval_result = child_result
+                if task.minibatch_ids is not None:
                     budget_api.charge_evaluation(
                         state,
-                        num_actual_examples=wr.child_n_uncached,
+                        num_actual_examples=child_n_uncached,
                         candidate_id=child.id,
                         split="train",
                         source="mutation_minibatch_gate",
                     )
-
-                    if budget_api.budget_exhausted(state, config):
-                        print_warning("Budget exhausted mid-generation -- stopping.")
-                        _save_state(state)
-                        _budget_break = True
-                        break
-
-                    # Apply the configured acceptance criterion on the
-                    # per-instance score vectors (GEPA §5.1).
-                    #
-                    # GEPA parity (adapter.py:154): a missing instance id in the
-                    # parent or child minibatch result is an evaluator bug, not a
-                    # benign zero.  Both vectors must cover every id in
-                    # ``_subsample_ids`` so the acceptance criterion compares like-for-like.
-                    from types import SimpleNamespace as _SN  # noqa: PLC0415
-
-                    assert set(_subsample_ids).issubset(
-                        wr.parent_eval_result.instance_scores
-                    ), (
-                        f"Parent minibatch eval missing ids: "
-                        f"{set(_subsample_ids) - set(wr.parent_eval_result.instance_scores)}"
-                    )
-                    _before = [
-                        float(wr.parent_eval_result.instance_scores[str(eid)])
-                        for eid in _subsample_ids
-                    ]
-                    assert set(_subsample_ids).issubset(
-                        gating_result.instance_scores
-                    ), (
-                        f"Child minibatch eval missing ids: "
-                        f"{set(_subsample_ids) - set(gating_result.instance_scores)}"
-                    )
-                    _after = [
-                        float(gating_result.instance_scores[str(eid)])
-                        for eid in _subsample_ids
-                    ]
-                    _proposal = _SN(
-                        subsample_scores_before=_before,
-                        subsample_scores_after=_after,
-                    )
-                    if not acceptance.should_accept(_proposal):
-                        _save_attempt_result(
-                            base_dir, gating_result,
-                            status="rejected", reason="minibatch_gate",
-                            parent_id=_parent.id, generation=gen,
-                            stage="train_minibatch", example_ids=list(_subsample_ids),
-                        )
-                        TRACE.emit(
-                            EventType.ACCEPT_DECISION, candidate_id=child.id,
-                            decision="reject", example_ids=list(_subsample_ids),
-                            score=float(sum(_after)),
-                        )
-                        print_warning(
-                            f"Minibatch gate: {child.id} rejected "
-                            f"(sum {sum(_after):.4f} vs parent {sum(_before):.4f}) -- removing."
-                        )
-                        _safe_remove_worktree(
-                            child, label="minibatch-gate-rejected candidate"
-                        )
-                        del candidates[child.id]
-                        continue
-                    else:
-                        TRACE.emit(
-                            EventType.ACCEPT_DECISION, candidate_id=child.id,
-                            decision="accept", example_ids=list(_subsample_ids),
-                            score=float(sum(_after)),
-                        )
-
                 else:
-                    # (b) Legacy no-minibatch path: run child eval sequentially
-                    # Single-task/no-example mode still gates on train eval.
-                    # The parent baseline comes from the train eval passed to the mutator.
-                    set_phase(HelixPhase.MUTATION_GATING)
-                    parent_acceptance_result = _eval_for_mutate
-                    gating_result, _gating_cached = _cached_eval(
-                        child, config, "train", eval_cache
-                    )
-                    gating_result.candidate_id = child.id
-                    _last_eval_result = gating_result
-                    # Single-task/no-example mode still charges on train eval.
-                    # GEPA parity (MODERATE D — audit-mutation.md C3):
-                    # same strict-sum acceptance criterion as minibatch path.
                     budget_api.charge_evaluation(
-                        state, was_cached=_gating_cached, candidate_id=child.id,
-                        split="train", source="mutation_train_gate",
+                        state,
+                        was_cached=(child_n_uncached == 0),
+                        candidate_id=child.id,
+                        split="train",
+                        source="mutation_train_gate",
                     )
-                    if budget_api.budget_exhausted(state, config):
-                        print_warning("Budget exhausted mid-generation -- stopping.")
-                        _save_state(state)
-                        _budget_break = True
-                        break
-
-                    from types import SimpleNamespace as _SN  # noqa: PLC0415
-
-                    _legacy_before = list(parent_acceptance_result.instance_scores.values())
-                    _legacy_after = list(gating_result.instance_scores.values())
-                    _legacy_proposal = _SN(
-                        subsample_scores_before=_legacy_before,
-                        subsample_scores_after=_legacy_after,
-                    )
-                    if not acceptance.should_accept(_legacy_proposal):
-                        parent_sum = sum(_legacy_before)
-                        child_sum = sum(_legacy_after)
-                        _save_attempt_result(
-                            base_dir, gating_result,
-                            status="rejected", reason="train_gate",
-                            parent_id=_parent.id, generation=gen,
-                            stage="train", example_ids=None,
-                        )
-                        print_warning(
-                            f"Acceptance: {child.id} does not improve "
-                            f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
-                        )
-                        _safe_remove_worktree(child, label="train-gate-rejected candidate")
-                        del candidates[child.id]
-                        continue
-
-                # --- Staged val gate ------------------------------------------
-                # UNCHANGED from previous architecture — runs sequentially after gating.
-                use_val_stage_gate = _has_example_scores(
-                    _parent_frontier_result, stage_val_example_ids
+                proposal = EvaluatedProposal(
+                    task=task,
+                    parent_eval_result=parent_result,
+                    child_candidate=child,
+                    child_eval_result=child_result,
+                    parent_n_uncached=parent_n_uncached,
+                    child_n_uncached=child_n_uncached,
                 )
-                if stage_val_example_ids and use_val_stage_gate:
-                    set_phase(HelixPhase.VAL_EVALUATION)
-                    stage_result, _n = _cached_evaluate_batch(
-                        child, list(stage_val_example_ids), minibatch_cache,
-                        config, "val", project_root,
-                    )
-                    stage_result.candidate_id = child.id
-                    _last_eval_result = stage_result
-                    budget_api.charge_evaluation(
-                        state, num_actual_examples=_n, candidate_id=child.id,
-                        split="val", source="mutation_val_stage",
-                    )
-                    if budget_api.budget_exhausted(state, config):
-                        print_warning("Budget exhausted mid-generation -- stopping.")
-                        _save_state(state)
-                        _budget_break = True
-                        break
+                proposal_outcomes[task.batch_index] = proposal
+                evaluated_proposals.append(proposal)
 
-                    from types import SimpleNamespace as _SN  # noqa: PLC0415
+            if fatal_child_error is not None:
+                for _, _, _, child in child_inputs:
+                    _discard_child(
+                        child,
+                        label="sibling of fatal child evaluation",
+                    )
+                for proposal in evaluated_proposals:
+                    _record_terminal(
+                        proposal.task,
+                        status="discarded",
+                        reason="fatal_sibling_child_eval",
+                        child=proposal.child_candidate,
+                    )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise fatal_child_error
 
-                    _stage_before = _scores_for_example_ids(
-                        _parent_frontier_result
-                        or EvalResult(
-                            candidate_id="", scores={}, asi={}, instance_scores={}
-                        ),
-                        stage_val_example_ids,
-                    )
-                    _stage_after = _scores_for_example_ids(stage_result, stage_val_example_ids)
-                    _proposal = _SN(
-                        subsample_scores_before=_stage_before,
-                        subsample_scores_after=_stage_after,
-                    )
-                    if not acceptance.should_accept(_proposal):
-                        _save_attempt_result(
-                            base_dir, stage_result,
-                            status="rejected", reason="val_stage",
-                            parent_id=_parent.id, generation=gen,
-                            stage="val_stage", example_ids=list(stage_val_example_ids),
-                        )
-                        TRACE.emit(
-                            EventType.ACCEPT_DECISION, candidate_id=child.id,
-                            decision="reject_stage", example_ids=list(stage_val_example_ids),
-                            score=float(sum(_stage_after)),
-                        )
-                        print_warning(
-                            f"Val stage: {child.id} rejected on first "
-                            f"{len(stage_val_example_ids)} val ids "
-                            f"(sum {sum(_stage_after):.4f} vs parent "
-                            f"{sum(_stage_before):.4f}) -- removing."
-                        )
-                        _safe_remove_worktree(child, label="val-stage-rejected candidate")
-                        del candidates[child.id]
-                        continue
+            # Run the configured selection exactly once over all successfully
+            # evaluated children.  Acceptance is owned by the selector, so a
+            # stateful criterion cannot be accidentally called twice.
+            if config.evolution.proposal_selection == "all_improvements":
+                selector = AllImprovements()
+            elif config.evolution.proposal_selection == "best_improvement":
+                selector = BestImprovement()
+            else:
+                assert config.evolution.proposal_top_k is not None
+                selector = TopKImprovements(config.evolution.proposal_top_k)
+            selected_proposals = selector.select(
+                evaluated_proposals,
+                acceptance,
+            )
+            selected_ids = {
+                selected.proposal.child_candidate.id
+                for selected in selected_proposals
+            }
 
-                    TRACE.emit(
-                        EventType.ACCEPT_DECISION, candidate_id=child.id,
-                        decision="accept_stage", example_ids=list(stage_val_example_ids),
-                        score=float(sum(_stage_after)),
-                    )
-                    print_info(
-                        f"Val stage: {child.id} passed on first {len(stage_val_example_ids)} "
-                        f"val ids (sum {sum(_stage_after):.4f} vs parent "
-                        f"{sum(_stage_before):.4f}); promoting to full val."
-                    )
-
-                # --- Val evaluation -------------------------------------------
-                # UNCHANGED: run full val eval sequentially after gating.
-                set_phase(HelixPhase.VAL_EVALUATION)
-                val_result = _run_full_val_eval(
+            # Persist and clean every evaluated child not selected.  The
+            # default all-improvements mode retains historical gate reasons.
+            for proposal in evaluated_proposals:
+                child = proposal.child_candidate
+                if child.id in selected_ids:
+                    continue
+                reason = (
+                    "minibatch_gate"
+                    if proposal.task.minibatch_ids is not None
+                    else "train_gate"
+                )
+                if config.evolution.proposal_selection != "all_improvements":
+                    reason = "proposal_selection"
+                _save_attempt_result(
+                    base_dir,
+                    proposal.child_eval_result,
+                    status="rejected",
+                    reason=reason,
+                    parent_id=proposal.task.parent_candidate.id,
+                    generation=gen,
+                    stage=(
+                        "train_minibatch"
+                        if proposal.task.minibatch_ids is not None
+                        else "train"
+                    ),
+                    example_ids=(
+                        list(proposal.task.minibatch_ids)
+                        if proposal.task.minibatch_ids is not None
+                        else None
+                    ),
+                )
+                _record_terminal(
+                    proposal.task,
+                    status="not_selected",
+                    reason=reason,
+                    child=child,
+                )
+                TRACE.emit(
+                    EventType.ACCEPT_DECISION,
+                    candidate_id=child.id,
+                    decision="reject",
+                    example_ids=(
+                        list(proposal.task.minibatch_ids)
+                        if proposal.task.minibatch_ids is not None
+                        else None
+                    ),
+                    score=proposal.child_eval_result.sum_score(),
+                )
+                _discard_child(
                     child,
-                    state,
-                    full_val_example_ids=full_val_example_ids,
-                    minibatch_cache=minibatch_cache,
-                    eval_cache=eval_cache,
-                    config=config,
-                    project_root=project_root,
-                    source_batch="mutation_full_val_batch",
-                    source_single="mutation_full_val",
+                    label="proposal-selection-rejected candidate",
                 )
+
+            # A dispatched child batch is always fully accounted before this
+            # check.  Crossing the cap withholds staged/full validation and
+            # cleans selected-but-unapplied children.
+            if budget_api.budget_exhausted(state, config):
+                _budget_break = True
+                for selected in selected_proposals:
+                    proposal = selected.proposal
+                    _save_attempt_result(
+                        base_dir,
+                        proposal.child_eval_result,
+                        status="rejected",
+                        reason="budget_exhausted_after_child_batch",
+                        parent_id=proposal.task.parent_candidate.id,
+                        generation=gen,
+                        stage="train",
+                        example_ids=(
+                            list(proposal.task.minibatch_ids)
+                            if proposal.task.minibatch_ids is not None
+                            else None
+                        ),
+                    )
+                    _record_terminal(
+                        proposal.task,
+                        status="not_applied",
+                        reason="budget_exhausted_after_child_batch",
+                        child=proposal.child_candidate,
+                    )
+                    _discard_child(
+                        proposal.child_candidate,
+                        label="budget-withheld selected candidate",
+                    )
+                selected_proposals = []
+
+            # ---- Optional staged validation batch ------------------------
+            stage_inputs = [
+                selected
+                for selected in selected_proposals
+                if stage_val_example_ids
+                and _has_example_scores(
+                    parent_frontier_results[selected.proposal.task.batch_index],
+                    stage_val_example_ids,
+                )
+            ]
+            stage_input_ids = {
+                selected.proposal.child_candidate.id for selected in stage_inputs
+            }
+            stage_pass_ids: set[str] = set()
+
+            stage_batch_items = [
+                EvalBatchItem(
+                    candidate=selected.proposal.child_candidate,
+                    content_key=_candidate_content_key(
+                        selected.proposal.child_candidate
+                    ),
+                    split="val",
+                    instance_ids=tuple(stage_val_example_ids),
+                )
+                for selected in stage_inputs
+            ]
+
+            def _evaluate_stage(item: EvalBatchItem) -> tuple[EvalResult, int]:
+                assert item.instance_ids is not None
+                result, n_uncached = _cached_evaluate_batch(
+                    item.candidate,
+                    list(item.instance_ids),
+                    minibatch_cache,
+                    config,
+                    item.split,
+                    project_root,
+                )
+                result.candidate_id = item.candidate.id
+                return result, n_uncached
+
+            set_phase(HelixPhase.VAL_EVALUATION)
+            try:
+                stage_calls = run_evaluator_batch(
+                    stage_batch_items,
+                    _evaluate_stage,
+                    max_workers=config.evolution.max_workers,
+                    config=config,
+                )
+            except BaseException:
+                for selected in selected_proposals:
+                    proposal = selected.proposal
+                    _record_terminal(
+                        proposal.task,
+                        status="discarded",
+                        reason="fatal_val_stage_batch",
+                        child=proposal.child_candidate,
+                    )
+                    _discard_child(
+                        proposal.child_candidate,
+                        label="fatal staged-validation batch",
+                    )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise
+            fatal_stage_error: BaseException | None = None
+            for selected, call in zip(stage_inputs, stage_calls):
+                proposal = selected.proposal
+                task = proposal.task
+                child = proposal.child_candidate
+                if call.error is not None:
+                    _record_terminal(
+                        task,
+                        status=(
+                            "fatal"
+                            if _is_fatal_proposal_exception(call.error)
+                            else "failed"
+                        ),
+                        reason="val_stage",
+                        child=child,
+                    )
+                    if _is_fatal_proposal_exception(call.error):
+                        fatal_stage_error = fatal_stage_error or call.error
+                    else:
+                        _discard_child(
+                            child,
+                            label="val-stage-evaluation-failed candidate",
+                        )
+                    continue
+
+                assert call.result is not None
+                stage_result = call.result
+                stage_result.candidate_id = child.id
+                stage_n_uncached = call.num_actual_evaluations
+                _last_eval_result = stage_result
+                budget_api.charge_evaluation(
+                    state,
+                    num_actual_examples=stage_n_uncached,
+                    candidate_id=child.id,
+                    split="val",
+                    source="mutation_val_stage",
+                )
+                parent_frontier_result = parent_frontier_results[task.batch_index]
+                assert parent_frontier_result is not None
+                before = _scores_for_example_ids(
+                    parent_frontier_result,
+                    stage_val_example_ids,
+                )
+                after = _scores_for_example_ids(
+                    stage_result,
+                    stage_val_example_ids,
+                )
+                stage_proposal = SimpleNamespace(
+                    subsample_scores_before=before,
+                    subsample_scores_after=after,
+                )
+                if not acceptance.should_accept(stage_proposal):
+                    _save_attempt_result(
+                        base_dir,
+                        stage_result,
+                        status="rejected",
+                        reason="val_stage",
+                        parent_id=task.parent_candidate.id,
+                        generation=gen,
+                        stage="val_stage",
+                        example_ids=list(stage_val_example_ids),
+                    )
+                    _record_terminal(
+                        task,
+                        status="rejected",
+                        reason="val_stage",
+                        child=child,
+                    )
+                    TRACE.emit(
+                        EventType.ACCEPT_DECISION,
+                        candidate_id=child.id,
+                        decision="reject_stage",
+                        example_ids=list(stage_val_example_ids),
+                        score=float(sum(after)),
+                    )
+                    _discard_child(
+                        child,
+                        label="val-stage-rejected candidate",
+                    )
+                    continue
+                stage_pass_ids.add(child.id)
+                TRACE.emit(
+                    EventType.ACCEPT_DECISION,
+                    candidate_id=child.id,
+                    decision="accept_stage",
+                    example_ids=list(stage_val_example_ids),
+                    score=float(sum(after)),
+                )
+
+            if fatal_stage_error is not None:
+                for selected in selected_proposals:
+                    proposal = selected.proposal
+                    _discard_child(
+                        proposal.child_candidate,
+                        label="sibling of fatal staged validation",
+                    )
+                    if proposal.task.batch_index not in terminal_records:
+                        _record_terminal(
+                            proposal.task,
+                            status="discarded",
+                            reason="fatal_sibling_val_stage",
+                            child=proposal.child_candidate,
+                        )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise fatal_stage_error
+
+            # Preserve selector order even when only a subset required the
+            # staged gate and those evaluations completed out of order.
+            validation_ready = [
+                selected
+                for selected in selected_proposals
+                if (
+                    selected.proposal.child_candidate.id not in stage_input_ids
+                    or selected.proposal.child_candidate.id in stage_pass_ids
+                )
+            ]
+
+            if budget_api.budget_exhausted(state, config) and validation_ready:
+                _budget_break = True
+                for selected in validation_ready:
+                    proposal = selected.proposal
+                    _record_terminal(
+                        proposal.task,
+                        status="not_applied",
+                        reason="budget_exhausted_after_val_stage",
+                        child=proposal.child_candidate,
+                    )
+                    _discard_child(
+                        proposal.child_candidate,
+                        label="budget-withheld validation candidate",
+                    )
+                validation_ready = []
+
+            # ---- Full-validation batch -----------------------------------
+            full_batch_items = [
+                EvalBatchItem(
+                    candidate=selected.proposal.child_candidate,
+                    content_key=_candidate_content_key(
+                        selected.proposal.child_candidate
+                    ),
+                    split="val",
+                    instance_ids=(
+                        tuple(full_val_example_ids)
+                        if full_val_example_ids
+                        else None
+                    ),
+                )
+                for selected in validation_ready
+            ]
+
+            def _evaluate_full(item: EvalBatchItem) -> tuple[EvalResult, int]:
+                if item.instance_ids is not None:
+                    result, n_uncached = _cached_evaluate_batch(
+                        item.candidate,
+                        list(item.instance_ids),
+                        minibatch_cache,
+                        config,
+                        item.split,
+                        project_root,
+                    )
+                else:
+                    result, was_cached = _cached_eval(
+                        item.candidate,
+                        config,
+                        item.split,
+                        eval_cache,
+                    )
+                    n_uncached = 0 if was_cached else 1
+                result.candidate_id = item.candidate.id
+                return result, n_uncached
+
+            try:
+                full_calls = run_evaluator_batch(
+                    full_batch_items,
+                    _evaluate_full,
+                    max_workers=config.evolution.max_workers,
+                    config=config,
+                )
+            except BaseException:
+                for selected in validation_ready:
+                    proposal = selected.proposal
+                    _record_terminal(
+                        proposal.task,
+                        status="discarded",
+                        reason="fatal_full_validation_batch",
+                        child=proposal.child_candidate,
+                    )
+                    _discard_child(
+                        proposal.child_candidate,
+                        label="fatal full-validation batch",
+                    )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise
+            fatal_full_error: BaseException | None = None
+            full_results: list[tuple[SelectedProposal, EvalResult]] = []
+            for selected, call in zip(validation_ready, full_calls):
+                proposal = selected.proposal
+                task = proposal.task
+                child = proposal.child_candidate
+                if call.error is not None:
+                    _record_terminal(
+                        task,
+                        status=(
+                            "fatal"
+                            if _is_fatal_proposal_exception(call.error)
+                            else "failed"
+                        ),
+                        reason="full_validation",
+                        child=child,
+                    )
+                    if _is_fatal_proposal_exception(call.error):
+                        fatal_full_error = fatal_full_error or call.error
+                    else:
+                        _discard_child(
+                            child,
+                            label="full-validation-failed candidate",
+                        )
+                    continue
+
+                assert call.result is not None
+                val_result = call.result
+                val_result.candidate_id = child.id
+                val_n_uncached = call.num_actual_evaluations
                 _last_eval_result = val_result
+                if full_val_example_ids:
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=val_n_uncached,
+                        candidate_id=child.id,
+                        split="val",
+                        source="mutation_full_val_batch",
+                    )
+                else:
+                    budget_api.charge_evaluation(
+                        state,
+                        was_cached=(val_n_uncached == 0),
+                        candidate_id=child.id,
+                        split="val",
+                        source="mutation_full_val",
+                    )
+                full_results.append((selected, val_result))
 
-                if budget_api.budget_exhausted(state, config):
-                    print_warning("Budget exhausted mid-generation -- stopping.")
-                    _save_state(state)
-                    _budget_break = True
-                    break
+            if fatal_full_error is not None:
+                for selected in validation_ready:
+                    proposal = selected.proposal
+                    _discard_child(
+                        proposal.child_candidate,
+                        label="sibling of fatal full validation",
+                    )
+                    if proposal.task.batch_index not in terminal_records:
+                        _record_terminal(
+                            proposal.task,
+                            status="discarded",
+                            reason="fatal_sibling_full_validation",
+                            child=proposal.child_candidate,
+                        )
+                _save_proposal_terminal_records(
+                    base_dir,
+                    generation=gen,
+                    tasks=tasks,
+                    records=terminal_records,
+                )
+                raise fatal_full_error
 
-                # --- Update frontier ------------------------------------------
-                set_phase(HelixPhase.PARETO_UPDATE)
+            # Apply successful full validations in selector order.  No budget
+            # check may break this loop: every dispatched result was already
+            # completed and charged above.
+            set_phase(HelixPhase.PARETO_UPDATE)
+            for selected, val_result in full_results:
+                proposal = selected.proposal
+                child = proposal.child_candidate
                 _save_evaluation(base_dir, val_result)
                 frontier.add(child, val_result)
                 _sync_frontier_state()
                 state.instance_scores[child.id] = val_result.instance_scores
-                # GEPA parity (audit-rng-state-persist C/§3): record per-program
-                # discovery budget at the moment the child enters the frontier.
-                # GEPA core/state.py:537.
                 budget_api.record_discovery_budget(state, child.id)
                 TRACE.emit(
                     EventType.FRONTIER_UPDATE,
                     candidate_id=child.id,
                     score=val_result.aggregate_score(),
                 )
-                # GEPA parity (Fix 7): accepting a new program increments merges_due.
+                _record_terminal(
+                    proposal.task,
+                    status="accepted",
+                    reason="selected",
+                    child=child,
+                )
                 if (
                     config.evolution.merge_enabled
                     and state.total_merge_invocations
@@ -2896,34 +3413,59 @@ def _run_evolution_impl(
                 ):
                     merges_due += 1
                 last_iter_found_new_program = True
-
                 mutations_accepted += 1
                 live.update(
                     mutations_attempted=mutations_attempted,
                     mutations_accepted=mutations_accepted,
                 )
 
-            # Write skip records for this generation (GEPA parity — single JSON list)
-            if _gen_skip_records:
-                _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
+            if budget_api.budget_exhausted(state, config):
+                _budget_break = True
 
-            # Check semantic skip: all proposals were perfect on the minibatch.
-            # GEPA parity (engine.py:649, reflective_mutation.py:308-327): gen was
-            # already incremented unconditionally at the top of the loop, so on
-            # resume the next iteration will be gen+1 — no rollback, no infinite loop.
+            # Every planned task now has a terminal status.  Parent/mutation
+            # failures, skipped tasks, unselected children, and accepted
+            # children are serialized in parent-major task order.
+            for task in tasks:
+                if task.batch_index in terminal_records:
+                    continue
+                _record_terminal(
+                    task,
+                    status="failed",
+                    reason="no_terminal_outcome",
+                )
+            _save_proposal_terminal_records(
+                base_dir,
+                generation=gen,
+                tasks=tasks,
+                records=terminal_records,
+            )
+            if _gen_skip_records:
+                _save_skip_record(
+                    base_dir,
+                    generation=gen,
+                    records=_gen_skip_records,
+                )
+
             if (
                 not any(
-                    wr and isinstance(wr, (_SuccessResult, _TamperedResult))
-                    for wr in worker_results
+                    isinstance(
+                        outcome,
+                        (EvaluatedProposal, TamperedProposal),
+                    )
+                    for outcome in proposal_outcomes.values()
                 )
                 and semantic_skip_count
                 and retryable_semantic_skip_count == semantic_skip_count
+                and not _budget_break
             ):
                 _save_state(state)
                 TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
                 continue
-            # If budget was exhausted during sequential acceptance, break outer loop.
+
+            # A cap crossed by any drained phase stops the next batch/iteration,
+            # never the accounting or cleanup of work already dispatched.
             if _budget_break:
+                _save_state(state)
                 break
 
             # Render at end of generation using the last result seen.
