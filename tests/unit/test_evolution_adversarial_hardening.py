@@ -13,6 +13,7 @@ import pytest
 import helix.evolution as evolution
 from helix.config import HelixConfig
 from helix.display import UsageStats
+from helix.eval_cache import EvaluationCache as MinibatchEvalCache
 from helix.exceptions import HelixError, PromptArtifactCollisionError
 from helix.population import Candidate, EvalResult
 from helix.state import (
@@ -252,6 +253,130 @@ def test_crash_injection_after_every_proposal_state_barrier_resumes_cleanly(
         assert sum(task.budget_charge.evaluations for task in batch.tasks) == (
             resumed.budget.evaluations - batch.budget_state_before_dispatch.evaluations
         )
+
+
+def test_cached_sibling_completed_before_checkpoint_is_charged_once_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache-durable sibling execution cannot disappear from the budget.
+
+    Both child evaluators drain before their ordered results are processed.  Slot 0
+    fails, so its terminal checkpoint persists the cache entry already produced by
+    slot 1.  The injected crash lands after that combined state/cache save but before
+    slot 1's ordinary accounting path.  Resume must conserve slot 1's fresh execution
+    even though reading its recovered cache entry correctly reports a zero charge.
+    """
+    evaluator_calls: list[tuple[str, str, tuple[str, ...]]] = []
+
+    def evaluator(
+        candidate: Candidate,
+        _config: HelixConfig,
+        split: str = "val",
+        instance_ids: list[str] | None = None,
+        **_kwargs: Any,
+    ) -> EvalResult:
+        ids = tuple(str(value) for value in (instance_ids or ["single-task"]))
+        evaluator_calls.append((candidate.id, split, ids))
+        if candidate.id == "g1-s1" and split == "train":
+            raise RuntimeError("first child fails after sibling cache fill")
+        score = 0.1 if candidate.id == "g0-s0" else 0.8
+        return _eval_result(candidate.id, ids, score)
+
+    _patch_runtime(monkeypatch, evaluator=evaluator)
+    project_root, base_dir = _new_project(tmp_path)
+    config = _make_config(
+        p=1,
+        n=2,
+        train_size=1,
+        val_size=1,
+        minibatch_size=1,
+        cache=True,
+        max_workers=2,
+    )
+    crashed = False
+
+    def crash_after_failed_sibling_checkpoint(
+        _name: str, state: EvolutionState
+    ) -> None:
+        nonlocal crashed
+        if crashed or not state.proposal_batches:
+            return
+        statuses = [task.status for task in state.proposal_batches[0].tasks]
+        if statuses == ["failed", "running"]:
+            crashed = True
+            raise _InjectedCrash()
+
+    monkeypatch.setattr(
+        evolution, "_DURABLE_BARRIER_HOOK", crash_after_failed_sibling_checkpoint
+    )
+    with pytest.raises(_InjectedCrash):
+        evolution.run_evolution(config, project_root, base_dir)
+    assert crashed
+
+    persisted = load_state(project_root)
+    persisted_cache = load_eval_cache(project_root)
+    assert persisted is not None
+    assert persisted_cache is not None
+    batch = persisted.proposal_batches[0]
+    recovered_task = batch.tasks[1]
+    assert recovered_task.status == "running"
+    assert not recovered_task.budget_accounted
+    assert recovered_task.budget_charge.evaluations == 1
+    # Seed=1, one deduplicated parent evaluation=1, and the successful child=1.
+    assert persisted.budget.evaluations == 3
+
+    child_calls_before_cache_recovery = sum(
+        candidate_id == "g1-s2" and split == "train"
+        for candidate_id, split, _ in evaluator_calls
+    )
+    recovered_cache: MinibatchEvalCache[object, str] = MinibatchEvalCache()
+    recovered_cache._cache.update(persisted_cache)
+    child = _candidate(
+        "g1-s2",
+        base_dir / "worktrees" / "g1-s2",
+        parent_id="g0-s0",
+    )
+    _, recovered_charge = evolution._cached_evaluate_batch(
+        child,
+        ["0"],
+        recovered_cache,
+        config,
+        "train",
+        project_root,
+    )
+    assert recovered_charge == 0
+    assert (
+        sum(
+            candidate_id == "g1-s2" and split == "train"
+            for candidate_id, split, _ in evaluator_calls
+        )
+        == child_calls_before_cache_recovery
+        == 1
+    )
+
+    monkeypatch.setattr(evolution, "_DURABLE_BARRIER_HOOK", None)
+    evolution.run_evolution(config, project_root, base_dir)
+    resumed = load_state(project_root)
+    assert resumed is not None
+    resumed_batch = resumed.proposal_batches[0]
+    resumed_task = resumed_batch.tasks[1]
+    assert resumed_batch.phase == "complete"
+    assert resumed_task.budget_accounted
+    assert resumed_task.budget_charge.evaluations == 1
+    assert resumed.budget.evaluations == 3
+    assert sum(task.budget_charge.evaluations for task in resumed_batch.tasks) == (
+        resumed.budget.evaluations - resumed_batch.budget_before_dispatch
+    )
+
+    evolution.run_evolution(config, project_root, base_dir)
+    assert load_state(project_root) == resumed
+    assert (
+        sum(
+            candidate_id == "g1-s2" and split == "train"
+            for candidate_id, split, _ in evaluator_calls
+        )
+        == 1
+    )
 
 
 def test_failed_resume_cleanup_blocks_dispatch_then_retries_idempotently(

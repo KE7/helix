@@ -53,7 +53,12 @@ from helix.exceptions import (
     ResumeIncompatibleError,
     print_helix_error,
 )
-from helix.executor import EvalBatchItem, run_evaluator, run_evaluator_batch
+from helix.executor import (
+    EvalBatchItem,
+    EvalBatchResult,
+    run_evaluator,
+    run_evaluator_batch,
+)
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
@@ -2715,7 +2720,13 @@ def _run_evolution_impl(
             proposal_outcomes: dict[int, TerminalProposalOutcome] = {}
             cleaned_child_ids: set[str] = set()
             cleanup_results: dict[str, ProposalCleanupResult] = {}
-            task_budget_charges = {task.batch_index: BudgetState() for task in tasks}
+            # Keep the live accumulator attached to the durable task row.  A task's
+            # charge may lead ``budget_accounted`` while a drained batch is being
+            # processed; the terminal checkpoint closes that journal entry.
+            task_budget_charges = {
+                task.batch_index: proposal_batch.tasks[task.batch_index].budget_charge
+                for task in tasks
+            }
             parent_ready: dict[int, tuple[EvalResult, int]] = {}
             child_ready: dict[int, tuple[ProposalTask, EvalResult, int, Candidate]] = {}
             evaluated_proposals: list[EvaluatedProposal] = []
@@ -2856,6 +2867,44 @@ def _run_evolution_impl(
                     cost_usd=charge.cost_usd,
                 )
 
+            def _precharge_drained_evaluation(
+                task: ProposalTask,
+                call: EvalBatchResult,
+                *,
+                candidate_id: str,
+                split: str,
+                source: str,
+                counts_examples: bool,
+            ) -> None:
+                """Journal one successful drained result before any phase save.
+
+                Evaluator workers populate the shared cache before the ordered main
+                thread consumes their results.  Every successful positional result in
+                a drained batch must therefore be charged before the first sibling can
+                checkpoint state plus that cache.  ``num_actual_evaluations`` is the
+                runtime distinction: cache hits and deduplicated followers report zero,
+                while executed leaders report their actual metric-call count.
+                """
+                if call.error is not None:
+                    return
+                if counts_examples:
+                    charged = budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=call.num_actual_evaluations,
+                        candidate_id=candidate_id,
+                        split=split,
+                        source=source,
+                    )
+                else:
+                    charged = budget_api.charge_evaluation(
+                        state,
+                        was_cached=(call.num_actual_evaluations == 0),
+                        candidate_id=candidate_id,
+                        split=split,
+                        source=source,
+                    )
+                _add_evaluation_charge(task, charged)
+
             # ---- Parent scoring batch ------------------------------------
             # The same parent can appear in more than one group, and siblings
             # intentionally carry independently sampled minibatches.
@@ -2912,6 +2961,19 @@ def _run_evolution_impl(
                     records=terminal_records,
                 )
                 raise
+            for task, parent_call in zip(tasks, parent_calls):
+                _precharge_drained_evaluation(
+                    task,
+                    parent_call,
+                    candidate_id=task.parent_candidate.id,
+                    split="train",
+                    source=(
+                        "parent_minibatch"
+                        if task.minibatch_ids is not None
+                        else "parent_train_no_minibatch"
+                    ),
+                    counts_examples=task.minibatch_ids is not None,
+                )
             fatal_parent_error: BaseException | None = None
             proposal_outcome: TerminalProposalOutcome
             for task, parent_call in zip(tasks, parent_calls):
@@ -2949,23 +3011,6 @@ def _run_evolution_impl(
                 parent_result = parent_call.result
                 parent_result.candidate_id = task.parent_candidate.id
                 parent_n_uncached = parent_call.num_actual_evaluations
-                if task.minibatch_ids is not None:
-                    charged = budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=parent_n_uncached,
-                        candidate_id=task.parent_candidate.id,
-                        split="train",
-                        source="parent_minibatch",
-                    )
-                else:
-                    charged = budget_api.charge_evaluation(
-                        state,
-                        was_cached=(parent_n_uncached == 0),
-                        candidate_id=task.parent_candidate.id,
-                        split="train",
-                        source="parent_train_no_minibatch",
-                    )
-                _add_evaluation_charge(task, charged)
 
                 if config.evolution.perfect_score_threshold is not None and all(
                     score >= config.evolution.perfect_score_threshold
@@ -3406,6 +3451,20 @@ def _run_evolution_impl(
                     records=terminal_records,
                 )
                 raise
+            for child_item, child_call in zip(child_inputs, child_calls):
+                task, _, _, child = child_item
+                _precharge_drained_evaluation(
+                    task,
+                    child_call,
+                    candidate_id=child.id,
+                    split="train",
+                    source=(
+                        "mutation_minibatch_gate"
+                        if task.minibatch_ids is not None
+                        else "mutation_train_gate"
+                    ),
+                    counts_examples=task.minibatch_ids is not None,
+                )
             fatal_child_error: BaseException | None = None
             for child_item, child_call in zip(child_inputs, child_calls):
                 task, parent_result, parent_n_uncached, child = child_item
@@ -3445,23 +3504,6 @@ def _run_evolution_impl(
                 child_result.candidate_id = child.id
                 child_n_uncached = child_call.num_actual_evaluations
                 _last_eval_result = child_result
-                if task.minibatch_ids is not None:
-                    charged = budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=child_n_uncached,
-                        candidate_id=child.id,
-                        split="train",
-                        source="mutation_minibatch_gate",
-                    )
-                else:
-                    charged = budget_api.charge_evaluation(
-                        state,
-                        was_cached=(child_n_uncached == 0),
-                        candidate_id=child.id,
-                        split="train",
-                        source="mutation_train_gate",
-                    )
-                _add_evaluation_charge(task, charged)
                 proposal_outcome = EvaluatedProposal(
                     task=task,
                     parent_eval_result=parent_result,
@@ -3668,6 +3710,16 @@ def _run_evolution_impl(
                     records=terminal_records,
                 )
                 raise
+            for selected, stage_call in zip(stage_inputs, stage_calls):
+                proposal = selected.proposal
+                _precharge_drained_evaluation(
+                    proposal.task,
+                    stage_call,
+                    candidate_id=proposal.child_candidate.id,
+                    split="val",
+                    source="mutation_val_stage",
+                    counts_examples=True,
+                )
             fatal_stage_error: BaseException | None = None
             for selected, stage_call in zip(stage_inputs, stage_calls):
                 proposal = selected.proposal
@@ -3696,16 +3748,7 @@ def _run_evolution_impl(
                 assert stage_call.result is not None
                 stage_result = stage_call.result
                 stage_result.candidate_id = child.id
-                stage_n_uncached = stage_call.num_actual_evaluations
                 _last_eval_result = stage_result
-                charged = budget_api.charge_evaluation(
-                    state,
-                    num_actual_examples=stage_n_uncached,
-                    candidate_id=child.id,
-                    split="val",
-                    source="mutation_val_stage",
-                )
-                _add_evaluation_charge(task, charged)
                 parent_frontier_result = parent_frontier_results[task.batch_index]
                 assert parent_frontier_result is not None
                 before = _scores_for_example_ids(
@@ -3870,6 +3913,20 @@ def _run_evolution_impl(
                     records=terminal_records,
                 )
                 raise
+            for selected, full_call in zip(validation_ready, full_calls):
+                proposal = selected.proposal
+                _precharge_drained_evaluation(
+                    proposal.task,
+                    full_call,
+                    candidate_id=proposal.child_candidate.id,
+                    split="val",
+                    source=(
+                        "mutation_full_val_batch"
+                        if full_val_example_ids
+                        else "mutation_full_val"
+                    ),
+                    counts_examples=bool(full_val_example_ids),
+                )
             fatal_full_error: BaseException | None = None
             full_results: list[tuple[SelectedProposal, EvalResult]] = []
             for selected, full_call in zip(validation_ready, full_calls):
@@ -3899,25 +3956,7 @@ def _run_evolution_impl(
                 assert full_call.result is not None
                 val_result = full_call.result
                 val_result.candidate_id = child.id
-                val_n_uncached = full_call.num_actual_evaluations
                 _last_eval_result = val_result
-                if full_val_example_ids:
-                    charged = budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=val_n_uncached,
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_full_val_batch",
-                    )
-                else:
-                    charged = budget_api.charge_evaluation(
-                        state,
-                        was_cached=(val_n_uncached == 0),
-                        candidate_id=child.id,
-                        split="val",
-                        source="mutation_full_val",
-                    )
-                _add_evaluation_charge(task, charged)
                 full_results.append((selected, val_result))
 
             if fatal_full_error is not None:

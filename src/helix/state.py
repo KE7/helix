@@ -113,11 +113,12 @@ def _budget_state_from_mapping(data: Mapping[str, Any]) -> BudgetState:
 class ProposalTaskRecord:
     """Durable state for one parent-major P-by-N proposal slot.
 
-    ``budget_accounted`` and ``applied`` are explicit crash barriers.  A
-    resumed run can therefore distinguish completed evaluator work from work
-    that still needs charging, and a selected result from one already inserted
-    into the frontier.  Candidate IDs remain reserved even when the task is
-    interrupted or cleaned up.
+    ``budget_charge`` is a monotonic runtime journal and may advance while the
+    task is still running; ``budget_accounted`` closes that journal as an
+    explicit crash barrier.  A resumed run can therefore conserve completed
+    evaluator work before terminal accounting, and ``applied`` distinguishes a
+    selected result from one already inserted into the frontier.  Candidate IDs
+    remain reserved even when the task is interrupted or cleaned up.
     """
 
     batch_id: str
@@ -759,9 +760,10 @@ def checkpoint_batch_task(
 ) -> ProposalTaskRecord:
     """Atomically checkpoint one ordered result/apply transition.
 
-    Evolution remains the authoritative charger: it first calls the relevant
-    source-tagged ``budget_api.charge_*`` helper, then passes the already-
-    computed delta here with ``budget_accounted=True``.  This function never
+    Evolution remains the authoritative charger: it journals drained runtime
+    results into ``budget_charge`` before a sibling checkpoint can expose their
+    cache entries, then passes the computed delta here with
+    ``budget_accounted=True`` at the terminal barrier.  This function never
     mutates the global budget.  Retrying an identical accounted marker is a
     no-op; retrying with a different charge is rejected.
     """
