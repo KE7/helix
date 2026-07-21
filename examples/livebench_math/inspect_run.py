@@ -16,15 +16,26 @@ TERMINAL_STATUSES = {
     "applied",
     "interrupted",
 }
-TERMINAL_CLEANUP = {"not_required", "removed", "missing", "failed"}
+SUCCESSFUL_CLEANUP = {"not_required", "removed", "missing"}
+TERMINAL_SELECTION = {"not_applicable", "not_selected", "selected"}
 
 
 def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict[str, Any]:
-    """Validate P-by-N identities and conservation in a decoded state file."""
+    """Validate durable identities and conservation in a decoded state file.
+
+    ``require_terminal`` is deliberately the fixed release gate for this demo's
+    P=2,N=2 run. The default mode remains shape-agnostic so it can summarize the
+    separate P=1,N=1 comparison without weakening the release assertion.
+    """
     budget = data.get("budget")
     batches = data.get("proposal_batches")
     if not isinstance(budget, dict) or not isinstance(batches, list):
         raise ValueError("state must contain budget and proposal_batches")
+    if require_terminal:
+        if data.get("generation") != 1:
+            raise ValueError("release gate requires state generation exactly 1")
+        if len(batches) != 1:
+            raise ValueError("release gate requires exactly one proposal batch")
 
     child_ids: list[str] = []
     ledger_evaluations = 0
@@ -34,10 +45,14 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
             raise ValueError("each proposal batch must contain a task list")
         p, n = int(batch["p"]), int(batch["n"])
         tasks = batch["tasks"]
+        if require_terminal and (p, n) != (2, 2):
+            raise ValueError("release gate requires proposal shape P=2,N=2")
         if len(tasks) != p * n:
             raise ValueError("proposal batch does not have exactly P*N tasks")
         batch_charge = 0
-        terminal = batch.get("phase") in {"complete", "interrupted"}
+        terminal = batch.get("phase") == "complete"
+        if require_terminal and not terminal:
+            raise ValueError("release gate requires proposal phase exactly complete")
         for index, task in enumerate(tasks):
             expected_group, expected_mutation = divmod(index, n)
             if (
@@ -59,14 +74,15 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
             batch_charge += int(charge.get("evaluations", 0))
             task_terminal = (
                 task.get("status") in TERMINAL_STATUSES
-                and task.get("cleanup") in TERMINAL_CLEANUP
+                and task.get("cleanup") in SUCCESSFUL_CLEANUP
                 and task.get("budget_accounted") is True
+                and task.get("selection") in TERMINAL_SELECTION
             )
             terminal = terminal and task_terminal
         after = batch.get("budget_after_apply")
         before = int(batch.get("budget_before_dispatch", 0))
         if batch.get("phase") == "complete":
-            if after is None or int(after) - before != batch_charge:
+            if after is None or int(after) < before or int(after) - before != batch_charge:
                 raise ValueError("completed batch budget does not conserve charges")
         if require_terminal and not terminal:
             raise ValueError("proposal ledger is not terminal and fully accounted")

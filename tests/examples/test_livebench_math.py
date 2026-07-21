@@ -360,6 +360,7 @@ def _completed_p2n2_state() -> dict:
                 "parent_id": f"parent-{group}",
                 "child_id": f"child-{index}",
                 "status": "applied" if index == 0 else "rejected",
+                "selection": "selected" if index == 0 else "not_selected",
                 "cleanup": "not_required" if index == 0 else "removed",
                 "budget_accounted": True,
                 "budget_charge": {"evaluations": 2},
@@ -401,4 +402,47 @@ def test_state_inspection_rejects_duplicate_candidate_ids() -> None:
     state = _completed_p2n2_state()
     state["proposal_batches"][0]["tasks"][1]["child_id"] = "child-0"
     with pytest.raises(ValueError, match="globally distinct"):
+        inspect_run.audit_state(state, require_terminal=True)
+
+
+def test_release_inspection_rejects_1x1_shape() -> None:
+    state = _completed_p2n2_state()
+    batch = state["proposal_batches"][0]
+    batch["p"] = batch["n"] = 1
+    batch["tasks"] = batch["tasks"][:1]
+    batch["tasks"][0]["p"] = batch["tasks"][0]["n"] = 1
+    batch["budget_after_apply"] = 6
+    state["budget"]["evaluations"] = 6
+    with pytest.raises(ValueError, match="P=2,N=2"):
+        inspect_run.audit_state(state, require_terminal=True)
+    summary = inspect_run.audit_state(state)
+    assert summary["batches"][0]["p"] == 1
+    assert summary["batches"][0]["n"] == 1
+
+
+def test_release_inspection_rejects_interrupted_batch() -> None:
+    state = _completed_p2n2_state()
+    state["proposal_batches"][0]["phase"] = "interrupted"
+    with pytest.raises(ValueError, match="phase exactly complete"):
+        inspect_run.audit_state(state, require_terminal=True)
+
+
+def test_release_inspection_rejects_pending_selection() -> None:
+    state = _completed_p2n2_state()
+    state["proposal_batches"][0]["tasks"][2]["selection"] = "pending"
+    with pytest.raises(ValueError, match="terminal and fully accounted"):
+        inspect_run.audit_state(state, require_terminal=True)
+
+
+def test_release_inspection_rejects_failed_cleanup() -> None:
+    state = _completed_p2n2_state()
+    state["proposal_batches"][0]["tasks"][2]["cleanup"] = "failed"
+    with pytest.raises(ValueError, match="terminal and fully accounted"):
+        inspect_run.audit_state(state, require_terminal=True)
+
+
+def test_release_inspection_rejects_accounting_mismatch() -> None:
+    state = _completed_p2n2_state()
+    state["proposal_batches"][0]["tasks"][2]["budget_charge"]["evaluations"] = 3
+    with pytest.raises(ValueError, match="does not conserve"):
         inspect_run.audit_state(state, require_terminal=True)

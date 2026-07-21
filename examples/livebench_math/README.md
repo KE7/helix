@@ -105,10 +105,13 @@ echo y | uv run helix clean --dir .
 /usr/bin/time -p uv run helix evolve --config helix.1x1.toml --dir .
 uv run helix log --dir .
 uv run helix best --dir .
+python3 inspect_run.py
 ```
 
 The comparison is only between two tiny stochastic smoke runs. It cannot be
-used to reproduce or refute the publication's validation/test scores.
+used to reproduce or refute the publication's validation/test scores. The
+argument-free inspector is the shape-agnostic 1x1 summary; only
+`--require-terminal` applies the fixed P=2,N=2 release gate.
 
 ## Cleanup and zero-resource proof
 
