@@ -1981,7 +1981,6 @@ class TestTranscriptToolPatchesUsageInArtifact:
     ) -> None:
         """tool_event_count and tool_names are populated from Claude JSONL transcript."""
         from helix.mutator import (
-            BACKEND_TRANSCRIPT_ARTIFACT_DIR,
             invoke_claude_code,
         )
 

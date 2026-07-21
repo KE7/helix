@@ -10,10 +10,10 @@ authors:
     website: 'https://github.com/KE7'
   - name: OMAR
     website: 'http://omar.tech/'
-version: "0.1.0"
-date-released: "2026-04-10"
+version: "0.3.0"
+date-released: "2026-07-20"
 repository-code: 'https://github.com/KE7/helix'
-license: MIT
+license: BSD-3-Clause
 abstract: >-
   HELIX is an evolutionary code optimization framework that
   applies LLM-driven mutation operators at GEPA parity to

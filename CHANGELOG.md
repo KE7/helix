@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-20
+
 ### Added
 - P×N proposal batches: `num_parallel_proposals` selects P parent slots and
   the new `mutations_per_parent` creates N independently sampled children per
