@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from helix.cli import cli
+from helix.worktree import create_seed_worktree
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_project(tmp_path: Path) -> Path:
     """Create a minimal project directory that helix CLI can point --dir at."""
@@ -25,6 +28,7 @@ def _make_project(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 # --dir is accepted (option parsing / Path(exists=True) validation)
 # ---------------------------------------------------------------------------
+
 
 class TestDirOptionAccepted:
     """Each command should accept --dir <path> without raising a usage error."""
@@ -69,6 +73,7 @@ class TestDirOptionAccepted:
 # ---------------------------------------------------------------------------
 # --dir resolves the correct project_root
 # ---------------------------------------------------------------------------
+
 
 class TestDirResolvesRoot:
     """Commands should use the --dir path, not cwd, to locate .helix/."""
@@ -120,9 +125,81 @@ class TestDirResolvesRoot:
         assert "no lineage data" in result.output.lower(), result.output
 
 
+class TestCleanCreatedRepository:
+    def test_clean_removes_nested_git_repo_created_by_helix(
+        self, tmp_path: Path
+    ) -> None:
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        subprocess.run(["git", "init"], cwd=outer, check=True, capture_output=True)
+        project = outer / "example"
+        project.mkdir()
+        (project / "solver.py").write_text("VALUE = 1\n")
+        worktrees = project / ".helix" / "worktrees"
+        create_seed_worktree(project, worktrees)
+
+        result = CliRunner().invoke(cli, ["clean", "--dir", str(project)], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert "Removed Git repository initialized by HELIX" in result.output
+        assert not (project / ".git").exists()
+        assert not (project / ".helix").exists()
+        assert (project / "solver.py").read_text() == "VALUE = 1\n"
+        assert (outer / ".git").is_dir()
+
+    def test_clean_preserves_preexisting_git_repo(self, tmp_path: Path) -> None:
+        project = tmp_path / "existing"
+        project.mkdir()
+        (project / "solver.py").write_text("VALUE = 1\n")
+        subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "add", "-A"], cwd=project, check=True, capture_output=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=HELIX Test",
+                "-c",
+                "user.email=helix@test.local",
+                "commit",
+                "-m",
+                "init",
+            ],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        worktrees = project / ".helix" / "worktrees"
+        create_seed_worktree(project, worktrees)
+
+        result = CliRunner().invoke(cli, ["clean", "--dir", str(project)], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert (project / ".git").is_dir()
+        assert not (project / ".helix").exists()
+
+    def test_clean_refuses_mismatched_created_repo_markers(
+        self, tmp_path: Path
+    ) -> None:
+        project = tmp_path / "mismatch"
+        project.mkdir()
+        (project / "solver.py").write_text("VALUE = 1\n")
+        worktrees = project / ".helix" / "worktrees"
+        create_seed_worktree(project, worktrees)
+        (worktrees / ".helix-created-repo").write_text(f"{'0' * 64}\n")
+
+        result = CliRunner().invoke(cli, ["clean", "--dir", str(project)], input="y\n")
+
+        assert result.exit_code == 0, result.output
+        assert "markers do not match" in result.output.replace("\n", " ")
+        assert (project / ".git").is_dir()
+
+
 # ---------------------------------------------------------------------------
 # --dir with a nonexistent path produces a Click error
 # ---------------------------------------------------------------------------
+
 
 class TestDirNonexistentPath:
     def test_log_rejects_missing_dir(self, tmp_path):
@@ -131,7 +208,10 @@ class TestDirNonexistentPath:
         result = runner.invoke(cli, ["log", "--dir", missing])
         assert result.exit_code != 0
         # Click Path(exists=True) should report the path doesn't exist
-        assert "does not exist" in result.output.lower() or "invalid" in result.output.lower()
+        assert (
+            "does not exist" in result.output.lower()
+            or "invalid" in result.output.lower()
+        )
 
     def test_best_rejects_missing_dir(self, tmp_path):
         runner = CliRunner()
@@ -162,8 +242,11 @@ class TestDirNonexistentPath:
 # Help output includes --dir for all relevant commands
 # ---------------------------------------------------------------------------
 
+
 class TestHelpContainsDir:
-    @pytest.mark.parametrize("command", ["log", "best", "frontier", "history", "resume", "clean", "evolve"])
+    @pytest.mark.parametrize(
+        "command", ["log", "best", "frontier", "history", "resume", "clean", "evolve"]
+    )
     def test_help_shows_dir(self, command):
         runner = CliRunner()
         result = runner.invoke(cli, [command, "--help"])
@@ -181,7 +264,10 @@ class TestHelpContainsDir:
         runner = CliRunner()
         result = runner.invoke(cli, ["log", "--help"])
         # Should mention trajectory or parent lineage in the docstring
-        assert any(word in result.output.lower() for word in ("trajectory", "lineage", "parent"))
+        assert any(
+            word in result.output.lower()
+            for word in ("trajectory", "lineage", "parent")
+        )
 
     def test_best_help_shows_export(self):
         runner = CliRunner()

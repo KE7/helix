@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Relative `--dir` evolution paths are normalized before Git worktree
   creation, so dirty seed snapshots and later candidate subprocesses resolve
   the same worktree location.
+- `helix clean` now removes a nested Git repository initialized by HELIX after
+  validating paired cleanup markers, while preserving every pre-existing
+  repository.
 
 ## [0.2.2] - 2026-05-13
 

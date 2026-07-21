@@ -30,7 +30,7 @@ from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_heli
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
-from helix.worktree import remove_worktree
+from helix.worktree import remove_helix_created_repo, remove_worktree
 
 logger = logging.getLogger(__name__)
 
@@ -1040,7 +1040,9 @@ def attempts_cmd(
       helix attempts --cid g12-s4           # full JSON for one attempt
       helix attempts --json | jq '.[].attempt.reason'
     """
-    base_dir = (helix_path if helix_path is not None else Path.cwd() / ".helix").resolve()
+    base_dir = (
+        helix_path if helix_path is not None else Path.cwd() / ".helix"
+    ).resolve()
 
     # ------------------------------------------------------------------ skips
     if show_skips:
@@ -1106,12 +1108,11 @@ def attempts_cmd(
             r for r in records if r.get("attempt", {}).get("generation") == generation
         ]
     if stage is not None:
-        records = [
-            r for r in records if r.get("attempt", {}).get("reason") == stage
-        ]
+        records = [r for r in records if r.get("attempt", {}).get("reason") == stage]
     if reason_substr is not None:
         records = [
-            r for r in records
+            r
+            for r in records
             if reason_substr in r.get("attempt", {}).get("reason", "")
         ]
 
@@ -1345,6 +1346,11 @@ def clean(project_dir: Path | None) -> None:
                 )
 
     if base_dir_exists:
+        try:
+            if remove_helix_created_repo(project_root, worktrees_dir):
+                print_info("Removed Git repository initialized by HELIX.")
+        except Exception as exc:
+            print_warning(f"Could not remove HELIX-created Git repository: {exc}")
         shutil.rmtree(base_dir, ignore_errors=True)
         print_success("Cleaned up .helix/ directory.")
     elif branch_result.returncode == 0 and branch_result.stdout.strip():

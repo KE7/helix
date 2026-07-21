@@ -7,6 +7,7 @@ mutations, evaluations and rollbacks are fully independent.
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import subprocess
 import threading
@@ -20,6 +21,13 @@ from helix.population import Candidate
 # has a distinct path and branch. Proposal workers share this process, so keep
 # prune/add/remove/branch-delete transactions from interleaving.
 _worktree_metadata_lock = threading.RLock()
+
+# A two-part marker lets ``helix clean`` remove a repository that HELIX itself
+# initialized without ever guessing from Git history or deleting a pre-existing
+# user repository.  One copy lives in Git metadata and one in HELIX state; both
+# must contain the same unguessable run token.
+_CREATED_REPO_MARKER = ".helix-created-repo"
+_CREATED_REPO_SENTINEL = "helix-created-repo"
 
 
 # ---------------------------------------------------------------------------
@@ -199,16 +207,16 @@ def _create_initial_gitignore(repo_root: Path) -> None:
         gitignore_path.write_text("\n".join(noise_patterns) + "\n")
 
 
-def _ensure_git_repo(repo_root: Path) -> None:
+def _ensure_git_repo(repo_root: Path) -> bool:
     """Initialise a git repo at *repo_root* if it is not already one.
 
     Always stamps the newly-created repo's local git config with the HELIX
     identity (name="HELIX", email="helix@noreply").  This config is scoped
     to the fixture's own .git directory and never touches the user's global
-    git config.
+    git config.  Returns True only when this call created the repository.
     """
     if _is_git_repo(repo_root):
-        return
+        return False
     _run(["git", "init"], cwd=repo_root, operation="git init")
     # Pin the HELIX identity in the local config of this fresh repo.
     # These settings live inside <repo_root>/.git/config — they are isolated
@@ -232,6 +240,57 @@ def _ensure_git_repo(repo_root: Path) -> None:
         operation="git commit (initial seed)",
         env={**os.environ, **helix_git_env()},
     )
+    return True
+
+
+def _record_created_repo(repo_root: Path, worktrees_dir: Path) -> None:
+    """Bind a HELIX-created Git repository to its cleanup state directory."""
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir() or git_dir.is_symlink():
+        raise HelixError(
+            "HELIX initialized a repository without a removable .git directory.",
+            operation="record HELIX-created repository",
+            suggestion="Inspect the project path before running `helix clean`.",
+        )
+    token = secrets.token_hex(32)
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
+    (git_dir / _CREATED_REPO_SENTINEL).write_text(f"{token}\n")
+    (worktrees_dir / _CREATED_REPO_MARKER).write_text(f"{token}\n")
+
+
+def remove_helix_created_repo(repo_root: Path, worktrees_dir: Path) -> bool:
+    """Remove ``.git`` only when paired markers prove HELIX created it.
+
+    Returns False for a pre-existing repository.  A partial or mismatched
+    marker is treated as unsafe and raises instead of deleting Git metadata.
+    """
+    marker = worktrees_dir / _CREATED_REPO_MARKER
+    if not marker.is_file():
+        return False
+
+    git_dir = repo_root / ".git"
+    sentinel = git_dir / _CREATED_REPO_SENTINEL
+    if not git_dir.is_dir() or git_dir.is_symlink() or not sentinel.is_file():
+        raise HelixError(
+            "HELIX-created repository cleanup markers are incomplete.",
+            operation="remove HELIX-created repository",
+            suggestion="Inspect the project .git directory and remove it manually only if it is task-created.",
+        )
+
+    marker_token = marker.read_text().strip()
+    sentinel_token = sentinel.read_text().strip()
+    valid_token = len(marker_token) == 64 and all(
+        char in "0123456789abcdef" for char in marker_token
+    )
+    if not valid_token or not secrets.compare_digest(marker_token, sentinel_token):
+        raise HelixError(
+            "HELIX-created repository cleanup markers do not match.",
+            operation="remove HELIX-created repository",
+            suggestion="Refusing to delete .git; inspect the project and clean it manually.",
+        )
+
+    shutil.rmtree(git_dir)
+    return True
 
 
 def _warn_uncommitted_changes(repo_root: Path) -> None:
@@ -387,6 +446,7 @@ def create_empty_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     base_dir = base_dir.resolve()
 
     # Initialise a bare git repo with an empty initial commit.
+    created_repo = False
     if not _is_git_repo(repo_root):
         repo_root.mkdir(parents=True, exist_ok=True)
         _run(["git", "init"], cwd=repo_root, operation="git init (seedless)")
@@ -414,10 +474,13 @@ def create_empty_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
             operation="git commit --allow-empty (seedless)",
             env={**os.environ, **helix_git_env()},
         )
+        created_repo = True
 
     seed_id = "g0-s0"
     worktree_path = base_dir / seed_id
     base_dir.mkdir(parents=True, exist_ok=True)
+    if created_repo:
+        _record_created_repo(repo_root, base_dir)
 
     with _worktree_metadata_lock:
         # Prune and add are one common-metadata transaction.
@@ -471,7 +534,7 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     repo_root = repo_root.resolve()
     base_dir = base_dir.resolve()
 
-    _ensure_git_repo(repo_root)
+    created_repo = _ensure_git_repo(repo_root)
 
     # Warn when local edits exist so the user knows HELIX will snapshot them.
     _warn_uncommitted_changes(repo_root)
@@ -482,6 +545,8 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     seed_id = "g0-s0"
     worktree_path = base_dir / seed_id
     base_dir.mkdir(parents=True, exist_ok=True)
+    if created_repo:
+        _record_created_repo(repo_root, base_dir)
 
     with _worktree_metadata_lock:
         # Prune and add are one common-metadata transaction.
