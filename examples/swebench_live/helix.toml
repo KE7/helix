@@ -37,7 +37,31 @@ max_turns = 12
 background = """Work only on coding_agent.py. Do not edit evaluator, configuration, task-description, pin, setup, inspection, cleanup, or attribution files. coding_agent.py is executed as an unprivileged user in a fresh official SWE-bench-Live task container with /testbed as the repository and a public issue file. It may inspect files and run local commands through Python subprocesses. It must make the smallest defensible source fix in /testbed; do not hard-code or reconstruct benchmark test patches, do not use network access, and do not weaken tests. Read TASK.md for the public issue and artifact contract."""
 
 [sandbox]
-enabled = false
+enabled = true
+evaluator = false
+image = "sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b"
+network = "bridge"
+cpus = 2.0
+memory = "2g"
+timeout_seconds = 900
+pids_limit = 256
+omit_from_agent = [
+  ".gitignore",
+  "README.md",
+  "SOURCE.md",
+  "THIRD_PARTY_NOTICES.md",
+  "cleanup.py",
+  "cleanup-proof.json",
+  "evaluate.py",
+  "helix.toml",
+  "inspect_run.py",
+  "official_runner.py",
+  "pins.py",
+  "prepare.py",
+  "artifacts",
+  "__pycache__",
+  ".helix_artifacts",
+]
 
 [worktree]
 base_dir = ".helix/worktrees"

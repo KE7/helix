@@ -46,8 +46,71 @@ def test_parallel_config_loads_with_supported_schema_and_measured_limits() -> No
     assert config.evolution.max_workers == 2
     raw = tomllib.loads((EXAMPLE / "helix.toml").read_text())
     assert "allowed_tools" not in raw["agent"]
+    assert config.sandbox.enabled is True
+    assert config.sandbox.evaluator is False
+    assert config.sandbox.image == (
+        "sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b"
+    )
+    assert config.sandbox.cpus == 2.0
+    assert config.sandbox.memory == "2g"
+    assert config.sandbox.pids_limit == 256
+    assert config.sandbox.timeout_seconds == 900
     evaluator_source = (EXAMPLE / "evaluate.py").read_text()
     assert '"--memory",\n        "4g"' in evaluator_source
+
+
+def test_mutation_sandbox_exposes_only_agent_and_public_contract(
+    tmp_path: Path,
+) -> None:
+    from helix.config import load_config
+    from helix.sandbox import _copy_tree_contents, _docker_args
+
+    config = load_config(EXAMPLE / "helix.toml")
+    omitted = {Path(item) for item in config.sandbox.omit_from_agent}
+    assert Path("coding_agent.py") not in omitted
+    assert Path("TASK.md") not in omitted
+    for sensitive in (
+        "prepare.py",
+        "evaluate.py",
+        "official_runner.py",
+        "pins.py",
+        "helix.toml",
+        "cleanup.py",
+        "SOURCE.md",
+    ):
+        assert Path(sensitive) in omitted
+
+    workspace = tmp_path / "workspace"
+    _copy_tree_contents(
+        EXAMPLE,
+        workspace,
+        skip_special_files=config.sandbox.skip_special_files,
+        omit_paths=omitted,
+    )
+    visible = {
+        path.relative_to(workspace).as_posix()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+    assert visible == {"TASK.md", "coding_agent.py"}
+
+    args = _docker_args(
+        ["claude", "--version"],
+        {},
+        workspace,
+        config.sandbox,
+        "agent",
+        config.sandbox.image or "",
+        "claude",
+    )
+    mounts = [args[index + 1] for index, item in enumerate(args[:-1]) if item == "-v"]
+    assert any(mount.endswith(":/workspace:rw") for mount in mounts)
+    assert "helix-auth-claude:/home/node:rw" in mounts
+    assert all("docker.sock" not in mount for mount in mounts)
+    assert all("swebench-live-capstone-2743-private" not in mount for mount in mounts)
+    assert args[args.index("--cpus") + 1] == "2.0"
+    assert args[args.index("--memory") + 1] == "2g"
+    assert args[args.index("--pids-limit") + 1] == "256"
 
 
 def test_task_row_validation_rejects_drift_without_echoing_private_values() -> None:
@@ -193,49 +256,192 @@ def test_artifact_root_falls_back_before_helix_initializes_git(tmp_path: Path) -
     assert evaluator.original_project_root(tmp_path) == tmp_path
 
 
-def test_inspection_reports_p_by_n_ids_and_durable_budget(tmp_path: Path) -> None:
-    inspect_run = _load("swebench_live_inspect", "inspect_run.py")
+def _current_state() -> dict:
     tasks = [
         {
+            "batch_id": "g1-b0",
+            "p": 2,
+            "n": 2,
             "task_index": index,
-            "parent_slot": index // 2,
-            "mutation_slot": index % 2,
-            "reserved_child_id": f"g1-s{index + 1}",
-            "status": "completed",
+            "parent_group": index // 2,
+            "mutation_index": index % 2,
+            "parent_id": "g0-s0",
+            "child_id": f"g1-s{index + 1}",
+            "status": "applied" if index == 0 else "rejected",
+            "score_delta": 1.0 if index == 0 else 0.0,
             "selection": "selected" if index == 0 else "not_selected",
             "cleanup": "not_required" if index == 0 else "removed",
+            "budget_charge": {
+                "evaluations": 1,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cached_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "reasoning_tokens": 0,
+                "cost_usd": 0.001,
+            },
+            "budget_accounted": True,
             "applied": index == 0,
-            "evaluation_delta": 1,
+            "detail": None,
         }
         for index in range(4)
     ]
-    state = {
+    return {
         "schema_version": 4,
         "generation": 1,
         "frontier": ["g0-s0", "g1-s1"],
         "active_frontier": {"instance": ["g1-s1"]},
-        "budget": {"evaluations": 5, "mutations": 4},
+        "budget": {
+            "evaluations": 5,
+            "input_tokens": 400,
+            "output_tokens": 40,
+            "cached_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost_usd": 0.004,
+        },
         "mutation_counter": 4,
         "proposal_batches": [
             {
                 "batch_id": "g1-b0",
+                "generation": 1,
                 "p": 2,
                 "n": 2,
-                "phase": "completed",
+                "phase": "complete",
                 "budget_before_dispatch": 1,
+                "budget_state_before_dispatch": {"evaluations": 1},
+                "max_evaluations": 9,
+                "max_in_flight_evaluations": 4,
+                "maximum_overshoot": 3,
                 "budget_after_apply": 5,
                 "tasks": tasks,
             }
         ],
     }
-    helix_dir = tmp_path / ".helix"
-    helix_dir.mkdir()
+
+
+def _write_state(project: Path, state: dict) -> None:
+    helix_dir = project / ".helix"
+    helix_dir.mkdir(exist_ok=True)
     (helix_dir / "state.json").write_text(json.dumps(state))
+
+
+def test_inspection_reports_p_by_n_ids_and_durable_budget(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect", "inspect_run.py")
+    state = _current_state()
+    _write_state(tmp_path, state)
     summary = inspect_run.summarize(tmp_path)
     assert summary["candidate_ids"] == ["g1-s1", "g1-s2", "g1-s3", "g1-s4"]
     assert summary["candidate_ids_distinct"] is True
     assert summary["candidate_ids_parent_major"] is True
-    assert summary["budget"] == {"evaluations": 5, "mutations": 4}
+    assert summary["accounting"] == {
+        "global_evaluations": 5,
+        "proposal_evaluations": 4,
+        "nonproposal_evaluations": 1,
+    }
+
+
+def test_inspection_rejects_obsolete_task_keys(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_old", "inspect_run.py")
+    state = _current_state()
+    task = state["proposal_batches"][0]["tasks"][0]
+    task["reserved_child_id"] = task.pop("child_id")
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="obsolete key"):
+        inspect_run.summarize(tmp_path)
+
+
+def test_inspection_rejects_missing_current_key(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_missing", "inspect_run.py")
+    state = _current_state()
+    del state["proposal_batches"][0]["tasks"][0]["budget_charge"]
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="missing required key"):
+        inspect_run.summarize(tmp_path)
+
+
+def test_inspection_rejects_duplicate_or_non_parent_major_ids(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_duplicate", "inspect_run.py")
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][1]["child_id"] = "g1-s1"
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="duplicate child_id"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][2]["parent_group"] = 0
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="not parent-major"):
+        inspect_run.summarize(tmp_path)
+
+
+def test_inspection_rejects_nonterminal_task_or_batch(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_terminal", "inspect_run.py")
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][3]["status"] = "running"
+    state["proposal_batches"][0]["tasks"][3]["cleanup"] = "pending"
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="status is not terminal"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["proposal_batches"][0]["phase"] = "applying"
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="phase must equal 'complete'"):
+        inspect_run.summarize(tmp_path)
+
+
+def test_inspection_rejects_pending_selection_or_failed_cleanup(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_completion", "inspect_run.py")
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][0]["selection"] = "pending"
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="selection is pending"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][1]["cleanup"] = "failed"
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="cleanup failed"):
+        inspect_run.summarize(tmp_path)
+
+
+def test_inspection_rejects_wrong_generation_or_task_count(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_generation", "inspect_run.py")
+    state = _current_state()
+    state["generation"] = 2
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="generation must equal 1"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"].pop()
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="exactly 4 entries"):
+        inspect_run.summarize(tmp_path)
+
+
+def test_inspection_rejects_unaccounted_or_mismatched_budget(tmp_path: Path) -> None:
+    inspect_run = _load("swebench_live_inspect_accounting", "inspect_run.py")
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][1]["budget_accounted"] = False
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="budget_accounted"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["proposal_batches"][0]["tasks"][1]["budget_charge"]["evaluations"] = 0
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="does not equal budget delta"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["budget"]["evaluations"] = 3
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="exceed the global"):
+        inspect_run.summarize(tmp_path)
 
 
 def test_cleanup_removes_digest_tag_and_exact_image_id(

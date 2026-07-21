@@ -10,20 +10,27 @@ hashes, image digest, licensing, and the already-passing upstream gold command.
 
 - macOS or Linux; Python 3.11+; `uv`; Git and Git LFS; Docker 24+.
 - Claude Code authenticated on the host (`claude auth status`).
-- At least 4 CPUs and enough space for the pinned 2.49 GB unpacked image.
+- The content-addressed Claude runner image
+  `sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b`
+  (local `ghcr.io/ke7/helix-evo-runner-claude:0.2.0`, `linux/arm64`) and
+  an authenticated `helix-auth-claude` Docker volume.
+- At least 8 CPUs and enough space for the pinned 2.49 GB official task image.
 - The official image is `linux/amd64`. Docker Desktop emulation was validated on
-  an Apple Silicon host (Darwin ARM64, 14 CPUs, 48 GiB host RAM, 8.216 GiB
-  Docker RAM). Each task container is capped at 4 GiB so the configured
-  two-worker window fits the VM. Gold resolved three times, including two
-  concurrent task containers.
+  an Apple Silicon host with Docker capacity 31,490,187,264 bytes and 14 CPUs.
+  Each task container is capped at 4 GiB; each mutation container is capped at
+  2 GiB/2 CPUs/256 PIDs and 900 seconds. Gold resolved three times, including
+  two concurrent task containers.
 
 No benchmark clone, row, patch, test patch, result, HELIX state, credentials,
 logs, image, or cache is committed. `prepare.py` checks out only the pinned
 dataset revision in a temporary directory, validates the parquet size/hash and
 row contract, writes private fields to a labeled Docker volume, and deletes the
-temporary checkout. The mutation context receives no private task row or
-credentials. The task-container network is disabled, and candidate code runs as
-an unprivileged user that cannot read the root-only private task volume.
+temporary checkout. Mutation runs in the pinned Claude Docker runner and sees
+only `coding_agent.py` plus the public `TASK.md`; it receives no private task
+row, credentials, evaluator/config/setup/source files, Docker socket, or task
+volume. The evaluator remains host-side so it can launch the official sandbox.
+The task-container network is disabled, and candidate code runs as an
+unprivileged user that cannot read the root-only private task volume.
 
 ## Exact setup and smoke
 
@@ -33,6 +40,10 @@ The image must already exist locally; setup never pulls or substitutes a tag.
 cd examples/swebench_live
 docker image inspect \
   docker.io/starryzhang/sweb.eval.x86_64.capstone-engine_1776_capstone-2743@sha256:c3d6222106db9afce1eaf6036f67d540011e46ea8e59419097c32d0555032ed9
+docker image inspect \
+  sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b
+uv run --project /path/to/helix-repo helix sandbox status claude \
+  --image sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b
 uv run --with pyarrow python prepare.py
 python3 evaluate.py --gold-smoke
 ```
@@ -48,7 +59,7 @@ Use a disposable project copy so this repository does not gain a nested `.git`:
 
 ```bash
 run_dir="$(mktemp -d /tmp/helix-swebench-live.XXXXXX)"
-cp -R examples/swebench_live/. "$run_dir/"
+git archive HEAD examples/swebench_live | tar -x -C "$run_dir" --strip-components=2
 cd "$run_dir"
 uv run --with pyarrow python prepare.py
 uv run --project /path/to/helix-repo helix evolve --dir .
@@ -58,7 +69,9 @@ uv run --project /path/to/helix-repo helix evolve --dir .
 best-improvement selection, no merge, and no evaluation cache. HELIX therefore
 reserves four distinct child IDs/worktrees in deterministic parent-major order;
 at most two isolated official task containers run concurrently. Each non-empty
-candidate receives a fresh container and the exact official harness rule.
+candidate receives a fresh container and the exact official harness rule. Only
+official correctness contributes to selection; timing and resource data are
+auxiliary diagnostics.
 
 Before the heavy evolution window, verify no other benchmark containers are
 running and record resources:
@@ -76,17 +89,23 @@ uv run --project /path/to/helix-repo helix frontier --dir .
 uv run --project /path/to/helix-repo helix attempts --path .helix --json
 python3 inspect_run.py --dir . > artifacts/run-audit.json
 uv run --project /path/to/helix-repo helix resume --dir .
-python3 inspect_run.py --dir . > artifacts/resume-audit.json
-cmp artifacts/run-audit.json artifacts/resume-audit.json
+python3 inspect_run.py --dir . > artifacts/resume-1-audit.json
+cmp artifacts/run-audit.json artifacts/resume-1-audit.json
+uv run --project /path/to/helix-repo helix resume --dir .
+python3 inspect_run.py --dir . > artifacts/resume-2-audit.json
+cmp artifacts/run-audit.json artifacts/resume-2-audit.json
 ```
 
 Expected uncommitted artifacts are `.helix/state.json`, batch/task journals,
 attempt records, HELIX logs, candidate worktrees, and
-`artifacts/evaluations/*.json`. `inspect_run.py` records the state hash,
-frontiers, P/N batch ledger, distinct ordered candidate IDs, task cleanup
-states, evaluation budget, and artifact count. With the generation budget
-already exhausted, resume must be idempotent: no new task container, candidate,
-or evaluation charge, and byte-identical state.
+`artifacts/evaluations/*.json`. `inspect_run.py` fails closed unless generation
+1 contains exactly one complete current-schema P=2/N=2 ledger with four
+globally distinct IDs,
+parent-major indices, terminal status/cleanup, `budget_accounted=true`, and an
+exact per-batch task-charge/budget-delta match. It records the global proposal
+charge and explicit non-proposal remainder. With the generation budget already
+exhausted, both consecutive resumes must be idempotent: no new task container,
+candidate, or evaluation charge, and byte-identical state/accounting.
 
 ## Exact cleanup and zero-resource proof
 
@@ -105,5 +124,22 @@ docker image inspect \
 
 The last image inspection must fail after cleanup. `cleanup-proof.json` records
 the before/after image IDs, removed labeled containers/volume, and zero remaining
-labeled containers. Remove the disposable `run_dir` only after retaining any
-audit evidence needed for the release report.
+labeled containers. After recording the audit evidence, remove and verify the
+exact disposable directory with a guarded path check:
+
+```bash
+cd /path/to/helix-repo
+python3 - "$run_dir" <<'PY'
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+target = Path(sys.argv[1]).resolve()
+temp_root = Path(tempfile.gettempdir()).resolve()
+if target.parent != temp_root or not target.name.startswith("helix-swebench-live."):
+    raise SystemExit(f"refusing unexpected cleanup target: {target}")
+shutil.rmtree(target)
+PY
+test ! -e "$run_dir"
+```

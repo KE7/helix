@@ -15,6 +15,12 @@ This demo is pinned to the following primary sources:
 - Official image:
   `docker.io/starryzhang/sweb.eval.x86_64.capstone-engine_1776_capstone-2743@sha256:c3d6222106db9afce1eaf6036f67d540011e46ea8e59419097c32d0555032ed9`,
   platform `linux/amd64`.
+- Mutation runner: local content-addressed image
+  `sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b`,
+  tagged `ghcr.io/ke7/helix-evo-runner-claude:0.2.0`, platform `linux/arm64`,
+  790,404,463 bytes. The local image has no registry `RepoDigest`, so the demo
+  deliberately selects its immutable Docker image ID and never resolves or
+  pulls a mutable tag.
 
 The official upstream gold smoke was executed from the pinned harness checkout:
 
