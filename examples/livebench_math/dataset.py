@@ -35,7 +35,11 @@ def split_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, An
     sizes = {subtask: len(group) for subtask, group in grouped.items()}
     val_alloc = largest_remainder(FULL_SPLIT_SIZES["val"], sizes)
     train_alloc = largest_remainder(FULL_SPLIT_SIZES["train"], sizes)
-    splits = {"train": [], "val": [], "test": []}
+    splits: dict[str, list[dict[str, Any]]] = {
+        "train": [],
+        "val": [],
+        "test": [],
+    }
     for subtask in sorted(grouped):
         group = sorted(grouped[subtask], key=lambda row: str(row["question_id"]))
         random.Random(0).shuffle(group)
@@ -76,4 +80,3 @@ def select_smoke_rows(
         except KeyError as exc:
             raise ValueError(f"pinned smoke ID is absent: {exc.args[0]}") from exc
     return selected
-
