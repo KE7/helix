@@ -2365,6 +2365,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
 
     config = HelixConfig(
         objective="Improve",
+        passthrough_env=["SHARED_RUNTIME_SETTING"],
         env={"EVALUATOR_BASE_URL": "https://model-service.example.invalid/v1"},
         evaluator=EvaluatorConfig(
             command="python /runner/evaluate.py",
@@ -2373,6 +2374,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
                 image="eval:latest",
                 command="python -m server",
                 endpoint="http://helix-evaluator:8080/evaluate",
+                passthrough_env=["OPENAI_API_KEY", "SHARED_RUNTIME_SETTING"],
             ),
         ),
         sandbox=SandboxConfig(
@@ -2393,7 +2395,7 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
 
     all_mocks["start_evaluator_sidecar"].assert_called_once_with(
         config.evaluator.sidecar,
-        passthrough_env=config.passthrough_env,
+        passthrough_env=["SHARED_RUNTIME_SETTING", "OPENAI_API_KEY"],
         fixed_env=config.env,
         extra_hosts=config.sandbox.extra_hosts,
     )

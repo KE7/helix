@@ -1658,9 +1658,13 @@ def run_evolution(
                 operation="start evaluator sidecar",
                 suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
             )
+        sidecar = config.evaluator.sidecar
+        sidecar_passthrough_env = list(
+            dict.fromkeys([*config.passthrough_env, *sidecar.passthrough_env])
+        )
         with start_evaluator_sidecar(
-            config.evaluator.sidecar,
-            passthrough_env=config.passthrough_env,
+            sidecar,
+            passthrough_env=sidecar_passthrough_env,
             fixed_env=config.env,
             extra_hosts=config.sandbox.extra_hosts,
         ):

@@ -68,6 +68,13 @@ class EvaluatorSidecarConfig(BaseModel):
     healthcheck_command: str | None = None
     startup_timeout_seconds: int = 60
     internal_network: bool = True
+    passthrough_env: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Environment variable names passed only to the private evaluator "
+            "sidecar, never to mutation-agent or evaluator-runner processes."
+        ),
+    )
 
     @property
     def resolved_runner_image(self) -> str:

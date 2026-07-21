@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal slot, including interrupted-batch reconciliation.
 - Opt-in, manually dispatched Docker integration CI on Python 3.11 and 3.12 for
   the daemon-backed parallel sandbox smoke test.
+- Sidecar-only `evaluator.sidecar.passthrough_env` injection for credentials
+  that private evaluators need but mutation agents must never receive.
 
 ### Changed
 - Existing `num_parallel_proposals = K` configurations now use the unified K×1
