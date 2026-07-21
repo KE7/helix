@@ -2,9 +2,9 @@
   "schema_version": 1,
   "helix": {
     "repository": "https://github.com/KE7/helix.git",
+    "target_release": "0.3.0",
     "base_commit": "84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023",
-    "relative_path_fix_source_commit": "402dcc8cfb2c461144de8f019e6ec49811dc2da9",
-    "relative_path_fix_applied_commit": "daa5062683e15017a56746cd46ad8f3bfe333984"
+    "relative_path_fix_commit": "402dcc8cfb2c461144de8f019e6ec49811dc2da9"
   },
   "fc_eval": {
     "repository": "https://github.com/formula-code/fc-eval.git",

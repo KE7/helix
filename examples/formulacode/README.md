@@ -18,8 +18,7 @@ scores**, never FormulaCode leaderboard scores.
 All machine-readable pins live in [`pins.json`](pins.json):
 
 - HELIX base `84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023` plus upstream
-  relative-path fix `402dcc8cfb2c461144de8f019e6ec49811dc2da9`, applied in this
-  branch as `daa5062683e15017a56746cd46ad8f3bfe333984`.
+  relative-path fix `402dcc8cfb2c461144de8f019e6ec49811dc2da9` (HELIX 0.3.0).
 - fc-eval `0.1.0` source commit
   `c08f665e7bf3b4de225b72dc02ce9b15b7aaba2b` (BSD-3-Clause).
 - FormulaCode verified-dataset commit
@@ -60,8 +59,8 @@ containers.
 From the HELIX repository root:
 
 ```bash
-git merge-base --is-ancestor 84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023 HEAD
-git merge-base --is-ancestor daa5062683e15017a56746cd46ad8f3bfe333984 HEAD
+git cat-file -e 84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023^{commit}
+git cat-file -e 402dcc8cfb2c461144de8f019e6ec49811dc2da9^{commit}
 uv run python examples/formulacode/manage.py preflight
 uv run python examples/formulacode/manage.py setup
 ```

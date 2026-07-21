@@ -161,11 +161,9 @@ def test_contract_error_redacts_exception_message(
 def test_pins_and_parallel_isolation_configuration_are_exact() -> None:
     pins = json.loads((DEMO_ROOT / "pins.json").read_text())
     assert pins["helix"]["base_commit"] == ("84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023")
-    assert pins["helix"]["relative_path_fix_source_commit"] == (
+    assert pins["helix"]["target_release"] == "0.3.0"
+    assert pins["helix"]["relative_path_fix_commit"] == (
         "402dcc8cfb2c461144de8f019e6ec49811dc2da9"
-    )
-    assert pins["helix"]["relative_path_fix_applied_commit"] == (
-        "daa5062683e15017a56746cd46ad8f3bfe333984"
     )
     assert pins["fc_eval"]["commit"] == "c08f665e7bf3b4de225b72dc02ce9b15b7aaba2b"
     assert pins["dataset"]["artifact_sha256"] == (
