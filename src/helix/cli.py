@@ -1351,6 +1351,10 @@ def clean(project_dir: Path | None) -> None:
                 print_info("Removed Git repository initialized by HELIX.")
         except Exception as exc:
             print_warning(f"Could not remove HELIX-created Git repository: {exc}")
+            print_warning(
+                "Preserved .helix cleanup markers for inspection; cleanup is incomplete."
+            )
+            raise SystemExit(2)
         shutil.rmtree(base_dir, ignore_errors=True)
         print_success("Cleaned up .helix/ directory.")
     elif branch_result.returncode == 0 and branch_result.stdout.strip():
