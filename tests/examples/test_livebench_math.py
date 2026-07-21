@@ -17,6 +17,7 @@ from helix.sandbox import _copy_tree_contents
 
 
 ROOT = Path(__file__).parents[2] / "examples" / "livebench_math"
+CODEX_RUNNER_IMAGE = "ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d"
 sys.path.insert(0, str(ROOT))
 
 import constants  # noqa: E402
@@ -198,7 +199,11 @@ def test_parallel_and_baseline_configs_pin_expected_shapes() -> None:
     assert p2n2["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert one["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert p2n2["sandbox"]["enabled"] and p2n2["sandbox"]["evaluator"]
-    assert p2n2["sandbox"]["image"] == "ghcr.io/ke7/helix-evo-runner-codex:0.2.0"
+    assert p2n2["sandbox"]["image"] == CODEX_RUNNER_IMAGE
+    assert one["sandbox"]["image"] == CODEX_RUNNER_IMAGE
+    assert (ROOT / "Dockerfile").read_text().splitlines()[0] == (
+        f"FROM {CODEX_RUNNER_IMAGE}"
+    )
     assert p2n2["evaluator"]["sidecar"]["image"].startswith("helix-livebench-math:")
     assert p2n2["evaluator"]["sidecar"]["runner_image"].startswith(
         "helix-livebench-math:"
@@ -230,7 +235,7 @@ def test_agent_command_environment_excludes_sidecar_key(
 def test_agent_image_and_evaluator_image_are_separate_trust_domains() -> None:
     config = load_config(ROOT / "helix.toml")
     assert config.evaluator.sidecar is not None
-    assert config.sandbox.image == "ghcr.io/ke7/helix-evo-runner-codex:0.2.0"
+    assert config.sandbox.image == CODEX_RUNNER_IMAGE
     assert config.evaluator.sidecar.image == "helix-livebench-math:e2c8b590-smoke"
     assert config.evaluator.sidecar.resolved_runner_image == (
         "helix-livebench-math:e2c8b590-smoke"

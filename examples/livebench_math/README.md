@@ -39,14 +39,16 @@ official scorer computation itself is unchanged.
 - a clean HELIX 0.3.0 worktree containing canonical core fixes `94f9751`,
   `402dcc8`, and `e5c260f` (the lane began from feature base `84c7bcd`)
 - `OPENAI_API_KEY` exported in the shell; never put it in this directory
-- access to `ghcr.io/ke7/helix-evo-runner-codex:0.2.0`, GitHub, Hugging Face,
-  and the OpenAI API during setup/run
+- access to the pinned linux/arm64 runner
+  `ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d`, GitHub, Hugging Face, and the OpenAI API during setup/run
 
 Run every command below from this directory.
 
 ## Setup and scorer gate
 
 ```sh
+docker pull --platform linux/arm64 \
+  ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d
 docker build --progress=plain \
   -t helix-livebench-math:e2c8b590-smoke .
 docker run --rm helix-livebench-math:e2c8b590-smoke \

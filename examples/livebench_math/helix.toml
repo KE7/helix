@@ -67,7 +67,7 @@ provenance files. Do not add benchmark answers or question-specific facts.
 
 [sandbox]
 enabled = true
-image = "ghcr.io/ke7/helix-evo-runner-codex:0.2.0"
+image = "ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d"
 network = "bridge"
 evaluator = true
 cpus = 2.0
