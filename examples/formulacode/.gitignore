@@ -1,0 +1,19 @@
+# All benchmark clones, task data, calibration output, and HELIX state stay local.
+.work/
+.helix/
+helix_batch.json
+.helix_*
+.agent_*
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.jsonl
+*.cast
+*.tar
+*.tar.gz
+*.parquet
+*.csv
+results/
+runs/
+artifacts/

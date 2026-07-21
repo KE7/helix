@@ -1,0 +1,46 @@
+objective = "Optimize NetworkX connected_components and weakly_connected_components for the official FormulaCode networkx_networkx_7971 adversarial disconnected-graph workload while preserving upstream correctness. Modify only production files under networkx/."
+rng_seed = 7971
+passthrough_env = ["ANTHROPIC_API_KEY"]
+
+[evaluator]
+command = "__PYTHON__ .formulacode/evaluator.py"
+score_parser = "helix_result"
+include_stdout = false
+include_stderr = false
+protected_files = [".formulacode", "helix.toml"]
+
+[dataset]
+train_size = 2
+val_size = 2
+
+[evolution]
+max_generations = 1
+max_evaluations = 40
+merge_enabled = false
+num_parallel_proposals = 2
+mutations_per_parent = 2
+proposal_selection = "best_improvement"
+minibatch_size = 2
+max_workers = 4
+cache_evaluation = true
+acceptance_criterion = "strict_improvement"
+frontier_type = "instance"
+
+[agent]
+backend = "claude"
+model = "haiku"
+effort = "low"
+max_turns = 6
+background = "FormulaCode task networkx_networkx_7971 at NetworkX base a986762f. The official PR reports repeated traversal on disconnected graphs whose singleton is visited before a large complete component. Optimize both connected_components and weakly_connected_components. Modify only production files under networkx/. Do not change tests, benchmark files, configuration, or hidden files."
+
+[sandbox]
+enabled = true
+evaluator = false
+image = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
+network = "bridge"
+cpus = 1.5
+memory = "1536m"
+timeout_seconds = 360
+pids_limit = 256
+omit_from_agent = [".formulacode", "helix.toml"]
+preserve_backend_transcripts = true

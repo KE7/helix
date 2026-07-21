@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "clock": "timeit.perf_counter",
+  "warmups": 3,
+  "repeats": 7,
+  "loops": 12,
+  "correctness_timeout_seconds": 45,
+  "measurement_timeout_seconds": 45,
+  "correctness_tests": [
+    "networkx/algorithms/components/tests/test_connected.py",
+    "networkx/algorithms/components/tests/test_weakly_connected.py"
+  ]
+}

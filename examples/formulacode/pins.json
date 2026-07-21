@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "helix": {
+    "repository": "https://github.com/KE7/helix.git",
+    "base_commit": "84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023",
+    "relative_path_fix_source_commit": "402dcc8cfb2c461144de8f019e6ec49811dc2da9",
+    "relative_path_fix_applied_commit": "daa5062683e15017a56746cd46ad8f3bfe333984"
+  },
+  "fc_eval": {
+    "repository": "https://github.com/formula-code/fc-eval.git",
+    "commit": "c08f665e7bf3b4de225b72dc02ce9b15b7aaba2b",
+    "version": "0.1.0",
+    "license": "BSD-3-Clause"
+  },
+  "dataset": {
+    "repository": "https://huggingface.co/datasets/formulacode/formulacode-all",
+    "commit": "897e48cab8a27d32ba20ddb970b1fc397d96ee95",
+    "config": "verified",
+    "artifact": "verified/train-00000-of-00001.parquet",
+    "artifact_sha256": "d872c4f3025e2331c012ce311e4330c73a72b87034c287fc9ce5f4d1b23e81d7"
+  },
+  "task": {
+    "task_id": "networkx_networkx_7971",
+    "repository": "https://github.com/networkx/networkx.git",
+    "base_commit": "a986762f2a1919126df2174644232c92c58be2be",
+    "oracle_commit": "3d0bb212f9fa4bac168c3b8c3f512a5f69b7920c",
+    "pull_request": "https://github.com/networkx/networkx/pull/7971",
+    "official_image": "formulacode/all:networkx-networkx-a986762f2a1919126df2174644232c92c58be2be--final",
+    "official_image_digest": "sha256:6e7f9d3cc7ec5020b8156038eea0832bc2d993953f5f03e13e38dcaccaffb0fe",
+    "official_image_platform": "linux/amd64"
+  },
+  "runner": {
+    "image": "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba",
+    "platform": "linux/amd64"
+  },
+  "python": "3.12",
+  "pytest": "8.4.1"
+}
