@@ -66,6 +66,23 @@ def _make_repo(path: Path) -> None:
 
 
 class TestCreateSeedWorktree:
+    def test_resolves_relative_paths_before_dirty_snapshot(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Relative --dir-style paths retain one meaning across Git cwd changes."""
+        monkeypatch.chdir(tmp_path)
+        repo_root = Path("project")
+        _make_repo(repo_root)
+        (repo_root / "README.md").write_text("# dirty relative seed\n")
+
+        base_dir = repo_root / ".helix" / "worktrees"
+        candidate = create_seed_worktree(repo_root, base_dir)
+        worktree_path = Path(candidate.worktree_path)
+
+        assert worktree_path.is_absolute()
+        assert worktree_path == base_dir.resolve() / "g0-s0"
+        assert (worktree_path / "README.md").read_text() == ("# dirty relative seed\n")
+
     def test_creates_worktree_from_non_git_dir(
         self, tmp_path: Path, monkeypatch
     ) -> None:

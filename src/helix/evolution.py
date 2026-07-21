@@ -1637,6 +1637,13 @@ def run_evolution(
     base_dir: Path,
 ) -> HelixResult:
     """Run the HELIX evolutionary loop."""
+    # Normalize once at the public boundary.  Git interprets a relative
+    # ``worktree add`` target from its subprocess cwd, whereas the rest of
+    # HELIX interprets paths from the invoking process.  Absolute roots keep
+    # state, evaluator artifacts, and worktree subprocesses on the same tree.
+    project_root = project_root.resolve()
+    base_dir = base_dir.resolve()
+
     # Mirror GEPA api.py:262-265: at least one stopping condition is required.
     # Without this, perfect-skip + always-perfect data + no effective bound =
     # a run that terminates only by the OS.  In HELIX, max_generations (loop

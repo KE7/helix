@@ -380,6 +380,12 @@ def create_empty_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     Candidate
         The seed candidate (id="g0-s0", generation=0, parent=None).
     """
+    # Git resolves relative worktree arguments from ``cwd`` while Python
+    # resolves later ``Path`` operations from the caller's working directory.
+    # Keep one absolute interpretation for creation and every later operation.
+    repo_root = repo_root.resolve()
+    base_dir = base_dir.resolve()
+
     # Initialise a bare git repo with an empty initial commit.
     if not _is_git_repo(repo_root):
         repo_root.mkdir(parents=True, exist_ok=True)
@@ -460,6 +466,11 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     Candidate
         The seed candidate (generation 0, slot 0).
     """
+    # See ``create_empty_seed_worktree``: candidate paths must not change
+    # meaning when they cross a subprocess ``cwd`` boundary.
+    repo_root = repo_root.resolve()
+    base_dir = base_dir.resolve()
+
     _ensure_git_repo(repo_root)
 
     # Warn when local edits exist so the user knows HELIX will snapshot them.
@@ -525,6 +536,7 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
     Candidate
         The cloned candidate with its own isolated worktree.
     """
+    base_dir = base_dir.resolve()
     new_branch = f"helix/{new_id}"
     new_worktree_path = base_dir / new_id
     base_dir.mkdir(parents=True, exist_ok=True)

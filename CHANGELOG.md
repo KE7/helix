@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uncached work is charged, so an admitted phase with U uncached metric units
   can overshoot by at most `max(0, U - 1)` units.
 
+### Fixed
+- Relative `--dir` evolution paths are normalized before Git worktree
+  creation, so dirty seed snapshots and later candidate subprocesses resolve
+  the same worktree location.
+
 ## [0.2.2] - 2026-05-13
 
 ### Added
