@@ -17,8 +17,8 @@ scores**, never FormulaCode leaderboard scores.
 
 All machine-readable pins live in [`pins.json`](pins.json):
 
-- HELIX base `84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023` plus upstream
-  relative-path fix `402dcc8cfb2c461144de8f019e6ec49811dc2da9` (HELIX 0.3.0).
+- HELIX 0.3.0 runtime core `c9371f4c91a50fa7196c85826a0e08e546aa05bc`,
+  with canonical ancestry `94f9751` → `402dcc8` → `e5c260f` → `c9371f4`.
 - fc-eval `0.1.0` source commit
   `c08f665e7bf3b4de225b72dc02ce9b15b7aaba2b` (BSD-3-Clause).
 - FormulaCode verified-dataset commit
@@ -45,9 +45,11 @@ tracked in this repository.
 - At least 8 GiB free disk for setup and the HELIX runner. The official
   FormulaCode task image is not pulled by this smoke workflow.
 - A valid `ANTHROPIC_API_KEY` in the environment. Never place it in a file or
-  command-line argument. HELIX passes it through only to isolated mutation
-  containers and redacts Docker diagnostics.
-- This HELIX checkout must contain the pinned base and relative-path fix above.
+  command-line argument. HELIX supplies it to isolated mutation containers and
+  redacts Docker diagnostics. Each protected evaluator subprocess removes
+  provider credential variables from its own environment before any candidate
+  import/execution; its correctness child receives only PATH and PYTHONPATH.
+- This HELIX checkout must contain the canonical 0.3.0 ancestry above.
 
 The pinned HELIX runner is `linux/amd64`; Docker Desktop on Apple Silicon uses
 emulation. That affects wall time, but performance measurement itself runs on
@@ -59,8 +61,11 @@ containers.
 From the HELIX repository root:
 
 ```bash
-git cat-file -e 84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023^{commit}
-git cat-file -e 402dcc8cfb2c461144de8f019e6ec49811dc2da9^{commit}
+git merge-base --is-ancestor 94f9751de22b42d5a3140d69dec1d1a9ffd329e5 HEAD
+git merge-base --is-ancestor 402dcc8cfb2c461144de8f019e6ec49811dc2da9 HEAD
+git merge-base --is-ancestor e5c260f08948cf33abf61716f31b25f455de0dd0 HEAD
+git merge-base --is-ancestor c9371f4c91a50fa7196c85826a0e08e546aa05bc HEAD
+uv run helix --version
 uv run python examples/formulacode/manage.py preflight
 uv run python examples/formulacode/manage.py setup
 ```

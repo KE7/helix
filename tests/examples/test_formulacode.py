@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -142,6 +143,77 @@ def test_correctness_timeout_becomes_failure_without_output(
     assert kind == "correctness_timeout"
 
 
+def test_measure_agent_purges_provider_credentials_before_candidate_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate_module = tmp_path / "networkx" / "__init__.py"
+    candidate_module.parent.mkdir()
+    candidate_module.write_text("# sentinel candidate module\n")
+    secrets = {
+        "ANTHROPIC_API_KEY": "anthropic-sentinel",
+        "ANTHROPIC_AUTH_TOKEN": "auth-sentinel",
+        "OPENAI_API_KEY": "openai-sentinel",
+        "GOOGLE_API_KEY": "google-sentinel",
+        "AWS_SECRET_ACCESS_KEY": "aws-sentinel",
+        "GITHUB_TOKEN": "github-sentinel",
+    }
+    for name, value in secrets.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("FORMULACODE_HARMLESS", "preserved")
+    monkeypatch.setattr(evaluator, "ROOT", tmp_path)
+    private = tmp_path / ".formulacode"
+    private.mkdir()
+    monkeypatch.setattr(evaluator, "PRIVATE_DIR", private)
+
+    def assert_candidate_environment() -> None:
+        assert not secrets.keys() & evaluator.os.environ.keys()
+        candidate_home = Path(evaluator.os.environ["HOME"])
+        assert candidate_home.parent == private
+        assert candidate_home.is_dir()
+        assert list(candidate_home.iterdir()) == []
+
+    def candidate_import(name: str) -> SimpleNamespace:
+        assert name == "networkx"
+        assert_candidate_environment()
+        return SimpleNamespace(__file__=str(candidate_module))
+
+    def candidate_measure(*args: object, **kwargs: object) -> list[float]:
+        assert_candidate_environment()
+        return [0.001]
+
+    monkeypatch.setattr(evaluator.importlib, "import_module", candidate_import)
+    monkeypatch.setattr(evaluator, "measure_workload", candidate_measure)
+    measured = evaluator._measure_agent(
+        ["0"], "val", {"warmups": 0, "repeats": 1, "loops": 1}
+    )
+    assert measured == {workloads.WORKLOADS["val"]["0"].benchmark_name: [0.001]}
+    assert list(private.iterdir()) == []
+    assert evaluator.os.environ["FORMULACODE_HARMLESS"] == "preserved"
+
+
+def test_correctness_child_environment_is_allowlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "/safe/bin")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-child")
+    captured: dict[str, object] = {}
+
+    def run(*args: object, **kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(evaluator.subprocess, "run", run)
+    passed, kind = evaluator.run_correctness(
+        {"correctness_tests": ["test.py"], "correctness_timeout_seconds": 1}
+    )
+    assert passed is True
+    assert kind is None
+    assert captured["env"] == {
+        "PATH": "/safe/bin",
+        "PYTHONPATH": str(evaluator.ROOT),
+    }
+
+
 def test_contract_error_redacts_exception_message(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -160,17 +232,23 @@ def test_contract_error_redacts_exception_message(
 
 def test_pins_and_parallel_isolation_configuration_are_exact() -> None:
     pins = json.loads((DEMO_ROOT / "pins.json").read_text())
-    assert pins["helix"]["base_commit"] == ("84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023")
     assert pins["helix"]["target_release"] == "0.3.0"
-    assert pins["helix"]["relative_path_fix_commit"] == (
-        "402dcc8cfb2c461144de8f019e6ec49811dc2da9"
+    assert pins["helix"]["runtime_core_commit"] == (
+        "c9371f4c91a50fa7196c85826a0e08e546aa05bc"
     )
+    assert pins["helix"]["canonical_ancestry"] == [
+        "94f9751de22b42d5a3140d69dec1d1a9ffd329e5",
+        "402dcc8cfb2c461144de8f019e6ec49811dc2da9",
+        "e5c260f08948cf33abf61716f31b25f455de0dd0",
+        "c9371f4c91a50fa7196c85826a0e08e546aa05bc",
+    ]
     assert pins["fc_eval"]["commit"] == "c08f665e7bf3b4de225b72dc02ce9b15b7aaba2b"
     assert pins["dataset"]["artifact_sha256"] == (
         "d872c4f3025e2331c012ce311e4330c73a72b87034c287fc9ce5f4d1b23e81d7"
     )
     assert pins["task"]["task_id"] == "networkx_networkx_7971"
     config = (DEMO_ROOT / "helix.toml.template").read_text()
+    assert 'passthrough_env = ["ANTHROPIC_API_KEY"]' in config
     assert "num_parallel_proposals = 2" in config
     assert "mutations_per_parent = 2" in config
     assert "rng_seed = 7971" in config

@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterator
 
 from official_score import helix_result_pairs, score_measurements
@@ -19,10 +20,53 @@ from workloads import WORKLOADS, measure_workload
 
 ROOT = Path.cwd().resolve()
 PRIVATE_DIR = ROOT / ".formulacode"
+_CREDENTIAL_SUFFIXES = (
+    "_API_KEY",
+    "_AUTH_TOKEN",
+    "_ACCESS_TOKEN",
+    "_SECRET_ACCESS_KEY",
+    "_SECRET_KEY",
+    "_CLIENT_SECRET",
+)
+_CREDENTIAL_NAMES = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+}
 
 
 class EvaluationTimeout(TimeoutError):
     """Raised by the local wall-clock guard."""
+
+
+def purge_mutation_credentials() -> None:
+    """Remove provider credentials before candidate code can run in-process.
+
+    This changes only the evaluator subprocess environment.  HELIX's parent
+    process and isolated mutation containers retain their configured auth.
+    """
+
+    for name in tuple(os.environ):
+        if name in _CREDENTIAL_NAMES or name.endswith(_CREDENTIAL_SUFFIXES):
+            os.environ.pop(name, None)
+
+
+@contextmanager
+def candidate_environment() -> Iterator[None]:
+    """Expose no mutation auth or host HOME to in-process candidate code."""
+
+    purge_mutation_credentials()
+    previous_home = os.environ.get("HOME")
+    with tempfile.TemporaryDirectory(prefix="candidate-home-", dir=PRIVATE_DIR) as home:
+        os.environ["HOME"] = home
+        try:
+            yield
+        finally:
+            if previous_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous_home
 
 
 @contextmanager
@@ -83,33 +127,35 @@ def run_correctness(config: dict[str, Any]) -> tuple[bool, str | None]:
 def _measure_agent(
     requested_ids: list[str], split: str, config: dict[str, Any]
 ) -> dict[str, list[float]]:
-    sys.path.insert(0, str(ROOT))
-    try:
-        nx = importlib.import_module("networkx")
-    finally:
-        sys.path.pop(0)
+    with candidate_environment():
+        sys.path.insert(0, str(ROOT))
+        try:
+            nx = importlib.import_module("networkx")
+        finally:
+            sys.path.pop(0)
 
-    module_file = getattr(nx, "__file__", None)
-    if module_file is None:
-        raise RuntimeError("candidate NetworkX module has no source path")
-    module_path = Path(module_file).resolve()
-    if ROOT not in module_path.parents:
-        raise RuntimeError("candidate NetworkX was not imported from its worktree")
+        module_file = getattr(nx, "__file__", None)
+        if module_file is None:
+            raise RuntimeError("candidate NetworkX module has no source path")
+        module_path = Path(module_file).resolve()
+        if ROOT not in module_path.parents:
+            raise RuntimeError("candidate NetworkX was not imported from its worktree")
 
-    measured: dict[str, list[float]] = {}
-    for instance_id in dict.fromkeys(requested_ids):
-        workload = WORKLOADS[split][instance_id]
-        measured[workload.benchmark_name] = measure_workload(
-            nx,
-            workload,
-            warmups=int(config["warmups"]),
-            repeats=int(config["repeats"]),
-            loops=int(config["loops"]),
-        )
-    return measured
+        measured: dict[str, list[float]] = {}
+        for instance_id in dict.fromkeys(requested_ids):
+            workload = WORKLOADS[split][instance_id]
+            measured[workload.benchmark_name] = measure_workload(
+                nx,
+                workload,
+                warmups=int(config["warmups"]),
+                repeats=int(config["repeats"]),
+                loops=int(config["loops"]),
+            )
+        return measured
 
 
 def evaluate() -> list[list[Any]]:
+    purge_mutation_credentials()
     config = json.loads((PRIVATE_DIR / "measurement.json").read_text())
     baselines = json.loads((PRIVATE_DIR / "baselines.json").read_text())
     split = os.environ.get("HELIX_SPLIT", "val")

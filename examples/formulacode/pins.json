@@ -3,8 +3,13 @@
   "helix": {
     "repository": "https://github.com/KE7/helix.git",
     "target_release": "0.3.0",
-    "base_commit": "84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023",
-    "relative_path_fix_commit": "402dcc8cfb2c461144de8f019e6ec49811dc2da9"
+    "runtime_core_commit": "c9371f4c91a50fa7196c85826a0e08e546aa05bc",
+    "canonical_ancestry": [
+      "94f9751de22b42d5a3140d69dec1d1a9ffd329e5",
+      "402dcc8cfb2c461144de8f019e6ec49811dc2da9",
+      "e5c260f08948cf33abf61716f31b25f455de0dd0",
+      "c9371f4c91a50fa7196c85826a0e08e546aa05bc"
+    ]
   },
   "fc_eval": {
     "repository": "https://github.com/formula-code/fc-eval.git",
