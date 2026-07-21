@@ -172,6 +172,8 @@ def test_parallel_and_baseline_configs_pin_expected_shapes() -> None:
     assert p2n2["evaluator"]["sidecar"]["passthrough_env"] == ["OPENAI_API_KEY"]
     assert "passthrough_env" not in one
     assert one["evaluator"]["sidecar"]["passthrough_env"] == ["OPENAI_API_KEY"]
+    assert ".gitignore" not in p2n2["evaluator"]["protected_files"]
+    assert ".gitignore" not in one["evaluator"]["protected_files"]
 
 
 def test_agent_command_environment_excludes_sidecar_key(

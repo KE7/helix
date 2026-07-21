@@ -21,7 +21,6 @@ protected_files = [
   "README.md",
   "SOURCES.md",
   "helix.1x1.toml",
-  ".gitignore",
   ".dockerignore",
 ]
 

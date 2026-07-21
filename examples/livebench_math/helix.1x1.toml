@@ -7,7 +7,7 @@ command = "python3 evaluate.py"
 score_parser = "helix_result"
 include_stdout = false
 include_stderr = true
-protected_files = ["constants.py", "dataset.py", "scoring.py", "prepare_data.py", "server.py", "evaluate.py", "smoke_score.py", "inspect_run.py", "requirements-evaluator.txt", "Dockerfile", "README.md", "SOURCES.md", "helix.toml", ".gitignore", ".dockerignore"]
+protected_files = ["constants.py", "dataset.py", "scoring.py", "prepare_data.py", "server.py", "evaluate.py", "smoke_score.py", "inspect_run.py", "requirements-evaluator.txt", "Dockerfile", "README.md", "SOURCES.md", "helix.toml", ".dockerignore"]
 
 [evaluator.sidecar]
 image = "helix-livebench-math:e2c8b590-smoke"
