@@ -1,0 +1,78 @@
+objective = "Improve prompt.txt so a pinned GPT-4.1-mini snapshot solves the pinned LiveBench-Math smoke subset under the official LiveBench scorers. This is a 4-train/4-validation smoke subset, not a reproduction of the published 100/100/168, 5,000-call experiment."
+seed = "."
+rng_seed = 0
+
+[evaluator]
+command = "python3 evaluate.py"
+score_parser = "helix_result"
+include_stdout = false
+include_stderr = true
+protected_files = [
+  "constants.py",
+  "dataset.py",
+  "scoring.py",
+  "prepare_data.py",
+  "server.py",
+  "evaluate.py",
+  "smoke_score.py",
+  "inspect_run.py",
+  "requirements-evaluator.txt",
+  "Dockerfile",
+  "README.md",
+  "SOURCES.md",
+  "helix.1x1.toml",
+  ".gitignore",
+  ".dockerignore",
+]
+
+[evaluator.sidecar]
+image = "helix-livebench-math:e2c8b590-smoke"
+runner_image = "helix-livebench-math:e2c8b590-smoke"
+command = "python3 /opt/livebench-math/server.py"
+endpoint = "http://helix-evaluator:8080/evaluate"
+startup_timeout_seconds = 60
+passthrough_env = ["OPENAI_API_KEY"]
+# The sidecar has no published port and remains on a run-private network, but
+# needs outbound egress for the pinned OpenAI solver snapshot.
+internal_network = false
+
+[dataset]
+train_size = 4
+val_size = 4
+
+[evolution]
+max_generations = 1
+max_evaluations = 32
+minibatch_size = 1
+num_parallel_proposals = 2
+mutations_per_parent = 2
+proposal_selection = "all_improvements"
+max_workers = 4
+merge_enabled = false
+cache_evaluation = true
+# Scores are in [0, 1]. A threshold above that range ensures the smoke
+# exercises proposal scheduling even if the seed happens to score perfectly.
+perfect_score_threshold = 2.0
+
+[agent]
+backend = "codex"
+model = "gpt-5-mini"
+effort = "low"
+max_turns = 8
+background = """
+Only prompt.txt is an evolvable candidate artifact. Improve general mathematical
+reasoning and exact final-answer formatting. Do not modify, replace, bypass, or
+reimplement the evaluator, dataset adapter, scoring harness, configuration, or
+provenance files. Do not add benchmark answers or question-specific facts.
+"""
+
+[sandbox]
+enabled = true
+image = "ghcr.io/ke7/helix-evo-runner-codex:0.2.0"
+network = "bridge"
+evaluator = true
+cpus = 2.0
+memory = "4g"
+pids_limit = 256
+timeout_seconds = 600
+preserve_backend_transcripts = false
