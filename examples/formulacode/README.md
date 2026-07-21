@@ -41,7 +41,7 @@ tracked in this repository.
 
 - macOS or Linux with Git, Docker, `uv`, and `jq`.
 - Docker with at least 4 CPUs and 6 GiB available; the demonstrated machine had
-  14 CPUs and 8,216,301,568 bytes in the shared VM.
+  14 CPUs and 31,490,187,264 bytes in the shared VM.
 - At least 8 GiB free disk for setup and the HELIX runner. The official
   FormulaCode task image is not pulled by this smoke workflow.
 - A valid `ANTHROPIC_API_KEY` in the environment. Never place it in a file or
@@ -116,7 +116,7 @@ The generated configuration fixes:
 
 ```bash
 uv run python examples/formulacode/manage.py inspect | tee /tmp/formulacode-inspect.json
-jq '.state | {generation,budget,batches,tasks,distinct_child_ids,parent_major_order}' \
+jq '.state | {generation,budget,batches,tasks,accounting,distinct_child_ids,parent_major_order,terminal_p2n2}' \
   /tmp/formulacode-inspect.json
 uv run helix frontier --dir examples/formulacode/.work/networkx_networkx_7971
 uv run helix history --dir examples/formulacode/.work/networkx_networkx_7971
@@ -134,9 +134,15 @@ Expected durable artifacts (all ignored and local):
 - `.helix/worktrees/<candidate-id>/` — isolated candidate repositories;
 - `.helix/eval_cache.pkl` — durable content/example cache.
 
-`inspect` asserts unique reserved child IDs, parent-major ordering, reports every
-task's status/selection/cleanup/budget charge, lists actual worktree paths, and
-scans HELIX artifacts for configured API-key values without printing them.
+`inspect` fails closed unless state is generation 1 with exactly one complete
+P=2,N=2 batch, four globally distinct reserved IDs in parent-major order, and
+every task has terminal status/selection/cleanup plus `budget_accounted=true`.
+For each complete batch it reports the sum of task evaluation charges and the
+`budget_after_apply - budget_before_dispatch` delta and requires equality. It
+also reports total global, proposal, and non-proposal evaluations, requires the
+terminal batch boundary to equal the global budget, lists actual worktree
+paths, and scans HELIX artifacts for configured API-key values without printing
+them.
 
 ## Resume and idempotence
 
@@ -144,15 +150,26 @@ Resume uses the exact same generated config; changing P, N, selection, sampler,
 or evaluator semantics is intentionally rejected by HELIX.
 
 ```bash
-before=$(uv run python examples/formulacode/manage.py fingerprint | jq -r .fingerprint)
+uv run python examples/formulacode/manage.py inspect > /tmp/formulacode-resume0.json
+jq -S '{fingerprint,budget:.state.budget,accounting:.state.accounting,batches:.state.batches,tasks:.state.tasks}' \
+  /tmp/formulacode-resume0.json > /tmp/formulacode-resume0.stable.json
+
 uv run helix resume --dir examples/formulacode/.work/networkx_networkx_7971
-after=$(uv run python examples/formulacode/manage.py fingerprint | jq -r .fingerprint)
-test "$before" = "$after"
+uv run python examples/formulacode/manage.py inspect > /tmp/formulacode-resume1.json
+jq -S '{fingerprint,budget:.state.budget,accounting:.state.accounting,batches:.state.batches,tasks:.state.tasks}' \
+  /tmp/formulacode-resume1.json > /tmp/formulacode-resume1.stable.json
+cmp /tmp/formulacode-resume0.stable.json /tmp/formulacode-resume1.stable.json
+
+uv run helix resume --dir examples/formulacode/.work/networkx_networkx_7971
+uv run python examples/formulacode/manage.py inspect > /tmp/formulacode-resume2.json
+jq -S '{fingerprint,budget:.state.budget,accounting:.state.accounting,batches:.state.batches,tasks:.state.tasks}' \
+  /tmp/formulacode-resume2.json > /tmp/formulacode-resume2.stable.json
+cmp /tmp/formulacode-resume1.stable.json /tmp/formulacode-resume2.stable.json
 ```
 
-For a completed one-generation run, resume must schedule no new child ID,
-consume no additional evaluator budget, and leave the durable fingerprint
-unchanged.
+For a completed one-generation run, both consecutive resumes must schedule no
+new child ID, consume no additional evaluator budget, and leave the durable
+fingerprint and terminal ledger/accounting unchanged.
 
 ## Cleanup and zero-resource proof
 
@@ -163,6 +180,10 @@ runner image if this demo pulled it:
 uv run helix clean --dir examples/formulacode/.work/networkx_networkx_7971
 uv run python examples/formulacode/manage.py cleanup --remove-runner-image
 uv run python examples/formulacode/manage.py verify-clean
+rm -f /tmp/formulacode-inspect.json \
+  /tmp/formulacode-resume0.json /tmp/formulacode-resume0.stable.json \
+  /tmp/formulacode-resume1.json /tmp/formulacode-resume1.stable.json \
+  /tmp/formulacode-resume2.json /tmp/formulacode-resume2.stable.json
 git worktree list --porcelain
 docker ps --format '{{.ID}} {{.Names}} {{.Image}}'
 git status --short -- examples/formulacode tests/examples/test_formulacode.py

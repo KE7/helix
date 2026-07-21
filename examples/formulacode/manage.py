@@ -196,7 +196,11 @@ def _append_local_ignores(path: Path) -> None:
 
 def setup() -> dict[str, Any]:
     if (PROJECT_ROOT / "helix.toml").is_file():
-        return {"status": "already_setup", "project": str(PROJECT_ROOT), **inspect()}
+        return {
+            "status": "already_setup",
+            "project": str(PROJECT_ROOT),
+            **inspect(require_terminal=False),
+        }
     if WORK_ROOT.exists():
         raise DemoError(
             f"partial setup exists at {WORK_ROOT}; inspect it or run cleanup first"
@@ -312,44 +316,138 @@ def setup() -> dict[str, Any]:
         # Preserve partial setup for diagnosis.  cleanup validates the exact
         # owned path before removing it.
         raise
-    return {"status": "setup", "project": str(PROJECT_ROOT), **inspect()}
+    return {
+        "status": "setup",
+        "project": str(PROJECT_ROOT),
+        **inspect(require_terminal=False),
+    }
 
 
 def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
-    batches = state.get("proposal_batches", [])
-    tasks = [task for batch in batches for task in batch.get("tasks", [])]
-    child_ids = [str(task.get("child_id")) for task in tasks]
+    if state.get("generation") != 1:
+        raise DemoError("state is not terminal at the pinned generation 1")
+    raw_batches = state.get("proposal_batches")
+    if not isinstance(raw_batches, list) or len(raw_batches) != 1:
+        raise DemoError("expected exactly one terminal P=2,N=2 proposal batch")
+    batch = raw_batches[0]
+    if not isinstance(batch, dict):
+        raise DemoError("proposal batch must be a JSON object")
+    if batch.get("phase") != "complete" or (batch.get("p"), batch.get("n")) != (
+        2,
+        2,
+    ):
+        raise DemoError("proposal batch is not complete P=2,N=2")
+    raw_tasks = batch.get("tasks")
+    if not isinstance(raw_tasks, list) or len(raw_tasks) != 4:
+        raise DemoError("terminal P=2,N=2 batch must contain exactly four tasks")
 
-    def batch_is_parent_major(batch: dict[str, Any]) -> bool:
-        n = max(1, int(batch.get("n", 1)))
-        return all(
-            task.get("task_index") == index
-            and task.get("parent_group") == index // n
-            and task.get("mutation_index") == index % n
-            for index, task in enumerate(batch.get("tasks", []))
+    tasks: list[dict[str, Any]] = []
+    child_ids: list[str] = []
+    task_charge_evaluations = 0
+    terminal_statuses = {
+        "skipped",
+        "failed",
+        "tampered",
+        "rejected",
+        "applied",
+        "interrupted",
+    }
+    terminal_selections = {"not_applicable", "not_selected", "selected"}
+    terminal_cleanups = {"not_required", "removed", "missing"}
+    for index, raw_task in enumerate(raw_tasks):
+        if not isinstance(raw_task, dict):
+            raise DemoError(f"proposal task {index} must be a JSON object")
+        task = cast(dict[str, Any], raw_task)
+        if (
+            task.get("batch_id") != batch.get("batch_id")
+            or (task.get("p"), task.get("n")) != (2, 2)
+            or task.get("task_index") != index
+            or task.get("parent_group") != index // 2
+            or task.get("mutation_index") != index % 2
+        ):
+            raise DemoError(f"proposal task {index} violates parent-major P=2,N=2")
+        child_id = task.get("child_id")
+        if not isinstance(child_id, str) or not child_id:
+            raise DemoError(f"proposal task {index} has no reserved child ID")
+        child_ids.append(child_id)
+        if task.get("status") not in terminal_statuses:
+            raise DemoError(f"proposal task {child_id} is not terminal")
+        if task.get("selection") not in terminal_selections:
+            raise DemoError(f"proposal task {child_id} has nonterminal selection")
+        if task.get("cleanup") not in terminal_cleanups:
+            raise DemoError(f"proposal task {child_id} has nonterminal cleanup")
+        if task.get("budget_accounted") is not True:
+            raise DemoError(f"proposal task {child_id} is not budget-accounted")
+        raw_charge = task.get("budget_charge")
+        if not isinstance(raw_charge, dict):
+            raise DemoError(f"proposal task {child_id} has no budget charge")
+        charge = raw_charge.get("evaluations")
+        if not isinstance(charge, int) or isinstance(charge, bool) or charge < 0:
+            raise DemoError(f"proposal task {child_id} has invalid evaluation charge")
+        task_charge_evaluations += charge
+        tasks.append(task)
+
+    if len(set(child_ids)) != 4:
+        raise DemoError("expected exactly four globally distinct proposal child IDs")
+
+    budget_before = batch.get("budget_before_dispatch")
+    budget_after = batch.get("budget_after_apply")
+    if (
+        not isinstance(budget_before, int)
+        or isinstance(budget_before, bool)
+        or budget_before < 0
+        or not isinstance(budget_after, int)
+        or isinstance(budget_after, bool)
+        or budget_after < budget_before
+    ):
+        raise DemoError("proposal batch has invalid evaluation budget boundaries")
+    batch_delta = budget_after - budget_before
+    if task_charge_evaluations != batch_delta:
+        raise DemoError(
+            "proposal task charges do not conserve the complete batch budget delta"
         )
+
+    budget = state.get("budget")
+    if not isinstance(budget, dict):
+        raise DemoError("global budget must be a JSON object")
+    global_evaluations = budget.get("evaluations")
+    if (
+        not isinstance(global_evaluations, int)
+        or isinstance(global_evaluations, bool)
+        or global_evaluations < task_charge_evaluations
+    ):
+        raise DemoError("global evaluation budget is smaller than proposal charges")
+    if budget_after != global_evaluations:
+        raise DemoError("terminal batch budget does not match the global budget")
+    nonproposal_evaluations = global_evaluations - task_charge_evaluations
 
     return {
         "generation": state.get("generation"),
         "frontier": state.get("frontier", []),
-        "budget": state.get("budget", {}),
+        "budget": budget,
         "mutation_counter": state.get("mutation_counter"),
-        "batch_count": len(batches),
+        "batch_count": 1,
         "batches": [
             {
                 "batch_id": batch.get("batch_id"),
                 "phase": batch.get("phase"),
                 "p": batch.get("p"),
                 "n": batch.get("n"),
-                "budget_before_dispatch": batch.get("budget_before_dispatch"),
-                "budget_after_apply": batch.get("budget_after_apply"),
+                "budget_before_dispatch": budget_before,
+                "budget_after_apply": budget_after,
+                "budget_delta_evaluations": batch_delta,
+                "task_charge_evaluations": task_charge_evaluations,
+                "budget_conserved": True,
             }
-            for batch in batches
         ],
         "tasks": [
             {
                 key: task.get(key)
                 for key in (
+                    "batch_id",
+                    "p",
+                    "n",
+                    "task_index",
                     "child_id",
                     "parent_id",
                     "parent_group",
@@ -365,8 +463,16 @@ def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
             }
             for task in tasks
         ],
-        "distinct_child_ids": len(child_ids) == len(set(child_ids)),
-        "parent_major_order": all(batch_is_parent_major(batch) for batch in batches),
+        "accounting": {
+            "global_evaluations": global_evaluations,
+            "proposal_evaluations": task_charge_evaluations,
+            "nonproposal_evaluations": nonproposal_evaluations,
+            "complete_batch_delta_evaluations": batch_delta,
+            "budget_conserved": True,
+        },
+        "distinct_child_ids": True,
+        "parent_major_order": True,
+        "terminal_p2n2": True,
     }
 
 
@@ -385,13 +491,15 @@ def fingerprint() -> str:
     return digest.hexdigest()
 
 
-def inspect() -> dict[str, Any]:
+def inspect(*, require_terminal: bool = True) -> dict[str, Any]:
     result: dict[str, Any] = {
         "project_exists": PROJECT_ROOT.is_dir(),
         "task_id": TASK_ID,
         "project": str(PROJECT_ROOT),
     }
     if not PROJECT_ROOT.is_dir():
+        if require_terminal:
+            raise DemoError("FormulaCode project is not set up")
         return result
     head = run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT).stdout.strip()
     worktrees = run(["git", "worktree", "list", "--porcelain"], cwd=PROJECT_ROOT)
@@ -428,6 +536,8 @@ def inspect() -> dict[str, Any]:
                 data = path.read_bytes()
                 matches += sum(secret.encode() in data for secret in secrets)
         result["secret_scan"] = {"values_checked": len(secrets), "matches": matches}
+    elif require_terminal:
+        raise DemoError("no terminal HELIX state is available to inspect")
     return result
 
 

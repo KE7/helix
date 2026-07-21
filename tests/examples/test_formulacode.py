@@ -179,9 +179,12 @@ def test_pins_and_parallel_isolation_configuration_are_exact() -> None:
     assert 'protected_files = [".formulacode", "helix.toml"]' in config
 
 
-def test_state_summary_preserves_parallel_accounting_and_order() -> None:
+def _terminal_state() -> dict[str, object]:
     tasks = [
         {
+            "batch_id": "g1-proposals",
+            "p": 2,
+            "n": 2,
             "task_index": index,
             "parent_group": index // 2,
             "mutation_index": index % 2,
@@ -196,7 +199,7 @@ def test_state_summary_preserves_parallel_accounting_and_order() -> None:
         }
         for index in range(4)
     ]
-    state = {
+    return {
         "generation": 1,
         "budget": {"evaluations": 10, "agent_steps": 8},
         "proposal_batches": [
@@ -211,41 +214,80 @@ def test_state_summary_preserves_parallel_accounting_and_order() -> None:
             }
         ],
     }
+
+
+def test_state_summary_asserts_terminal_parallel_accounting() -> None:
+    state = _terminal_state()
     summary = manage._state_summary(state)
     assert summary["distinct_child_ids"] is True
     assert summary["parent_major_order"] is True
+    assert summary["terminal_p2n2"] is True
     assert summary["budget"] == state["budget"]
     assert len(summary["tasks"]) == 4
     assert all(task["budget_accounted"] for task in summary["tasks"])
-
-
-def test_state_summary_detects_duplicate_ids_and_resets_order_per_batch() -> None:
-    def batch(batch_id: str, child_ids: list[str]) -> dict[str, object]:
-        return {
-            "batch_id": batch_id,
-            "phase": "complete",
-            "p": 1,
-            "n": 2,
-            "tasks": [
-                {
-                    "task_index": index,
-                    "parent_group": 0,
-                    "mutation_index": index,
-                    "child_id": child_id,
-                }
-                for index, child_id in enumerate(child_ids)
-            ],
-        }
-
-    state = {
-        "proposal_batches": [
-            batch("g1-proposals", ["g1-s0", "duplicate"]),
-            batch("g2-proposals", ["g2-s0", "duplicate"]),
-        ]
+    assert summary["batches"][0]["task_charge_evaluations"] == 8
+    assert summary["batches"][0]["budget_delta_evaluations"] == 8
+    assert summary["accounting"] == {
+        "global_evaluations": 10,
+        "proposal_evaluations": 8,
+        "nonproposal_evaluations": 2,
+        "complete_batch_delta_evaluations": 8,
+        "budget_conserved": True,
     }
-    summary = manage._state_summary(state)
-    assert summary["distinct_child_ids"] is False
-    assert summary["parent_major_order"] is True
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    [
+        ("wrong_p", "complete P=2,N=2"),
+        ("duplicate_id", "globally distinct"),
+        ("running", "is not terminal"),
+        ("pending_cleanup", "nonterminal cleanup"),
+        ("unaccounted", "not budget-accounted"),
+        ("batch_charge_mismatch", "do not conserve"),
+        ("global_budget_mismatch", "does not match the global budget"),
+    ],
+)
+def test_state_summary_fails_closed(defect: str, message: str) -> None:
+    state = _terminal_state()
+    batches = state["proposal_batches"]
+    assert isinstance(batches, list)
+    batch = batches[0]
+    assert isinstance(batch, dict)
+    tasks = batch["tasks"]
+    assert isinstance(tasks, list)
+    first = tasks[0]
+    assert isinstance(first, dict)
+    if defect == "wrong_p":
+        batch["p"] = 1
+    elif defect == "duplicate_id":
+        second = tasks[1]
+        assert isinstance(second, dict)
+        second["child_id"] = first["child_id"]
+    elif defect == "running":
+        first["status"] = "running"
+    elif defect == "pending_cleanup":
+        first["cleanup"] = "pending"
+    elif defect == "unaccounted":
+        first["budget_accounted"] = False
+    elif defect == "batch_charge_mismatch":
+        batch["budget_after_apply"] = 11
+    else:
+        budget = state["budget"]
+        assert isinstance(budget, dict)
+        budget["evaluations"] = 11
+
+    with pytest.raises(manage.DemoError, match=message):
+        manage._state_summary(state)
+
+
+def test_inspect_fails_closed_without_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(manage, "PROJECT_ROOT", tmp_path / "missing-project")
+    with pytest.raises(manage.DemoError, match="not set up"):
+        manage.inspect()
+    assert manage.inspect(require_terminal=False)["project_exists"] is False
 
 
 def test_geometric_mean_rejects_invalid_inputs() -> None:
