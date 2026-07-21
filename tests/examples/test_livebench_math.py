@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import urllib.request
 from pathlib import Path
+from typing import Any, Callable, NoReturn
 
 import pytest
 
@@ -28,7 +30,9 @@ def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
     assert constants.GEPA_BLOG_COMMIT == "121084499247e7ddfa05ec453a53e0d644838b7a"
     assert constants.TERRARIUM_COMMIT == "e2c8b59079ed26de2d38e8aaf4ac2b4437703fe9"
     assert constants.LIVEBENCH_CODE_COMMIT == "1de6a43e82a137beeeaf2b92d683eedb67f0cf97"
-    assert constants.LIVEBENCH_DATA_REVISION == "bb66571c8ccf32d3df9e6f48b920d3770ff4aacb"
+    assert (
+        constants.LIVEBENCH_DATA_REVISION == "bb66571c8ccf32d3df9e6f48b920d3770ff4aacb"
+    )
     assert {name: len(ids) for name, ids in constants.SMOKE_IDS.items()} == {
         "train": 4,
         "val": 4,
@@ -39,10 +43,10 @@ def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
 
 
 def test_official_dispatch_routes_all_math_families() -> None:
-    calls = []
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
-    def record(name, value):
-        def inner(*args, **kwargs):
+    def record(name: str, value: float) -> Callable[..., float]:
+        def inner(*args: Any, **kwargs: Any) -> float:
             calls.append((name, args, kwargs))
             return value
 
@@ -55,11 +59,25 @@ def test_official_dispatch_routes_all_math_families() -> None:
         amps_hard=record("amps", 1),
     )
     base = {"ground_truth": "A", "turns": ["problem"]}
-    assert scoring.score_livebench_math({**base, "subtask": "amc_12a_2023"}, "A", fakes) == 1
-    assert scoring.score_livebench_math({**base, "subtask": "updated_amc_12a_2023"}, "A", fakes) == 1
-    assert scoring.score_livebench_math({**base, "subtask": "aime_i_2024"}, "A", fakes) == 1
+    assert (
+        scoring.score_livebench_math({**base, "subtask": "amc_12a_2023"}, "A", fakes)
+        == 1
+    )
+    assert (
+        scoring.score_livebench_math(
+            {**base, "subtask": "updated_amc_12a_2023"}, "A", fakes
+        )
+        == 1
+    )
+    assert (
+        scoring.score_livebench_math({**base, "subtask": "aime_i_2024"}, "A", fakes)
+        == 1
+    )
     assert scoring.score_livebench_math({**base, "subtask": "imo"}, "A", fakes) == 0.5
-    assert scoring.score_livebench_math({**base, "subtask": "amps_hard_gcd"}, "A", fakes) == 1
+    assert (
+        scoring.score_livebench_math({**base, "subtask": "amps_hard_gcd"}, "A", fakes)
+        == 1
+    )
     olympiad = next(call for call in calls if call[0] == "olympiad")
     assert olympiad[2] == {"edit_distance": True, "debug": False}
 
@@ -85,7 +103,12 @@ def test_largest_remainder_is_deterministic_and_exact() -> None:
 def test_smoke_selection_is_pinned_and_deterministic() -> None:
     rows = {
         name: [
-            {"question_id": question_id, "subtask": "x", "turns": ["q"], "ground_truth": "a"}
+            {
+                "question_id": question_id,
+                "subtask": "x",
+                "turns": ["q"],
+                "ground_truth": "a",
+            }
             for question_id in reversed(ids)
         ]
         for name, ids in constants.SMOKE_IDS.items()
@@ -97,7 +120,9 @@ def test_smoke_selection_is_pinned_and_deterministic() -> None:
     } == constants.SMOKE_IDS
 
 
-def test_evaluate_adapter_preserves_repeated_and_padded_positions(tmp_path: Path) -> None:
+def test_evaluate_adapter_preserves_repeated_and_padded_positions(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "prompt.txt").write_text("candidate")
     (tmp_path / "helix_batch.json").write_text('["0", "0", "3"]')
     assert evaluate.build_request(tmp_path, "train") == {
@@ -117,14 +142,16 @@ def test_evaluate_adapter_rejects_malformed_ids_and_split(tmp_path: Path) -> Non
         evaluate.build_request(tmp_path, "test")
 
 
-def test_client_timeout_is_bounded_and_propagated(monkeypatch: pytest.MonkeyPatch) -> None:
-    observed = {}
+def test_client_timeout_is_bounded_and_propagated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, float] = {}
 
-    def timeout(request, timeout):
+    def timeout(request: Any, timeout: float) -> NoReturn:
         observed["timeout"] = timeout
         raise TimeoutError("bounded evaluator timeout")
 
-    monkeypatch.setattr(evaluate.urllib.request, "urlopen", timeout)
+    monkeypatch.setattr(urllib.request, "urlopen", timeout)
     with pytest.raises(TimeoutError, match="bounded evaluator timeout"):
         evaluate.run_client(
             "http://evaluator.invalid/evaluate",
@@ -134,18 +161,20 @@ def test_client_timeout_is_bounded_and_propagated(monkeypatch: pytest.MonkeyPatc
     assert observed == {"timeout": 3.5}
 
 
-def test_client_rejects_wrong_result_cardinality(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_client_rejects_wrong_result_cardinality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class Response:
-        def __enter__(self):
+        def __enter__(self) -> Response:
             return self
 
-        def __exit__(self, *args):
+        def __exit__(self, *args: Any) -> None:
             return None
 
-        def read(self):
+        def read(self) -> bytes:
             return b'{"results":[]}'
 
-    monkeypatch.setattr(evaluate.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: Response())
     with pytest.raises(ValueError, match="cardinality"):
         evaluate.run_client(
             "http://evaluator.invalid/evaluate",
@@ -158,15 +187,19 @@ def test_parallel_and_baseline_configs_pin_expected_shapes() -> None:
 
     p2n2 = tomllib.loads((ROOT / "helix.toml").read_text())
     one = tomllib.loads((ROOT / "helix.1x1.toml").read_text())
-    assert (p2n2["evolution"]["num_parallel_proposals"], p2n2["evolution"]["mutations_per_parent"]) == (2, 2)
-    assert (one["evolution"]["num_parallel_proposals"], one["evolution"]["mutations_per_parent"]) == (1, 1)
+    assert (
+        p2n2["evolution"]["num_parallel_proposals"],
+        p2n2["evolution"]["mutations_per_parent"],
+    ) == (2, 2)
+    assert (
+        one["evolution"]["num_parallel_proposals"],
+        one["evolution"]["mutations_per_parent"],
+    ) == (1, 1)
     assert p2n2["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert one["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert p2n2["sandbox"]["enabled"] and p2n2["sandbox"]["evaluator"]
     assert p2n2["sandbox"]["image"] == "ghcr.io/ke7/helix-evo-runner-codex:0.2.0"
-    assert p2n2["evaluator"]["sidecar"]["image"].startswith(
-        "helix-livebench-math:"
-    )
+    assert p2n2["evaluator"]["sidecar"]["image"].startswith("helix-livebench-math:")
     assert p2n2["evaluator"]["sidecar"]["runner_image"].startswith(
         "helix-livebench-math:"
     )
@@ -223,10 +256,12 @@ def test_agent_snapshot_omits_every_non_prompt_demo_file(tmp_path: Path) -> None
     )
 
 
-def test_sidecar_errors_are_zero_scored_and_secrets_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sidecar_errors_are_zero_scored_and_secrets_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original = Path.read_text
 
-    def fake_read(path: Path, *args, **kwargs):
+    def fake_read(path: Path, *args: Any, **kwargs: Any) -> str:
         if str(path) == "/opt/livebench-math/data.json":
             return json.dumps(
                 {
@@ -238,13 +273,20 @@ def test_sidecar_errors_are_zero_scored_and_secrets_redacted(monkeypatch: pytest
 
     monkeypatch.setattr(Path, "read_text", fake_read)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-secret-12345678")
-    spec = importlib.util.spec_from_file_location("livebench_math_server_errors", ROOT / "server.py")
+    spec = importlib.util.spec_from_file_location(
+        "livebench_math_server_errors", ROOT / "server.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    row = {"question_id": "q", "subtask": "aime_i_2024", "ground_truth": "1", "turns": ["q"]}
+    row = {
+        "question_id": "q",
+        "subtask": "aime_i_2024",
+        "ground_truth": "1",
+        "turns": ["q"],
+    }
 
-    def fail(prompt, example):
+    def fail(prompt: str, example: dict[str, Any]) -> NoReturn:
         raise TimeoutError("request exposed sk-test-secret-12345678")
 
     result = module.evaluate_one("prompt", row, fail)
@@ -261,7 +303,7 @@ def test_ground_truth_never_enters_side_info_or_mutation_prompt(
     sentinel = "SENTINEL_GROUND_TRUTH_MUST_NOT_LEAK"
     original = Path.read_text
 
-    def fake_read(path: Path, *args, **kwargs):
+    def fake_read(path: Path, *args: Any, **kwargs: Any) -> str:
         if str(path) == "/opt/livebench-math/data.json":
             return json.dumps(
                 {
@@ -285,9 +327,7 @@ def test_ground_truth_never_enters_side_info_or_mutation_prompt(
         "ground_truth": sentinel,
         "turns": ["question"],
     }
-    result = module.evaluate_one(
-        "prompt", row, lambda prompt, example: ("wrong", {})
-    )
+    result = module.evaluate_one("prompt", row, lambda prompt, example: ("wrong", {}))
     serialized = json.dumps(result)
     assert sentinel not in serialized
     assert "expected" not in serialized.lower()
@@ -305,10 +345,12 @@ def test_ground_truth_never_enters_side_info_or_mutation_prompt(
     assert "Official score 0.000" in reflection_prompt
 
 
-def test_sidecar_preserves_duplicate_positions_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sidecar_preserves_duplicate_positions_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     original = Path.read_text
 
-    def fake_read(path: Path, *args, **kwargs):
+    def fake_read(path: Path, *args: Any, **kwargs: Any) -> str:
         if str(path) == "/opt/livebench-math/data.json":
             return json.dumps(
                 {
@@ -319,7 +361,9 @@ def test_sidecar_preserves_duplicate_positions_in_order(monkeypatch: pytest.Monk
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", fake_read)
-    spec = importlib.util.spec_from_file_location("livebench_math_server_order", ROOT / "server.py")
+    spec = importlib.util.spec_from_file_location(
+        "livebench_math_server_order", ROOT / "server.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -345,8 +389,8 @@ def test_sidecar_preserves_duplicate_positions_in_order(monkeypatch: pytest.Monk
     assert [result[1]["question_id"] for result in results] == ["q0", "q0", "q3"]
 
 
-def _completed_p2n2_state() -> dict:
-    tasks = []
+def _completed_p2n2_state() -> dict[str, Any]:
+    tasks: list[dict[str, Any]] = []
     for index in range(4):
         group, mutation = divmod(index, 2)
         tasks.append(
@@ -391,11 +435,14 @@ def _completed_p2n2_state() -> dict:
 def test_state_inspection_is_resume_stable_and_conserves_accounting() -> None:
     state = _completed_p2n2_state()
     before = inspect_run.audit_state(state, require_terminal=True)
-    after = inspect_run.audit_state(json.loads(json.dumps(state)), require_terminal=True)
+    after = inspect_run.audit_state(
+        json.loads(json.dumps(state)), require_terminal=True
+    )
     assert before == after
     assert before["candidate_ids"] == ["child-0", "child-1", "child-2", "child-3"]
     assert before["ledger_evaluations"] == 8
     assert before["nonproposal_evaluations"] == 4
+    assert before["budget_conserved"] is True
 
 
 def test_state_inspection_rejects_duplicate_candidate_ids() -> None:
@@ -445,4 +492,11 @@ def test_release_inspection_rejects_accounting_mismatch() -> None:
     state = _completed_p2n2_state()
     state["proposal_batches"][0]["tasks"][2]["budget_charge"]["evaluations"] = 3
     with pytest.raises(ValueError, match="does not conserve"):
+        inspect_run.audit_state(state, require_terminal=True)
+
+
+def test_release_inspection_rejects_unexplained_post_batch_spend() -> None:
+    state = _completed_p2n2_state()
+    state["budget"]["evaluations"] = 13
+    with pytest.raises(ValueError, match="unexplained post-batch spend"):
         inspect_run.audit_state(state, require_terminal=True)

@@ -20,7 +20,9 @@ SUCCESSFUL_CLEANUP = {"not_required", "removed", "missing"}
 TERMINAL_SELECTION = {"not_applicable", "not_selected", "selected"}
 
 
-def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict[str, Any]:
+def audit_state(
+    data: dict[str, Any], *, require_terminal: bool = False
+) -> dict[str, Any]:
     """Validate durable identities and conservation in a decoded state file.
 
     ``require_terminal`` is deliberately the fixed release gate for this demo's
@@ -82,7 +84,11 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
         after = batch.get("budget_after_apply")
         before = int(batch.get("budget_before_dispatch", 0))
         if batch.get("phase") == "complete":
-            if after is None or int(after) < before or int(after) - before != batch_charge:
+            if (
+                after is None
+                or int(after) < before
+                or int(after) - before != batch_charge
+            ):
                 raise ValueError("completed batch budget does not conserve charges")
         if require_terminal and not terminal:
             raise ValueError("proposal ledger is not terminal and fully accounted")
@@ -104,6 +110,14 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
     evaluations = int(budget.get("evaluations", 0))
     if ledger_evaluations > evaluations:
         raise ValueError("proposal ledger charges exceed the global budget")
+    final_budget_after = batches[-1].get("budget_after_apply") if batches else None
+    budget_conserved = (
+        final_budget_after is not None
+        and int(final_budget_after) == evaluations
+        and ledger_evaluations <= evaluations
+    )
+    if require_terminal and not budget_conserved:
+        raise ValueError("global budget contains unexplained post-batch spend")
     encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
     return {
         "state_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -117,6 +131,7 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
         "budget": budget,
         "ledger_evaluations": ledger_evaluations,
         "nonproposal_evaluations": evaluations - ledger_evaluations,
+        "budget_conserved": budget_conserved,
         "batches": batch_summaries,
         "scheduler_phase": data.get("scheduler_state", {}).get("phase"),
     }
@@ -124,11 +139,15 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("state", nargs="?", type=Path, default=Path(".helix/state.json"))
+    parser.add_argument(
+        "state", nargs="?", type=Path, default=Path(".helix/state.json")
+    )
     parser.add_argument("--require-terminal", action="store_true")
     args = parser.parse_args()
     data = json.loads(args.state.read_text())
-    print(json.dumps(audit_state(data, require_terminal=args.require_terminal), indent=2))
+    print(
+        json.dumps(audit_state(data, require_terminal=args.require_terminal), indent=2)
+    )
 
 
 if __name__ == "__main__":

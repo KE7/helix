@@ -122,7 +122,9 @@ def evaluate_request(
     split = payload.get("split")
     ids = payload.get("ids")
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100_000:
-        raise ValueError("prompt must be a non-empty string of at most 100000 characters")
+        raise ValueError(
+            "prompt must be a non-empty string of at most 100000 characters"
+        )
     if split not in {"train", "val"}:
         raise ValueError("smoke evaluator only accepts train or val")
     if not isinstance(ids, list) or not ids or len(ids) > 100:

@@ -19,9 +19,9 @@ def largest_remainder(target: int, sizes: Mapping[str, int]) -> dict[str, int]:
     raw = {name: target * size / grand_total for name, size in sizes.items()}
     result = {name: int(raw[name]) for name in sizes}
     deficit = target - sum(result.values())
-    for name in sorted(
-        sizes, key=lambda item: raw[item] - result[item], reverse=True
-    )[:deficit]:
+    for name in sorted(sizes, key=lambda item: raw[item] - result[item], reverse=True)[
+        :deficit
+    ]:
         result[name] += 1
     return result
 
@@ -70,9 +70,7 @@ def validate_full_splits(splits: Mapping[str, list[dict[str, Any]]]) -> None:
 def select_smoke_rows(
     splits: Mapping[str, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
-    by_id = {
-        str(row["question_id"]): row for rows in splits.values() for row in rows
-    }
+    by_id = {str(row["question_id"]): row for rows in splits.values() for row in rows}
     selected: dict[str, list[dict[str, Any]]] = {}
     for name, ids in SMOKE_IDS.items():
         try:

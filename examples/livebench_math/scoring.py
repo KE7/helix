@@ -49,10 +49,11 @@ def score_livebench_math(
     if parts[0] == "aime":
         return float(scorers.aime(ground_truth, answer, False))
     if parts[0] in {"imo", "usamo"}:
-        return float(scorers.olympiad(ground_truth, answer, edit_distance=True, debug=False))
+        return float(
+            scorers.olympiad(ground_truth, answer, edit_distance=True, debug=False)
+        )
     if "amps_hard" in subtask:
         # server.py removes OPENAI_API_KEY from os.environ at startup, making
         # LiveBench's optional o3 fallback unreachable and scoring deterministic.
         return float(scorers.amps_hard(ground_truth, answer, False))
     raise ValueError(f"unroutable pinned LiveBench math subtask: {subtask!r}")
-
