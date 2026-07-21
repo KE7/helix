@@ -36,7 +36,7 @@ perfect_score_threshold = 2.0
 
 [agent]
 backend = "codex"
-model = "gpt-5-mini"
+model = "gpt-5.4"
 effort = "low"
 max_turns = 8
 background = "Only prompt.txt is evolvable. Do not alter or bypass the protected benchmark harness and do not encode benchmark answers."

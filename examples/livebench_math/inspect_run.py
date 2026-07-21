@@ -102,7 +102,7 @@ def audit_state(data: dict[str, Any], *, require_terminal: bool = False) -> dict
         "ledger_evaluations": ledger_evaluations,
         "nonproposal_evaluations": evaluations - ledger_evaluations,
         "batches": batch_summaries,
-        "scheduler_state": data.get("scheduler_state", {}),
+        "scheduler_phase": data.get("scheduler_state", {}).get("phase"),
     }
 
 

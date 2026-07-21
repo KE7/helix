@@ -36,3 +36,7 @@ SOLVER_MAX_TOKENS = 32_000
 SOLVER_TIMEOUT_SECONDS = 180
 SOLVER_RETRIES = 0
 
+PUBLICATION_PROPOSER_MODEL = "gpt-5-mini"
+# Explicit smoke deviation: the publication model returns HTTP 400 through
+# Codex ChatGPT OAuth in the pinned runner; this supported model is used.
+SMOKE_PROPOSER_MODEL = "gpt-5.4"

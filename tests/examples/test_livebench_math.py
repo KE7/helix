@@ -31,6 +31,8 @@ def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
         "val": 4,
     }
     assert len(set(constants.SMOKE_IDS["train"] + constants.SMOKE_IDS["val"])) == 8
+    assert constants.PUBLICATION_PROPOSER_MODEL == "gpt-5-mini"
+    assert constants.SMOKE_PROPOSER_MODEL == "gpt-5.4"
 
 
 def test_official_dispatch_routes_all_math_families() -> None:
@@ -155,6 +157,8 @@ def test_parallel_and_baseline_configs_pin_expected_shapes() -> None:
     one = tomllib.loads((ROOT / "helix.1x1.toml").read_text())
     assert (p2n2["evolution"]["num_parallel_proposals"], p2n2["evolution"]["mutations_per_parent"]) == (2, 2)
     assert (one["evolution"]["num_parallel_proposals"], one["evolution"]["mutations_per_parent"]) == (1, 1)
+    assert p2n2["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
+    assert one["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert p2n2["sandbox"]["enabled"] and p2n2["sandbox"]["evaluator"]
     assert p2n2["sandbox"]["image"] == "ghcr.io/ke7/helix-evo-runner-codex:0.2.0"
     assert p2n2["evaluator"]["sidecar"]["image"].startswith(

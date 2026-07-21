@@ -29,6 +29,12 @@ The full Terrarium-derived split has 100 train, 100 validation, and 168 test
 rows. `prepare_data.py` reconstructs it with seed 0 and rejects it unless the
 ordered question-ID SHA-256 digests match those in `constants.py`.
 
+The publication proposer was `gpt-5-mini`. In this environment the pinned
+Codex runner authenticated with ChatGPT OAuth returns HTTP 400 stating that
+`gpt-5-mini` is unsupported. The executable smoke configs therefore use
+`gpt-5.4`, which was verified in the same plain runner and auth boundary. This
+is an explicit model deviation, not an equivalence claim.
+
 ## Attribution and licenses
 
 - GEPA is MIT-licensed; copyright belongs to its contributors.

@@ -7,12 +7,16 @@ It compared `P=2,N=2` with `P=1,N=1`, using `gpt-4.1-mini` as solver and
 `gpt-5-mini` as proposer. This demo preserves those proposal shapes, the
 Terrarium seed prompt and split algorithm, and the official LiveBench scorers,
 but uses four train and four validation rows and does not claim a held-out test
-result. See [SOURCES.md](SOURCES.md) for immutable pins, IDs, and attribution.
+result. It also has an explicit proposer-model deviation: Codex ChatGPT OAuth
+returned HTTP 400 for `gpt-5-mini` in the pinned runner, so the actual smoke
+uses supported proposer `gpt-5.4`. It is not described as equivalent to the
+publication model. See [SOURCES.md](SOURCES.md) for immutable pins, IDs, and
+attribution.
 
 The protected evaluator uses the dated solver snapshot
 `gpt-4.1-mini-2025-04-14`, temperature 1, maximum 32,000 output tokens, a
 180-second request timeout, and zero retries. The HELIX mutation agent is
-`gpt-5-mini` with low reasoning effort and eight turns. Candidate code receives
+`gpt-5.4` with low reasoning effort and eight turns. Candidate code receives
 only opaque split positions; questions, ground truth, scoring code, and the API
 credential remain in a run-private sidecar. The sidecar has outbound network
 access only because the pinned solver is an external API.
@@ -84,7 +88,7 @@ Clean the first run before the serial comparison; the two configs intentionally
 share `.helix/`:
 
 ```sh
-uv run helix clean --dir .
+echo y | uv run helix clean --dir .
 /usr/bin/time -p uv run helix evolve --config helix.1x1.toml --dir .
 uv run helix log --dir .
 uv run helix best --dir .
@@ -99,7 +103,7 @@ Inspect anything needed first, then remove HELIX state/worktrees and the derived
 image (the published base runner image is not task-created):
 
 ```sh
-uv run helix clean --dir .
+echo y | uv run helix clean --dir .
 docker image rm helix-livebench-math:e2c8b590-smoke
 test ! -e .helix
 test -z "$(git worktree list --porcelain | grep '^worktree ' | grep '/.helix/' || true)"
