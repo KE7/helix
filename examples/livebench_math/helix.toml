@@ -75,3 +75,22 @@ memory = "4g"
 pids_limit = 256
 timeout_seconds = 600
 preserve_backend_transcripts = false
+omit_from_agent = [
+  ".dockerignore",
+  ".gitignore",
+  "__pycache__",
+  "Dockerfile",
+  "README.md",
+  "SOURCES.md",
+  "constants.py",
+  "dataset.py",
+  "evaluate.py",
+  "helix.1x1.toml",
+  "helix.toml",
+  "inspect_run.py",
+  "prepare_data.py",
+  "requirements-evaluator.txt",
+  "scoring.py",
+  "server.py",
+  "smoke_score.py",
+]

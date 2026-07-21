@@ -22,13 +22,22 @@ credential remain in a run-private sidecar. The sidecar has outbound network
 access only because the pinned solver is an external API.
 `OPENAI_API_KEY` is passed only through `[evaluator.sidecar].passthrough_env`;
 the mutation sandbox uses the plain Codex runner image and cannot read the
-baked dataset, official scorer modules, ground truth, or solver credential.
+baked dataset, official scorer modules, ground truth, solver credential, or
+non-prompt demo files. `sandbox.omit_from_agent` makes `prompt.txt` the only
+candidate artifact visible to the mutator.
+
+Terrarium's reflective evaluator may expose answer-oriented feedback. This demo
+intentionally deviates at that interface for security: incorrect answers return
+only the official numeric score and a generic retry message. Ground truth never
+enters serialized side info or the rendered mutation/reflection prompt. The
+official scorer computation itself is unchanged.
 
 ## Prerequisites
 
 - Docker Desktop with at least 4 GiB available to a worker container
 - Python 3.11+ and `uv`
-- a clean Git worktree at HELIX commit `84c7bcd2b82a56c8dd5c18b7fe5828101b6a7023`
+- a clean HELIX 0.3.0 worktree containing canonical core fixes `94f9751`,
+  `402dcc8`, and `e5c260f` (the lane began from feature base `84c7bcd`)
 - `OPENAI_API_KEY` exported in the shell; never put it in this directory
 - access to `ghcr.io/ke7/helix-evo-runner-codex:0.2.0`, GitHub, Hugging Face,
   and the OpenAI API during setup/run
@@ -58,31 +67,35 @@ the solver and therefore incurs no API cost.
 uv run helix log --dir .
 uv run helix history --dir .
 uv run helix frontier --dir .
-uv run helix attempts --dir .
+uv run helix attempts --path .helix
 uv run helix best --dir .
 python3 inspect_run.py --require-terminal
 ```
 
 Expected durable artifacts are `.helix/state.json`, the proposal ledger embedded
 in that state, candidate/evaluation records, and HELIX-managed candidate
-worktrees. With `P=2,N=2`, every scheduled proposal wave must have two proposal
-batches of two mutations, four distinct candidate IDs, and isolated Docker
-containers/worktrees. Scores are official LiveBench per-row scores averaged by
-HELIX; solver token usage is recorded in evaluator details. A 32-call ceiling is
-configured, but cache hits and scheduler stopping can make actual calls lower.
+worktrees. With `P=2,N=2`, the generation has one proposal batch containing two
+parent groups times two mutations: four tasks with distinct candidate IDs and
+isolated Docker containers/worktrees. Scores are official LiveBench per-row
+scores averaged by HELIX; solver token usage is recorded in evaluator details. A
+32-call ceiling is configured, but cache hits and scheduler stopping can make
+actual calls lower.
 
 ## Resume and compare P=1,N=1
 
 After an interruption, inspect `.helix/state.json`, then resume the same run:
 
 ```sh
+python3 inspect_run.py --require-terminal
 uv run helix resume --dir .
+python3 inspect_run.py --require-terminal
+uv run helix resume --dir .
+python3 inspect_run.py --require-terminal
 ```
 
-Repeated `resume` after the terminal state must not spend more budget or add
-candidate IDs. Run `python3 inspect_run.py --require-terminal` immediately
-before and after; its state digest, candidate IDs, scores, ledger totals, and
-metric-call budget must remain identical.
+Both consecutive `resume` invocations after terminal state must spend no budget
+and add no candidate IDs. The three inspector snapshots must have identical
+state digests, candidate IDs, scores, ledger totals, and metric-call budgets.
 
 Clean the first run before the serial comparison; the two configs intentionally
 share `.helix/`:

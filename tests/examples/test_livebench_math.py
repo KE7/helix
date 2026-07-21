@@ -9,6 +9,9 @@ import pytest
 
 from helix.config import load_config
 from helix.executor import _scrub_environment
+from helix.mutator import build_mutation_prompt
+from helix.population import EvalResult
+from helix.sandbox import _copy_tree_contents
 
 
 ROOT = Path(__file__).parents[2] / "examples" / "livebench_math"
@@ -202,6 +205,24 @@ def test_agent_image_and_evaluator_image_are_separate_trust_domains() -> None:
     assert config.sandbox.image != config.evaluator.sidecar.image
 
 
+def test_agent_snapshot_omits_every_non_prompt_demo_file(tmp_path: Path) -> None:
+    config = load_config(ROOT / "helix.toml")
+    omitted = {Path(item) for item in config.sandbox.omit_from_agent}
+    source_entries = {path.name for path in ROOT.iterdir()}
+    assert source_entries - {"prompt.txt"} <= {path.as_posix() for path in omitted}
+    assert Path("helix.toml") in omitted
+    assert Path("constants.py") in omitted
+    assert Path("server.py") in omitted
+    assert Path("prompt.txt") not in omitted
+
+    snapshot = tmp_path / "agent-snapshot"
+    _copy_tree_contents(ROOT, snapshot, omit_paths=omitted)
+    assert {path.name for path in snapshot.iterdir()} == {"prompt.txt"}
+    assert "helix-evaluator:8080" not in "\n".join(
+        path.read_text() for path in snapshot.iterdir() if path.is_file()
+    )
+
+
 def test_sidecar_errors_are_zero_scored_and_secrets_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
     original = Path.read_text
 
@@ -232,6 +253,56 @@ def test_sidecar_errors_are_zero_scored_and_secrets_redacted(monkeypatch: pytest
     assert "sk-test-secret" not in rendered
     assert "<redacted>" in rendered
     assert "OPENAI_API_KEY" not in __import__("os").environ
+
+
+def test_ground_truth_never_enters_side_info_or_mutation_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "SENTINEL_GROUND_TRUTH_MUST_NOT_LEAK"
+    original = Path.read_text
+
+    def fake_read(path: Path, *args, **kwargs):
+        if str(path) == "/opt/livebench-math/data.json":
+            return json.dumps(
+                {
+                    "dataset_revision": constants.LIVEBENCH_DATA_REVISION,
+                    "smoke_splits": {"train": [], "val": []},
+                }
+            )
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read)
+    spec = importlib.util.spec_from_file_location(
+        "livebench_math_server_no_leak", ROOT / "server.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "score_livebench_math", lambda row, answer: 0.0)
+    row = {
+        "question_id": "q",
+        "subtask": "aime_i_2024",
+        "ground_truth": sentinel,
+        "turns": ["question"],
+    }
+    result = module.evaluate_one(
+        "prompt", row, lambda prompt, example: ("wrong", {})
+    )
+    serialized = json.dumps(result)
+    assert sentinel not in serialized
+    assert "expected" not in serialized.lower()
+
+    evaluation = EvalResult(
+        candidate_id="candidate",
+        scores={"success": 0.0},
+        asi={},
+        instance_scores={"0": 0.0},
+        per_example_side_info=[result[1]],
+    )
+    reflection_prompt = build_mutation_prompt("Improve prompt.txt", evaluation)
+    assert sentinel not in reflection_prompt
+    assert "expected" not in reflection_prompt.lower()
+    assert "Official score 0.000" in reflection_prompt
 
 
 def test_sidecar_preserves_duplicate_positions_in_order(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -76,11 +76,13 @@ def evaluate_one(
     try:
         answer, usage = solver(prompt, row)
         score = score_livebench_math(row, answer)
-        expected = str(row["ground_truth"])
         feedback = (
             "Correct; preserve the exact-answer discipline."
             if score >= 1.0
-            else f"Official score {score:.3f}; expected {expected!r}. Recheck the mathematics and final format."
+            else (
+                f"Official score {score:.3f}; the answer was not accepted. "
+                "Recheck the mathematics and final format."
+            )
         )
         return [
             score,
@@ -171,4 +173,3 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
-
