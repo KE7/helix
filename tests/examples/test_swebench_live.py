@@ -187,6 +187,12 @@ def test_timeout_is_zero_scored_and_secret_free(
     assert len(artifacts) == 1
 
 
+def test_artifact_root_falls_back_before_helix_initializes_git(tmp_path: Path) -> None:
+    evaluator = _load("swebench_live_evaluator_no_git", "evaluate.py")
+    assert not (tmp_path / ".git").exists()
+    assert evaluator.original_project_root(tmp_path) == tmp_path
+
+
 def test_inspection_reports_p_by_n_ids_and_durable_budget(tmp_path: Path) -> None:
     inspect_run = _load("swebench_live_inspect", "inspect_run.py")
     tasks = [

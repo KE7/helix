@@ -35,10 +35,12 @@ def original_project_root(cwd: Path) -> Path:
     result = subprocess.run(
         ["git", "rev-parse", "--git-common-dir"],
         cwd=cwd,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        return cwd
     common = Path(result.stdout.strip())
     if not common.is_absolute():
         common = (cwd / common).resolve()
