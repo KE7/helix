@@ -336,6 +336,7 @@ def test_inspection_reports_p_by_n_ids_and_durable_budget(tmp_path: Path) -> Non
     assert summary["candidate_ids"] == ["g1-s1", "g1-s2", "g1-s3", "g1-s4"]
     assert summary["candidate_ids_distinct"] is True
     assert summary["candidate_ids_parent_major"] is True
+    assert summary["budget_conserved"] is True
     assert summary["accounting"] == {
         "global_evaluations": 5,
         "proposal_evaluations": 4,
@@ -441,6 +442,12 @@ def test_inspection_rejects_unaccounted_or_mismatched_budget(tmp_path: Path) -> 
     state["budget"]["evaluations"] = 3
     _write_state(tmp_path, state)
     with pytest.raises(inspect_run.InspectionError, match="exceed the global"):
+        inspect_run.summarize(tmp_path)
+
+    state = _current_state()
+    state["budget"]["evaluations"] = 6
+    _write_state(tmp_path, state)
+    with pytest.raises(inspect_run.InspectionError, match="does not equal the global"):
         inspect_run.summarize(tmp_path)
 
 

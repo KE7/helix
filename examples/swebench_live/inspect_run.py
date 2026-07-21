@@ -214,6 +214,12 @@ def summarize(project: Path) -> dict[str, Any]:
         raise InspectionError(
             "proposal evaluation charges exceed the global evaluation budget"
         )
+    final_budget = batches[0]["budget_after_apply"]
+    if final_budget != global_evaluations:
+        raise InspectionError(
+            "final batch budget_after_apply does not equal the global "
+            "evaluation budget"
+        )
     nonproposal_evaluations = global_evaluations - proposal_evaluations
     return {
         "state_sha256": hashlib.sha256(state_bytes).hexdigest(),
@@ -227,6 +233,7 @@ def summarize(project: Path) -> dict[str, Any]:
         "candidate_ids": ordered_ids,
         "candidate_ids_distinct": True,
         "candidate_ids_parent_major": True,
+        "budget_conserved": True,
         "accounting": {
             "global_evaluations": global_evaluations,
             "proposal_evaluations": proposal_evaluations,

@@ -103,7 +103,8 @@ attempt records, HELIX logs, candidate worktrees, and
 globally distinct IDs,
 parent-major indices, terminal status/cleanup, `budget_accounted=true`, and an
 exact per-batch task-charge/budget-delta match. It records the global proposal
-charge and explicit non-proposal remainder. With the generation budget already
+charge and explicit non-proposal remainder, and requires the final batch budget
+to equal the global counter. With the generation budget already
 exhausted, both consecutive resumes must be idempotent: no new task container,
 candidate, or evaluation charge, and byte-identical state/accounting.
 
