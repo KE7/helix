@@ -113,6 +113,13 @@ candidate receives a fresh container and the exact official harness rule. Only
 official correctness contributes to selection; timing and resource data are
 auxiliary diagnostics.
 
+Each candidate evaluation also emits a root-side repository-provenance record.
+It fails closed unless the official source contains the pinned public gold-fix
+commit while the candidate clone is shallow, tagless, contains exactly the base
+commit, cannot reach the gold fix, and does not contain the gold commit object.
+The pin and runner are omitted from mutation sandboxes, so this audit evidence
+is never exposed to the agent being scored.
+
 Before the heavy evolution window, verify no other benchmark containers are
 running and record resources:
 
@@ -123,6 +130,11 @@ df -h .
 ```
 
 ## Inspect, resume, and expected artifacts
+
+`evidence.py` provides deterministic manifests, literal-value secret scans,
+live run-owned container/worktree/transcript attribution, and a console-script
+launcher that writes the actual HELIX exit status to a dedicated JSON file.
+It never cleans resources and never records credential values.
 
 ```bash
 uv run --project /path/to/helix-repo helix frontier --dir .

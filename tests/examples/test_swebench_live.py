@@ -83,6 +83,7 @@ def test_mutation_sandbox_exposes_only_agent_and_public_contract(
         "evaluate.py",
         "official_runner.py",
         "pins.py",
+        "evidence.py",
         "helix.toml",
         "cleanup.py",
         "SOURCE.md",
@@ -592,10 +593,13 @@ def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
     with full refs hands the candidate the gold patch, so the runner must clone
     shallowly and must fail closed if anything beyond base_commit is reachable.
     """
+    runner = _load("swebench_live_runner_clone_guard", "official_runner.py")
+    pins = _load("swebench_live_pins_clone_guard", "pins.py")
     runner_source = (EXAMPLE / "official_runner.py").read_text(encoding="utf-8")
     assert "--depth" in runner_source and "--no-tags" in runner_source
     assert "--no-hardlinks" not in runner_source
     assert "exposes commits beyond base_commit" in runner_source
+    assert runner.GOLD_FIX_COMMIT == pins.TASK_GOLD_FIX_COMMIT
 
     def _git(*args: str, cwd: Path) -> str:
         return subprocess.run(
@@ -613,6 +617,7 @@ def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
     base = _git("rev-parse", "HEAD", cwd=testbed)
     (testbed / "src.c").write_text("GOLD ANSWER\n", encoding="utf-8")
     _git("commit", "-qam", "Handle zero case (#2743)", cwd=testbed)
+    gold = _git("rev-parse", "HEAD", cwd=testbed)
     _git("branch", "upstream-fix", cwd=testbed)
     _git("checkout", "-q", base, cwd=testbed)
 
@@ -637,6 +642,78 @@ def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
     assert "GOLD ANSWER" not in _git("log", "--all", "-p", cwd=shallow)
     (shallow / "src.c").write_text("candidate fix\n", encoding="utf-8")
     assert "candidate fix" in _git("diff", "--binary", "--text", "HEAD", cwd=shallow)
+
+    runner.REPO = testbed
+    runner.CANDIDATE_REPO = shallow
+    runner.GOLD_FIX_COMMIT = gold
+    provenance = runner._candidate_repository_provenance()["candidate_repository"]
+    assert provenance == {
+        "head": base,
+        "base_commit": base,
+        "is_shallow": True,
+        "commit_count": 1,
+        "extra_commit_count": 0,
+        "tag_count": 0,
+        "source_extra_commit_count": 1,
+        "gold_fix_commit": gold,
+        "gold_fix_source_reachable": True,
+        "gold_fix_candidate_reachable": False,
+        "gold_fix_object_present": False,
+    }
+
+    # Recreate the historical leak and prove the runtime guard rejects it,
+    # rather than merely documenting the desired clone arguments.
+    runner.CANDIDATE_REPO = full
+    with pytest.raises(ValueError):
+        runner._candidate_repository_provenance()
+
+
+def test_evidence_manifest_is_deterministic_and_non_vacuous(tmp_path: Path) -> None:
+    evidence = _load("swebench_live_evidence_manifest", "evidence.py")
+    helix_dir = tmp_path / ".helix"
+    attempts = helix_dir / "attempts"
+    evaluations = tmp_path / "artifacts" / "evaluations"
+    attempts.mkdir(parents=True)
+    evaluations.mkdir(parents=True)
+    state = {
+        "proposal_batches": [{"phase": "complete", "tasks": []}],
+        "budget": {"evaluations": 1},
+        "frontier": ["seed"],
+        "active_frontier": {"instance": "seed"},
+    }
+    (helix_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (attempts / "one.json").write_text('{"status":"rejected"}\n', encoding="utf-8")
+    (evaluations / "one.json").write_text('{"accuracy":0}\n', encoding="utf-8")
+
+    first = evidence.manifest(tmp_path, tmp_path / "manifest-1.json")
+    second = evidence.manifest(tmp_path, tmp_path / "manifest-2.json")
+    assert first == second
+    assert first["non_vacuous"] is True
+    assert first["substantive_key_count"] >= 13
+    assert first["independent_digest_count"] >= 3
+
+
+def test_evidence_secret_scan_reports_counts_and_lengths_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = _load("swebench_live_evidence_secret_scan", "evidence.py")
+    secret = "test-only-literal-credential"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    scanned = tmp_path / "scanned"
+    scanned.mkdir()
+    (scanned / "one.bin").write_bytes(b"before " + secret.encode() + b" after")
+    output = tmp_path / "scan.json"
+
+    result = evidence.secret_scan([scanned], output)
+    report = next(
+        item
+        for item in result["reports"]
+        if item["credential_name"] == "ANTHROPIC_API_KEY"
+    )
+    assert report["credential_length"] == len(secret)
+    assert report["hit_count"] == 1
+    assert report["files_with_hits"] == 1
+    assert secret not in output.read_text(encoding="utf-8")
 
 
 def test_no_credentialed_sidecar_so_passthrough_env_must_be_empty() -> None:
