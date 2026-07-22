@@ -1,0 +1,344 @@
+# Sandbox HOME isolation — approved architecture (HELIX 0.3.0 release blocker)
+
+- **Branch:** `fix/sandbox-home-isolation`, based on `9f2bcaa` (the credential fix).
+- **Defect:** proven in `docs/audits/2026-07-22-auth-volume-cross-run-state.md`
+  (branch `audit/auth-volume-state`, commit `b07db88`). Not re-litigated here.
+- **Contains no credential values.** Real `helix-auth-*` volumes were read
+  `:ro`, metadata and hashes only; no session, history or credential *contents*
+  were read. Every behavioural test below ran on disposable volumes under this
+  branch's own `helixiso-*` prefix.
+
+This document records the architecture that supersedes design **D4** from the
+audit memo, the evidence that forced the change, and the proof obligations that
+remain before the mount rewrite can land.
+
+---
+
+## 1. Why D4 as written is not sufficient
+
+D4 is: mount the persistent auth volume at the backend's auth directory via
+`volume-subpath`, then `--tmpfs`-overlay the leaky **subdirectories** inside it.
+
+That silently assumes every piece of per-run state lives in a *subdirectory* of
+the auth directory. Metadata reads of the five real volumes show it does not.
+
+### Behavioural proof — overlays isolate directories, not sibling files
+
+Disposable volume `helixiso-codexshape`, codex runner image, exact D4 layout,
+volume removed afterwards:
+
+| Object written by run A | Seen by later run B | Meaning |
+|---|---|---|
+| `~/.codex/sessions/a.txt` | 0 files | **isolated** — the overlay works |
+| `~/.codex/state_5.sqlite` | `RUN-A-CANARY` | **LEAK** — sibling file crosses runs |
+
+A regular file sitting beside `auth.json` cannot be masked by a directory
+overlay, and a per-file bind is design **D2**, already rejected: `rename`-over
+and `unlink` both return `EBUSY`, which breaks OAuth rotation.
+
+### Why this is release-critical, not a nitpick
+
+`helix-auth-codex` holds these as regular files **directly beside `auth.json`**:
+
+```
+memories_1.sqlite (+ -wal/-shm)   goals_1.sqlite (+ -wal/-shm)
+state_5.sqlite (188 KB)           logs_2.sqlite
+models_cache.json                 installation_id
+```
+
+`memories` and `goals` are cross-run **agent memory**. `helix-auth-cursor` is
+the same shape and has *no subdirectories at all* — `agent-cli-state.json`,
+`cli-config.json`, `statsig-cache.json` are all siblings, so D4 does literally
+nothing for cursor.
+
+Shipping D4 verbatim would close claude's transcript channel and leave codex's
+memory channel open, while all three completed demos were re-run and certified
+clean. **A false certification is worse than a known gap.**
+
+---
+
+## 2. Approved architecture — four classes + backend-native env redirection
+
+Per-backend registry. Every path in a backend's HOME falls into exactly one
+class:
+
+| Class | Contents | Mechanism |
+|---|---|---|
+| **1 — AUTH_DIR** | the directory holding the credential | shared: `--mount type=volume,volume-subpath=<subpath>,dst=<auth_dir>`, **writable** — preserves atomic rename/unlink, refresh rotation, and cross-container `flock` |
+| **2 — ephemeral subdirs** *inside* AUTH_DIR | sessions, logs, transcripts, caches | per-run `--tmpfs` overlay (or per-candidate **host bind** for transcripts) |
+| **3 — ephemeral sibling files** *inside* AUTH_DIR | DBs, state/config/cache files | **not isolatable by any mount** — must be relocated by the backend's own env knob |
+| **4 — everything outside AUTH_DIR** | `~/.npm`, `~/.cache`, `~/.claude.json`, … | private per-run `--tmpfs /home/node:uid=1000,gid=1000` |
+
+### Fail-closed rule (EA-approved, supersedes "accepted residual")
+
+A class-3 file with **no proven redirection knob** is **not** an acceptable
+declared residual. If a supported backend cannot be made isolated, HELIX
+**refuses to run that backend** with an actionable "unsupported layout/runtime"
+error naming what could not be isolated and why.
+
+There is **no whole-HOME fallback**, under any circumstance. A per-file
+"accepted residual" would reproduce the D4 failure at finer granularity: a
+candidate could still read the previous candidate's memory DB while the release
+claimed independence.
+
+This applies to `claude` exactly as to the others — the backend we care most
+about is not special-cased.
+
+---
+
+## 3. Mount mechanics — established facts
+
+These are settled; do not re-derive.
+
+- **`volume-subpath` requires Docker Engine 25.0+ / API 1.45+** (verified on
+  29.6.1 / API 1.55). Any host below Engine 25 **cannot run this design at
+  all.** This is a hard requirement bump; it must be preflight-checked with a
+  clear message and documented for operators, never surfaced as a mystery
+  failure.
+- **A naive per-run tmpfs HOME is unwritable.** `--user node --tmpfs /home/node`
+  yields `root:root 0755`; uid 1000 gets `Permission denied` and *every*
+  mutation agent fails. Use `--tmpfs /home/node:rw,uid=1000,gid=1000,mode=0755`.
+- **`volume-subpath` must already exist**, or the container never starts
+  ("cannot access path …: no such file or directory"). `helix sandbox login`
+  must **create the subpath** before any agent run; the login path itself
+  cannot use the subpath mount. Creating the *subpath* on login is legitimate;
+  creating the *volume* on `status` remains prohibited.
+- **Nested mount ordering is not argv-order-dependent** — Docker orders mounts
+  by destination depth.
+- **Subpath symlink escape is blocked by the daemon** ("path concatenation
+  escapes the base directory"). A genuine containment property.
+
+### Pinned runtimes and uid (guard targets)
+
+Measured from the images themselves, independently by two parties:
+
+| Backend | CLI version | `node` uid:gid | default USER |
+|---|---|---|---|
+| claude | 2.1.120 | 1000:1000 | root |
+| codex | codex-cli 0.125.0 | 1000:1000 | root |
+| cursor | 2026.04.17-787b533 | 1000:1000 | root |
+| gemini | gemini-cli 0.39.1 | 1000:1000 | root |
+| opencode | 1.14.24 | 1000:1000 | root |
+
+uid 1000 is uniform *today*, so the constant is used — but it is **enforced by a
+pinned-runtime guard**, not assumed. A base-image bump that changes it must
+fail loudly rather than silently produce an unwritable HOME.
+
+---
+
+## 4. Five-backend layout (source-grounded)
+
+Credential locations and knobs, from the pinned bundles/binaries. Class-3
+columns are the ones D4 missed.
+
+| Backend | AUTH_DIR (class 1) | Credential | Class-2 subdirs | Class-3 siblings | Redirection knob (from source) |
+|---|---|---|---|---|---|
+| claude | `~/.claude` | `.credentials.json` | `projects`, `sessions`, `backups`, `shell-snapshots`, `session-env`, `cache` | `.last-cleanup`, `mcp-needs-auth-cache.json`, `policy-limits.json` | `CLAUDE_CONFIG_DIR` present (31 refs in 2.1.120) — **but it moves the whole config dir including credentials, so it is not usable for a class-3 split** |
+| codex | `~/.codex` | `auth.json` | `sessions`, `log`, `shell_snapshots`, `memories`, `tmp`, `.tmp`, `cache`, `skills` | `*.sqlite{,-wal,-shm}`, `models_cache.json`, `installation_id`, `config.toml` | `CODEX_HOME`, `CODEX_SQLITE_HOME`, `CODEX_ROLLOUT_TRACE_ROOT`, `CODEX_JS_TMP_DIR` |
+| cursor | `~/.cursor` | `cli-config.json` | *(none today)* | `agent-cli-state.json`, `statsig-cache.json` | `CURSOR_CONFIG_DIR`, `CURSOR_DATA_DIR` |
+| gemini | `~/.gemini` | `oauth_creds.json`, `google_accounts.json` | `tmp`, `history` | `state.json`, `projects.json`, `installation_id` | `GEMINI_CLI_HOME` |
+| opencode | `~/.local/share/opencode` | `auth.json` | — | — | `XDG_DATA_HOME` (already used), `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` |
+
+Two notes carried forward:
+
+- `~/.claude.json` lives at the **HOME root**, outside AUTH_DIR, so it is class 4
+  and becomes private automatically. See §5.
+- gemini also uses `~/.config/google-gemini` (see `BACKEND_AUTH_COMMANDS`), which
+  is outside `~/.gemini` and must be classified before gemini can be certified.
+
+---
+
+## 5. `~/.claude.json` on the exact pinned runtime — RESOLVED
+
+The audit could not establish what Claude Code requires from `~/.claude.json`
+once it becomes per-run. **This is now resolved on 2.1.120, without ever
+touching the real token**, using a fresh tmpfs HOME and a synthetic credential.
+
+Findings:
+
+1. **It is auto-created on demand** when absent (231 bytes). No seeding needed.
+2. Its contents are only:
+   `firstStartTime`, `migrationVersion`, `opusProMigrationComplete`, `userID`.
+3. The onboarding/trust keys that motivated the concern —
+   `hasCompletedOnboarding`, `hasTrustDialogAccepted`,
+   `bypassPermissionsModeAccepted`, `hasCompletedProjectOnboarding`,
+   `projectOnboardingSeenCount` — exist in the binary but are **not written to
+   the fresh file and are not required** to reach the inference path.
+4. **No interactive prompt gates `-p` mode.** With no credential, `claude -p`
+   exits immediately with `Not logged in · Please run /login` rather than
+   hanging on an onboarding dialog. With a credential present it proceeds past
+   config straight to the network path.
+
+**Conclusion: making `~/.claude.json` per-run is safe and requires no seeding.**
+
+Two declared consequences, neither blocking:
+
+- `userID` is regenerated per run, so per-run telemetry identity changes. For a
+  benchmark asserting candidate independence this is arguably correct.
+- The real volume's `.claude.json` is 29 KB of accumulated project/trust/history
+  state. Per-run isolation discards it. The fresh file works, so this is
+  acceptable — and it is the point of the fix.
+
+**Residual limitation, stated rather than waived:** a *successful authenticated*
+run with a per-run `.claude.json` has not been observed, because that requires
+the real token. The gating question — "does a fresh `.claude.json` cause an
+interactive hang in a non-interactive container?" — is answered **no** on the
+exact pinned runtime.
+
+---
+
+## 6. Root-owned files — mask, never clean
+
+`helix-auth-claude` contains **four uid-0 entries**; the other four volumes have
+none.
+
+```
+.claude/backups/.claude.json.backup.1784706605944   (07:50)
+.claude/backups/.claude.json.backup.1784706667263   (07:51)
+.claude/projects/-workspace/dc84f1e2-….jsonl        (07:50)
+.claude/projects/-workspace/834a242e-….jsonl        (07:51)
+```
+
+### The mechanics, stated precisely so this guard is not "corrected" away
+
+A `--user node` container **can** unlink and rename-over these files: POSIX
+`unlink` requires write+execute on the **parent directory**, not ownership of
+the file, and both parents are `1000:1000 drwxr-xr-x` with no sticky bit
+(proven on a synthetic replica: read → DENIED, `cp` → DENIED, unlink →
+DELETE_OK).
+
+So an `rm -rf` over this tree would **succeed and destroy the evidence**. Any
+comment claiming "node cannot delete these" is false, and a reader who tests
+the premise would find it false and remove the safeguard.
+
+- **Deletion is prohibited by POLICY** — these are incident evidence — not by
+  permissions.
+- **The operative technical hazard is READ**: the files are `0600 root`, so
+  `--user node` cannot read them (verified by exit code only; a node-owned
+  transcript in the same directory reads fine as a control).
+- Class-2 isolation **masks** them, so no candidate inherits them.
+- New transcript binds must be **node-owned**, so the hazard does not recur.
+
+### Live bug at 9f2bcaa, independent of this fix
+
+`_copy_claude_transcript_from_auth_volume` (`sandbox.py:207`) runs `--user node`
+and does `cp "$src" "$dst"`. When a session's transcript is root-owned `0600` —
+**two are, today** — the `cp` fails, docker exits non-zero, `check=False`
+swallows it, and there is no return value and no logging.
+
+**This is silent transcript loss, already happening**, with
+`preserve_backend_transcripts` defaulting to `True`. It compounds the coupling
+in §7: the same function also breaks under any tmpfs-only fix.
+
+The transcript re-plumb must therefore fix **both** failure modes — it needs a
+**detectable failure path**, not merely a new location.
+
+### Attribution (settled as far as it can be)
+
+Every `--user` in `sandbox.py` passes `node` (lines 239, 1379, 1462, 1537,
+1749) except one — `_run_workspace_helper` (line 522) — which passes `root` but
+bind-mounts only `{workspace}:/workspace:rw`, never the auth volume, with
+`extra_args` appended after the image so they cannot inject docker flags.
+
+**No production code path in `sandbox.py` can create a root-owned file inside an
+auth volume.** The four files came from an ad-hoc root container outside
+production code; the writer was not identified and is not guessed at. Nothing
+here needs to defend against a production path — the requirement is to **mask
+what exists**.
+
+---
+
+## 7. Transcripts
+
+`preserve_backend_transcripts` is **coupled to the defect**: the default
+`claude_transcript_root` (`config.py:626`) is
+`/home/node/.claude/projects/-workspace`, inside the very directory being
+masked, and `-workspace` is a single key for every candidate of every run
+because every workspace mounts at `/workspace`.
+
+A tmpfs-only fix **silently breaks the feature**. The transcript path must
+therefore be a **per-candidate host bind**, with `sandbox.py`'s copy-out reading
+from that bind instead of re-mounting the auth volume `:ro`. Distinct candidate
+IDs must yield distinct transcript roots **even concurrently**, and the shared
+`-workspace` key must be eliminated.
+
+### Acceptance gate — transcript preservation
+
+1. **The post-hoc auth-volume copy path is removed**, or made structurally
+   unreachable and *proven* so. It is not retained as a fallback: a
+   persistent-volume copy path is the defect.
+2. **Typed outcome, no swallowing.** Preservation returns a typed
+   success / missing / disabled outcome, or raises a redacted actionable
+   failure. Nonzero docker or `cp` exits may **not** be swallowed. Today's
+   shape — `[ -f "$src" ] || exit 0`, `_run_docker(args, check=False)`, no
+   return value, no logging — is precisely what made this silent.
+3. **Structural assertion on the final Docker argv:** no fallback ever remounts
+   the persistent auth volume to copy transcripts. Make the bad path
+   *impossible*, not merely absent, so a future edit cannot reintroduce it.
+
+Five non-vacuous synthetic tests, each naming the mutation it catches:
+
+| # | Case | Required outcome |
+|---|---|---|
+| 1 | readable node-owned transcript | succeeds |
+| 2 | root-owned `0600` transcript | **fails detectably** — and must do so **without reading or deleting** the file. Detect via metadata (`stat` uid / `test -r`), never by attempting a read that partially succeeds. Live in the real volume today. |
+| 3 | missing transcript vs. copy failure | **distinguished** — different remedies; today both are the same silent nothing |
+| 4 | candidate-specific host bind | survives success, nonzero exit, **and** timeout; concurrent distinct candidates cannot collide — **force the collision attempt**, do not merely assert distinct paths |
+| 5 | `preserve_backend_transcripts=false` | the **only** intentionally silent case; everything else speaks |
+
+---
+
+## 8. Reconciling the b07db88 regression suite
+
+The 16 strict-xfail assertions flip only when the fix genuinely makes them pass.
+One requires **re-expression rather than a flip**, and it is flagged here rather
+than quietly rewritten:
+
+`test_shared_auth_state_is_narrower_than_home` asserts the auth mount must not
+target `~/.claude` — but the approved architecture mounts **exactly there**. Its
+current form is also vacuous for the spec shape the fix produces:
+
+- the assertion is `not spec.endswith("/home/node/.claude")`, on an f-string
+  with no placeholder, and the loop variable `leaky` is unused;
+- for `--mount type=volume,src=…,dst=/home/node/.claude,volume-subpath=.claude`
+  the destination is not the end of the spec string, so it never fires.
+
+The real invariant it was reaching for is:
+
+> the destination **may** be the auth directory, but every class-2 subdir must
+> be overlaid **and** every class-3 sibling file must be redirected or the
+> backend must fail closed.
+
+The re-expressed form must be genuinely falsifiable — it will be
+mutation-tested, not merely read — and the registry itself needs an anti-vacuity
+test proving that **mutating or ignoring any registry class turns the canary
+suite red**.
+
+---
+
+## 9. Remaining proof obligations before the mount rewrite lands
+
+For **each** pinned backend, both halves are required. A proof that shows only
+isolation, without showing auth still persists, is half a proof.
+
+1. **Source**: cite bundle/binary evidence for the knob. *(done — §4)*
+2. **Behavioural, isolation half**: sequential A→B and live-concurrent C1/C2
+   canaries show class-2 and class-3 state is per-run.
+3. **Behavioural, persistence half**: on a **synthetic** volume, rotation via
+   atomic rename-over reaches the persistent store and is visible to the
+   **next** run; `flock` is mutually exclusive across concurrent containers.
+
+Backends that cannot satisfy both **fail closed**.
+
+Also outstanding: the Engine-25 preflight, the login-time ensure-subpath step,
+the transcript re-plumb, the evaluator no-mount control, rewriting
+`tests/integration/test_parallel_sandbox.py` against a disposable volume (it
+currently runs `scope="agent"` against shared `helix-auth-opencode` `:rw` and
+would **create** it), the three demo README rewordings, and the full gate
+matrix.
+
+### Retired phrasings
+
+`shared volume untouched` and unconditional `zero residue` are retired. Cleanup
+claims must distinguish **task-resource cleanup** from **persistent auth-store
+state**.

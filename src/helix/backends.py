@@ -98,9 +98,34 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "gemini": {
         "login": ["gemini", "--skip-trust"],
         "status": ["gemini", "--version"],
-        # The auth volume is mounted at /home/node and is shared across
-        # backends, so logout must scrub only Gemini's state directory rather
-        # than the whole home tree.
+        # The auth volume is mounted at /home/node, so logout must scrub only
+        # Gemini's state directory rather than the whole home tree.
+        #
+        # NOTE: the volume is NOT shared across backends -- an earlier version
+        # of this comment said so and was wrong.  ``sandbox_auth_volume_name``
+        # derives a per-backend name (``helix-auth-<backend>``), and five
+        # distinct volumes exist in practice.  What the volume IS shared
+        # across is RUNS, which is the direction that causes cross-candidate
+        # state to leak between candidates of different runs.  The narrow
+        # scrub above is still correct; only its stated rationale was.
+        #
+        # Do not extend this scrub to "clean up" pre-existing root-owned
+        # entries.  helix-auth-claude contains uid-0 files (two backups, two
+        # transcripts) written out-of-band by an ad-hoc root container; no
+        # production path in sandbox.py can produce them.
+        #
+        # Deletion is prohibited by POLICY -- they are incident evidence.  Be
+        # explicit about the mechanics so this guard is not "corrected" away:
+        # a ``--user node`` container CAN unlink and rename-over them, because
+        # POSIX unlink needs write+execute on the PARENT directory (both
+        # parents are 1000:1000 drwxr-xr-x, no sticky bit), not ownership of
+        # the file.  An ``rm -rf`` here would SUCCEED and destroy the
+        # evidence; that is the reason to keep the scrub narrow, not an
+        # inability to delete.
+        #
+        # The operative technical hazard is READ, not delete: those files are
+        # 0600 root, so ``--user node`` cannot read them.  Per-run isolation
+        # MASKS them so no candidate inherits them.
         "logout": [
             "sh",
             "-lc",
