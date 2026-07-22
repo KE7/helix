@@ -35,6 +35,36 @@ numbers are smoke-subset figures, not leaderboard performance. A run in which
 every proposal is rejected is a valid and honest outcome for an integrity
 demo: the fail-closed path is exactly what is being exercised.
 
+### Runner architecture and emulation
+
+The pinned runner image `ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef…`
+is a **single-platform `linux/amd64`** image — the manifest is not a multi-arch
+index, so there is no `arm64` variant to select. On an `aarch64` host it runs
+**under emulation** (`uname -m` inside the container reports `x86_64`), and
+HELIX passes no `--platform` flag, relying on the host default.
+
+This does **not** affect any measured result here, and the reason is
+structural rather than incidental: `[sandbox] evaluator = false`, so the
+timing and correctness evaluator runs **natively on the host**. Only the
+agent's code-writing container is emulated. Emulation changes how long the
+agent takes to write code; it does not change how fast the resulting code
+runs.
+
+Two consequences worth stating plainly:
+
+- Emulation slows the agent. This run used `model = "haiku"`, `effort = "low"`,
+  `max_turns = 6`, `timeout_seconds = 360`. A slower agent is a **plausible
+  contributing factor** to the 0/4 correctness failures above. This is offered
+  as a hypothesis, not a measured conclusion.
+- Any lane that intends to publish wall-clock numbers from an `aarch64` host
+  must confirm its evaluator is host-side. Container-measured timings under
+  emulation would not be comparable to native and must not be reported.
+
+**Pre-pull the runner before a timed run.** HELIX never calls `docker pull`; it
+passes the image reference straight to `docker run`. With a cold cache, Docker
+pulls implicitly at dispatch, requiring live network and registry auth
+mid-run — a failure that would abort the run at its first container.
+
 ## Exact sources and licenses
 
 All machine-readable pins live in [`pins.json`](pins.json):
