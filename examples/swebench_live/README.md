@@ -177,8 +177,11 @@ import tempfile
 from pathlib import Path
 
 target = Path(sys.argv[1]).resolve()
-temp_root = Path(tempfile.gettempdir()).resolve()
-if target.parent != temp_root or not target.name.startswith("helix-swebench-live."):
+# The run directory is created under /tmp, but on macOS ``gettempdir()``
+# returns $TMPDIR (/var/folders/...) and /tmp resolves to /private/tmp, so
+# comparing against gettempdir() alone rejects a legitimate target.
+allowed = {Path("/tmp").resolve(), Path(tempfile.gettempdir()).resolve()}
+if target.parent not in allowed or not target.name.startswith("helix-swebench-live."):
     raise SystemExit(f"refusing unexpected cleanup target: {target}")
 shutil.rmtree(target)
 PY
