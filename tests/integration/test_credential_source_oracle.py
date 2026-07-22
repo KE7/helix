@@ -97,11 +97,28 @@ def capture_server():
         server.server_close()
 
 
+def _assert_disposable(volume: str) -> None:
+    """Refuse to operate on anything that could be shared credential state."""
+    assert volume.startswith("helix-oracle-"), volume
+    assert not volume.startswith("helix-auth-"), (
+        f"refusing to touch what may be a SHARED credential volume: {volume}"
+    )
+
+
+def _volume_exists(volume: str) -> bool:
+    return (
+        subprocess.run(
+            ["docker", "volume", "inspect", volume], capture_output=True
+        ).returncode
+        == 0
+    )
+
+
 @pytest.fixture
 def oauth_volume():
     volume = f"helix-oracle-{uuid.uuid4().hex[:10]}"
-    assert volume.startswith("helix-oracle-")
-    assert not volume.startswith("helix-auth-")
+    _assert_disposable(volume)
+    assert not _volume_exists(volume), "volume name collision"
     subprocess.run(["docker", "volume", "create", volume], capture_output=True)
     record = {
         "claudeAiOauth": {
@@ -137,7 +154,21 @@ def oauth_volume():
     try:
         yield volume
     finally:
+        # NAME-VERIFIED teardown with a POST-CONDITION.
+        #
+        # The previous form ran ``docker volume rm -f`` and discarded the
+        # return code, so a FAILED removal was indistinguishable from a
+        # successful one -- the swallowed-nonzero class again, in the fixture
+        # whose entire purpose is safe handling of credential-adjacent
+        # disposable state. It leaked a volume in practice, not just in
+        # principle.
+        #
+        # This is the pattern already used by the sibling suite in
+        # ``test_oauth_refresh_suppression.py``, whose before/after volume diff
+        # was verified identical.
+        _assert_disposable(volume)
         subprocess.run(["docker", "volume", "rm", "-f", volume], capture_output=True)
+        assert not _volume_exists(volume), f"disposable volume {volume} leaked"
 
 
 def _run_cli(volume: str, port: int, env: dict[str, str]) -> None:
