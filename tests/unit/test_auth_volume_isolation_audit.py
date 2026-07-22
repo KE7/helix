@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import pytest
 
-from helix.backend_layout import UnsupportedBackendLayoutError
+from helix.exceptions import VolumeModeUnsupportedError
 from helix.backends import BACKENDS
 from helix.envpolicy import EnvGrant
 from helix.sandbox import (
@@ -79,7 +79,11 @@ _GRANTS = [
 # cannot be relocated off the shared store. For these the isolation questions
 # below are answered by refusal, which is a stronger outcome than a clean mount
 # layout: HELIX declines to run rather than report an isolated run that is not.
-_VOLUME_FAIL_CLOSED = {"claude", "gemini", "cursor", "opencode"}
+# Volume mode is RETIRED for agent execution in 0.3.0 (EA ruling), for EVERY
+# backend: ``_docker_args`` raises before an argv exists. Every isolation
+# question below is therefore answered by REFUSAL, which is strictly stronger
+# than any mount layout -- no container starts, so nothing can cross.
+_VOLUME_FAIL_CLOSED = set(BACKENDS)
 
 
 def _agent_argv(backend: str) -> list[str]:
@@ -92,6 +96,33 @@ def _agent_argv(backend: str) -> list[str]:
         "helix-test:latest",
         backend,
         grants=_GRANTS,
+    )
+
+
+def _env_argv(backend: str) -> list[str]:
+    """Env-mode argv -- the supported path, and the only one that builds one."""
+    return _docker_args(
+        ["claude", "-p", "prompt"],
+        {"ANTHROPIC_API_KEY": "SYNTHETIC-NOT-REAL"},
+        "/tmp/ws",  # type: ignore[arg-type]
+        SandboxConfig(
+            enabled=True,
+            image="helix-test:latest",
+            network="none",
+            auth="env",
+            auth_env_allow=["ANTHROPIC_API_KEY"],
+        ),
+        "agent",
+        "helix-test:latest",
+        backend,
+        grants=[
+            EnvGrant(
+                name="ANTHROPIC_API_KEY",
+                value="SYNTHETIC-NOT-REAL",
+                origin="auth_env_allow",
+                scopes=frozenset({"agent"}),
+            )
+        ],
     )
 
 
@@ -128,7 +159,7 @@ def test_agent_container_does_not_mount_auth_volume_over_whole_home(
     stopped seeing mounts.
     """
     if backend in _VOLUME_FAIL_CLOSED:
-        with pytest.raises(UnsupportedBackendLayoutError):
+        with pytest.raises(VolumeModeUnsupportedError):
             _agent_argv(backend)
         return
     volume = sandbox_auth_volume_name(backend)
@@ -145,7 +176,7 @@ def test_agent_container_gets_a_private_per_run_home(backend: str) -> None:
     read-only image layer and silently break credential persistence).
     """
     if backend in _VOLUME_FAIL_CLOSED:
-        with pytest.raises(UnsupportedBackendLayoutError):
+        with pytest.raises(VolumeModeUnsupportedError):
             _agent_argv(backend)
         return
     specs = _mount_targets(_agent_argv(backend))
@@ -229,7 +260,7 @@ def test_shared_auth_state_is_narrower_than_home(backend: str) -> None:
     turns this red for that backend.
     """
     if backend in _VOLUME_FAIL_CLOSED:
-        with pytest.raises(UnsupportedBackendLayoutError):
+        with pytest.raises(VolumeModeUnsupportedError):
             _agent_argv(backend)
         return
     volume = sandbox_auth_volume_name(backend)
@@ -336,21 +367,17 @@ def test_guard_audit_helpers_see_the_real_mount() -> None:
     # as the non-vacuity subject -- there is no argv to parse. ``codex`` is the
     # backend proven isolatable (CODEX_SQLITE_HOME relocates its agent memory
     # and goals databases), so it carries the control.
-    specs = _mount_targets(_agent_argv("codex"))
+    specs = _mount_targets(_env_argv("codex"))
     assert specs, "argv parser found no mounts at all"
 
-    # The parser must still find the persistent auth volume -- at its NEW,
-    # narrowed destination. Without this, every "no whole-HOME mount"
-    # assertion above could pass simply because the parser stopped seeing
-    # mounts, or because the volume name changed, or because credentials
-    # stopped being mounted at all (the D2/D3 over-correction).
-    volume = sandbox_auth_volume_name("codex")
-    auth_specs = [spec for spec in specs if volume in spec]
-    assert auth_specs, f"parser found no {volume} mount; credentials must still persist"
-    assert any("volume-subpath=" in spec for spec in auth_specs), auth_specs
-    assert not any(spec.startswith(f"{volume}:/home/node") for spec in auth_specs), (
-        "the whole-HOME mount is back"
-    )
+    # Volume mode is RETIRED for agent execution, so there is no auth mount
+    # left to find. The parser's liveness is instead proven on env mode's
+    # private HOME and candidate transcript bind -- without which every "no
+    # whole-HOME mount" assertion above could pass merely because the parser
+    # stopped seeing mounts at all.
+    assert any(spec.startswith("/home/node:") for spec in specs), specs
+    assert any(spec.endswith("/home/node/.claude/projects:rw") for spec in specs), specs
+    assert not any("helix-auth-" in spec for spec in specs), specs
 
     # And a per-run HOME must be present, so the narrowed mount is not simply
     # sitting on top of the image's shared /home/node.

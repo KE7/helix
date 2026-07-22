@@ -252,3 +252,26 @@ class SharedHomeMountError(HelixError):
     AGENT scope only.  ``helix sandbox login`` mounts the auth volume at HOME
     legitimately and does not pass through ``_docker_args``.
     """
+
+
+class VolumeModeUnsupportedError(HelixError):
+    """``sandbox.auth = "volume"`` was requested for AGENT execution.
+
+    RETIRED in 0.3.0 for ALL backends: no backend can be shown isolated under a
+    persistent auth store shared across runs.  Raised at argv construction,
+    before any container starts.
+
+    Scope note, load-bearing for the docs: this concerns AGENT containers only.
+    ``helix sandbox login`` / ``status`` / ``logout`` still mount the auth
+    volume -- that is its purpose -- so no claim of the form "HELIX never
+    mounts the auth volume over HOME" is true.
+    """
+
+
+class AuthSubpathBootstrapError(HelixError):
+    """``helix sandbox login`` could not create the backend's auth directory.
+
+    Raised rather than logged because the alternative -- reporting a successful
+    login over a store that was not fully bootstrapped -- is exactly the
+    missing/failed conflation this codebase has repeatedly had to remove.
+    """

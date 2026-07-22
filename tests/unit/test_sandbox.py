@@ -280,6 +280,13 @@ def _endpoint_duplicated_argv(
 # and goals databases), so it stands in wherever the backend is incidental.
 VOLUME_BACKEND = "codex"
 
+# Volume mode is RETIRED for agent execution in 0.3.0, so agent-scope tests
+# that are not about credentials run on the supported path. auth_env_allow
+# names a variable deliberately left UNSET: the config layer requires a
+# non-empty allowlist and an unset name injects nothing, so no credential --
+# synthetic or real -- enters these containers.
+_SUPPORTED_AUTH = {"auth": "env", "auth_env_allow": ["HELIX_TEST_UNSET_CREDENTIAL"]}
+
 
 def _is_workspace_chown(args: list[str]) -> bool:
     """True for either workspace-recovery helper (chown or permission-relax).
@@ -306,7 +313,7 @@ def _is_workspace_permission_relax(args: list[str]) -> bool:
 
 
 def test_resolve_sandbox_image_defaults_from_backend():
-    cfg = SandboxConfig(enabled=True)
+    cfg = SandboxConfig(enabled=True, **_SUPPORTED_AUTH)
     assert (
         resolve_sandbox_image(cfg, "claude")
         == "ghcr.io/ke7/helix-evo-runner-claude:latest"
@@ -330,7 +337,7 @@ def test_resolve_sandbox_image_defaults_from_backend():
 
 
 def test_resolve_sandbox_image_honors_override():
-    cfg = SandboxConfig(enabled=True, image="custom:latest")
+    cfg = SandboxConfig(enabled=True, **_SUPPORTED_AUTH, image="custom:latest")
     assert resolve_sandbox_image(cfg, "claude") == "custom:latest"
 
 
@@ -349,6 +356,7 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     mocker.patch("helix.sandbox._host_owner", return_value="1000:1000")
 
     cfg = SandboxConfig(
+        **_SUPPORTED_AUTH,
         enabled=True,
         image="helix-test:latest",
         network="none",
@@ -389,14 +397,12 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     assert "helix-test:latest" in docker_call
     assert "-e" in docker_call
     assert "HOME=/home/node" in docker_call
-    # The auth volume persists but is NO LONGER the container HOME. The old
-    # form asserted "helix-auth-<b>:/home/node:rw", which is precisely the
-    # whole-HOME mount that let every candidate read every prior candidate's
-    # transcripts, sessions and caches.
-    assert f"helix-auth-{VOLUME_BACKEND}" in joined
-    assert f"helix-auth-{VOLUME_BACKEND}:/home/node" not in joined
-    assert "volume-subpath=" in joined
-    # ...on top of a private, uid-correct per-run HOME.
+    # Volume mode is RETIRED for agent execution, so NO auth volume is mounted
+    # at all -- this runs on the supported path. The old form asserted
+    # "helix-auth-<b>:/home/node:rw", the whole-HOME mount that let every
+    # candidate read every prior candidate's transcripts and caches.
+    assert "helix-auth-" not in joined, joined
+    # ...and the agent still gets a private, uid-correct per-run HOME.
     assert "/home/node:rw,uid=1000,gid=1000" in joined
     assert f"{tmp_path}:" not in joined
     assert "/workspace:rw" in joined
@@ -415,7 +421,7 @@ def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):
         return_value=MagicMock(stdout="", stderr="", returncode=0),
     )
 
-    cfg = SandboxConfig(enabled=True)
+    cfg = SandboxConfig(enabled=True, **_SUPPORTED_AUTH)
     run_sandboxed_command(
         ["python", "evaluate.py"],
         cwd=source,
@@ -457,7 +463,7 @@ def test_sidecar_runtime_switches_evaluator_to_private_network(tmp_path: Path, m
             ["python", "/runner/evaluate.py"],
             cwd=source,
             env={},
-            sandbox=SandboxConfig(enabled=True),
+            sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
             scope="evaluator",
             sync_back=False,
             image="helix-test:latest",
@@ -535,7 +541,7 @@ def test_parallel_sandboxes_use_distinct_mounts_and_sidecar_runtime(
                     ["sh", "-c", "true"],
                     cwd=source,
                     env={},
-                    sandbox=SandboxConfig(enabled=True),
+                    sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
                     scope="evaluator",
                     sync_back=False,
                     image="helix-test:latest",
@@ -590,7 +596,7 @@ def test_sandbox_exception_forces_container_and_workspace_cleanup(
             ["sh", "-c", "true"],
             cwd=source,
             env={},
-            sandbox=SandboxConfig(enabled=True, timeout_seconds=1),
+            sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH, timeout_seconds=1),
             scope="evaluator",
             sync_back=False,
             image="helix-test:latest",
@@ -1294,7 +1300,7 @@ def test_timeout_exception_redacts_docker_env_in_all_renderings(
             ["sh", "-c", "true"],
             cwd=source,
             env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
-            sandbox=SandboxConfig(enabled=True, timeout_seconds=1),
+            sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH, timeout_seconds=1),
             scope="evaluator",
             sync_back=False,
             image="helix-test:latest",
@@ -1338,7 +1344,7 @@ def test_nonzero_result_redacts_docker_argv_and_output_diagnostics(
         ["sh", "-c", "exit 7"],
         cwd=source,
         env={_NON_HEURISTIC_ENV_KEY: _SYNTHETIC_SECRET},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="evaluator",
         sync_back=False,
         image="helix-test:latest",
@@ -1709,7 +1715,7 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
 
     mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
-    cfg = SandboxConfig(enabled=True)
+    cfg = SandboxConfig(enabled=True, **_SUPPORTED_AUTH)
 
     run_sandboxed_command(
         ["claude", "-p", "prompt"],
@@ -1770,7 +1776,7 @@ def test_agent_sync_tolerates_inaccessible_workspace_paths(
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -1826,7 +1832,7 @@ def test_agent_transcript_capture_no_longer_remounts_the_auth_volume(
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -1887,7 +1893,7 @@ def test_agent_sync_tolerates_inaccessible_backend_transcripts(
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -1926,7 +1932,7 @@ def test_agent_sync_recovers_rootless_workspace_permissions(tmp_path: Path, mock
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -1979,7 +1985,7 @@ def test_agent_sync_skips_relax_when_host_owner_available(tmp_path: Path, mocker
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -2050,7 +2056,9 @@ def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True, omit_from_agent=["private/token.txt"]),
+        sandbox=SandboxConfig(
+            enabled=True, **_SUPPORTED_AUTH, omit_from_agent=["private/token.txt"]
+        ),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -2079,7 +2087,9 @@ def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True, omit_from_agent=["private"]),
+        sandbox=SandboxConfig(
+            enabled=True, **_SUPPORTED_AUTH, omit_from_agent=["private"]
+        ),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -2110,7 +2120,7 @@ def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -2145,7 +2155,7 @@ def test_sync_preserves_existing_host_special_files_when_skipped(
         ["claude", "-p", "prompt"],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="agent",
         grants=_agent_grants(),
         sync_back=True,
@@ -2178,7 +2188,9 @@ def test_special_file_skip_can_be_disabled(tmp_path: Path, mocker):
             ["claude", "-p", "prompt"],
             cwd=source,
             env={},
-            sandbox=SandboxConfig(enabled=True, skip_special_files=False),
+            sandbox=SandboxConfig(
+                enabled=True, **_SUPPORTED_AUTH, skip_special_files=False
+            ),
             scope="agent",
             grants=_agent_grants(),
             sync_back=True,
@@ -2202,7 +2214,7 @@ def test_evaluator_does_not_sync_changes_back(tmp_path: Path, mocker):
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
 
     mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
-    cfg = SandboxConfig(enabled=True)
+    cfg = SandboxConfig(enabled=True, **_SUPPORTED_AUTH)
 
     run_sandboxed_command(
         ["python", "evaluate.py"],
@@ -2240,7 +2252,7 @@ def test_sandboxed_command_sequence_reuses_workspace(tmp_path: Path, mocker):
         [["sh", "-c", "write"], ["sh", "-c", "read"]],
         cwd=source,
         env={},
-        sandbox=SandboxConfig(enabled=True),
+        sandbox=SandboxConfig(enabled=True, **_SUPPORTED_AUTH),
         scope="evaluator",
         sync_back=False,
         image="helix-test:latest",

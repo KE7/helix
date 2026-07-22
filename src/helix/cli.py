@@ -15,6 +15,7 @@ from rich.tree import Tree
 
 from helix import __version__
 from helix.backend_layout import layout_for
+from helix.exceptions import AuthSubpathBootstrapError
 from helix.subpath_bootstrap import auth_subpath_bootstrap_command
 from helix.backends import BACKENDS
 from helix.config import load_config
@@ -480,7 +481,17 @@ def _ensure_auth_subpath(backend: str, image: str) -> None:
     """
     layout = layout_for(backend)
     volume = sandbox_auth_volume_name(backend)
-    production_docker_runner()(
+    # Result BOUND AND CHECKED. An earlier version of this call passed
+    # ``check=False`` and discarded the return value -- which is verbatim the
+    # defect ``helix/transcripts.py``'s own module docstring names about the
+    # design it replaced: "no return value and no logging. A nonzero exit ...
+    # produced no error, no log line and no artifact."
+    #
+    # Unchecked here, a failed bootstrap (image without ``sh``, permissions, a
+    # failed mkdir) would let ``helix sandbox login`` REPORT SUCCESS while the
+    # subpath does not exist, leaving the store in a state login claimed to
+    # have established.
+    result = production_docker_runner()(
         [
             "docker",
             "run",
@@ -500,6 +511,16 @@ def _ensure_auth_subpath(backend: str, image: str) -> None:
         ],
         check=False,
     )
+    if result.returncode != 0:
+        raise AuthSubpathBootstrapError(
+            f"failed to create the auth directory {layout.volume_subpath!r} "
+            f"inside {volume!r} after login (exit {result.returncode}).\n"
+            "  Login wrote credentials, but the store is NOT fully "
+            "bootstrapped, so a later mount of that subpath would fail inside "
+            "the Docker daemon with an opaque error.\n"
+            f"  Remedy: re-run `helix sandbox login {backend}`; if it persists, "
+            f"the runner image may lack a shell."
+        )
 
 
 def _stamp_auth_volume(backend: str, image: str) -> None:

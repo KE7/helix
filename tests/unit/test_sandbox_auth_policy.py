@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from helix.backend_layout import UnsupportedBackendLayoutError
+from helix.exceptions import VolumeModeUnsupportedError
 from helix.backends import BACKEND_AUTH_ENV
 from helix.config import (
     AgentConfig,
@@ -55,6 +55,56 @@ CANARY = "sk-canary-value-must-not-reach-any-container"
 # exercised on an isolatable backend. ``T10`` still sweeps ALL backends, so
 # per-backend coverage is not lost.
 VOLUME_BACKEND = "codex"
+
+# Volume mode is RETIRED for agent execution in 0.3.0 (EA ruling), so no agent
+# argv can be built under it -- ``_docker_args`` raises first. The
+# credential-exposure properties below remain meaningful and are therefore
+# exercised on the SUPPORTED path, env mode, with an allowlist naming a
+# variable deliberately left UNSET: the config layer requires a non-empty
+# allowlist, and an unset name injects nothing. So "no credential reaches the
+# argv" stays a real assertion rather than becoming vacuous.
+#
+# The volume-mode question itself is now answered by refusal, asserted in
+# ``test_volume_mode_refuses_agent_execution`` -- a strictly stronger outcome,
+# since no container starts at all.
+_UNSET_ALLOW = ["HELIX_TEST_UNSET_CREDENTIAL"]
+
+
+@pytest.fixture(autouse=True)
+def _quiet_unset_allowlist_warning():
+    """Silence the expected "allowlisted name is not set" warning.
+
+    That warning FIRING is confirmation the approach works -- the allowlist
+    names a variable deliberately left unset, so nothing is injected. It is
+    filtered only to keep the gate output clean.
+    """
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*which is not set in the env.*")
+        yield
+
+
+def supported_config(**kw):
+    """A config on the SUPPORTED path that injects no credential."""
+    kw.setdefault("backend", VOLUME_BACKEND)
+    kw["auth"] = "env"
+    kw["auth_env_allow"] = _UNSET_ALLOW
+    return make_config(**kw)
+
+
+def assert_env_mode_launch(argv, backend: str) -> None:
+    """Env-mode replacement for the old auth-mount non-vacuity marker.
+
+    The auth mount used to double as the "this is a real launch" marker. Env
+    mode has none, so without a replacement every "no credential in argv"
+    assertion could pass on an EMPTY argv.
+    """
+    joined = " ".join(argv)
+    assert "helix-auth-" not in joined, joined
+    assert any(
+        part.startswith("/home/node:") and "uid=1000" in part for part in argv
+    ), argv
 
 
 def make_config(
@@ -186,11 +236,11 @@ def assert_auth_volume_mounted_narrowly(argv: list[str], backend: str) -> None:
 def test_T1_volume_mode_emits_no_credential_env(monkeypatch):
     """T1 — catches deleting the mode guard. THIS IS THE BUG."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", CANARY)
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     argv = agent_docker_argv(config)
     assert "ANTHROPIC_API_KEY" not in env_assignments(argv)
     assert not any(CANARY in part for part in argv)
-    assert_auth_volume_mounted_narrowly(argv, VOLUME_BACKEND)
+    assert_env_mode_launch(argv, VOLUME_BACKEND)
     assert_real_launch(argv, config)
 
 
@@ -202,7 +252,7 @@ def test_T2_volume_mode_excludes_both_claude_variables(monkeypatch):
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", CANARY)
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     argv = agent_docker_argv(config)
     assert "ANTHROPIC_AUTH_TOKEN" not in env_assignments(argv)
     assert not any(CANARY in part for part in argv)
@@ -234,7 +284,7 @@ def test_T4_backend_rename_cannot_change_credential_flow(monkeypatch):
     assert "OPENAI_API_KEY" in BACKEND_AUTH_ENV["opencode"]
 
     as_volume = agent_docker_argv(
-        make_config(backend=VOLUME_BACKEND, sidecar_passthrough=["OPENAI_API_KEY"])
+        supported_config(sidecar_passthrough=["OPENAI_API_KEY"])
     )
     assert "OPENAI_API_KEY" not in env_assignments(as_volume)
 
@@ -244,7 +294,7 @@ def test_T4_backend_rename_cannot_change_credential_flow(monkeypatch):
     # silently change credential flow -- it either yields the same
     # credential-relevant environment or refuses to run. A refusal cannot leak,
     # so the hole this test guards is closed by a stronger mechanism.
-    with pytest.raises(UnsupportedBackendLayoutError):
+    with pytest.raises(VolumeModeUnsupportedError):
         agent_docker_argv(
             make_config(backend="opencode", sidecar_passthrough=["OPENAI_API_KEY"])
         )
@@ -268,11 +318,11 @@ def test_T5_both_present_still_volume_only(monkeypatch):
     """T5 — directly guards R4: no fallback, in either direction."""
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
         monkeypatch.setenv(name, CANARY)
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     argv = agent_docker_argv(config)
     assignments = env_assignments(argv)
     assert not ({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} & set(assignments))
-    assert_auth_volume_mounted_narrowly(argv, VOLUME_BACKEND)
+    assert_env_mode_launch(argv, VOLUME_BACKEND)
     assert_real_launch(argv, config)
 
 
@@ -298,18 +348,18 @@ def test_T10_all_backends_volume_mode(monkeypatch, backend):
         for name in names:
             monkeypatch.setenv(name, CANARY)
     config = make_config(backend=backend)
-    if backend in {"claude", "gemini", "cursor", "opencode"}:
+    if True:  # volume mode is RETIRED for agent execution, ALL backends
         # Per-run state cannot be relocated off the shared store for these, so
         # volume mode REFUSES. That is a stronger guarantee than a clean argv:
         # no credential can reach a container that never starts.
-        with pytest.raises(UnsupportedBackendLayoutError):
+        with pytest.raises(VolumeModeUnsupportedError):
             agent_docker_argv(config)
         return
     argv = agent_docker_argv(config)
     assignments = env_assignments(argv)
     for name in BACKEND_AUTH_ENV.get(backend, ()):
         assert name not in assignments
-    assert_auth_volume_mounted_narrowly(argv, backend)
+    assert_env_mode_launch(argv, backend)
     assert_real_launch(argv, config)
 
 
@@ -327,13 +377,13 @@ def test_T10b_gemini_google_api_key_never_reaches_agent(monkeypatch):
     # that neither Google key reaches ANY sandboxed agent argv -- is
     # backend-independent, and gemini's own coverage is the fail-closed
     # assertion in T10.
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     argv = agent_docker_argv(config)
     assignments = env_assignments(argv)
     assert "GEMINI_API_KEY" not in assignments
     assert "GOOGLE_API_KEY" not in assignments
     assert not any(CANARY in part for part in argv)
-    assert_auth_volume_mounted_narrowly(argv, VOLUME_BACKEND)
+    assert_env_mode_launch(argv, VOLUME_BACKEND)
 
 
 def test_T11_codex_is_not_safe_by_absence(monkeypatch):
@@ -346,7 +396,7 @@ def test_T11_codex_is_not_safe_by_absence(monkeypatch):
     monkeypatch.setenv("HELIX_OPENAI_KEY", CANARY + "-wildcard")
     monkeypatch.setenv("SOME_API_KEY", CANARY + "-passthrough")
     monkeypatch.setenv("HELIX_ASI_LOG", "1")
-    config = make_config(backend="codex", passthrough_env=["SOME_API_KEY"])
+    config = supported_config(backend="codex", passthrough_env=["SOME_API_KEY"])
     argv = agent_docker_argv(config)
     assignments = env_assignments(argv)
     assert "HELIX_OPENAI_KEY" not in assignments, "HELIX_* wildcard reached an agent"
@@ -360,7 +410,7 @@ def test_T12_helix_wildcard_closed_for_sandboxed_agent(monkeypatch):
     """T12 — guards R5."""
     monkeypatch.setenv("HELIX_SECRET_TOKEN", CANARY)
     monkeypatch.setenv("HELIX_ASI_LOG", "1")
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     assignments = env_assignments(agent_docker_argv(config))
     assert "HELIX_SECRET_TOKEN" not in assignments
     assert assignments.get("HELIX_ASI_LOG") == "1"
@@ -370,7 +420,7 @@ def test_T12b_helix_wildcard_preserved_for_evaluator(monkeypatch):
     """T12b — catches an over-broad R5 that breaks legitimate evaluator
     context propagation."""
     monkeypatch.setenv("HELIX_SECRET_TOKEN", "evaluator-visible")
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     grants = resolve_env_grants(
         scope="evaluator",
         backend=VOLUME_BACKEND,
@@ -444,7 +494,7 @@ def test_T19_provenance_assertion_blocks_unregistered_callers():
     carries no grant must raise, and agent scope must refuse a bare dict
     outright.
     """
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     grants = agent_grants(config)
 
     # An ungranted key smuggled into the env dict is refused.
@@ -481,7 +531,7 @@ def test_T18_silent_flips_do_not_change_agent_argv(monkeypatch):
     monkeypatch.setenv("HELIX_LEAKED_KEY", CANARY)
     monkeypatch.setenv("ANTHROPIC_API_KEY", CANARY)
 
-    baseline = make_config(backend=VOLUME_BACKEND)
+    baseline = supported_config()
     base_argv = agent_docker_argv(baseline)
     assert_real_launch(base_argv, baseline)
     base_env = credential_relevant_env(base_argv)
@@ -489,27 +539,29 @@ def test_T18_silent_flips_do_not_change_agent_argv(monkeypatch):
     # (1) backend rename; (2) sidecar name moved to top-level passthrough;
     # (3) a host credential renamed into the HELIX_* namespace.
     flips = [
-        make_config(backend=VOLUME_BACKEND, passthrough_env=["OPENAI_API_KEY"]),
-        make_config(backend=VOLUME_BACKEND, passthrough_env=[]),
+        supported_config(passthrough_env=["OPENAI_API_KEY"]),
+        supported_config(passthrough_env=[]),
     ]
     for flipped in flips:
         flipped_env = credential_relevant_env(agent_docker_argv(flipped))
         assert flipped_env == base_env, "a config flip changed agent exposure"
 
     # The backend-rename flip now FAILS CLOSED rather than producing an argv:
-    # opencode cannot be isolated under volume mode. A refusal cannot leak a
-    # credential, so the silent-flip class stays closed by a different --
-    # stronger -- mechanism.
-    with pytest.raises(UnsupportedBackendLayoutError):
-        agent_docker_argv(make_config(backend="opencode"))
+    # A refusal cannot leak a credential, so the silent-flip class stays closed
+    # by a stronger mechanism than argv equality: no container starts at all.
+    # NOTE the explicit volume config -- ``supported_config`` is env mode and
+    # would NOT raise, which is precisely the shape that would make this
+    # assertion vacuous.
+    with pytest.raises(VolumeModeUnsupportedError):
+        agent_docker_argv(make_config(backend="opencode", auth="volume"))
     assert not any(CANARY in value for value in base_env.values())
 
 
 def test_T6_unrelated_volume_does_not_authenticate():
     """T6 — catches a preflight implemented as 'any helix-auth-* exists'."""
-    config = make_config(backend=VOLUME_BACKEND)
+    config = supported_config()
     argv = agent_docker_argv(config)
-    assert_auth_volume_mounted_narrowly(argv, VOLUME_BACKEND)
+    assert_env_mode_launch(argv, VOLUME_BACKEND)
     assert "helix-auth-claude" not in " ".join(argv)
 
 

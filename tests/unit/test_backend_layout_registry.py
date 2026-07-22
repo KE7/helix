@@ -94,7 +94,19 @@ def test_credential_lives_inside_the_auth_dir(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_auth_dir_is_never_the_whole_home(backend: str) -> None:
-    """Catches: regressing to the whole-HOME mount, per backend."""
+    """REGISTRY-DATA invariant only: the declared auth_dir is a subpath of HOME.
+
+    SCOPE CORRECTION. This previously claimed to catch "regressing to the
+    whole-HOME mount", which it CANNOT do: a whole-HOME mount does not require
+    ``auth_dir`` to change at all. Mutations S1, S2 and S3 each produce one with
+    ``auth_dir`` untouched, and all three were green while this test passed --
+    parametrized across five backends, so it LOOKED like broad coverage.
+
+    It is the test a reviewer would have cited to claim F-13 was already
+    guarded. The argv property is now carried by
+    ``tests/unit/test_shared_home_mount_guard.py``, which asserts destinations
+    on the FINAL argv; this one asserts only what its body reads.
+    """
     layout = BACKEND_LAYOUTS[backend]
     assert layout.auth_dir != "/home/node"
     assert layout.auth_dir.startswith("/home/node/")
@@ -154,8 +166,14 @@ def test_codex_relocates_its_agent_memory_databases() -> None:
     a sibling file. Proven behaviourally: without CODEX_SQLITE_HOME 4 sqlite
     files land in ~/.codex; with it, 0 there and 6 in the redirect dir.
 
-    Catches: dropping the redirect, which would restore a cross-run agent
-    MEMORY channel -- the most directly benchmark-invalidating leak found.
+    REGISTRY-DATA scope only: this asserts the DECLARATION, not the argv.
+    Dropping the redirect from the emitted argv is invisible here -- and
+    "registry declares / argv never applies" IS the CODEX_SQLITE_HOME defect,
+    so a docstring on the registry half claiming to catch the argv half is the
+    exact wording that let the original bug hide.
+
+    The argv property is carried by
+    ``test_codex_memory_databases_are_redirected_in_the_final_argv``.
     """
     layout = BACKEND_LAYOUTS["codex"]
     for db in ("memories_1.sqlite", "goals_1.sqlite", "state_5.sqlite"):
@@ -253,141 +271,26 @@ def test_registry_does_not_claim_candidate_independence() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The argv must APPLY the registry, not merely declare it
+# RETIRED: argv-application tests
 # ---------------------------------------------------------------------------
-
-
-def _volume_argv(backend: str) -> list[str]:
-    from pathlib import Path
-
-    from helix.config import SandboxConfig
-    from helix.envpolicy import EnvGrant
-    from helix.sandbox import _docker_args  # noqa: PLC2701 - argv is under test
-
-    return _docker_args(
-        ["sh", "-c", "true"],
-        {"X": "1"},
-        Path("/tmp/ws-cand"),
-        SandboxConfig(enabled=True, image="i:latest", network="none", auth="volume"),
-        "agent",
-        "i:latest",
-        backend,
-        grants=[
-            EnvGrant(
-                name="X",
-                value="1",
-                origin="helix_internal",
-                scopes=frozenset({"agent"}),
-            )
-        ],
-    )
-
-
-@pytest.mark.parametrize(
-    "backend",
-    [b for b in BACKENDS if b not in FAIL_CLOSED_UNDER_VOLUME_MODE],
-)
-def test_argv_applies_every_class2_overlay(backend: str) -> None:
-    """Each class-2 subdir must be individually re-isolated in the FINAL argv.
-
-    Catches: a registry entry that exists but is never emitted -- the shape of
-    a control that reports success while the property is false.
-    """
-    layout = BACKEND_LAYOUTS[backend]
-    joined = " ".join(_volume_argv(backend))
-    for subdir in layout.ephemeral_subdirs:
-        assert f"{layout.auth_dir}/{subdir}" in joined, subdir
-
-
-@pytest.mark.parametrize(
-    "backend",
-    [b for b in BACKENDS if b not in FAIL_CLOSED_UNDER_VOLUME_MODE],
-)
-def test_argv_applies_every_class3_env_redirect(backend: str) -> None:
-    """Class-3 knobs must reach the container ENVIRONMENT, not just the registry.
-
-    This is the regression that motivated the test: the registry declared
-    CODEX_SQLITE_HOME and ``_docker_args`` never set it, so codex was reported
-    isolatable while its agent memory and goals databases were still being
-    written into the shared auth directory.
-
-    Also asserts the redirect TARGET is mounted: a knob pointing at a directory
-    that does not exist can silently fall back to the shared location.
-    """
-    layout = BACKEND_LAYOUTS[backend]
-    argv = _volume_argv(backend)
-    joined = " ".join(argv)
-    for knob, target in layout.env_redirects.items():
-        assert f"{knob}={target}" in argv, f"{knob} not set in argv"
-        assert f"{target}:rw" in joined, f"{target} not mounted"
-
-
-def test_codex_memory_databases_are_redirected_in_the_final_argv() -> None:
-    """The headline leak, asserted end to end on the argv.
-
-    codex keeps memories/goals/state SQLite as REGULAR FILES beside auth.json;
-    no overlay can mask a sibling file. If this fails, a candidate can read the
-    previous candidate's agent memory.
-    """
-    argv = _volume_argv("codex")
-    assert "CODEX_SQLITE_HOME=/home/node/.helix-run/codex-sqlite" in argv, argv
-
-
-# ---------------------------------------------------------------------------
-# Emptiness must not masquerade as support (the opencode trap, generalised)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("backend", sorted(FAIL_CLOSED_UNDER_VOLUME_MODE))
-def test_refusal_is_explicit_not_inferred_from_an_empty_set(backend: str) -> None:
-    """Unsupported must be STATED, never left inferable from an omission.
-
-    This is the opencode defect generalised. Refusal used to be DERIVED from
-    "a class-3 file whose knob is absent from env_redirects", which cannot
-    distinguish "declares nothing unrelocatable" from "declares nothing at
-    all" -- so an empty ``ephemeral_files`` read as SUPPORTED, and opencode was
-    certified safe while its session database sat beside the credential.
-
-    Catches: emptying any input set to make a refusing backend look supported.
-    """
-    layout = BACKEND_LAYOUTS[backend]
-    assert layout.unsupported_reason, (
-        f"{backend} refuses under volume mode, so it must say WHY in an "
-        f"explicit field a check can key on -- not leave it to be inferred"
-    )
-
-
-@pytest.mark.parametrize("backend", sorted(FAIL_CLOSED_UNDER_VOLUME_MODE))
-def test_emptying_the_derived_sets_still_refuses(backend: str) -> None:
-    """The explicit gate must hold when every derived signal is emptied.
-
-    Directly simulates the mutation: strip ephemeral_files and env_redirects
-    (the inputs the old derived check read) and require the refusal to SURVIVE.
-    Under the old shape this produced a silently SUPPORTED backend.
-    """
-    import dataclasses
-
-    stripped = dataclasses.replace(
-        BACKEND_LAYOUTS[backend], ephemeral_files={}, env_redirects={}
-    )
-    with pytest.raises(UnsupportedBackendLayoutError):
-        assert_layout_is_isolatable(stripped)
-
-
-def test_emptying_the_sets_for_a_SUPPORTED_backend_is_not_silently_fine() -> None:
-    """Non-vacuity for the pair above: the explicit gate is not always-on.
-
-    codex has no ``unsupported_reason``, so emptying its sets does NOT raise --
-    which is exactly why the derived check alone was insufficient and why the
-    explicit field had to be added rather than relied upon everywhere.
-    """
-    import dataclasses
-
-    stripped = dataclasses.replace(
-        BACKEND_LAYOUTS["codex"], ephemeral_files={}, env_redirects={}
-    )
-    assert stripped.unsupported_reason is None
-    assert_layout_is_isolatable(stripped)  # does not raise -- documented above
+#
+# These asserted that the emitted argv APPLIED every class-2 overlay and
+# class-3 env redirect. They were the tests that caught the CODEX_SQLITE_HOME
+# gap (registry declared it; _docker_args never set it).
+#
+# Volume mode is now RETIRED for agent execution, so there is no argv to
+# assert against -- _docker_args raises first. They are removed rather than
+# left passing-by-exception, which would read as live coverage of a path that
+# no longer exists.
+#
+# *** THE EVIDENCE THEY ESTABLISHED IS PRESERVED, and it matters: ***
+# CODEX_SQLITE_HOME WORKS. Measured across three clean runs under the full
+# production layout -- nothing created or mutated in the shared auth dir
+# (shared=1, being only an untouched stale seed with contents intact), and
+# redirect=6. CODEX FAILED ON models_cache.json ALONE, NOT on its agent-memory
+# databases. "Codex leaks agent memory" would be a new false claim manufactured
+# by a cleanup -- the same defect class as everything else here, arriving
+# through deletion instead of through declaration.
 
 
 def test_a_layout_that_classifies_nothing_is_rejected_outright() -> None:

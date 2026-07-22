@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from helix.backends import BACKENDS
+from helix.exceptions import VolumeModeUnsupportedError
 from helix.config import AgentConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
 from helix.mutator import _build_backend_args  # noqa: PLC2701 - argv is under test
@@ -75,36 +76,33 @@ def test_env_mode_argv_contains_no_auth_volume_reference(backend: str) -> None:
     assert "helix-auth-" not in joined, joined
 
 
-# claude and gemini FAIL CLOSED under volume mode -- their per-run state cannot
-# be relocated off the shared store -- so they have no volume-mode argv to
-# inspect. The non-vacuity control below uses the backends that do.
-_VOLUME_FAIL_CLOSED = {"claude", "gemini", "cursor", "opencode"}
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_volume_mode_refuses_for_every_backend(backend: str) -> None:
+    """Non-vacuity control for the assertion above, post-retirement.
 
-
-@pytest.mark.parametrize(
-    "backend", [b for b in BACKENDS if b not in _VOLUME_FAIL_CLOSED]
-)
-def test_volume_mode_still_mounts_the_auth_volume(backend: str) -> None:
-    """Non-vacuity control for the assertion above."""
+    Env mode's "no helix-auth-* in argv" needs a counterpart showing the helper
+    behaves differently under volume mode. Volume mode is now RETIRED for agent
+    execution, so the counterpart is a REFUSAL rather than a different argv --
+    which is a stronger property: no container starts at all.
+    """
     grants = [
         EnvGrant(
-            name="X",
-            value="1",
-            origin="helix_internal",
-            scopes=frozenset({"agent"}),
+            name="X", value="1", origin="helix_internal", scopes=frozenset({"agent"})
         )
     ]
-    argv = _docker_args(
-        ["claude", "-p", "p"],
-        {"X": "1"},
-        Path("/tmp/ws"),
-        SandboxConfig(enabled=True, image="i:latest", network="none", auth="volume"),
-        "agent",
-        "i:latest",
-        backend,
-        grants=grants,
-    )
-    assert f"helix-auth-{backend}" in " ".join(argv)
+    with pytest.raises(VolumeModeUnsupportedError):
+        _docker_args(
+            ["claude", "-p", "p"],
+            {"X": "1"},
+            Path("/tmp/ws"),
+            SandboxConfig(
+                enabled=True, image="i:latest", network="none", auth="volume"
+            ),
+            "agent",
+            "i:latest",
+            backend,
+            grants=grants,
+        )
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

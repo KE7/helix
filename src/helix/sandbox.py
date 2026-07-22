@@ -24,7 +24,11 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
-from helix.exceptions import SandboxAuthImageError, SharedHomeMountError
+from helix.exceptions import (
+    SandboxAuthImageError,
+    SharedHomeMountError,
+    VolumeModeUnsupportedError,
+)
 from helix.transcripts import capture_claude_transcript
 from helix.backend_layout import assert_layout_is_isolatable, layout_for
 from helix.sandbox_home import (
@@ -1624,6 +1628,63 @@ def _docker_args(
             args.extend(private_home_tmpfs_arg())
             args.extend(transcript_bind_arg(transcript_host_dir(workspace)))
         else:
+            # VOLUME MODE IS RETIRED FOR AGENT EXECUTION IN 0.3.0, ALL
+            # BACKENDS. Not "not recommended", not "not the default" --
+            # UNSUPPORTED.
+            #
+            # EA ruling: "models_cache.json is persistent application-level
+            # state in the deliberately shared, agent-visible auth store. One
+            # run writes the remote catalogue; a later run reads
+            # presence/version and CHANGES CONTROL FLOW by skipping/refetching
+            # network work. That is causal cross-run influence under the
+            # project's carrying definition EVEN IF catalogue contents are
+            # account-wide."
+            #
+            # Per backend, precisely -- and codex's entry matters because it is
+            # the one that was nearly certified:
+            #   claude, gemini  the CLI keeps per-run state beside the
+            #                   credential with no relocation knob;
+            #   cursor          a config/data split is plausible but was never
+            #                   verified, and plausible is not proven;
+            #   opencode        its session database sits beside the credential
+            #                   and the only knob moves both;
+            #   codex           ITS AGENT MEMORY DATABASES ISOLATE CORRECTLY.
+            #                   Measured across three clean runs under the full
+            #                   production layout: nothing created or mutated in
+            #                   the shared dir (shared=1, being only an
+            #                   untouched stale seed), redirect=6.
+            #                   CODEX_SQLITE_HOME WORKS. Codex fails on
+            #                   models_cache.json ALONE -- which is materially
+            #                   different from, and more honest than, "codex
+            #                   leaks agent memory".
+            #
+            # And even a fully classified backend could not claim candidate
+            # independence: the auth dir must stay writable for OAuth rotation,
+            # so an agent can create an unenumerated file the next candidate
+            # reads.
+            #
+            # `helix sandbox login` / `status` / `logout` are UNAFFECTED and
+            # still use the volume -- that is what it is for.
+            raise VolumeModeUnsupportedError(
+                'sandbox.auth = "volume" is not supported for agent execution '
+                "in HELIX 0.3.0.\n"
+                f"  backend: {agent_backend}\n\n"
+                "  The persistent auth store is shared ACROSS RUNS and every "
+                "supported CLI keeps per-run state inside it that HELIX cannot "
+                "relocate, so a later candidate can be causally influenced by "
+                "an earlier one. HELIX refuses rather than report an isolated "
+                "run that is not isolated.\n\n"
+                '  Remedy: set sandbox.auth = "env" with a non-empty '
+                "sandbox.auth_env_allow. Env mode mounts NO persistent store, "
+                "so the cross-run channel does not exist rather than being "
+                "masked.\n"
+                "  Disclosed tradeoff: the named host credential is present "
+                "inside the agent container, and OAuth refresh is suppressed.\n\n"
+                "  `helix sandbox login` and `status` are unaffected."
+            )
+
+            # --- RETIRED BELOW; unreachable. Retained only until the layout
+            # --- registry is removed, so the diff shows what was withdrawn.
             # VOLUME MODE: private per-run HOME, with ONLY the backend's auth
             # directory coming from the persistent store.
             #
