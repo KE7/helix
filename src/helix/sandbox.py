@@ -25,6 +25,7 @@ from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
 from helix.exceptions import SandboxAuthImageError
+from helix.transcripts import capture_claude_transcript
 from helix.sandbox_home import (
     ensure_transcript_host_dir,
     private_home_tmpfs_arg,
@@ -208,57 +209,6 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
                 if isinstance(value, str) and value:
                     return value
     return None
-
-
-def _copy_claude_transcript_from_auth_volume(
-    *,
-    workspace: Path,
-    image: str,
-    agent_backend: str | None,
-    sandbox: SandboxConfig,
-    stdout: str,
-) -> None:
-    if agent_backend != "claude" or not sandbox.preserve_backend_transcripts:
-        return
-    session_id = _extract_session_id_from_json_output(stdout)
-    if not session_id:
-        return
-    rel_dir = Path(sandbox.transcript_artifact_dir) / "claude"
-    rel_file = rel_dir / f"{session_id}.jsonl"
-    source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
-    rel_file_str = str(rel_file).lstrip("/")
-    command = (
-        "set -eu; "
-        f"src={shlex.quote(str(source))}; "
-        f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
-        '[ -f "$src" ] || exit 0; '
-        'mkdir -p "$(dirname "$dst")"; '
-        'cp "$src" "$dst"'
-    )
-    args = [
-        "docker",
-        "run",
-        "--rm",
-        "--workdir",
-        "/workspace",
-        "--user",
-        "node",
-        "--network",
-        "none",
-        "--security-opt",
-        "no-new-privileges",
-        "-v",
-        f"{workspace}:/workspace:rw",
-        "-v",
-        f"{sandbox_auth_volume_name(agent_backend)}:/home/node:ro",
-        "-e",
-        "HOME=/home/node",
-        image,
-        "sh",
-        "-c",
-        command,
-    ]
-    _run_docker(args, check=False)
 
 
 def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
@@ -1693,12 +1643,23 @@ def run_sandboxed_commands(
                 finally:
                     _run_docker(["docker", "rm", "-f", container_name], check=False)
                 if scope == "agent":
-                    _copy_claude_transcript_from_auth_volume(
+                    # Capture reads the candidate-keyed HOST BIND, so it runs
+                    # no container and cannot re-mount the auth volume.  The
+                    # outcome is typed and a genuine failure RAISES rather
+                    # than being swallowed by ``check=False``.
+                    transcript_outcome = capture_claude_transcript(
                         workspace=workspace,
-                        image=docker_image,
-                        agent_backend=agent_backend,
-                        sandbox=sandbox,
-                        stdout=results[-1].stdout or "",
+                        artifact_dir=sandbox.transcript_artifact_dir,
+                        session_id=_extract_session_id_from_json_output(
+                            results[-1].stdout or ""
+                        ),
+                        enabled=sandbox.preserve_backend_transcripts,
+                        backend=agent_backend or "",
+                    )
+                    logger.debug(
+                        "transcript capture: %s (%s)",
+                        transcript_outcome.status,
+                        transcript_outcome.detail or transcript_outcome.artifact,
                     )
         finally:
             if host_owner := _host_owner():

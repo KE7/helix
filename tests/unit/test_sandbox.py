@@ -51,7 +51,6 @@ def _agent_grants(env: dict[str, str] | None = None) -> list[EnvGrant]:
     ]
 
 
-
 _SYNTHETIC_SECRET = "synthetic-sentinel-secret-for-redaction-tests"
 _SYNTHETIC_ENDPOINT_FRAGMENT = "synthetic-endpoint-fragment-for-redaction-tests"
 _SYNTHETIC_PRIOR_SECRET = "synthetic-prior-invocation-redaction-value"
@@ -1765,7 +1764,25 @@ def test_agent_sync_tolerates_inaccessible_workspace_paths(
     assert (source / ".gitignore").read_text() == "*.tmp\n"
 
 
-def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker):
+def test_agent_transcript_capture_no_longer_remounts_the_auth_volume(
+    tmp_path: Path, mocker
+):
+    """SUPERSEDES ``test_agent_copies_claude_transcript_from_auth_volume``.
+
+    That test asserted the OLD design: a second container mounting
+    ``helix-auth-claude:/home/node:ro`` to ``cp`` the transcript out. It is
+    replaced rather than deleted so the removed behaviour is not reinstated
+    from first principles.
+
+    Two defects made that design untenable. It only worked BECAUSE HOME was
+    shared across runs -- so the feature was coupled to the isolation defect
+    and any fix broke it silently. And it ran under ``check=False`` with no
+    return value, so a ``cp`` that could not read a root-owned 0600 transcript
+    produced no artifact, no error and no log.
+
+    Capture now reads the candidate-keyed HOST BIND, so it starts no container
+    at all. This asserts on the FINAL argv of every Docker call the run makes.
+    """
     source = tmp_path / "candidate"
     source.mkdir()
     (source / "main.py").write_text("old\n")
@@ -1776,18 +1793,7 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
         calls.append(args)
         if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
-            if args[-3:] and args[-3] == "sh" and "sess_123.jsonl" in args[-1]:
-                transcript = (
-                    workspace
-                    / ".helix_artifacts"
-                    / "backend_transcripts"
-                    / "claude"
-                    / "sess_123.jsonl"
-                )
-                transcript.parent.mkdir(parents=True)
-                transcript.write_text('{"message":"saved"}\n')
-            else:
-                (workspace / "main.py").write_text("new\n")
+            (workspace / "main.py").write_text("new\n")
         return subprocess.CompletedProcess(
             args,
             0,
@@ -1811,20 +1817,16 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
     )
 
     assert (source / "main.py").read_text() == "new\n"
-    transcript = (
-        source
-        / ".helix_artifacts"
-        / "backend_transcripts"
-        / "claude"
-        / "sess_123.jsonl"
+
+    # No container is started to fetch a transcript, and nothing ever mounts
+    # the persistent auth volume read-only for that purpose.
+    joined = [" ".join(call) for call in calls]
+    assert not any("sess_123.jsonl" in call for call in joined), (
+        "transcript capture must not run a container"
     )
-    assert transcript.read_text() == '{"message":"saved"}\n'
-    copy_call = next(
-        call
-        for call in calls
-        if call[:2] == ["docker", "run"] and "sess_123.jsonl" in " ".join(call)
+    assert not any(":/home/node:ro" in call for call in joined), (
+        "no path may re-mount the persistent auth volume to copy transcripts"
     )
-    assert "helix-auth-claude:/home/node:ro" in copy_call
 
 
 def test_agent_sync_tolerates_inaccessible_backend_transcripts(
