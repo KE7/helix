@@ -75,11 +75,47 @@ def _drop_privileges() -> None:
 
 def _run_candidate(problem_statement: str, timeout: int) -> tuple[str, dict[str, Any]]:
     shutil.rmtree(CANDIDATE_REPO, ignore_errors=True)
+    # A full clone of /testbed copies every ref in the official task image.
+    # That image carries the upstream history *past* base_commit, including the
+    # commit that fixes this very instance, so a full clone hands the candidate
+    # the gold patch (`git log --all --grep=<issue>`).  A depth-1, tag-less
+    # clone carries only base_commit, which is all the candidate legitimately
+    # needs and still supports `git diff HEAD` for patch extraction.
     subprocess.run(
-        ["git", "clone", "--quiet", "--no-hardlinks", str(REPO), str(CANDIDATE_REPO)],
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            "--no-tags",
+            f"file://{REPO}",
+            str(CANDIDATE_REPO),
+        ],
         check=True,
         timeout=120,
     )
+    # Fail closed if the candidate repository can still reach anything beyond
+    # base_commit; scoring a run on a leaking repository is worse than failing.
+    base_commit = _git("rev-parse", "HEAD").stdout.strip()
+    cloned_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=CANDIDATE_REPO,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    ).stdout.strip()
+    if cloned_head != base_commit:
+        raise ValueError("candidate repository HEAD does not match base_commit")
+    extra = subprocess.run(
+        ["git", "log", "--all", "--oneline", "--not", "HEAD"],
+        cwd=CANDIDATE_REPO,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    ).stdout.strip()
+    if extra:
+        raise ValueError("candidate repository exposes commits beyond base_commit")
     ISSUE_FILE.write_text(problem_statement, encoding="utf-8")
     ISSUE_FILE.chmod(0o444)
     CANDIDATE_SCRIPT.chmod(0o555)
