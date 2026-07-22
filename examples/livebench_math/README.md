@@ -228,19 +228,31 @@ that is shared **across runs**, and that volume is mutable runtime state which
 cleanup neither removes nor accounts for. See
 `docs/design/sandbox-home-isolation.md`.
 
-Inspect anything needed first, then remove HELIX state/worktrees and the derived
-image (the published base runner image is not task-created):
+Export anything needed outside `.helix/` first, then remove HELIX
+state/worktrees. Remove the evaluator image or tag only when the current run
+created the underlying image; never infer image ownership from the presence of
+a tag alone (the published base runner image is never task-created):
 
 ```sh
 echo y | uv run helix clean --dir .
-docker image rm helix-livebench-math:e2c8b590-smoke
 test ! -e .helix
 test -z "$(git worktree list --porcelain | grep '^worktree ' | grep '/.helix/' || true)"
 test -z "$(docker ps -aq --filter label=org.helix.demo=livebench-math)"
 test -z "$(docker network ls -q --filter label=org.helix.demo=livebench-math)"
-! docker image inspect helix-livebench-math:e2c8b590-smoke >/dev/null 2>&1
 git status --short -- .
 ```
+
+### HELIX 0.3.0 accepted-replay cleanup note (2026-07-22)
+
+One task-created tag, `helix-livebench-math:e2c8b590-smoke`, deliberately
+remains after the accepted release replay. It is only a name alias for
+pre-existing baseline image
+`sha256:928e475a9d49d8d9653cb9419196954656ea20b4c5cd477d55966b46d60343b4`;
+it adds no image data and leaves the recorded `docker images -a -q` baseline
+at exactly 27 rows. Removing the final tag risks deleting that protected
+underlying image, which cannot be re-pulled or rebuilt on the release host, so
+preserving the baseline image takes precedence over removing the cosmetic
+alias. This is a known, reviewed residual—not an unreported cleanup omission.
 
 Do not commit `.helix/`, benchmark rows, results, images/layers, caches, logs,
 credentials, or temporary evidence. Local ignore rules enforce the common cases.
