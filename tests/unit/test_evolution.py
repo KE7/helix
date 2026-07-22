@@ -177,6 +177,13 @@ def test_load_evaluation_round_trips_optional_eval_result_fields(
 def all_mocks(mocker):
     """Patch all external I/O dependencies of run_evolution."""
     return {
+        # The auth preflight performs a REAL authenticated request against the
+        # REAL auth volume at :rw. It must never run from a unit test: a
+        # successful refresh rotates the stored token and would invalidate the
+        # shared volume for every lane. tests/unit/conftest.py additionally
+        # blocks Docker outright, so this mock is the intended path rather
+        # than the only thing standing between the suite and the credential.
+        "preflight_auth": mocker.patch("helix.evolution.preflight_auth"),
         "create_seed_worktree": mocker.patch("helix.evolution.create_seed_worktree"),
         "run_evaluator": mocker.patch("helix.evolution.run_evaluator"),
         "mutate": mocker.patch("helix.evolution.mutate"),

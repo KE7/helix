@@ -135,6 +135,37 @@ def charge_llm_usage(
     )
 
 
+def charge_auth_overhead(
+    state: EvolutionState,
+    usage: UsageStats | None = None,
+    *,
+    source: str | None = None,
+) -> None:
+    """Record the cost of the auth preflight, OUTSIDE proposal accounting.
+
+    This function deliberately does NOT touch ``state.budget.evaluations``,
+    and must never be changed to.  Every lane inspector expresses budget
+    conservation purely in terms of that counter, and livebench asserts a
+    hard equality against it, so any non-proposal increment breaks all four
+    lanes simultaneously — including an unrun lane whose single timed window
+    makes the failure maximally expensive and makes it look like a lane
+    defect rather than a core change.
+
+    It also does not touch the shared token/cost counters, so auth overhead is
+    never misattributed to proposal cost.  It is reported distinctly.
+    """
+    state.budget.auth_overhead_calls += 1
+    if usage is not None:
+        state.budget.auth_overhead_input_tokens += usage.input_tokens
+        state.budget.auth_overhead_output_tokens += usage.output_tokens
+        state.budget.auth_overhead_cost_usd += usage.cost_usd
+    TRACE.emit(
+        EventType.BUDGET_UPDATE,
+        reason=source or "auth_preflight",
+        auth_overhead_calls=state.budget.auth_overhead_calls,
+    )
+
+
 def set_generation(state: EvolutionState, generation: int) -> None:
     """Record the active generation."""
     state.generation = generation

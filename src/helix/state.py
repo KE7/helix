@@ -43,6 +43,25 @@ class BudgetState:
     reasoning_tokens: int = 0
     cost_usd: float = 0.0
 
+    # Authentication overhead, tracked SEPARATELY from proposal accounting.
+    #
+    # The once-per-run auth preflight makes a real, billable authenticated
+    # request. It must never enter ``evaluations``: every lane inspector
+    # expresses budget conservation purely in terms of that counter, and
+    # livebench asserts a HARD EQUALITY
+    # (``int(final_budget_after) == evaluations``), so ANY non-proposal
+    # increment breaks all four lanes at once. There is no slack to absorb an
+    # accidental charge — the margin is one integer.
+    #
+    # Folding this into ``cost_usd`` / token counters would not break today's
+    # inspectors (none assert on them), but it would silently misattribute
+    # auth overhead to proposal cost — a quiet instance of exactly the
+    # silent-flip class this release removes. Keep it separate and visible.
+    auth_overhead_calls: int = 0
+    auth_overhead_input_tokens: int = 0
+    auth_overhead_output_tokens: int = 0
+    auth_overhead_cost_usd: float = 0.0
+
 
 ProposalTaskStatus = Literal[
     "planned",
@@ -106,6 +125,10 @@ def _budget_state_from_mapping(data: Mapping[str, Any]) -> BudgetState:
         cache_read_input_tokens=int(data.get("cache_read_input_tokens", 0)),
         reasoning_tokens=int(data.get("reasoning_tokens", 0)),
         cost_usd=float(data.get("cost_usd", 0.0)),
+        auth_overhead_calls=int(data.get("auth_overhead_calls", 0)),
+        auth_overhead_input_tokens=int(data.get("auth_overhead_input_tokens", 0)),
+        auth_overhead_output_tokens=int(data.get("auth_overhead_output_tokens", 0)),
+        auth_overhead_cost_usd=float(data.get("auth_overhead_cost_usd", 0.0)),
     )
 
 

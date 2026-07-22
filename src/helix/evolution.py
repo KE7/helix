@@ -85,6 +85,7 @@ from helix.proposals import (
     TerminalProposalOutcome,
     TopKImprovements,
 )
+from helix.authpreflight import env_mode_disclosure, preflight_auth
 from helix.envpolicy import sidecar_passthrough_names
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
@@ -1659,6 +1660,18 @@ def run_evolution(
             "config.evolution.max_evaluations > 0. "
             "See GEPA api.py:262-265 for the upstream equivalent check."
         )
+    # Authentication preflight: once per run, BEFORE the first mutation is
+    # dispatched, with zero proposal / budget / ledger / population side
+    # effects.  A mid-run 401 today becomes a failed proposal averaged into
+    # the population — silent degradation that looks like a bad generation —
+    # after budget and state have already been spent.
+    if config.sandbox.enabled:
+        if config.sandbox.resolved_auth() == "env":
+            # Non-suppressible, and deliberately not reassuring.
+            print(env_mode_disclosure(config))
+        else:
+            preflight_auth(config)
+
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
             raise HelixError(
