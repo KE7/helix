@@ -668,6 +668,37 @@ original diagnosis, which no probe has touched.
 Fixing the fixture does not fix them — verified by running the reference harness
 rather than assumed.
 
+### The suppression MECHANISM is observable, even though refresh execution is not
+
+An OAuth-mode diagnostic was run on the pinned digest with the preserved
+synthetic harness, reporting **presence counts only, never values**, with the
+mandatory two-arm control:
+
+| Arm | `bearer` header | `x-api-key` header | token POST |
+|---|---|---|---|
+| CLEAN (no auth env) | **1** | 0 | 0 |
+| `ANTHROPIC_API_KEY` set | 0 | **1** | 0 |
+| `ANTHROPIC_AUTH_TOKEN` set | 1 | 0 | 0 |
+
+**The control passes: the two arms are distinguishable**, so the diagnostic is
+not one of the vacuous probes discarded earlier.
+
+Two findings:
+
+1. **The clean arm is genuinely in OAuth mode** — it emits a `bearer`
+   credential path from the volume record. So the missing refresh is *not*
+   caused by contamination of the test environment.
+2. **`ANTHROPIC_API_KEY` demonstrably switches the credential path** from
+   `bearer` to `x-api-key`. That is the suppression mechanism itself, observed
+   **behaviourally** rather than read out of a minified predicate — which is
+   stronger evidence for the central claim than anything previously available.
+
+**What this does NOT establish:** that a *refresh* is suppressed. Refresh
+execution was never observed in any arm, on either CLI version, with either
+fixture. Mode selection and refresh execution are different properties, and only
+the first is demonstrated here. The distinction is preserved deliberately rather
+than collapsed into a convenient claim.
+
 **Attribution, verified rather than assumed.** The same four fail identically
 at `9f2bcaa`, the base commit. `git diff 9f2bcaa..HEAD` over that file is
 empty, and it references none of the symbols this branch changed. They are

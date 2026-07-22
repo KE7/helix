@@ -19,6 +19,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from _pytest.outcomes import Skipped
 
 
 def _module():
@@ -95,7 +96,18 @@ def test_skip_message_names_the_capability_and_the_unverified_property() -> None
     module = _module()
     module._REACHABILITY.clear()
     module._REACHABILITY["verdict"] = (False, "DNS resolution failed")
-    with pytest.raises(Exception) as exc:
+    # ``pytest.raises(Skipped)``, NOT ``Exception``. ``Skipped`` derives from
+    # ``BaseException``, NOT ``Exception``, so ``pytest.raises(Exception)``
+    # cannot catch it: the Skipped propagated out of the ``with``, out of the
+    # test, and SKIPPED THE TEST ITSELF -- leaving all three assertions below
+    # unreachable while the summary showed a harmless "skipped".
+    #
+    # THE DEFECT NESTED INSIDE ITSELF: the skip REASON is the control, because
+    # "4 skipped" reads as "4 fine" to anyone who does not open the string --
+    # and the guard protecting that control failed by skipping, which is the
+    # same green-looking non-result. Mutating the reason to the single word
+    # "skipped" left the suite fully green.
+    with pytest.raises(Skipped) as exc:
         module.require_oauth_endpoint_reachable()
     message = str(exc.value)
     assert "MISSING NETWORK CAPABILITY" in message
