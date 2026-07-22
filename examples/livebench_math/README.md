@@ -186,7 +186,21 @@ used to reproduce or refute the publication's validation/test scores. The
 argument-free inspector is the shape-agnostic 1x1 summary; only
 `--require-terminal` applies the fixed P=2,N=2 release gate.
 
-## Cleanup and zero-resource proof
+## Cleanup and resource accounting
+
+This section accounts for **task-created resources**. It is deliberately no
+longer titled "zero-resource proof": the checks below verify that this run's
+own worktrees, containers, networks and derived image are gone, and they never
+inspected any Docker **volume** at all.
+
+**Persistent auth-store state is a separate matter.** A sandboxed run's
+credential path is `sandbox.auth`. This lane runs `auth = "env"`, so it mounts
+no persistent auth volume and leaves no auth-store state behind. Under
+`auth = "volume"` — which is what an omitted `auth` key silently resolves to —
+the backend CLI reads and writes a persistent `helix-auth-<backend>` volume
+that is shared **across runs**, and that volume is mutable runtime state which
+cleanup neither removes nor accounts for. See
+`docs/design/sandbox-home-isolation.md`.
 
 Inspect anything needed first, then remove HELIX state/worktrees and the derived
 image (the published base runner image is not task-created):

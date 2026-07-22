@@ -228,7 +228,20 @@ For a completed one-generation run, both consecutive resumes must schedule no
 new child ID, consume no additional evaluator budget, and leave the durable
 fingerprint and terminal ledger/accounting unchanged.
 
-## Cleanup and zero-resource proof
+## Cleanup and resource accounting
+
+This section accounts for **task-created resources**. `manage.py cleanup`
+verifies that no HELIX worktree/branch or task-created container remains, which
+is correct as written — but the previous title, "zero-resource proof", promised
+more than the checks deliver, and none of them inspects a Docker volume.
+
+**Persistent auth-store state is a separate matter.** This lane runs
+`sandbox.auth = "env"`, so it mounts no persistent auth volume and leaves no
+auth-store state behind. Under `auth = "volume"` — which an omitted `auth` key
+silently resolves to — the backend CLI reads and writes a persistent
+`helix-auth-<backend>` volume shared **across runs**; that is mutable runtime
+state which cleanup neither removes nor accounts for. See
+`docs/design/sandbox-home-isolation.md`.
 
 Run HELIX cleanup first, then remove the ignored benchmark clone/venv and the
 runner image if this demo pulled it:

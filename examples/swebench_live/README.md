@@ -148,7 +148,25 @@ to equal the global counter. With the generation budget already
 exhausted, both consecutive resumes must be idempotent: no new task container,
 candidate, or evaluation charge, and byte-identical state/accounting.
 
-## Exact cleanup and zero-resource proof
+## Cleanup and resource accounting
+
+This section accounts for **task-created resources**. The previous title,
+"Exact cleanup and zero-resource proof", was the strongest of the three and the
+least earned.
+
+The volume check below filters on `label=com.helix.demo=…`. **The persistent
+auth volume carries no labels at all** (`docker volume inspect
+helix-auth-claude` reports `Labels: map[]`), so that filter cannot match it and
+the check passes *vacuously* with respect to auth-store state — it proves
+something about task-labelled volumes only.
+
+**Persistent auth-store state is a separate matter.** This lane runs
+`sandbox.auth = "env"`, so it mounts no persistent auth volume and leaves no
+auth-store state behind. Under `auth = "volume"` — which an omitted `auth` key
+silently resolves to — the backend CLI reads and writes a persistent
+`helix-auth-<backend>` volume shared **across runs**; that is mutable runtime
+state which this cleanup neither removes nor accounts for. See
+`docs/design/sandbox-home-isolation.md`.
 
 Export a best candidate first if desired, then remove HELIX and benchmark state:
 

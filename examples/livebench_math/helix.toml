@@ -67,6 +67,29 @@ provenance files. Do not add benchmark answers or question-specific facts.
 
 [sandbox]
 enabled = true
+# 0.3.0 credential policy — EXPLICIT env auth.
+#
+# This was previously omitted, and omission resolves to auth = "volume"
+# (config.py `resolved_auth`). That mattered more than it looked: volume mode
+# mounts a persistent per-backend store that is shared ACROSS RUNS, and it
+# CANNOT support a candidate-independence claim. The auth directory has to stay
+# writable so the CLI can rotate its OAuth token by atomic rename, which means a
+# mutation agent can create an unenumerated file there that the next candidate
+# reads — demonstrated by canary through the completed isolation design. Volume
+# mode closes INCIDENTAL cross-run state; it does not make candidates
+# independent.
+#
+# This lane's results are read as per-candidate measurements, so it runs under
+# env mode, where no persistent store is mounted at all and the cross-run
+# channel therefore does not exist rather than being masked.
+#
+# Env mode is a DISCLOSED TRADEOFF, not an equivalent alternative:
+#   - the named host credential IS PRESENT INSIDE THE AGENT CONTAINER; and
+#   - OAuth refresh is SUPPRESSED (these variables turn OAuth mode off), so the
+#     run performs no container-side token refresh at all.
+# It is chosen BECAUSE no persistent cross-candidate store exists.
+auth = "env"
+auth_env_allow = ["ANTHROPIC_API_KEY"]
 image = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
 network = "bridge"
 evaluator = true

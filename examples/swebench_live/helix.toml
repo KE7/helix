@@ -38,6 +38,28 @@ background = """Work only on coding_agent.py. Do not edit evaluator, configurati
 
 [sandbox]
 enabled = true
+# 0.3.0 credential policy — EXPLICIT env auth.
+#
+# Previously omitted, and omission resolves to auth = "volume"
+# (config.py `resolved_auth`). Volume mode mounts a persistent per-backend
+# store shared ACROSS RUNS and CANNOT support a candidate-independence claim:
+# the auth directory must stay writable so the CLI can rotate its OAuth token
+# by atomic rename, so a mutation agent can create an unenumerated file there
+# that the next candidate reads. Beyond that, the claude CLI itself keeps
+# per-run state in that shared HOME (a cleanup sentinel that makes the next
+# candidate skip its cleanup pass, an MCP auth cache, and a policy file whose
+# on-disk hash shapes the next candidate's outbound request), so claude
+# volume mode is refused outright.
+#
+# This lane's results are read as per-candidate measurements, so it runs under
+# env mode, where no persistent store is mounted at all.
+#
+# Env mode is a DISCLOSED TRADEOFF, not an equivalent alternative:
+#   - the named host credential IS PRESENT INSIDE THE AGENT CONTAINER; and
+#   - OAuth refresh is SUPPRESSED, so no container-side token refresh occurs.
+# It is chosen BECAUSE no persistent cross-candidate store exists.
+auth = "env"
+auth_env_allow = ["ANTHROPIC_API_KEY"]
 evaluator = false
 image = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
 network = "bridge"

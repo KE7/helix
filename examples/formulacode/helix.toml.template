@@ -44,8 +44,17 @@ enabled = true
 # now declared where a reviewer reads it, and it is opt-in.
 #
 # Env mode is a TRADEOFF, not an equivalent alternative to auth = "volume":
-# setting these variables turns OAuth mode off in the backend CLI, so this run
-# performs no container-side token refresh at all.
+#   - setting these variables turns OAuth mode off in the backend CLI, so this
+#     run performs no container-side token refresh at all; and
+#   - the named host credential IS PRESENT INSIDE THE AGENT CONTAINER, visible
+#     to agent code, for the whole run.
+#
+# It is chosen BECAUSE no persistent cross-candidate store exists in this mode.
+# Volume mode mounts a store shared ACROSS RUNS and cannot support a
+# candidate-independence claim: the auth directory must stay writable for OAuth
+# rotation, so an agent can create an unenumerated file there that the next
+# candidate reads, and on the pinned claude digest the CLI itself keeps per-run
+# state in that shared HOME.
 auth = "env"
 auth_env_allow = ["ANTHROPIC_API_KEY"]
 evaluator = false
