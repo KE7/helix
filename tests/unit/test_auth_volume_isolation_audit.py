@@ -79,7 +79,7 @@ _GRANTS = [
 # cannot be relocated off the shared store. For these the isolation questions
 # below are answered by refusal, which is a stronger outcome than a clean mount
 # layout: HELIX declines to run rather than report an isolated run that is not.
-_VOLUME_FAIL_CLOSED = {"claude", "gemini"}
+_VOLUME_FAIL_CLOSED = {"claude", "gemini", "cursor", "opencode"}
 
 
 def _agent_argv(backend: str) -> list[str]:

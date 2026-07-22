@@ -217,11 +217,28 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
         auth_dir="/home/node/.cursor",
         volume_subpath=".cursor",
         credential_file="cli-config.json",
+        # FAILS CLOSED under volume mode: the split is PLAUSIBLE but UNPROVEN.
+        #
+        # Source shows two independent knobs, which is promising -- the
+        # credential is read from the CONFIG dir
+        # (``join(configDir(), "cli-config.json")``, where
+        # ``CURSOR_CONFIG_DIR || XDG_CONFIG_HOME/cursor || ~/.cursor``) while
+        # ``CURSOR_DATA_DIR || ~/.cursor`` governs the DATA dir. Because both
+        # default to ``~/.cursor`` the files are commingled today, so pointing
+        # DATA elsewhere might genuinely split them.
+        #
+        # "Might" is not good enough to run a benchmark on. It has NOT been
+        # verified which files follow which knob, and an earlier version of
+        # this entry declared cursor isolatable on exactly that unverified
+        # assumption -- the same declared-but-unproven error this registry
+        # exists to prevent. Isolation stays refused until a both-halves
+        # behavioural proof exists (ephemeral state moves; credential stays
+        # readable and rotatable in place).
         ephemeral_files={
             "agent-cli-state.json": "CURSOR_DATA_DIR",
             "statsig-cache.json": "CURSOR_DATA_DIR",
         },
-        env_redirects={"CURSOR_DATA_DIR": f"{HELIX_RUN_ROOT}/cursor-data"},
+        env_redirects={},
         pinned_cli_version="2026.04.17-787b533",
     ),
     # ---------------------------------------------------------------
@@ -267,11 +284,30 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
         auth_dir="/home/node/.local/share/opencode",
         volume_subpath=".local/share/opencode",
         credential_file="auth.json",
-        env_redirects={
-            "XDG_CONFIG_HOME": f"{HELIX_RUN_ROOT}/xdg-config",
-            "XDG_CACHE_HOME": f"{HELIX_RUN_ROOT}/xdg-cache",
-            "XDG_STATE_HOME": f"{HELIX_RUN_ROOT}/xdg-state",
+        ephemeral_subdirs=("log", "snapshot", "storage"),
+        # FAILS CLOSED under volume mode.
+        #
+        # Measured contents of the real auth dir: ``opencode.db``,
+        # ``opencode.db-shm`` and ``opencode.db-wal`` sit as REGULAR FILES
+        # beside the credential -- that is the session database, the very state
+        # ``mutator.py``'s XDG_DATA_HOME workaround was introduced to isolate.
+        # No overlay can mask a sibling file.
+        #
+        # The only knob that relocates them is XDG_DATA_HOME, which moves
+        # ``~/.local/share/opencode`` WHOLESALE -- i.e. the credential too. That
+        # is the same shape as CLAUDE_CONFIG_DIR and GEMINI_CLI_HOME: it proves
+        # RELOCATION, not a class-3 SPLIT.
+        #
+        # An earlier version of this entry declared opencode isolatable with an
+        # EMPTY ephemeral set, which made it vacuously pass the fail-closed
+        # check while its session DB crossed runs. The measured contents are
+        # now recorded so the refusal is grounded in evidence.
+        ephemeral_files={
+            "opencode.db": "XDG_DATA_HOME",
+            "opencode.db-shm": "XDG_DATA_HOME",
+            "opencode.db-wal": "XDG_DATA_HOME",
         },
+        env_redirects={},
         pinned_cli_version="1.14.24",
     ),
 }

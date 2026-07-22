@@ -233,15 +233,35 @@ def test_T4_backend_rename_cannot_change_credential_flow(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", CANARY)
     assert "OPENAI_API_KEY" in BACKEND_AUTH_ENV["opencode"]
 
-    as_claude = agent_docker_argv(
+    as_volume = agent_docker_argv(
         make_config(backend=VOLUME_BACKEND, sidecar_passthrough=["OPENAI_API_KEY"])
     )
-    as_opencode = agent_docker_argv(
-        make_config(backend="opencode", sidecar_passthrough=["OPENAI_API_KEY"])
+    assert "OPENAI_API_KEY" not in env_assignments(as_volume)
+
+    # opencode now FAILS CLOSED under volume mode: its session database
+    # (opencode.db) sits beside the credential and the only knob that relocates
+    # it (XDG_DATA_HOME) moves the credential too. So a backend rename cannot
+    # silently change credential flow -- it either yields the same
+    # credential-relevant environment or refuses to run. A refusal cannot leak,
+    # so the hole this test guards is closed by a stronger mechanism.
+    with pytest.raises(UnsupportedBackendLayoutError):
+        agent_docker_argv(
+            make_config(backend="opencode", sidecar_passthrough=["OPENAI_API_KEY"])
+        )
+
+    # The equality half needs two comparable argvs, so it moves to env mode,
+    # where every backend runs and none mounts a persistent store.
+    env_a = agent_docker_argv(
+        make_config(backend="claude", auth="env", auth_env_allow=["ANTHROPIC_API_KEY"])
     )
-    assert "OPENAI_API_KEY" not in env_assignments(as_claude)
-    assert "OPENAI_API_KEY" not in env_assignments(as_opencode)
-    assert credential_relevant_env(as_claude) == credential_relevant_env(as_opencode)
+    env_b = agent_docker_argv(
+        make_config(
+            backend="opencode", auth="env", auth_env_allow=["ANTHROPIC_API_KEY"]
+        )
+    )
+    assert "OPENAI_API_KEY" not in env_assignments(env_a)
+    assert "OPENAI_API_KEY" not in env_assignments(env_b)
+    assert credential_relevant_env(env_a) == credential_relevant_env(env_b)
 
 
 def test_T5_both_present_still_volume_only(monkeypatch):
@@ -278,7 +298,7 @@ def test_T10_all_backends_volume_mode(monkeypatch, backend):
         for name in names:
             monkeypatch.setenv(name, CANARY)
     config = make_config(backend=backend)
-    if backend in {"claude", "gemini"}:
+    if backend in {"claude", "gemini", "cursor", "opencode"}:
         # Per-run state cannot be relocated off the shared store for these, so
         # volume mode REFUSES. That is a stronger guarantee than a clean argv:
         # no credential can reach a container that never starts.
@@ -307,13 +327,13 @@ def test_T10b_gemini_google_api_key_never_reaches_agent(monkeypatch):
     # that neither Google key reaches ANY sandboxed agent argv -- is
     # backend-independent, and gemini's own coverage is the fail-closed
     # assertion in T10.
-    config = make_config(backend="cursor")
+    config = make_config(backend=VOLUME_BACKEND)
     argv = agent_docker_argv(config)
     assignments = env_assignments(argv)
     assert "GEMINI_API_KEY" not in assignments
     assert "GOOGLE_API_KEY" not in assignments
     assert not any(CANARY in part for part in argv)
-    assert_auth_volume_mounted_narrowly(argv, "cursor")
+    assert_auth_volume_mounted_narrowly(argv, VOLUME_BACKEND)
 
 
 def test_T11_codex_is_not_safe_by_absence(monkeypatch):
@@ -469,21 +489,27 @@ def test_T18_silent_flips_do_not_change_agent_argv(monkeypatch):
     # (1) backend rename; (2) sidecar name moved to top-level passthrough;
     # (3) a host credential renamed into the HELIX_* namespace.
     flips = [
-        make_config(backend="opencode"),
         make_config(backend=VOLUME_BACKEND, passthrough_env=["OPENAI_API_KEY"]),
         make_config(backend=VOLUME_BACKEND, passthrough_env=[]),
     ]
     for flipped in flips:
         flipped_env = credential_relevant_env(agent_docker_argv(flipped))
         assert flipped_env == base_env, "a config flip changed agent exposure"
+
+    # The backend-rename flip now FAILS CLOSED rather than producing an argv:
+    # opencode cannot be isolated under volume mode. A refusal cannot leak a
+    # credential, so the silent-flip class stays closed by a different --
+    # stronger -- mechanism.
+    with pytest.raises(UnsupportedBackendLayoutError):
+        agent_docker_argv(make_config(backend="opencode"))
     assert not any(CANARY in value for value in base_env.values())
 
 
 def test_T6_unrelated_volume_does_not_authenticate():
     """T6 — catches a preflight implemented as 'any helix-auth-* exists'."""
-    config = make_config(backend="cursor")
+    config = make_config(backend=VOLUME_BACKEND)
     argv = agent_docker_argv(config)
-    assert_auth_volume_mounted_narrowly(argv, "cursor")
+    assert_auth_volume_mounted_narrowly(argv, VOLUME_BACKEND)
     assert "helix-auth-claude" not in " ".join(argv)
 
 

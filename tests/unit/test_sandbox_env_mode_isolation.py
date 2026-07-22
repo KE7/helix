@@ -78,7 +78,7 @@ def test_env_mode_argv_contains_no_auth_volume_reference(backend: str) -> None:
 # claude and gemini FAIL CLOSED under volume mode -- their per-run state cannot
 # be relocated off the shared store -- so they have no volume-mode argv to
 # inspect. The non-vacuity control below uses the backends that do.
-_VOLUME_FAIL_CLOSED = {"claude", "gemini"}
+_VOLUME_FAIL_CLOSED = {"claude", "gemini", "cursor", "opencode"}
 
 
 @pytest.mark.parametrize(

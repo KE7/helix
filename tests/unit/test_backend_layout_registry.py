@@ -116,7 +116,14 @@ def test_auth_dir_is_never_the_whole_home(backend: str) -> None:
 #
 # Running either backend under ``auth = "env"`` is unaffected -- there is no
 # shared store in that mode.
-FAIL_CLOSED_UNDER_VOLUME_MODE = {"gemini", "claude"}
+# cursor: source shows a plausible CONFIG/DATA split (the credential is read
+# from CURSOR_CONFIG_DIR, while CURSOR_DATA_DIR governs the data dir), but it
+# is UNVERIFIED which files follow which knob. Plausible is not proven.
+#
+# opencode: opencode.db{,-shm,-wal} -- the session database -- are regular
+# files beside the credential, and the only knob that moves them
+# (XDG_DATA_HOME) moves the credential too. Relocation, not a split.
+FAIL_CLOSED_UNDER_VOLUME_MODE = {"gemini", "claude", "cursor", "opencode"}
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
