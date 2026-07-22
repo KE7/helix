@@ -191,9 +191,10 @@ class TestCleanCreatedRepository:
 
         result = CliRunner().invoke(cli, ["clean", "--dir", str(project)], input="y\n")
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 2, result.output
         assert "markers do not match" in result.output.replace("\n", " ")
         assert (project / ".git").is_dir()
+        assert (project / ".helix" / "worktrees" / ".helix-created-repo").is_file()
 
 
 # ---------------------------------------------------------------------------
