@@ -160,15 +160,41 @@ After an interruption, inspect `.helix/state.json`, then resume the same run:
 
 ```sh
 python3 inspect_run.py --require-terminal
-uv run helix resume --dir .
+../../.venv/bin/helix resume --dir .
 python3 inspect_run.py --require-terminal
-uv run helix resume --dir .
+../../.venv/bin/helix resume --dir .
 python3 inspect_run.py --require-terminal
 ```
 
 Both consecutive `resume` invocations after terminal state must spend no budget
 and add no candidate IDs. The three inspector snapshots must have identical
 state digests, candidate IDs, scores, ledger totals, and metric-call budgets.
+
+For release evidence, export deterministic manifests outside `.helix/` before
+and after each resume, then compare the files byte-for-byte. The manifest is
+intentionally non-vacuous: it records proposal identities and terminal fields,
+budget accounting, durable-file counts and sizes, and three independent
+digests (exact state-file bytes, a stable semantic projection, and the durable
+artifact inventory). It excludes only the append-only diagnostic log and
+ephemeral candidate worktrees.
+
+```sh
+mkdir -p ../../.helix-evidence/livebench-release
+python3 inspect_run.py --resume-manifest \
+  > ../../.helix-evidence/livebench-release/resume0-before.json
+../../.venv/bin/helix resume --dir .
+python3 inspect_run.py --resume-manifest \
+  > ../../.helix-evidence/livebench-release/resume1-after.json
+cmp ../../.helix-evidence/livebench-release/{resume0-before,resume1-after}.json
+../../.venv/bin/helix resume --dir .
+python3 inspect_run.py --resume-manifest \
+  > ../../.helix-evidence/livebench-release/resume2-after.json
+cmp ../../.helix-evidence/livebench-release/{resume1-after,resume2-after}.json
+```
+
+Invoke HELIX through its installed console script as shown and capture each
+actual process status in a dedicated evidence file. Do not use
+`python -m helix`: HELIX intentionally has no `helix.__main__` entry point.
 
 Clean the first run before the serial comparison; the two configs intentionally
 share `.helix/`:

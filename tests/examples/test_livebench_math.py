@@ -728,6 +728,48 @@ def test_state_inspection_is_resume_stable_and_conserves_accounting() -> None:
     assert before["budget_conserved"] is True
 
 
+def test_resume_manifest_is_non_vacuous_stable_and_sensitive(tmp_path: Path) -> None:
+    ledger = tmp_path / ".helix"
+    ledger.mkdir()
+    state_path = ledger / "state.json"
+    state_path.write_text(json.dumps(_completed_p2n2_state(), indent=2) + "\n")
+    (ledger / "evaluations.jsonl").write_text('{"candidate":"seed"}\n')
+    (ledger / "helix.log").write_text("first invocation\n")
+    worktree = ledger / "worktrees" / "g0-s0"
+    worktree.mkdir(parents=True)
+    (worktree / "candidate.txt").write_text("ephemeral\n")
+
+    before = inspect_run.build_resume_manifest(state_path)
+    before_bytes = json.dumps(before, indent=2, sort_keys=True).encode()
+
+    # Terminal resumes may append diagnostics and clean ephemeral worktrees;
+    # neither is durable evolutionary state.
+    (ledger / "helix.log").write_text("second invocation\n")
+    (worktree / "candidate.txt").write_text("changed ephemeral content\n")
+    after = inspect_run.build_resume_manifest(state_path)
+    after_bytes = json.dumps(after, indent=2, sort_keys=True).encode()
+
+    assert before_bytes == after_bytes
+    assert before["substantive_key_count"] >= 13
+    assert before["candidate_count"] == before["distinct_candidate_count"] == 4
+    digests = {
+        before["state_file_sha256"],
+        before["stable_projection_sha256"],
+        before["durable_artifact_manifest_sha256"],
+    }
+    assert len(digests) == 3
+    assert before["durable_file_count"] == 2
+    assert before["durable_total_bytes"] > state_path.stat().st_size
+
+    # A change to another durable artifact must change the inventory digest.
+    (ledger / "evaluations.jsonl").write_text('{"candidate":"changed"}\n')
+    changed = inspect_run.build_resume_manifest(state_path)
+    assert (
+        changed["durable_artifact_manifest_sha256"]
+        != before["durable_artifact_manifest_sha256"]
+    )
+
+
 def test_state_inspection_rejects_duplicate_candidate_ids() -> None:
     state = _completed_p2n2_state()
     state["proposal_batches"][0]["tasks"][1]["child_id"] = "child-0"

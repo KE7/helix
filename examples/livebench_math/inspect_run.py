@@ -20,6 +20,10 @@ SUCCESSFUL_CLEANUP = {"not_required", "removed", "missing"}
 TERMINAL_SELECTION = {"not_applicable", "not_selected", "selected"}
 
 
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
 def audit_state(
     data: dict[str, Any], *, require_terminal: bool = False
 ) -> dict[str, Any]:
@@ -120,7 +124,7 @@ def audit_state(
         raise ValueError("global budget contains unexplained post-batch spend")
     encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
     return {
-        "state_sha256": hashlib.sha256(encoded).hexdigest(),
+        "state_sha256": _sha256(encoded),
         "schema_version": data.get("schema_version"),
         "generation": data.get("generation"),
         "frontier": data.get("frontier", []),
@@ -137,17 +141,109 @@ def audit_state(
     }
 
 
+def build_resume_manifest(state_path: Path) -> dict[str, Any]:
+    """Return a deterministic, non-vacuous terminal-resume fingerprint.
+
+    HELIX appends to ``helix.log`` during an otherwise idempotent terminal
+    resume, and cleaned candidate worktrees are intentionally ephemeral.  The
+    durable artifact view therefore excludes that log and the ``worktrees/``
+    subtree, while independently hashing the exact state-file bytes, a stable
+    semantic projection, and the remaining durable artifact inventory.
+
+    No timestamps or absolute paths enter the result, so two manifests can be
+    compared byte-for-byte across consecutive terminal resumes.
+    """
+    state_path = state_path.resolve()
+    state_dir = state_path.parent
+    data = json.loads(state_path.read_text())
+    audit = audit_state(data, require_terminal=True)
+
+    durable_files: list[dict[str, Any]] = []
+    for path in sorted(state_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(state_dir)
+        if relative == Path("helix.log"):
+            continue
+        if relative.parts and relative.parts[0] == "worktrees":
+            continue
+        payload = path.read_bytes()
+        durable_files.append(
+            {
+                "path": relative.as_posix(),
+                "sha256": _sha256(payload),
+                "size": len(payload),
+            }
+        )
+
+    stable_projection = {
+        "schema_version": audit["schema_version"],
+        "generation": audit["generation"],
+        "frontier": audit["frontier"],
+        "active_frontier": audit["active_frontier"],
+        "candidate_ids": audit["candidate_ids"],
+        "instance_scores": audit["instance_scores"],
+        "budget": audit["budget"],
+        "ledger_evaluations": audit["ledger_evaluations"],
+        "nonproposal_evaluations": audit["nonproposal_evaluations"],
+        "budget_conserved": audit["budget_conserved"],
+        "batches": audit["batches"],
+        "scheduler_phase": audit["scheduler_phase"],
+    }
+    stable_bytes = json.dumps(
+        stable_projection, sort_keys=True, separators=(",", ":")
+    ).encode()
+    artifact_bytes = json.dumps(
+        durable_files, sort_keys=True, separators=(",", ":")
+    ).encode()
+    tasks = data["proposal_batches"][0]["tasks"]
+
+    manifest: dict[str, Any] = {
+        "schema_version": audit["schema_version"],
+        "generation": audit["generation"],
+        "candidate_ids": audit["candidate_ids"],
+        "candidate_count": audit["candidate_count"],
+        "distinct_candidate_count": len(set(audit["candidate_ids"])),
+        "frontier": audit["frontier"],
+        "active_frontier": audit["active_frontier"],
+        "budget": audit["budget"],
+        "ledger_evaluations": audit["ledger_evaluations"],
+        "nonproposal_evaluations": audit["nonproposal_evaluations"],
+        "budget_conserved": audit["budget_conserved"],
+        "batch_count": len(audit["batches"]),
+        "batch_phases": [batch["phase"] for batch in audit["batches"]],
+        "task_statuses": [task["status"] for task in tasks],
+        "task_selections": [task["selection"] for task in tasks],
+        "task_cleanups": [task["cleanup"] for task in tasks],
+        "scheduler_phase": audit["scheduler_phase"],
+        "durable_file_count": len(durable_files),
+        "durable_total_bytes": sum(item["size"] for item in durable_files),
+        "state_file_sha256": _sha256(state_path.read_bytes()),
+        "stable_projection_sha256": _sha256(stable_bytes),
+        "durable_artifact_manifest_sha256": _sha256(artifact_bytes),
+    }
+    manifest["substantive_key_count"] = len(manifest) + 1
+    return manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "state", nargs="?", type=Path, default=Path(".helix/state.json")
     )
     parser.add_argument("--require-terminal", action="store_true")
-    args = parser.parse_args()
-    data = json.loads(args.state.read_text())
-    print(
-        json.dumps(audit_state(data, require_terminal=args.require_terminal), indent=2)
+    parser.add_argument(
+        "--resume-manifest",
+        action="store_true",
+        help="emit a deterministic terminal-state manifest for byte comparison",
     )
+    args = parser.parse_args()
+    if args.resume_manifest:
+        result = build_resume_manifest(args.state)
+    else:
+        data = json.loads(args.state.read_text())
+        result = audit_state(data, require_terminal=args.require_terminal)
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
