@@ -333,6 +333,76 @@ def test_agent_command_environment_excludes_sidecar_key(
     assert "OPENAI_API_KEY" not in agent_env
 
 
+def _agent_env_names_in_docker_argv(config: Any) -> list[str]:
+    """Env var NAMES on the real agent docker argv, via the production path."""
+    from helix.mutator import _add_backend_auth_env
+    from helix.sandbox import _docker_args
+
+    env = _scrub_environment(
+        passthrough_env=config.passthrough_env, fixed_env=config.env
+    )
+    # The production sequence re-adds backend auth AFTER scrubbing, so a test
+    # that stops at the scrubber stops one step too early.
+    _add_backend_auth_env(env, config.agent.backend)
+    argv = _docker_args(
+        ["true"],
+        env,
+        Path("/tmp"),
+        config.sandbox,
+        "agent",
+        config.sandbox.image,
+        config.agent.backend,
+        None,
+        container_name="test-probe",
+    )
+    return [
+        arg.split("=", 1)[0]
+        for index, arg in enumerate(argv)
+        if index > 0 and argv[index - 1] == "-e"
+    ]
+
+
+def test_sidecar_key_never_reaches_agent_docker_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The solver credential must be absent from the ACTUAL docker argv.
+
+    Asserting only on ``_scrub_environment`` is insufficient: HELIX re-adds
+    backend auth env via ``_add_backend_auth_env`` after scrubbing, so a key
+    can be absent at the scrubber and still be handed to the container. This
+    test therefore asserts on the final argv.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-agent-must-not-see-this")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-backend-auth")
+    config = load_config(ROOT / "helix.toml")
+    names = _agent_env_names_in_docker_argv(config)
+
+    # The whole point of core fix 94f9751: the solver key is sidecar-only.
+    assert "OPENAI_API_KEY" not in names
+    assert config.evaluator.sidecar is not None
+    assert config.evaluator.sidecar.passthrough_env == ["OPENAI_API_KEY"]
+
+
+def test_backend_choice_is_what_keeps_the_solver_key_out_of_the_agent() -> None:
+    """Guard the assumption the sidecar boundary silently depends on.
+
+    ``BACKEND_AUTH_ENV`` re-adds each backend's auth vars after scrubbing.
+    ``opencode`` lists OPENAI_API_KEY, so switching this demo to that backend
+    would hand the solver credential straight to the mutation agent and
+    silently defeat the sidecar isolation, with no config looking wrong.
+    """
+    from helix.backends import BACKEND_AUTH_ENV
+
+    config = load_config(ROOT / "helix.toml")
+    assert config.agent.backend == "claude"
+    assert "OPENAI_API_KEY" not in BACKEND_AUTH_ENV.get(config.agent.backend, ())
+    # Documents the hazard rather than asserting the whole table is safe.
+    assert "OPENAI_API_KEY" in BACKEND_AUTH_ENV["opencode"], (
+        "if this changes, revisit whether the backend allowlist still governs "
+        "sidecar credential isolation"
+    )
+
+
 def test_agent_image_and_evaluator_image_are_separate_trust_domains() -> None:
     config = load_config(ROOT / "helix.toml")
     assert config.evaluator.sidecar is not None
@@ -347,7 +417,17 @@ def test_agent_image_and_evaluator_image_are_separate_trust_domains() -> None:
 def test_agent_snapshot_omits_every_non_prompt_demo_file(tmp_path: Path) -> None:
     config = load_config(ROOT / "helix.toml")
     omitted = {Path(item) for item in config.sandbox.omit_from_agent}
-    source_entries = {path.name for path in ROOT.iterdir()}
+    # HELIX-managed runtime state (.git from the dirty-seed snapshot repo,
+    # .helix*, helix_batch.json) is created by a run and stripped by
+    # _ignore_for_copy in core, not by omit_from_agent. Excluding it here keeps
+    # the assertion about DEMO files; the snapshot assertion below is what
+    # actually proves nothing extra reaches the agent, and it is unconditional.
+    runtime_state = {".git", ".helix", "helix_batch.json"}
+    source_entries = {
+        path.name
+        for path in ROOT.iterdir()
+        if path.name not in runtime_state and not path.name.startswith(".helix")
+    }
     assert source_entries - {"prompt.txt"} <= {path.as_posix() for path in omitted}
     assert Path("helix.toml") in omitted
     assert Path("constants.py") in omitted

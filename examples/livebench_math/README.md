@@ -69,6 +69,47 @@ while the solver (`gpt-4.1-mini`) is invoked directly by the protected sidecar
 and graded by the official LiveBench scorers. The proposer is outside the
 scored path.
 
+### Divergence: this lane containerizes the evaluator
+
+This is the only HELIX 0.3.0 demo lane that sets `[sandbox] evaluator = true`.
+The other lanes (`formulacode`, `swebench`, `algotune`) set it to `false`. The
+divergence is required here because scoring must happen inside the protected
+sidecar that holds the ground truth, never in the agent's trust domain.
+
+It is sound despite the amd64 emulation described above because **nothing in
+the scored path is time-dependent**: the official LiveBench scorers perform
+exact numeric and string matching against ground truth, so emulation changes
+how long scoring takes but not what it computes. If emulation ever pushed work
+past a timeout, the sidecar's `except` branch returns a hard `0.0` with an
+`error` field, so the failure surfaces as fail-closed and is distinguishable in
+the ledger from a genuinely wrong answer (which has no `error` field and a
+non-empty `output`). For that reason **no wall-clock numbers are reported from
+this lane**.
+
+The timeout chain is nested strictly outward, so no inner bound can outlive its
+outer one:
+
+| Bound | Value | Source |
+|---|---|---|
+| Solver call (no retries) | 180s | `SOLVER_TIMEOUT_SECONDS` |
+| Evaluator batch call | 240s | `evaluate.run_client` |
+| Sandbox container | 600s | `sandbox.timeout_seconds` |
+
+### Credential isolation
+
+The solver credential is sidecar-only, exercising core fix `94f9751`.
+`OPENAI_API_KEY` is passed via `[evaluator.sidecar] passthrough_env` and is
+absent from the agent's environment and from the agent's docker argv.
+
+Note that HELIX re-adds each backend's auth variables **after** scrubbing, via
+`BACKEND_AUTH_ENV`. Asserting only on `_scrub_environment` therefore stops one
+step too early, which is why the tests here assert on the final docker argv.
+That table lists `OPENAI_API_KEY` under the `opencode` backend, so switching
+this demo to `opencode` would hand the solver credential to the mutation agent
+and silently defeat this isolation while every config still looked correct.
+`test_backend_choice_is_what_keeps_the_solver_key_out_of_the_agent` guards that
+assumption.
+
 Run every command below from this directory.
 
 ## Setup and scorer gate
