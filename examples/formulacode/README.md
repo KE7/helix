@@ -22,18 +22,60 @@ elsewhere:
 - **0 of 4 proposals were accepted.** All four failed correctness, fell back to
   baseline (`failure_kind=correctness_failure`, `success=false`,
   `correctness=0.0`, speedup clamped to `1.0`).
-- The frontier **retained the seed** `g0-s0` at advantage `-107.5204`; no
+- The frontier **retained the seed** `g0-s0` at advantage `-107.7423`; no
   candidate improved on it.
-- Total cost: **$0.1651**.
+- Total cost: **$0.2487627** across **12 evaluations**.
 
 What this run demonstrates is **scheduler, ledger, resume, and cleanup
-integrity** — a real P=2, N=2 with four distinct proposal IDs, worktrees, and
-concurrent containers; a terminal fail-closed ledger with conserved budget
-(`2+0+4+0 = 6 == 8 - 2`); two byte-identical resumes; and zero task-created
-residue. It does **not** demonstrate any improvement on FormulaCode, and these
-numbers are smoke-subset figures, not leaderboard performance. A run in which
-every proposal is rejected is a valid and honest outcome for an integrity
-demo: the fail-closed path is exactly what is being exercised.
+integrity** — a real P=2, N=2 with four distinct proposal IDs, worktrees,
+concurrent containers, and candidate-keyed transcript roots; a terminal
+fail-closed ledger with conserved budget (task charges `4+0+4+2 = 10`, equal to
+the batch delta `12 - 2`, with the global total `12 = 10` proposal `+ 2`
+non-proposal); two byte-identical resumes; and zero task-created residue. It
+does **not** demonstrate any improvement on FormulaCode, and these numbers are
+smoke-subset figures, not leaderboard performance. A run in which every
+proposal is rejected is a valid and honest outcome for an integrity demo: the
+fail-closed path is exactly what is being exercised.
+
+### How to read these numbers
+
+- **The four candidate advantage values are not agent measurements.** Every
+  candidate records `agent_median_seconds=null` with
+  `fallback_to_baseline=true`, so its advantage (`-65.0810198304571`, identical
+  across all four) is derived from the oracle/nop baseline *after* correctness
+  failed. Four identical values are the expected consequence of universal
+  fallback, not evidence of cross-candidate contamination. Only the **seed**
+  advantage is a genuine host-timed measurement.
+- **Timing is indicative, not precise.** This host carries roughly 1.3 cores of
+  uncontrolled background load (macOS Spotlight/media-analysis daemons) that
+  cannot be quiesced. The run was made with no competing HELIX lane work, and
+  load was sampled and recorded, but the seed advantage should be read as
+  indicative rather than a controlled benchmark figure.
+- **The cost is reproducible but unexplained.** Two independent post-fix runs
+  agree within 1.3% ($0.2488 and $0.2521), both roughly 51% above an earlier
+  pre-fix run ($0.1651). The increase is therefore systematic rather than
+  noise, but **no cause has been established** and the runs are not presented
+  as equivalent.
+- **`g1-s2` is charged 0 evaluations by design.** It is a content-dedup
+  *follower*: its committed tree is byte-identical to `g1-s1`, so the executor
+  reuses the leader's outcome and charges the follower zero
+  (`num_actual_evaluations == 0`), including when the shared outcome is a
+  failure. The zero charge is correct accounting, not a skipped task.
+
+### Known limitations (pre-existing, non-blocking)
+
+These are properties of HELIX that this demo surfaced. Neither is introduced by
+the demo, and neither blocks the release:
+
+1. **Dedup provenance is not durable across cleanup.** The follower-to-leader
+   relationship above is reconstructible while the run's artifacts exist, but
+   `helix clean` removes them, and the persisted ledger does not record the
+   donor. After cleanup, a legitimately deduplicated zero-charge follower is
+   not distinguishable from a skipped task using persisted state alone.
+2. **Full token/cost conservation is not a persisted guarantee.** Exact
+   conservation is enforced for `evaluations` (verified in this run), but the
+   six token counters and `cost_usd` are not conserved relationally in the
+   persisted state.
 
 ### Runner architecture and emulation
 
