@@ -659,10 +659,33 @@ been aligned field-for-field with it; the result is unchanged.
 in the 2.1.120 binary, matching the RCA's finding that the CLI never reads it.
 
 **So the cause is NOT the fixture, NOT the CLI version, NOT egress, and NOT any
-refresh-gate precondition.** What changed between `c089da0` and now is **not
-established**, and is not guessed at here. Remaining untested candidates: a
-server-side behaviour change, and the `linux/amd64`-under-emulation half of the
-original diagnosis, which no probe has touched.
+refresh-gate precondition.**
+
+**Egress is dead by direct observation, not merely by probe.** Three independent
+sessions agree the endpoint answers (HTTP 400 / 405 / 405), and — stronger — the
+captured CLI output shows the CLI *itself* reaching the network:
+`sending request { method: "post", url: "https://api.anthropic.com/v1/messages" }`,
+8 hits on `/v1/messages`, 5 on 401, **0 on the token endpoint**. The CLI runs,
+uses the network, and goes straight to inference without ever attempting a
+refresh.
+
+**TWO CANDIDATES REMAIN, AND BOTH ARE UNTESTED — they are named as UNTESTED,
+not as causes:**
+
+| Candidate | Status |
+|---|---|
+| `linux/amd64` under emulation on `arm64` | **UNPROBED.** The only survivor of the original two-part diagnosis. |
+| Server-side behaviour change since `c089da0` | **UNPROBED.** |
+
+Being the last candidate standing is not evidence. Neither has been measured,
+and "emulation" must not drift from *the only surviving hypothesis* into *the
+cause* — that drift is the wrong-declaration class this branch exists to
+remove, and it would be a soft landing rather than an honest one.
+
+**This is an open question with a named next step, not a resolved cause.** It is
+no longer release-blocking: the suppression property is verified by credential-
+source selection (below), so refresh *execution* is interesting rather than
+gating.
 
 **Consequence:** these four cannot be made to pass by any change to this branch.
 Fixing the fixture does not fix them — verified by running the reference harness
@@ -692,6 +715,20 @@ Two findings:
    `bearer` to `x-api-key`. That is the suppression mechanism itself, observed
    **behaviourally** rather than read out of a minified predicate — which is
    stronger evidence for the central claim than anything previously available.
+
+This is now formalised as an offline oracle — see
+`tests/integration/test_credential_source_oracle.py`, which points the CLI at a
+loopback capture server via `ANTHROPIC_BASE_URL` and asserts **which synthetic
+canary arrived**, one per credential source. With no auth env the *volume's*
+canary is sent; with each of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+`CLAUDE_CODE_OAUTH_TOKEN` set, **that variable's** canary is sent and the
+volume's is **not**.
+
+The per-source canaries are the load-bearing design choice: `ANTHROPIC_AUTH_TOKEN`
+and `CLAUDE_CODE_OAUTH_TOKEN` *replace the bearer value* rather than switching
+header type, so an oracle asserting "no bearer header" would pass for
+`ANTHROPIC_API_KEY` and fail for the other two — measuring the header type
+(adjacent) instead of the credential source (the property).
 
 **What this does NOT establish:** that a *refresh* is suppressed. Refresh
 execution was never observed in any arm, on either CLI version, with either
