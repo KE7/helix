@@ -623,9 +623,27 @@ and `CLAUDE_CODE_OAUTH_TOKEN` suppresses container-side OAuth refresh.
 > VACUOUS until this passes — they would be measuring a broken harness rather
 > than env-var suppression.`
 
-**Why.** They need real network egress to the OAuth token endpoint, and the
-pinned runner digest is `linux/amd64` running under emulation on an `arm64`
-host.
+**Why — CAUSE NOT ESTABLISHED. Two hypotheses have been FALSIFIED by
+measurement, and the earlier claim here was wrong.**
+
+An earlier version of this section attributed the failures to *"they need real
+network egress to the OAuth token endpoint"*. **That is false and is
+withdrawn** — a wrong declaration about the artifact, in the document written
+to explain a failure. What has been measured:
+
+| Hypothesis | Verdict |
+|---|---|
+| Missing network egress | **FALSIFIED.** DNS resolves and `https://platform.claude.com/v1/oauth/token` answers (HTTP 400 to POST, 405 to GET) from the pinned runtime, with no credential material. |
+| CLI version difference (`:latest` 2.1.120 vs pinned digest 2.1.138) | **FALSIFIED.** Both give zero token-endpoint contacts on the same fixture. |
+| Fixture misses a refresh-gate precondition | **FALSIFIED.** All four hold, checked as the probe runs (`--user node`, `:rw`): `refreshToken` present; `expiresAt: 1` trips any expiry margin; scopes include `user:inference` *and* `subscriptionType: max`; and the credential dir is writable — the lockfile is creatable, dir `1000:1000`, process uid 1000. That last one is the condition that fails *silently*, so it was tested rather than read. |
+
+**What is observed:** the CLI goes straight to `POST /v1/messages`, receives 401,
+and never contacts the token endpoint at all.
+
+**Remaining candidates, untested:** that the pinned CLI performs no
+*proactive-on-expiry* refresh in headless `-p` mode — in which case T22's
+premise, not its fixture, is wrong — and the `linux/amd64`-under-emulation half
+of the original diagnosis, which no probe has touched.
 
 **Attribution, verified rather than assumed.** The same four fail identically
 at `9f2bcaa`, the base commit. `git diff 9f2bcaa..HEAD` over that file is

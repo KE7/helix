@@ -10,6 +10,15 @@ That is the auditor's pre-registered attack, and it is asserted directly in
 ``test_a_new_production_control_without_a_row_is_rejected`` rather than left as
 a property someone has to trust.
 
+NOTE FOR ANYONE MUTATION-TESTING THIS FILE: it reads source by ABSOLUTE REPO
+PATH (``parents[2] / "src" / "helix"``), NOT through an import. A harness that
+copies ``src/`` to a temp tree and points ``PYTHONPATH`` at the copy will not
+exercise it -- the test keeps reading the real repo and keeps passing, which
+looks like a decorative test rather than a working one. Mutate in a FULL-REPO
+sandbox instead. (An auditor nearly filed a P1 against this file for exactly
+that reason, and caught it only because three greens were implausible against a
+file containing ``test_a_new_production_control_without_a_row_is_rejected``.)
+
 STATED LIMITATION, because the derivation is a heuristic and pretending
 otherwise would be the same error one level up: a control is recognised by
 NAME (``assert_*`` / ``_assert_*``) or by being imported from one of the

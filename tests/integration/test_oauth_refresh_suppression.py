@@ -54,6 +54,116 @@ _SYNTHETIC_REFRESH = "sk-ant-ort01-SYNTHETIC-DO-NOT-USE-" + ("E" * 74)
 TOKEN_ENDPOINT_MARKER = "/v1/oauth/token"
 
 
+# ---------------------------------------------------------------------------
+# Capability preflight -- distinguish "cannot test here" from "property broken"
+# ---------------------------------------------------------------------------
+#
+# These four tests previously failed UNCONDITIONALLY in an environment without
+# egress to the OAuth endpoint, which conflates "this environment cannot
+# support the test" with "the suppression property is broken" -- the same
+# missing-vs-failed conflation removed from ``helix.transcripts`` and from
+# ``_run_in_image``.
+#
+# Neither shipping red nor a blanket skip is acceptable: the first leaves a
+# SECURITY property of the credential fix unverified and unexplained, the
+# second silences it. The third option is a skip that is CONDITIONAL AND
+# PROVEN.
+
+# The endpoint the CLI actually POSTs to. Confirmed by two independent
+# observations on this host: a direct probe returning HTTP 400, and the earlier
+# refresh investigation recording
+# ``AxiosError: [url=https://platform.claude.com/v1/oauth/token,status=400]``.
+OAUTH_TOKEN_HOST = "platform.claude.com"
+_REACHABILITY: dict[str, tuple[bool, str]] = {}
+
+
+def _probe_endpoint_reachability() -> tuple[bool, str]:
+    """Is the OAuth endpoint reachable FROM THE PINNED RUNTIME?
+
+    Classifies ONLY DNS and connectivity. Uses NO credential or token material
+    of any kind -- it is an unauthenticated HEAD-equivalent.
+
+    THE DISTINCTION THIS TURNS ON: an HTTP status from the endpoint -- 400,
+    401, 404, anything -- means the endpoint IS REACHABLE. Only DNS failure or
+    a connection error mean it is not. Treating a rejection as "unavailable"
+    would reproduce exactly the defect this preflight exists to remove.
+    """
+    if "verdict" in _REACHABILITY:
+        return _REACHABILITY["verdict"]
+
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--pull=never",
+            "--user",
+            "node",
+            "--security-opt",
+            "no-new-privileges",
+            "--entrypoint",
+            "sh",
+            RUNNER_IMAGE,
+            "-c",
+            # -o /dev/null: never capture a body. -s -S: quiet but report errors.
+            # A status line at all == reachable.
+            f"curl -s -S -o /dev/null -w 'HTTP:%{{http_code}}' "
+            f"--max-time 20 https://{OAUTH_TOKEN_HOST}/v1/oauth/token 2>&1 "
+            f"|| echo CURL_FAILED",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    verdict = _classify_probe_output(combined)
+    _REACHABILITY["verdict"] = verdict
+    return verdict
+
+
+def _classify_probe_output(combined: str) -> tuple[bool, str]:
+    """Classify raw probe output as reachable / unreachable.
+
+    Split out from the Docker call so both branches are unit-testable without
+    a daemon or network -- the preflight decides whether four security tests
+    RUN, so it is load-bearing and both its branches need coverage.
+    """
+    if "HTTP:" in combined:
+        code = combined.split("HTTP:")[1].strip()[:3]
+        # ANY status, including 4xx, proves reachability.
+        if code.isdigit() and code != "000":
+            return (True, f"endpoint returned HTTP {code}")
+
+    lowered = combined.lower()
+    for marker, why in (
+        ("could not resolve", "DNS resolution failed"),
+        ("name or service not known", "DNS resolution failed"),
+        ("connection refused", "connection refused"),
+        ("connection timed out", "connection timed out"),
+        ("timed out", "connection timed out"),
+        ("network is unreachable", "network unreachable"),
+        ("curl_failed", "curl could not reach the endpoint"),
+        ("not found", "curl is unavailable in the runner image"),
+    ):
+        if marker in lowered:
+            return (False, why)
+
+    return (False, f"unclassified probe result: {combined.strip()[:160]}")
+
+
+def require_oauth_endpoint_reachable() -> None:
+    """Skip ONLY on proven unreachability, naming the missing capability."""
+    reachable, why = _probe_endpoint_reachability()
+    if reachable:
+        return
+    pytest.skip(
+        f"MISSING NETWORK CAPABILITY: egress from the pinned runner image to "
+        f"https://{OAUTH_TOKEN_HOST}/v1/oauth/token ({why}). "
+        f"T22-T25 OAuth-refresh SUPPRESSION BEHAVIOUR REMAINS UNVERIFIED IN "
+        f"THIS ENVIRONMENT -- this is not evidence that suppression works."
+    )
+
+
 def _assert_disposable(volume: str) -> None:
     """Refuse to operate on anything that could be shared credential state."""
     assert volume.startswith("helix-refreshtest-"), volume
@@ -93,9 +203,16 @@ def synthetic_volume():
 
     _docker(
         [
-            "docker", "run", "--rm", "--user", "root",
-            "-v", f"{volume}:/home/node",
-            RUNNER_IMAGE, "sh", "-c",
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "root",
+            "-v",
+            f"{volume}:/home/node",
+            RUNNER_IMAGE,
+            "sh",
+            "-c",
             "mkdir -p /home/node/.claude && "
             f"printf '%s' {json.dumps(payload)} > /home/node/.claude/.credentials.json && "
             "chmod 600 /home/node/.claude/.credentials.json && "
@@ -116,10 +233,16 @@ def _run_probe(volume: str, env: dict[str, str]) -> str:
     """Run the CLI headless against ``volume`` and return its debug output."""
     _assert_disposable(volume)
     args = [
-        "docker", "run", "--rm", "--user", "node",
-        "-e", "HOME=/home/node",
+        "docker",
+        "run",
+        "--rm",
+        "--user",
+        "node",
+        "-e",
+        "HOME=/home/node",
         # The CLI writes its own debug log; ask for it so the oracle has input.
-        "-e", "ANTHROPIC_LOG=debug",
+        "-e",
+        "ANTHROPIC_LOG=debug",
     ]
     for key, value in env.items():
         args.extend(["-e", f"{key}={value}"])
@@ -132,9 +255,16 @@ def _run_probe(volume: str, env: dict[str, str]) -> str:
     # Also collect the CLI's on-disk debug log from inside the volume.
     logs = _docker(
         [
-            "docker", "run", "--rm", "--user", "node",
-            "-v", f"{volume}:/home/node:ro", RUNNER_IMAGE,
-            "sh", "-c",
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "node",
+            "-v",
+            f"{volume}:/home/node:ro",
+            RUNNER_IMAGE,
+            "sh",
+            "-c",
             "cat /home/node/.claude/debug/*.txt 2>/dev/null || true",
         ]
     )
@@ -163,6 +293,7 @@ def test_T22_expired_record_no_auth_env_attempts_refresh(synthetic_volume):
     this fails, T23-T25 "prove" suppression that is really a broken harness,
     so it is asserted first and its failure message says so.
     """
+    require_oauth_endpoint_reachable()
     output = _run_probe(synthetic_volume, {})
     assert _refresh_attempted(output), (
         "CONTROL FAILED: no refresh was attempted even with no auth env. "
@@ -187,7 +318,11 @@ def test_T23_T25_auth_env_suppresses_refresh(synthetic_volume, variable):
     suppression result can never be reported from a harness that never
     refreshes at all.
     """
+    require_oauth_endpoint_reachable()
     control = _run_probe(synthetic_volume, {})
+    # HARD FAILURE, never a skip: the endpoint is PROVEN reachable at this
+    # point, so a missing refresh attempt is a real result about the harness or
+    # the runtime -- not an environment limitation.
     assert _refresh_attempted(control), "control must attempt refresh first"
 
     output = _run_probe(

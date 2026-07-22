@@ -95,10 +95,17 @@ class BackendHomeLayout:
     #: mounts.  Values are container paths under the private HOME.
     env_redirects: dict[str, str] = field(default_factory=dict)
 
-    #: Files inside ``auth_dir`` that are stable identity/configuration rather
-    #: than per-run state.  Listed EXPLICITLY so that "not isolated" is a
-    #: recorded decision rather than an oversight, and so the detection
-    #: backstop can distinguish them from an agent-invented file.
+    #: RETAINED MEASUREMENT RECORD -- NO CONSUMER. Not load-bearing.
+    #:
+    #: Its only consumer was ``auth_drift.expected_entries``, deleted with the
+    #: drift detector when volume mode was retired. Nothing reads this field
+    #: today; growing it changes no behaviour.
+    #:
+    #: Kept because it records what was MEASURED in each auth directory, which
+    #: is the evidence for the per-backend refusals. Marked explicitly because
+    #: retired DATA lingering as though it were live is the mirror image of the
+    #: retirement condition that retired CODE must not linger looking live --
+    #: a future reader must not take this for a control.
     stable_files: tuple[str, ...] = ()
 
     #: Pinned CLI version this layout was measured against.
