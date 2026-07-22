@@ -106,6 +106,49 @@ class ResumeIncompatibleError(HelixError):
     """
 
 
+class SandboxAuthError(HelixError):
+    """Base class for sandbox backend-authentication failures.
+
+    Raised before any mutation is dispatched.  Every subclass guarantees
+    zero proposal, budget, ledger, or population side effects: HELIX
+    fails closed rather than silently falling back to a weaker
+    credential path (see ``docs/sandbox-auth.md``, rule R4).
+    """
+
+
+class SandboxAuthImageError(SandboxAuthError):
+    """Raised when the runner image for an auth command cannot be determined.
+
+    ``helix sandbox login`` must write credentials with the *same* backend
+    CLI build that runs consume.  When no project configuration is
+    discoverable and no ``--image`` is supplied, HELIX refuses rather than
+    defaulting to ``DEFAULT_BACKEND_IMAGES`` — a silent default hands the
+    operator a different CLI than their runs use, with no way to notice.
+    """
+
+
+class SandboxAuthPreflightError(SandboxAuthError):
+    """Raised when the once-per-run auth preflight refuses to dispatch.
+
+    Covers the missing / empty / wrong-backend / expired / real-auth-failing
+    volume states.  Carries ``remedy`` so the CLI can print an actionable
+    next step, and never carries a credential value.
+    """
+
+    def __init__(self, message: str, *, remedy: str = "", **kwargs: object) -> None:
+        self.remedy = remedy
+        super().__init__(message, **kwargs)  # type: ignore[arg-type]
+
+
+class SandboxAuthConcurrencyError(SandboxAuthError):
+    """Raised when another HELIX run holds the auth-volume advisory lock.
+
+    HELIX never proceeds unverified and never retries silently: the backend
+    CLI's own refresh lockfile gives up silently after 5 retries, which is
+    the exact pathology this release removes.
+    """
+
+
 class RateLimitError(HelixError):
     """Raised when Claude Code hits a rate / usage limit.
 

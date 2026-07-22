@@ -17,7 +17,16 @@ from helix import __version__
 from helix.backends import BACKENDS
 from helix.config import load_config
 from helix.logging_config import setup_file_logging
-from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
+from helix.sandbox import (
+    AuthVolumeManifest,
+    auth_manifest_write_args,
+    docker_volume_exists,
+    probe_backend_cli_version,
+    read_auth_manifest,
+    resolve_auth_runtime_image,
+    run_sandbox_auth_command,
+    sandbox_auth_volume_name,
+)
 from helix.display import (
     console,
     print_error,
@@ -26,7 +35,12 @@ from helix.display import (
     print_warning,
     render_frontier_table,
 )
-from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_helix_error
+from helix.exceptions import (
+    RateLimitError,
+    ResumeIncompatibleError,
+    SandboxAuthImageError,
+    print_helix_error,
+)
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
@@ -395,6 +409,96 @@ def sandbox_cli() -> None:
     """Manage HELIX Docker sandbox helpers."""
 
 
+def _load_project_sandbox_config(searched_dir: Path) -> Any | None:
+    """Load ``helix.toml`` from ``searched_dir``, or return None.
+
+    R2/R8: the auth commands previously never read the project config at all,
+    so they could not use the pinned runner even in principle.  A malformed or
+    absent config is not fatal here — it degrades to "no configured image",
+    which :func:`resolve_auth_runtime_image` turns into a hard, actionable
+    refusal rather than a silent ``:latest`` default.
+    """
+    cfg_file = searched_dir / "helix.toml"
+    if not cfg_file.is_file():
+        return None
+    try:
+        return load_config(cfg_file).sandbox
+    except Exception as exc:  # noqa: BLE001 - degrade to "unresolved", never default
+        print_warning(f"Could not load {cfg_file} for sandbox image resolution: {exc}")
+        return None
+
+
+def _resolve_auth_runtime(backend: str, image: str | None) -> str:
+    """Resolve the auth runner image, or exit with the actionable error.
+
+    Single-sources runtime identity across ``login``, ``status``, ``logout``
+    and the run preflight.  Never falls back to ``DEFAULT_BACKEND_IMAGES``.
+    """
+    searched_dir = Path.cwd()
+    sandbox_cfg = _load_project_sandbox_config(searched_dir)
+    volume = sandbox_auth_volume_name(backend)
+    exists: bool | None
+    try:
+        exists = docker_volume_exists(volume)
+    except Exception:  # noqa: BLE001 - Docker may be unavailable; stay informative
+        exists = None
+    try:
+        return resolve_auth_runtime_image(
+            backend,
+            explicit_image=image,
+            sandbox=sandbox_cfg,
+            searched_dir=searched_dir,
+            volume_exists=exists,
+            manifest=None,
+        )
+    except SandboxAuthImageError as exc:
+        print_error(f"HELIX: {exc}")
+        raise SystemExit(2) from exc
+
+
+def _stamp_auth_volume(backend: str, image: str) -> None:
+    """Record HELIX-owned provenance in the volume after a successful login.
+
+    Best effort: a failed stamp leaves provenance *unknown*, which the
+    preflight reports honestly.  It must never fail the login that just
+    succeeded.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        cli_version = probe_backend_cli_version(backend, image=image)
+        manifest = AuthVolumeManifest(
+            backend=backend,
+            cli_version=cli_version,
+            image=image,
+            written_at=datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            helix_version=__version__,
+        )
+        result = subprocess.run(
+            auth_manifest_write_args(backend, image=image, manifest=manifest),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print_warning(
+                "Could not record auth provenance stamp; provenance will report "
+                "as unknown."
+            )
+        else:
+            print_info(
+                f"Recorded auth provenance: {backend} / "
+                f"{cli_version or 'unknown CLI'}."
+            )
+    except Exception:  # noqa: BLE001 - never fail a successful login
+        print_warning(
+            "Could not record auth provenance stamp; provenance will report as "
+            "unknown."
+        )
+
+
 @sandbox_cli.command(name="login")
 @click.argument("backend", type=click.Choice(BACKENDS))
 @click.option("--image", default=None, help="Override the backend runner image.")
@@ -428,7 +532,14 @@ def sandbox_login(
         raise SystemExit(1)
 
     volume = sandbox_auth_volume_name(backend)
+    resolved_image = _resolve_auth_runtime(backend, image)
     print_info(f"Using Docker auth volume [cyan]{volume}[/cyan].")
+    print_info(f"Using runner image [cyan]{resolved_image}[/cyan].")
+    # R9: login MAY create the volume — that is its purpose — but only
+    # intentionally, and it announces it.  Provisioning is never a side effect
+    # the operator did not ask for.
+    if not docker_volume_exists(volume):
+        print_info(f"Creating auth volume [cyan]{volume}[/cyan].")
     if backend == "gemini":
         print_warning(
             "Gemini CLI does not expose a dedicated login subcommand; HELIX "
@@ -438,7 +549,7 @@ def sandbox_login(
     result = run_sandbox_auth_command(
         backend,
         action="login",
-        image=image,
+        image=resolved_image,
         network=network,
         add_host_gateway=add_host_gateway,
         extra_hosts=extra_hosts,
@@ -446,6 +557,7 @@ def sandbox_login(
     )
     if result.returncode != 0:
         raise SystemExit(result.returncode)
+    _stamp_auth_volume(backend, resolved_image)
 
 
 @sandbox_cli.command(name="status")
@@ -481,25 +593,61 @@ def sandbox_status(
 
     backends = [backend] if backend is not None else BACKENDS
     exit_code = 0
-    extra_hosts = _parse_extra_hosts(extra_hosts_list)
     for item in backends:
-        console.print(f"[bold]{item}[/bold] ({sandbox_auth_volume_name(item)})")
-        result = run_sandbox_auth_command(
-            item,
-            action="status",
-            image=image if backend is not None else None,
-            network=network,
-            add_host_gateway=add_host_gateway,
-            extra_hosts=extra_hosts,
+        volume = sandbox_auth_volume_name(item)
+        console.print(f"[bold]{item}[/bold] ({volume})")
+
+        # R9: status NEVER creates a volume.  It previously ran a container,
+        # and ``docker run -v`` silently creates the named volume — so
+        # observing the volume provisioned it, and "the volume exists" became
+        # true forever after the first status call.  Existence is now
+        # established with ``docker volume inspect`` only.
+        if not docker_volume_exists(volume):
+            console.print("  not provisioned", style="yellow")
+            console.print(f"  Remedy: helix sandbox login {item}")
+            exit_code = exit_code or 1
+            continue
+
+        console.print("  provisioned", style="green")
+
+        # Provenance is read-only and side-effect free.  Sufficiency is NOT
+        # reported here: a non-empty credentials file and a backend's own
+        # status text were both observed affirming credentials that a real
+        # request rejected.  A real authenticated probe requires --verify.
+        resolved_image = _resolve_auth_runtime(item, image if backend else None)
+        manifest = read_auth_manifest(item, image=resolved_image)
+        if manifest is None:
+            console.print(
+                "  provenance: unknown (no HELIX stamp; written before HELIX "
+                "recorded provenance, or by another tool)",
+                style="yellow",
+            )
+            console.print(
+                f"  Re-run `helix sandbox login {item}` to record provenance."
+            )
+        else:
+            console.print(
+                f"  provenance: backend={manifest.backend} "
+                f"cli={manifest.cli_version or 'unknown'} "
+                f"written_at={manifest.written_at or 'unknown'}"
+            )
+            if manifest.backend and manifest.backend != item:
+                console.print(
+                    f"  WARNING: volume was provisioned for backend "
+                    f"{manifest.backend!r}, not {item!r}.",
+                    style="red",
+                )
+                exit_code = exit_code or 1
+            if manifest.image and manifest.image != resolved_image:
+                console.print(
+                    f"  WARNING: provisioned with {manifest.image}, but the "
+                    f"configured runner is {resolved_image}.",
+                    style="yellow",
+                )
+        console.print(
+            "  NOTE: 'provisioned' is not 'valid'. Credential validity is "
+            "verified by the run preflight with a real authenticated request."
         )
-        output = (result.stdout or "").strip()
-        error = (result.stderr or "").strip()
-        if output:
-            console.print(output)
-        if error:
-            console.print(error, style="red")
-        if result.returncode != 0:
-            exit_code = result.returncode
     if exit_code:
         raise SystemExit(exit_code)
 
@@ -531,10 +679,11 @@ def sandbox_logout(
 ) -> None:
     """Log out a backend from its persistent sandbox auth volume."""
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
+    resolved_image = _resolve_auth_runtime(backend, image)
     result = run_sandbox_auth_command(
         backend,
         action="logout",
-        image=image,
+        image=resolved_image,
         network=network,
         add_host_gateway=add_host_gateway,
         extra_hosts=extra_hosts,

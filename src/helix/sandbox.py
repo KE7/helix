@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
@@ -23,9 +23,14 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
+from helix.exceptions import SandboxAuthImageError
 
 
 logger = logging.getLogger(__name__)
+
+# Injectable Docker entry point.  The preflight and volume-lifecycle helpers
+# take a runner so unit tests never start a container.
+DockerRunner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 _REDACTED_DOCKER_ENV_VALUE = "<redacted>"
@@ -1163,6 +1168,300 @@ def sandbox_auth_volume_name(agent_backend: str) -> str:
     return f"helix-auth-{agent_backend}"
 
 
+# ---------------------------------------------------------------------------
+# Auth volume lifecycle (R9) and runtime identity (R2/R8)
+# ---------------------------------------------------------------------------
+
+# HELIX-owned provenance stamp.  Deliberately NOT a field inside
+# ``.credentials.json``: the backend CLI owns that file and rewrites the
+# ``claudeAiOauth`` object *wholesale* on every successful refresh, so anything
+# HELIX writes inside it is destroyed by the next refresh.  A sibling file in a
+# path the CLI never touches travels with the credential and survives refresh.
+AUTH_MANIFEST_CONTAINER_PATH = "/home/node/.helix-auth-meta.json"
+AUTH_MANIFEST_SCHEMA = 1
+
+
+@dataclass(frozen=True)
+class AuthVolumeManifest:
+    """HELIX-authored provenance stamp for a backend auth volume.
+
+    Contains no credential material — backend name, CLI version, image
+    reference and a timestamp only.  This is a *skew detector*, never a
+    security control: anything able to write the volume can write the
+    manifest (and can equally write the credentials themselves).
+    """
+
+    backend: str
+    cli_version: str
+    image: str
+    written_at: str
+    helix_version: str = ""
+    schema: int = AUTH_MANIFEST_SCHEMA
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "backend": self.backend,
+                "cli_version": self.cli_version,
+                "image": self.image,
+                "written_at": self.written_at,
+                "helix_version": self.helix_version,
+                "schema": self.schema,
+            },
+            sort_keys=True,
+        )
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any]) -> AuthVolumeManifest:
+        return cls(
+            backend=str(data.get("backend", "")),
+            cli_version=str(data.get("cli_version", "")),
+            image=str(data.get("image", "")),
+            written_at=str(data.get("written_at", "")),
+            helix_version=str(data.get("helix_version", "")),
+            schema=int(data.get("schema", 0)),
+        )
+
+
+def docker_volume_exists(
+    volume: str, *, runner: DockerRunner | None = None
+) -> bool:
+    """Return True iff the named Docker volume already exists.
+
+    Uses ``docker volume inspect`` and **never** ``docker run -v``.  This is
+    load-bearing: ``docker run -v <name>:/path`` *silently creates* a missing
+    named volume, which makes "is the volume mounted" true by construction on
+    every host and makes observing the volume indistinguishable from
+    provisioning it.  Any existence check routed through a container start is
+    not an existence check.
+    """
+    run = runner or _run_docker
+    result = run(["docker", "volume", "inspect", volume], check=False)
+    return result.returncode == 0
+
+
+def _auth_image_resolution_error(
+    agent_backend: str,
+    *,
+    searched_dir: Path | None,
+    volume_exists: bool | None,
+    manifest: AuthVolumeManifest | None,
+) -> SandboxAuthImageError:
+    """Build the hard, actionable refusal for an undeterminable runner image.
+
+    Every fact here is available without touching the volume's contents, and
+    the last one is the operator's one-line fix.
+    """
+    volume = sandbox_auth_volume_name(agent_backend)
+    declined = DEFAULT_BACKEND_IMAGES.get(agent_backend, "<none>")
+    lines = [
+        "cannot determine which runner image to authenticate against.",
+        "",
+        "  `helix sandbox login` must use the same image your runs use, or the",
+        "  credentials it writes may not be readable by the CLI version your runs",
+        "  consume.",
+        "",
+        f"  backend:          {agent_backend}",
+        f"  auth volume:      {volume}",
+    ]
+    if searched_dir is not None:
+        lines.append(f"  no helix.toml in: {searched_dir}")
+    if volume_exists is not None:
+        lines.append(
+            f"  volume exists:    {'yes' if volume_exists else 'no (not provisioned)'}"
+        )
+    lines.append(
+        f"  NOT used:         {declined} "
+        "(default tag — would risk producer/consumer CLI skew)"
+    )
+    if manifest is not None and manifest.image:
+        lines.extend(
+            [
+                "",
+                f"  This volume was last written by {manifest.image}"
+                + (f" (CLI {manifest.cli_version})" if manifest.cli_version else ""),
+                f"  Remedy: helix sandbox login {agent_backend} "
+                f"--image {manifest.image}",
+            ]
+        )
+        suggestion = f"helix sandbox login {agent_backend} --image {manifest.image}"
+    else:
+        suggestion = (
+            "Run from a project directory whose helix.toml sets sandbox.image, "
+            "or pass --image <ref> explicitly."
+        )
+        lines.extend(
+            [
+                "",
+                "  Remedy: run this from a project directory containing helix.toml",
+                "          with sandbox.image set, or pass --image <ref> explicitly.",
+            ]
+        )
+    return SandboxAuthImageError(
+        "\n".join(lines),
+        operation="resolve sandbox auth runtime image",
+        suggestion=suggestion,
+    )
+
+
+def resolve_auth_runtime_image(
+    agent_backend: str,
+    *,
+    explicit_image: str | None = None,
+    sandbox: SandboxConfig | None = None,
+    searched_dir: Path | None = None,
+    volume_exists: bool | None = None,
+    manifest: AuthVolumeManifest | None = None,
+) -> str:
+    """Resolve the runner image for login/status/logout — never silently.
+
+    R2/R8: ``login``, ``status``, ``logout`` and the run preflight must all
+    resolve to the **exact same** image the run will use.  Previously
+    ``run_sandbox_auth_command`` constructed a fresh ``SandboxConfig(enabled=True)``
+    whose ``image`` is ``None`` by definition, so it always fell through to
+    ``DEFAULT_BACKEND_IMAGES[backend]`` (``:latest``) and *could not* use the
+    project's pinned runner even in principle.
+
+    There is deliberately **no** ``:latest`` fallback.  On this project's
+    release host ``:latest`` is *older* than the pinned digest, so a silent
+    default is worse than a version lottery: it writes credentials with one CLI
+    for a runner that executes another.
+    """
+    if explicit_image:
+        return explicit_image
+    if sandbox is not None and sandbox.image:
+        return sandbox.image
+    raise _auth_image_resolution_error(
+        agent_backend,
+        searched_dir=searched_dir,
+        volume_exists=volume_exists,
+        manifest=manifest,
+    )
+
+
+def read_auth_manifest(
+    agent_backend: str,
+    *,
+    image: str,
+    runner: DockerRunner | None = None,
+) -> AuthVolumeManifest | None:
+    """Read the HELIX provenance stamp from an existing auth volume.
+
+    Returns ``None`` when the stamp is absent or unparseable, which means
+    **unknown provenance**.  Unknown is never valid and must never be
+    silently promoted to valid — but it also must not hard-fail, or this
+    change would brick every volume provisioned before stamps existed.
+
+    Mounted ``:ro``: this is *observation*, not authentication.  (The Stage 2
+    sufficiency probe is the opposite case and must be ``:rw`` — see
+    :func:`preflight_auth`.)  Callers must establish existence with
+    :func:`docker_volume_exists` first, since mounting creates.
+    """
+    run = runner or _run_docker
+    volume = sandbox_auth_volume_name(agent_backend)
+    result = run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "node",
+            "--network",
+            "none",
+            "--security-opt",
+            "no-new-privileges",
+            "-v",
+            f"{volume}:/helix-auth-probe:ro",
+            image,
+            "cat",
+            f"/helix-auth-probe/{Path(AUTH_MANIFEST_CONTAINER_PATH).name}",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return AuthVolumeManifest.from_mapping(data)
+
+
+BACKEND_VERSION_COMMANDS: dict[str, list[str]] = {
+    "claude": ["claude", "--version"],
+    "codex": ["codex", "--version"],
+    "cursor": ["cursor-agent", "--version"],
+    "gemini": ["gemini", "--version"],
+    "opencode": ["opencode", "--version"],
+}
+
+
+def probe_backend_cli_version(
+    agent_backend: str,
+    *,
+    image: str,
+    runner: DockerRunner | None = None,
+) -> str:
+    """Return the backend CLI version string reported by ``image``.
+
+    No volume is mounted and the network is disabled: this reads the image,
+    not the credential.  Returns ``""`` when the version cannot be determined,
+    which downstream is treated as unknown rather than as a match.
+    """
+    command = BACKEND_VERSION_COMMANDS.get(agent_backend)
+    if command is None:
+        return ""
+    run = runner or _run_docker
+    result = run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--security-opt",
+            "no-new-privileges",
+            image,
+            *command,
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip().splitlines()[0] if result.stdout else ""
+
+
+def auth_manifest_write_args(
+    agent_backend: str,
+    *,
+    image: str,
+    manifest: AuthVolumeManifest,
+) -> list[str]:
+    """Docker argv that writes the provenance stamp into the auth volume."""
+    volume = sandbox_auth_volume_name(agent_backend)
+    name = Path(AUTH_MANIFEST_CONTAINER_PATH).name
+    payload = manifest.to_json()
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--user",
+        "node",
+        "--network",
+        "none",
+        "--security-opt",
+        "no-new-privileges",
+        "-v",
+        f"{volume}:/home/node:rw",
+        image,
+        "sh",
+        "-c",
+        f"cat > /home/node/{shlex.quote(name)} <<'HELIX_EOF'\n{payload}\nHELIX_EOF",
+    ]
+
+
 def _docker_args(
     command: list[str],
     env: dict[str, str],
@@ -1397,18 +1696,24 @@ def run_sandbox_auth_command(
     agent_backend: str,
     *,
     action: Literal["login", "status", "logout"],
-    image: str | None = None,
+    image: str,
     network: str = "bridge",
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    docker_image = image or resolve_sandbox_image(
-        SandboxConfig(enabled=True), agent_backend
-    )
+    """Run a backend auth command against the auth volume.
+
+    ``image`` is **required** and must already be resolved by
+    :func:`resolve_auth_runtime_image`.  It used to be optional, defaulting via
+    a freshly constructed ``SandboxConfig(enabled=True)`` that could never
+    carry the project's pinned image — the structural cause of
+    producer/consumer CLI skew.  Making it required means the fallback cannot
+    be reintroduced by accident.
+    """
     args = sandbox_auth_docker_args(
         agent_backend,
-        image=docker_image,
+        image=image,
         action=action,
         network=network,
         add_host_gateway=add_host_gateway,
