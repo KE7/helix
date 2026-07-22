@@ -608,6 +608,53 @@ third column is not a documentation gap — it is an unprotected control.
 
 ---
 
+## 8e. KNOWN-FAILING TESTS SHIPPED RED, DELIBERATELY
+
+Four tests in `tests/integration/test_oauth_refresh_suppression.py` (the
+T22–T25 synthetic refresh family) **fail at this head and are being shipped
+that way on purpose.**
+
+**What they test.** That each of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
+and `CLAUDE_CODE_OAUTH_TOKEN` suppresses container-side OAuth refresh.
+
+**How they fail.** Not on an assertion — on their **own non-vacuity control**:
+
+> `CONTROL FAILED: no refresh was attempted even with no auth env. T23–T25 are
+> VACUOUS until this passes — they would be measuring a broken harness rather
+> than env-var suppression.`
+
+**Why.** They need real network egress to the OAuth token endpoint, and the
+pinned runner digest is `linux/amd64` running under emulation on an `arm64`
+host.
+
+**Attribution, verified rather than assumed.** The same four fail identically
+at `9f2bcaa`, the base commit. `git diff 9f2bcaa..HEAD` over that file is
+empty, and it references none of the symbols this branch changed. They are
+**pre-existing and unrelated**. They are also in **no CI gate** — the
+`docker_integration` job is `workflow_dispatch`-gated and scoped to
+`test_parallel_sandbox.py`.
+
+> **Do not read the suppression property as verified.** These tests have never
+> executed successfully in this environment, and the credential-fix author said
+> so at the time. The property is asserted by the suite but not demonstrated
+> by it.
+
+**Why they are NOT marked skipped.** A skip would silence the one control in
+the repository that is loudly announcing its own vacuity — the exact defect
+class this branch exists to eliminate. **A red test that says "I am vacuous" is
+more valuable than a green one that is.**
+
+**Follow-up (deliberately NOT implemented here — out of scope).** Apply the
+same remedy used for `_run_in_image` (F-11): decide availability **before** the
+probe by positively identifying that the OAuth endpoint is unreachable, and
+skip with that specific reason; if egress **is** available and the control
+still fails, **fail**. As written they fail unconditionally, which conflates
+*"the environment cannot support this test"* with *"the property is broken"* —
+the same missing-vs-failed conflation removed from `transcripts.py` and from
+`_run_in_image`.
+
+---
+
 ## 9. Remaining proof obligations before the mount rewrite lands
 
 For **each** pinned backend, both halves are required. A proof that shows only
