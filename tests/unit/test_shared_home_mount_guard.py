@@ -356,3 +356,148 @@ def test_fail_closed_does_not_reject_legitimate_argv() -> None:
     """
     assert _mount_destinations(_ok_argv())
     _assert_no_shared_home_mount(_ok_argv())
+
+
+# ---------------------------------------------------------------------------
+# F-21: the ARGV allowlist -- the class no spelling coverage can reach
+# ---------------------------------------------------------------------------
+
+
+def test_volumes_from_is_refused_though_it_has_no_destination_string() -> None:
+    """``--volumes-from`` mounts another container's volumes at THEIR paths.
+
+    It contains no ``dst=``, no ``src:dst`` pair, and no destination string at
+    all -- so a destination parser cannot see it however many spellings it
+    learns. Adding the four missing spellings closes X1/X2/X3/X6 and leaves
+    this WIDE OPEN.
+
+    Catches: reverting the argv allowlist to a mount-spelling denylist.
+    """
+    from helix.sandbox import (  # noqa: PLC2701
+        UnknownAgentArgvFlagError,
+        _assert_agent_argv_uses_only_known_flags,
+    )
+
+    for spelling in (
+        ["--volumes-from", "other-container"],
+        ["--volumes-from=other-container"],
+    ):
+        with pytest.raises(UnknownAgentArgvFlagError):
+            _assert_agent_argv_uses_only_known_flags(["docker", "run", *spelling])
+
+
+def test_argv_allowlist_refuses_an_unanticipated_flag() -> None:
+    """The point is the INVERSION, not this particular flag.
+
+    A flag nobody has thought of cannot be inspected for a destination, so it
+    is refused outright rather than ignored. This is the same
+    allowlist-not-denylist argument this change makes about HOME paths, applied
+    one level up to the argv.
+    """
+    from helix.sandbox import (  # noqa: PLC2701
+        UnknownAgentArgvFlagError,
+        _assert_agent_argv_uses_only_known_flags,
+    )
+
+    with pytest.raises(UnknownAgentArgvFlagError):
+        _assert_agent_argv_uses_only_known_flags(
+            ["docker", "run", "--some-future-docker-flag=whatever"]
+        )
+
+
+def test_argv_allowlist_accepts_everything_helix_actually_emits() -> None:
+    """Non-vacuity: fail-closed must not mean fail-always.
+
+    Without this, refusing every flag would satisfy both tests above -- and
+    would break every run.
+    """
+    from helix.sandbox import (  # noqa: PLC2701
+        _assert_agent_argv_uses_only_known_flags,
+    )
+
+    _assert_agent_argv_uses_only_known_flags(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--workdir",
+            "/workspace",
+            "--user",
+            "node",
+            "--network",
+            "none",
+            "--security-opt",
+            "no-new-privileges",
+            "--name",
+            "c",
+            "--pids-limit",
+            "512",
+            "--cpus",
+            "2.0",
+            "--memory",
+            "2g",
+            "--add-host",
+            "h:1.2.3.4",
+            "-v",
+            "/a:/workspace:rw",
+            "-v/b:/x:ro",
+            "--tmpfs",
+            "/home/node:rw,uid=1000",
+            "--mount",
+            "type=volume,src=s,dst=/d",
+            "-e",
+            "HOME=/home/node",
+        ]
+    )
+
+
+def test_docker_args_actually_invokes_the_argv_allowlist() -> None:
+    """The CALL, not the function -- F-20's lesson applied to the new guard.
+
+    Catches: deleting ``_assert_agent_argv_uses_only_known_flags`` from
+    ``_docker_args``, which would leave every test above green while the
+    production argv went unchecked.
+    """
+    from pathlib import Path
+
+    from helix.config import SandboxConfig
+    from helix.envpolicy import EnvGrant
+    from helix.sandbox import (  # noqa: PLC2701
+        UnknownAgentArgvFlagError,
+        _docker_args,
+    )
+    import helix.sandbox as sandbox_mod
+
+    original = sandbox_mod.private_home_tmpfs_arg
+
+    def rogue() -> list[str]:
+        return [*original(), "--volumes-from", "other-container"]
+
+    sandbox_mod.private_home_tmpfs_arg = rogue  # type: ignore[assignment]
+    try:
+        with pytest.raises(UnknownAgentArgvFlagError):
+            _docker_args(
+                ["sh", "-c", "true"],
+                {"ANTHROPIC_API_KEY": "SYNTHETIC-NOT-REAL"},
+                Path("/tmp/ws-cand"),
+                SandboxConfig(
+                    enabled=True,
+                    image="i:latest",
+                    network="none",
+                    auth="env",
+                    auth_env_allow=["ANTHROPIC_API_KEY"],
+                ),
+                "agent",
+                "i:latest",
+                "claude",
+                grants=[
+                    EnvGrant(
+                        name="ANTHROPIC_API_KEY",
+                        value="SYNTHETIC-NOT-REAL",
+                        origin="auth_env_allow",
+                        scopes=frozenset({"agent"}),
+                    )
+                ],
+            )
+    finally:
+        sandbox_mod.private_home_tmpfs_arg = original  # type: ignore[assignment]

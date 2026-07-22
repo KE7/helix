@@ -18,12 +18,30 @@ agent_passthrough_env = []
 require_cli_match = false
 ```
 
-| | `auth = "volume"` (default) | `auth = "env"` |
+> ## `auth = "volume"` is UNSUPPORTED FOR AGENT EXECUTION in 0.3.0
+>
+> Omitting `sandbox.auth` still resolves to `"volume"`, and a sandboxed agent
+> run in that mode now **raises `VolumeModeUnsupportedError` before any
+> container starts**, on **every** backend. A config that says nothing about
+> `sandbox.auth` will therefore fail. Set `auth = "env"` explicitly.
+>
+> Why: the persistent auth store is shared **across runs**, and every supported
+> CLI keeps per-run state inside it that HELIX cannot relocate, so a later
+> candidate can be causally influenced by an earlier one. HELIX refuses rather
+> than report an isolated run that is not isolated.
+>
+> `helix sandbox login` / `status` / `logout` are **unaffected** and still use
+> the volume — that is what it is for. So no statement of the form "HELIX never
+> mounts the auth volume over HOME" is true; the accurate statement is that **no
+> AGENT container mounts it**.
+
+| | `auth = "volume"` | `auth = "env"` |
 |---|---|---|
-| Credential path | the backend auth volume | the variables in `auth_env_allow` |
-| Credentials on the container argv | none, from any origin | exactly `auth_env_allow`, nothing else |
-| Auth volume mount | `:rw` | `:ro` |
-| Container-side OAuth refresh | works | **disabled** |
+| Agent execution | **UNSUPPORTED — raises** | supported |
+| Credential path | n/a for agents; `login`/`status` only | the variables in `auth_env_allow` |
+| Credentials on the container argv | n/a | exactly `auth_env_allow`, nothing else |
+| Auth volume mount (agent container) | n/a | **none at all** |
+| Container-side OAuth refresh | n/a | **disabled** |
 
 `sandbox.enabled = false` is unchanged: non-sandboxed runs always authenticate
 from the environment, and setting `sandbox.auth` there is a config error.
@@ -36,9 +54,14 @@ token refresh at all**. If an auth volume exists for that backend, an env-mode
 run consumes the credential path without maintaining it, and **the volume's
 stored token will go stale**.
 
-That is why env mode mounts the auth volume `:ro`: the run provably cannot
-refresh it, so a writable mount would offer a write path that is never used
-for its purpose while leaving the credential record writable by agent code.
+**Env mode mounts NO auth volume at all.** An earlier version of this document
+said it mounted the volume `:ro`, reasoning that a run which cannot refresh has
+no need of a writable mount. That reasoning addressed the wrong risk and the
+code now explicitly repudiates it: a read-only whole-HOME mount still exposes
+every prior run's transcripts, sessions and caches **for reading**, and read
+access is the cross-candidate channel — write access never was. Env mode
+therefore mounts no persistent store, so the channel does not exist rather than
+being masked.
 
 `CLAUDE_CODE_OAUTH_TOKEN` is **rejected** in `auth_env_allow`. It does not
 merely bypass refresh — it makes the credential accessor return a record with

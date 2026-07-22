@@ -20,9 +20,12 @@ passthrough of `HELIX_`-prefixed variables, and the `passthrough_env` / `env`
 configuration fields. Only the first was widely understood.
 
 **What changed.** Sandboxed agent authentication is now explicit.
-`sandbox.auth = "volume"` (the default) authenticates solely from the backend
-auth volume and places no credentials in the container. `sandbox.auth = "env"`
-is an explicit opt-in that injects only the variables named in
+`sandbox.auth = "volume"` is **UNSUPPORTED for agent execution** and raises on
+every backend; it remains the value an omitted `sandbox.auth` resolves to, so
+configs that say nothing will fail and must set `auth = "env"` explicitly.
+`helix sandbox login` / `status` / `logout` are unaffected and still use the
+volume. `sandbox.auth = "env"` is the supported path: it injects only the
+variables named in
 `sandbox.auth_env_allow`, and prints a non-suppressible disclosure of the
 variable names and the container's network exposure. **There is no automatic
 fallback between the two modes in either direction.** Non-sandboxed runs are

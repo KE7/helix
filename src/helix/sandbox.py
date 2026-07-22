@@ -1492,6 +1492,15 @@ _AGENT_ALLOWED_HOME_BINDS = (CONTAINER_TRANSCRIPT_PARENT,)
 _MOUNT_FLAGS = ("--mount", "--tmpfs", "--volume", "-v")
 
 
+class UnknownAgentArgvFlagError(HelixError):
+    """An agent argv contains a flag HELIX does not emit.
+
+    Fail-closed at the ARGV level, above the mount parser: a flag nobody
+    anticipated cannot be inspected for a destination, so it is refused
+    outright rather than ignored.
+    """
+
+
 class UnparseableMountError(HelixError):
     """A mount-like token the parser does not fully understand.
 
@@ -1578,6 +1587,72 @@ def _mount_destinations(args: list[str]) -> list[tuple[str, str]]:
                 raise UnparseableMountError(f"unrecognised mount token: {token!r}")
         index += 1
     return found
+
+
+# Flags HELIX itself emits into an agent argv. ANY other flag is refused.
+#
+# This is an ALLOWLIST OF TOKENS, and the inversion matters: the previous
+# design recognised the mount spellings it knew and SILENTLY IGNORED the rest,
+# which is a DENYLIST of mount syntaxes and rots exactly the way the denylist
+# of HOME paths did. It is the same allowlist-not-denylist argument this change
+# makes about HOME, applied one level up to the argv itself.
+#
+# It closes a class no amount of spelling coverage can reach:
+# ``--volumes-from=<container>`` mounts EVERY volume of another container at
+# ITS destinations -- possibly ``/home/node`` -- while containing no ``dst=``,
+# no ``src:dst`` pair and no destination string at all. A destination parser
+# cannot see it, however many spellings it learns. An argv allowlist refuses
+# it without knowing what it is, and refuses the eleventh spelling nobody has
+# thought of, and the twelfth Docker adds next year.
+_AGENT_ALLOWED_FLAGS = frozenset(
+    {
+        "run",
+        "--rm",
+        "--workdir",
+        "--user",
+        "--network",
+        "--security-opt",
+        "--name",
+        "--pids-limit",
+        "--cpus",
+        "--memory",
+        "--add-host",
+        "-e",
+        "-v",
+        "--volume",
+        "--mount",
+        "--tmpfs",
+    }
+)
+
+
+def _assert_agent_argv_uses_only_known_flags(args: list[str]) -> None:
+    """Refuse any flag HELIX does not itself emit into an agent argv.
+
+    Scans only the DOCKER OPTION region -- everything before the image
+    reference -- because the command that follows is the backend's own and may
+    legitimately contain anything.
+    """
+    for token in args:
+        if not token.startswith("-"):
+            continue
+        flag = token.split("=", 1)[0]
+        if flag in _AGENT_ALLOWED_FLAGS:
+            continue
+        # ``-v`` may carry its value attached with no separator at all.
+        if token.startswith("-v") and len(token) > 2:
+            continue
+        raise UnknownAgentArgvFlagError(
+            f"unrecognised flag in an agent container argv: {token!r}.\n"
+            "  Agent argvs are an ALLOWLIST: HELIX refuses any flag it does not "
+            "itself emit, rather than trying to recognise every way a mount can "
+            "be spelled.\n"
+            "  `--volumes-from` is the example that makes this necessary -- it "
+            "mounts another container's volumes at THEIR destinations, with no "
+            "destination string for a parser to inspect.\n"
+            f"  If this flag is legitimate, add it to _AGENT_ALLOWED_FLAGS "
+            f"deliberately, having checked it cannot introduce a mount."
+        )
 
 
 def _assert_no_shared_home_mount(
@@ -1846,6 +1921,10 @@ def _docker_args(
     # site is how the original defects were introduced, and a construction-time
     # convention cannot catch that -- only a check over the FINAL artifact can.
     if scope == "agent":
+        # Order matters: refuse unknown flags FIRST, so a mount syntax the
+        # destination parser cannot understand is rejected before it is asked
+        # to understand it.
+        _assert_agent_argv_uses_only_known_flags(args[: args.index(image)])
         auth_dir = (
             layout_for(agent_backend).auth_dir
             if agent_backend and sandbox.resolved_auth() == "volume"
