@@ -441,6 +441,43 @@ written" premise that would have to be taken on trust.
 
 ---
 
+## 8c. What is ARTIFACT-PROVEN, per backend, per mode
+
+This table states what has been **proven against an artifact** — a Docker
+canary, a final-argv assertion, or a filesystem measurement — as distinct from
+what is *declared supported*. Anything not named here is not proven.
+
+### `auth = "volume"`
+
+| Backend | Status | Proof |
+|---|---|---|
+| codex | **supported, artifact-proven** | filesystem measurement (no knob → 4 SQLite in `~/.codex`; knob → 0 there, 6 redirected); Docker canary for isolation (prior/run-A sessions and sqlite = 0) **and** for rotation (atomic rename-over persists; next run reads the rotated value); final-argv assertions for every class-2 overlay and class-3 knob + target |
+| claude | **refuses** | explicit `unsupported_reason`; refusal asserted at final-argv construction |
+| gemini | **refuses** | as above |
+| cursor | **refuses** | as above — the split is *plausible but unverified*, not disproven |
+| opencode | **refuses** | as above, grounded in measured auth-dir contents |
+
+### `auth = "env"`
+
+| Property | Status | Proof |
+|---|---|---|
+| no `helix-auth-*` mount | **proven, all five backends** | final-argv assertion, parametrized over `BACKENDS` |
+| private uid-correct HOME | **proven, all five backends** | final-argv assertion |
+| candidate-keyed transcript bind | **proven, all five backends** | final-argv assertion |
+| sequential cross-run isolation | **canary-proven — on the claude runner image only** | Docker canary A→B |
+| concurrent isolation | **canary-proven — on the claude runner image only** | Docker canary C1/C2 with C1 verified `Running` during C2 |
+| transcript capture + forced collision | **canary-proven — claude image only** | identical session ids → two separate host files |
+| fail-before | **proven** | the 9f2bcaa `:ro` argv reads a prior run's transcript verbatim; this branch reads nothing |
+
+**Correction worth stating plainly:** env-mode isolation is *not* canary-proven
+across all five backends. The **argv** properties are asserted for all five, but
+the behavioural canaries were run on the **claude runner image only**. Since env
+mode mounts no persistent store at all, the argv property is the load-bearing
+one and it is backend-parametrized — but "canary-proven for env mode" without
+that qualifier would overstate what was measured.
+
+---
+
 ## 9. Remaining proof obligations before the mount rewrite lands
 
 For **each** pinned backend, both halves are required. A proof that shows only
