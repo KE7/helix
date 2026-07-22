@@ -23,6 +23,7 @@ dist/
 htmlcov/
 .envrc
 .helix/
+.helix-evidence/
 
 # Scratch / local tooling (never commit)
 tmp/
