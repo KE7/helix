@@ -110,10 +110,18 @@ def test_missing_transcript_is_not_the_same_as_a_failure(tmp_path: Path) -> None
     """Catches: collapsing 'nothing to copy' into 'copy failed', or vice versa.
 
     They have different remedies, and the old code made both silent nothing.
+
+    BOTH directions are asserted here. An earlier version of this test claimed
+    "or vice versa" in its docstring while the body only ever exercised the
+    MISSING direction -- so a mutation that turned a copy FAILURE into a silent
+    ``missing`` passed with a green suite, in exactly the direction the
+    docstring promised was covered. A docstring is a declaration; it has to be
+    checked against what the body actually asserts.
     """
     ws = tmp_path / "cand-3"
     ws.mkdir()
 
+    # direction 1: nothing to copy -> missing, not an error
     outcome = _capture(ws, "sess-absent")
     assert outcome.status == "missing"
     assert outcome.artifact is None
@@ -121,6 +129,62 @@ def test_missing_transcript_is_not_the_same_as_a_failure(tmp_path: Path) -> None
 
     # and a missing session id is missing, not an error
     assert _capture(ws, None).status == "missing"
+
+    # direction 2: the transcript EXISTS but the copy fails -> an ERROR, never
+    # a silent ``missing``. This is the direction the mutation exploits.
+    ws2 = tmp_path / "cand-3b"
+    ws2.mkdir()
+    _plant(ws2, "sess-present")
+    artifact_parent = ws2 / ".helix_artifacts" / "backend_transcripts"
+    artifact_parent.parent.mkdir(parents=True, exist_ok=True)
+    # a REGULAR FILE where the artifact directory must go: mkdir then fails
+    artifact_parent.write_text("not a directory")
+
+    with pytest.raises(TranscriptCaptureError):
+        _capture(ws2, "sess-present")
+
+
+def test_copy_failure_raises_and_names_both_paths_without_leaking_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing copy MUST raise -- it must never degrade to ``missing``.
+
+    Catches (auditor mutation F-1): replacing the ``except OSError`` around
+    ``shutil.copy2`` with ``return TranscriptOutcome(status="missing", ...)``.
+    That single edit reinstates the exact defect this module was written to
+    remove -- ``missing`` and ``failed`` collapsing into one silent nothing --
+    and the full suite previously stayed GREEN, because the only
+    ``pytest.raises`` in this file covered the unreadable branch.
+
+    Also asserts the diagnostic is useful AND redacted: it must name the source
+    and the destination (an operator cannot act on "copy failed"), and it must
+    contain none of the transcript's bytes.
+    """
+    ws = tmp_path / "cand-copyfail"
+    ws.mkdir()
+    secret = '{"transcript":"SENSITIVE-TRANSCRIPT-BODY"}\n'
+    source = _plant(ws, "sess-copyfail", body=secret)
+
+    real_copy2 = __import__("shutil").copy2
+
+    def boom(*args: object, **kwargs: object):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("helix.transcripts.shutil.copy2", boom)
+
+    with pytest.raises(TranscriptCaptureError) as exc:
+        _capture(ws, "sess-copyfail")
+
+    message = str(exc.value)
+    assert str(source) in message, "must name the source"
+    assert "sess-copyfail.jsonl" in message, "must name the destination"
+    assert "No space left on device" in message, "must surface the real cause"
+    assert "SENSITIVE-TRANSCRIPT-BODY" not in message, "must not leak content"
+
+    # non-vacuity: with the real copy2 restored, the same input SUCCEEDS, so
+    # the raise above is attributable to the failure and not to the fixture.
+    monkeypatch.setattr("helix.transcripts.shutil.copy2", real_copy2)
+    assert _capture(ws, "sess-copyfail").status == "captured"
 
 
 # --- (4) candidate-keyed bind: survives outcomes, cannot collide ------------

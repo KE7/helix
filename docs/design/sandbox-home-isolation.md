@@ -401,6 +401,44 @@ Two limitations, in order of severity:
 > clean on a completed write-read-delete channel, so a future reader cannot
 > mistake silence for proof.
 
+### Pre-existing class-3 files, and what remains in the shared directory
+
+A class-3 file that was **already in the volume before this fix** stays
+readable — an overlay cannot mask a file, and deletion is prohibited by policy.
+
+That residual is a **constant, not a channel**: no post-fix run writes
+candidate-derived content there, so every post-fix candidate reads the same
+value and none can differentiate a later one. Under the carrying definition,
+CARRYING requires a prior candidate's actions to alter a later candidate
+*differentially*; a value read identically by all cannot do that.
+
+**Constant means non-differential, not harmless.** A stale pre-fix
+`policy-limits.json` can still gate features for every post-fix candidate
+*uniformly* — that affects **results** without affecting **independence**. The
+two must not be collapsed.
+
+**Scope:** this residual is moot for the published demos, which run env mode and
+mount no auth volume at all. It applies only to volume mode, which cannot claim
+independence regardless.
+
+The load-bearing half of the premise is proven: for codex, without
+`CODEX_SQLITE_HOME` 4 SQLite files land in `~/.codex`; with it, 0 there and 6 in
+the redirect directory — the candidate-derived state (memories, goals, session
+DB) moves out. `test_argv_applies_every_class3_env_redirect` enforces the knob
+and its mount target structurally.
+
+What **remains** in codex's shared auth directory after redirection:
+
+| File | Can it carry candidate-derived content? |
+|---|---|
+| `installation_id` | **No.** A per-installation UUID (`installation_id.rs`), generated once and stable across runs. |
+| `config.toml` | **Could not establish — and the evidence leans toward yes.** It holds MCP server configuration (`MCP server \`…\` is not configured in config.toml`) plus plugin and skill migration state. MCP server naming is precisely the shape that was found CARRYING for claude. |
+
+The `config.toml` answer is deliberately *"could not establish"* rather than a
+reassuring one. That is an acceptable answer for a compatibility mode that
+cannot claim independence anyway, and far better than a blanket "nothing is
+written" premise that would have to be taken on trust.
+
 ---
 
 ## 9. Remaining proof obligations before the mount rewrite lands

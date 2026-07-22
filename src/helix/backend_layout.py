@@ -104,6 +104,19 @@ class BackendHomeLayout:
     #: Pinned CLI version this layout was measured against.
     pinned_cli_version: str = ""
 
+    #: EXPLICIT statement that this backend is unsupported under volume mode,
+    #: with the reason.  ``None`` means supported.
+    #:
+    #: This exists because emptiness is ambiguous.  Refusal used to be INFERRED
+    #: from "a class-3 file whose knob is missing from ``env_redirects``" --
+    #: which cannot distinguish "declares nothing unrelocatable" from "declares
+    #: nothing at all".  An empty ``ephemeral_files`` therefore read as
+    #: SUPPORTED, and that is exactly how opencode was certified safe while its
+    #: session database sat beside the credential.
+    #:
+    #: A check keyed on an explicit field cannot be defeated by an omission.
+    unsupported_reason: str | None = None
+
 
 # Private per-run scratch root, inside the tmpfs HOME.  Anything redirected
 # here dies with the container.
@@ -161,6 +174,16 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
             "policy-limits.json": "",
         },
         env_redirects={},
+        unsupported_reason=(
+            "the CLI itself keeps per-run state in the shared auth directory "
+            "with no relocation knob: .last-cleanup (a prior candidate makes "
+            "the next one skip its entire cleanup pass), "
+            "mcp-needs-auth-cache.json (a cache hit skips connection), and "
+            "policy-limits.json (its on-disk sha256 shapes the next "
+            "candidate's outbound request). All three classified CARRYING on "
+            "the pinned digest, no unknowns. --strict-mcp-config closes only "
+            "the MCP channel and is not a rescue."
+        ),
         # NOTE: pinned to the DIGEST the demos actually run
         # (@sha256:6be6fef…), which is 2.1.138 -- NOT the ``:latest`` tag,
         # which is 2.1.120 and is only the login/status path.  This distinction
@@ -239,6 +262,13 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
             "statsig-cache.json": "CURSOR_DATA_DIR",
         },
         env_redirects={},
+        unsupported_reason=(
+            "a CONFIG/DATA split is plausible (the credential is read from "
+            "CURSOR_CONFIG_DIR while CURSOR_DATA_DIR governs the data dir) "
+            "but it is UNVERIFIED which files follow which knob, and both "
+            "default to ~/.cursor. Plausible is not proven; refused pending a "
+            "both-halves behavioural proof"
+        ),
         pinned_cli_version="2026.04.17-787b533",
     ),
     # ---------------------------------------------------------------
@@ -270,6 +300,11 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
         # measured.
         ephemeral_files={"state.json": "GEMINI_CLI_HOME"},
         env_redirects={},
+        unsupported_reason=(
+            "state.json is a regular file beside the credential, and the only "
+            "knob (GEMINI_CLI_HOME) relocates the whole home INCLUDING "
+            "oauth_creds.json -- relocation, not a class-3 split"
+        ),
         stable_files=("installation_id", "projects.json"),
         pinned_cli_version="0.39.1",
     ),
@@ -308,6 +343,12 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
             "opencode.db-wal": "XDG_DATA_HOME",
         },
         env_redirects={},
+        unsupported_reason=(
+            "opencode.db{,-shm,-wal} -- the session database -- are regular "
+            "files beside the credential, and the only knob that relocates "
+            "them (XDG_DATA_HOME) moves ~/.local/share/opencode wholesale "
+            "including the credential -- relocation, not a class-3 split"
+        ),
         pinned_cli_version="1.14.24",
     ),
 }
@@ -343,7 +384,26 @@ def unisolatable_files(layout: BackendHomeLayout) -> tuple[str, ...]:
 
 
 def assert_layout_is_isolatable(layout: BackendHomeLayout) -> None:
-    """Fail closed if any per-run file cannot be relocated off the shared store."""
+    """Fail closed if this backend is unsupported, or if anything is unrelocatable.
+
+    Two independent gates, deliberately:
+
+    1. an EXPLICIT ``unsupported_reason`` -- which an omission cannot produce;
+    2. the derived check, which catches a NEW class-3 file added without a knob.
+
+    Gate 1 exists because gate 2 alone is defeated by emptiness: a layout that
+    declares nothing passes it trivially.
+    """
+    if layout.unsupported_reason is not None:
+        raise UnsupportedBackendLayoutError(
+            f"backend {layout.backend!r} (CLI {layout.pinned_cli_version}) is "
+            f'NOT supported under sandbox.auth = "volume".\n'
+            f"  {layout.unsupported_reason}\n"
+            f"  HELIX refuses to run it there rather than report an isolated "
+            f"run that is not isolated.\n"
+            f'  Remedy: use sandbox.auth = "env", which mounts no '
+            f"persistent store at all."
+        )
     orphans = unisolatable_files(layout)
     if not orphans:
         return

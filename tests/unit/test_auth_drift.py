@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from helix.auth_drift import (
     AuthStoreDriftError,
     assert_no_drift,
@@ -70,6 +72,52 @@ def test_drift_fails_loudly_and_says_it_never_cleans() -> None:
     assert "exfil.txt" in message
     assert "has NOT removed anything" in message
     assert 'auth = "env"' in message, "must point at the mode without the hole"
+
+
+def test_detector_module_cannot_delete_anything() -> None:
+    """The "never cleans" half, held in place STRUCTURALLY.
+
+    The test above asserts the MESSAGE says nothing was removed. That is not
+    the same property: a detector that deleted files while printing "has NOT
+    removed anything" would pass it. A docstring claiming to catch "one that
+    tidies up" has to be backed by something that actually would.
+
+    So this asserts the module has no capability to mutate the filesystem at
+    all -- no unlink, no rmtree, no rename, no chmod, and no subprocess to do
+    it indirectly. The shared volume holds root-owned incident evidence, and a
+    ``--user node`` process CAN unlink it (write+execute on the parent), so the
+    prohibition is policy and needs a structural guard rather than trust.
+    """
+    import ast
+
+    import helix.auth_drift as mod
+
+    source = Path(mod.__file__).read_text()
+    tree = ast.parse(source)
+
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    for dangerous in ("os", "shutil", "subprocess", "pathlib"):
+        assert dangerous not in imported, (
+            f"auth_drift imports {dangerous!r}; it must have no means of "
+            f"modifying or removing anything in the auth store"
+        )
+
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    for verb in ("unlink", "remove", "rmtree", "rename", "chmod", "replace"):
+        assert verb not in called, f"auth_drift calls {verb}()"
 
 
 def test_report_carries_names_only_never_contents() -> None:

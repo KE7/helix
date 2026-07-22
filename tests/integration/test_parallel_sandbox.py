@@ -15,34 +15,33 @@ import pytest
 
 import helix.sandbox as sandbox_module
 from helix.config import SandboxConfig
+from helix.envpolicy import EnvGrant
 from helix.sandbox import run_sandboxed_command
 
 
 pytestmark = [
     pytest.mark.docker_integration,
-    # PRE-EXISTING HAZARD, surfaced by the session-wide safety guard rather
-    # than introduced by it.
-    #
-    # ``run_sandboxed_command(scope="agent", agent_backend="opencode")``
-    # mounts the SHARED credential volume ``helix-auth-opencode`` at ``:rw``
-    # — and because ``docker run -v`` silently CREATES a missing named
-    # volume, running this test also provisions that volume on any host where
-    # it does not yet exist. Neither is acceptable for a test: a container
-    # holding a shared credential volume ``:rw`` can trigger an OAuth refresh,
-    # and a successful refresh ROTATES the stored token for every lane.
-    #
-    # These tests assert workspace isolation and container cleanup, none of
-    # which needs real credentials. They must be rewritten to run against a
-    # DISPOSABLE volume with SYNTHETIC credentials before they can be enabled
-    # again. Skipping rather than deleting keeps the gap visible.
-    pytest.mark.skip(
-        reason=(
-            "mounts the SHARED helix-auth-opencode volume :rw (and would "
-            "create it if absent); rewrite against a disposable volume with "
-            "synthetic credentials first"
-        )
-    ),
 ]
+
+# REWRITTEN to run under ``sandbox.auth = "env"``.
+#
+# The previous form ran ``scope="agent"`` with ``agent_backend="opencode"``,
+# which mounted the SHARED ``helix-auth-opencode`` volume ``:rw`` -- and because
+# ``docker run -v`` silently CREATES a missing named volume, merely running the
+# test provisioned that volume on any host lacking it. Neither is acceptable: a
+# container holding a shared credential volume ``:rw`` can trigger an OAuth
+# refresh, and a successful refresh ROTATES the stored token for every lane.
+#
+# Env mode mounts NO persistent store at all, so both hazards are removed by
+# construction rather than by care. These tests assert workspace isolation and
+# container cleanup, none of which needs real credentials -- and env mode is
+# how the demo lanes now run, so the test exercises the shipped path.
+#
+# ``auth_env_allow`` names a variable deliberately left UNSET in the test
+# environment: the config layer requires a non-empty allowlist under env mode,
+# and an unset name injects nothing. No credential, synthetic or otherwise,
+# enters the container.
+_ENV_AUTH_ALLOW = ["OPENCODE_API_KEY"]
 
 _FIXTURE_IMAGE = os.environ.get("HELIX_DOCKER_TEST_IMAGE", "helix-runner-base:latest")
 
@@ -133,11 +132,27 @@ def test_parallel_sandboxes_overlap_isolate_state_and_cleanup(
                 image=_FIXTURE_IMAGE,
                 network="none",
                 timeout_seconds=30,
+                auth="env",
+                auth_env_allow=_ENV_AUTH_ALLOW,
             ),
             scope="agent",
             sync_back=True,
             image=_FIXTURE_IMAGE,
             agent_backend="opencode",
+            grants=[
+                EnvGrant(
+                    name="PROPOSAL_ID",
+                    value=f"candidate-{index}",
+                    origin="helix_internal",
+                    scopes=frozenset({"agent"}),
+                ),
+                EnvGrant(
+                    name="XDG_DATA_HOME",
+                    value="/workspace/.helix_opencode_state",
+                    origin="helix_internal",
+                    scopes=frozenset({"agent"}),
+                ),
+            ],
         )
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)

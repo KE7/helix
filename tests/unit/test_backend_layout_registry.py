@@ -331,3 +331,60 @@ def test_codex_memory_databases_are_redirected_in_the_final_argv() -> None:
     """
     argv = _volume_argv("codex")
     assert "CODEX_SQLITE_HOME=/home/node/.helix-run/codex-sqlite" in argv, argv
+
+
+# ---------------------------------------------------------------------------
+# Emptiness must not masquerade as support (the opencode trap, generalised)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", sorted(FAIL_CLOSED_UNDER_VOLUME_MODE))
+def test_refusal_is_explicit_not_inferred_from_an_empty_set(backend: str) -> None:
+    """Unsupported must be STATED, never left inferable from an omission.
+
+    This is the opencode defect generalised. Refusal used to be DERIVED from
+    "a class-3 file whose knob is absent from env_redirects", which cannot
+    distinguish "declares nothing unrelocatable" from "declares nothing at
+    all" -- so an empty ``ephemeral_files`` read as SUPPORTED, and opencode was
+    certified safe while its session database sat beside the credential.
+
+    Catches: emptying any input set to make a refusing backend look supported.
+    """
+    layout = BACKEND_LAYOUTS[backend]
+    assert layout.unsupported_reason, (
+        f"{backend} refuses under volume mode, so it must say WHY in an "
+        f"explicit field a check can key on -- not leave it to be inferred"
+    )
+
+
+@pytest.mark.parametrize("backend", sorted(FAIL_CLOSED_UNDER_VOLUME_MODE))
+def test_emptying_the_derived_sets_still_refuses(backend: str) -> None:
+    """The explicit gate must hold when every derived signal is emptied.
+
+    Directly simulates the mutation: strip ephemeral_files and env_redirects
+    (the inputs the old derived check read) and require the refusal to SURVIVE.
+    Under the old shape this produced a silently SUPPORTED backend.
+    """
+    import dataclasses
+
+    stripped = dataclasses.replace(
+        BACKEND_LAYOUTS[backend], ephemeral_files={}, env_redirects={}
+    )
+    with pytest.raises(UnsupportedBackendLayoutError):
+        assert_layout_is_isolatable(stripped)
+
+
+def test_emptying_the_sets_for_a_SUPPORTED_backend_is_not_silently_fine() -> None:
+    """Non-vacuity for the pair above: the explicit gate is not always-on.
+
+    codex has no ``unsupported_reason``, so emptying its sets does NOT raise --
+    which is exactly why the derived check alone was insufficient and why the
+    explicit field had to be added rather than relied upon everywhere.
+    """
+    import dataclasses
+
+    stripped = dataclasses.replace(
+        BACKEND_LAYOUTS["codex"], ephemeral_files={}, env_redirects={}
+    )
+    assert stripped.unsupported_reason is None
+    assert_layout_is_isolatable(stripped)  # does not raise -- documented above
