@@ -128,6 +128,17 @@ class BackendHomeLayout:
     #: human wrote on purpose, not something that happens when nobody looked.
     measured_empty: bool = False
 
+    #: Deliberate assertion that ``ephemeral_files`` was MEASURED and is
+    #: genuinely empty.
+    #:
+    #: PER-CLASS, and that is the whole point. The previous marker was
+    #: whole-layout, so a NON-EMPTY ``ephemeral_subdirs`` made an EMPTY,
+    #: UNMEASURED ``ephemeral_files`` look fine -- which is opencode's ACTUAL
+    #: bug shape, not the degenerate all-empty case. A backend can have
+    #: directories worth isolating and still have unmeasured sibling FILES
+    #: beside its credential; that is precisely what happened.
+    measured_empty_files: bool = False
+
 
 # Private per-run scratch root, inside the tmpfs HOME.  Anything redirected
 # here dies with the container.
@@ -428,6 +439,20 @@ def assert_layout_is_declared_completely(layout: BackendHomeLayout) -> None:
     somebody says which they mean -- so this requires either a non-empty
     ephemeral class or an explicit ``measured_empty``.
     """
+    # Per-class: a non-empty subdir set must NOT excuse an unmeasured file set.
+    if not layout.ephemeral_files and not (
+        layout.measured_empty_files or layout.measured_empty
+    ):
+        raise UnsupportedBackendLayoutError(
+            f"layout for {layout.backend!r} declares NO ephemeral FILES.\n"
+            f"  An empty file set passes every derived check trivially, and is "
+            f"indistinguishable from one that was never measured -- which is "
+            f"exactly how opencode was certified isolated while its session "
+            f"database sat beside the credential. A non-empty subdir set does "
+            f"not make an unmeasured file set safe.\n"
+            f"  If the auth directory was measured and genuinely holds no "
+            f"per-run sibling FILES, set measured_empty_files=True."
+        )
     if layout.ephemeral_subdirs or layout.ephemeral_files or layout.measured_empty:
         return
     raise UnsupportedBackendLayoutError(

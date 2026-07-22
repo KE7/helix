@@ -47,9 +47,37 @@ _PROBES = {
 }
 
 
+def _image_present(image: str) -> bool:
+    """Positively identify an ABSENT image, rather than inferring it."""
+    return (
+        subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).returncode
+        == 0
+    )
+
+
 def _run_in_image(image: str, command: str) -> str:
+    """Run *command* in *image*.
+
+    SKIP/FAIL DISCIPLINE (F-11). The earlier version skipped on ANY nonzero
+    exit with "image unavailable locally", so a renamed CLI, a broken
+    entrypoint or a changed ``--version`` flag degraded the whole suite to SKIP
+    and the gate reported GREEN. That is the same missing-vs-failed conflation
+    ``helix.transcripts`` was rewritten to eliminate, reintroduced inside the
+    guard that fixed a declaration-vs-declaration check.
+
+    Availability is now decided BEFORE the probe runs, by positively
+    identifying an absent image. Once the probe is SELECTED, a nonzero exit is
+    a FAILURE.
+    """
     if shutil.which("docker") is None:
         pytest.skip("docker unavailable")
+    if not _image_present(image):
+        pytest.skip(f"image not present locally: {image}")
     result = subprocess.run(
         [
             "docker",
@@ -70,8 +98,14 @@ def _run_in_image(image: str, command: str) -> str:
         text=True,
         timeout=180,
     )
-    if result.returncode != 0:
-        pytest.skip(f"image unavailable locally: {image}")
+    assert result.returncode == 0, (
+        f"probe failed in {image}: exit {result.returncode}\n"
+        f"  command: {command}\n"
+        f"  stderr:  {result.stderr.strip()[:400]}\n"
+        f"  The image IS present, so this is a real failure -- a renamed CLI, a "
+        f"broken entrypoint, or a changed flag. Skipping here would report the "
+        f"gate GREEN while measuring nothing."
+    )
     return result.stdout.strip()
 
 

@@ -310,7 +310,9 @@ def test_a_layout_that_classifies_nothing_is_rejected_outright() -> None:
     )
     with pytest.raises(UnsupportedBackendLayoutError) as exc:
         assert_layout_is_isolatable(empty)
-    assert "classifies NO per-run state" in str(exc.value)
+    assert "NO ephemeral FILES" in str(
+        exc.value
+    ) or "classifies NO per-run state" in str(exc.value)
 
 
 def test_deliberate_measured_empty_is_accepted() -> None:
@@ -329,6 +331,7 @@ def test_deliberate_measured_empty_is_accepted() -> None:
             credential_file="auth.json",
         ),
         measured_empty=True,
+        measured_empty_files=True,
     )
     assert_layout_is_isolatable(empty)  # does not raise
 
@@ -359,3 +362,50 @@ def test_codex_sqlite_family_includes_the_shm_and_wal_siblings() -> None:
             name = f"{stem}.sqlite{suffix}"
             assert name in layout.ephemeral_files, name
             assert layout.ephemeral_files[name] == "CODEX_SQLITE_HOME"
+
+
+def test_empty_ephemeral_files_with_nonempty_subdirs_is_REJECTED() -> None:
+    """F-9: the shape that ACTUALLY occurred, not the degenerate all-empty one.
+
+    opencode's real bug was ``ephemeral_files={}`` WITH a non-empty
+    ``ephemeral_subdirs`` -- and the previous whole-layout ``measured_empty``
+    marker let the non-empty subdir set excuse the unmeasured file set. The
+    decisive question for a regression guard is "would this have caught the bug
+    it was written for", and the earlier version's answer was NO.
+
+    A backend can have directories worth isolating and STILL have unmeasured
+    sibling files beside its credential. That is exactly what happened.
+    """
+    shape = BackendHomeLayout(
+        backend="codex",
+        auth_dir="/home/node/.x",
+        volume_subpath=".x",
+        credential_file="auth.json",
+        ephemeral_files={},
+        ephemeral_subdirs=("sessions",),
+    )
+    with pytest.raises(UnsupportedBackendLayoutError) as exc:
+        assert_layout_is_isolatable(shape)
+    assert "NO ephemeral FILES" in str(exc.value)
+    assert "measured_empty_files" in str(exc.value), "must name the deliberate opt-in"
+
+
+def test_per_class_marker_accepts_a_deliberately_measured_empty_file_set() -> None:
+    """Non-vacuity: the per-class gate is a demand for a statement, not a ban.
+
+    Without this, rejecting every empty file set would satisfy the test above
+    and a genuinely file-free backend could never ship.
+    """
+    import dataclasses
+
+    shape = dataclasses.replace(
+        BackendHomeLayout(
+            backend="codex",
+            auth_dir="/home/node/.x",
+            volume_subpath=".x",
+            credential_file="auth.json",
+            ephemeral_subdirs=("sessions",),
+        ),
+        measured_empty_files=True,
+    )
+    assert_layout_is_isolatable(shape)

@@ -453,17 +453,38 @@ what is *declared supported*. Anything not named here is not proven.
 | no `helix-auth-*` mount | **proven, all five backends** | final-argv assertion, parametrized over `BACKENDS` |
 | private uid-correct HOME | **proven, all five backends** | final-argv assertion |
 | candidate-keyed transcript bind | **proven, all five backends** | final-argv assertion |
-| sequential cross-run isolation | **canary-proven — on the claude runner image only** | Docker canary A→B |
-| concurrent isolation | **canary-proven — on the claude runner image only** | Docker canary C1/C2 with C1 verified `Running` during C2 |
-| transcript capture + forced collision | **canary-proven — claude image only** | identical session ids → two separate host files |
+| sequential cross-run isolation | **canary-proven on ALL FIVE runner images** | Docker canary A→B: `home_leak:0 transcript_leak:0 uid:1000 writable:yes` on claude, codex, cursor, gemini, opencode |
+| concurrent isolation | **canary-proven — claude image** | C1/C2 with C1 verified `Running` during C2 |
+| transcript capture | **canary-proven on ALL FIVE** | run A's transcript captured on the host bind in every image |
+| forced transcript collision | **canary-proven — claude image** | identical session ids → two separate host files |
 | fail-before | **proven** | the 9f2bcaa `:ro` argv reads a prior run's transcript verbatim; this branch reads nothing |
 
-**Correction worth stating plainly:** env-mode isolation is *not* canary-proven
-across all five backends. The **argv** properties are asserted for all five, but
-the behavioural canaries were run on the **claude runner image only**. Since env
-mode mounts no persistent store at all, the argv property is the load-bearing
-one and it is backend-parametrized — but "canary-proven for env mode" without
-that qualifier would overstate what was measured.
+**Updated after the four remaining canaries ran.** Sequential isolation and
+transcript capture are now canary-proven on **all five** runner images. The
+*concurrent* and *forced-collision* canaries remain claude-only — stated
+explicitly rather than generalised, since the earlier version of this note
+overstated coverage in the opposite direction and had to be corrected.
+
+### cursor: refused, and the decision recorded
+
+cursor stays **refused** under volume mode, which is now moot in any case since
+volume mode is retired for agent execution. The decision is recorded so a
+future reader does not re-derive it:
+
+- **Knob evidence:** the credential is read from the config dir
+  (`CURSOR_CONFIG_DIR || XDG_CONFIG_HOME/cursor || ~/.cursor`) while
+  `CURSOR_DATA_DIR` governs the data dir. Both default to `~/.cursor`, so the
+  files are commingled today and pointing DATA elsewhere *might* split them.
+- **What was never established:** which files follow which knob. Plausible is
+  not proven, and a benchmark cannot rest on plausible.
+- **What a future rescue would need:** a both-halves behavioural proof — the
+  ephemeral files move to the redirect target, AND the credential stays
+  readable and rotatable in place (atomic rename-over surviving, visible to
+  the next run).
+- **Why it was not pursued:** no demo uses volume mode, so a rescued backend
+  adds audit surface for zero release capability. "We refused it because we did
+  not verify it" is a better sentence than "we supported it because it looked
+  plausible".
 
 ---
 

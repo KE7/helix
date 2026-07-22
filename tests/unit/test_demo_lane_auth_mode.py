@@ -19,16 +19,34 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+
 # Lanes whose results are published as per-candidate measurements.
 #
 # NOTE: the algotune lane has no config under ``examples/`` in this tree, so it
 # cannot be asserted here.  That is recorded rather than silently omitted --
 # see ``test_declared_lane_configs_all_exist``.
-INDEPENDENCE_LANES = (
-    "examples/formulacode/helix.toml.template",
-    "examples/livebench_math/helix.toml",
-    "examples/swebench_live/helix.toml",
-)
+def _discover_independence_lanes() -> tuple[str, ...]:
+    """DERIVE the lane set from the filesystem, never declare it.
+
+    The previous hand-written tuple was a declaration, and emptying it to ``()``
+    yielded "1 passed, 3 skipped" -- GREEN with ZERO coverage, because the
+    designated non-vacuity guard was itself vacuous over an empty tuple. It
+    also listed THREE lanes while four exist, so algotune was asserted nowhere
+    and appeared only in a source comment.
+
+    Globbing every sandboxed lane config fixes both: coverage cannot be reduced
+    by editing a list, and a lane added later -- algotune's config, when it
+    lands -- is picked up automatically rather than needing a coordinated edit.
+    """
+    found: list[str] = []
+    for path in sorted(REPO_ROOT.glob("examples/*/helix.toml*")):
+        text = path.read_text()
+        if "[sandbox]" in text and "enabled = true" in text:
+            found.append(path.relative_to(REPO_ROOT).as_posix())
+    return tuple(found)
+
+
+INDEPENDENCE_LANES = _discover_independence_lanes()
 
 
 def _sandbox(rel: str) -> dict[str, object]:
@@ -38,8 +56,17 @@ def _sandbox(rel: str) -> dict[str, object]:
     return sandbox
 
 
-def test_declared_lane_configs_all_exist() -> None:
-    """Non-vacuity: a renamed or moved config must not silently drop coverage."""
+def test_lane_discovery_is_not_empty() -> None:
+    """Non-vacuity for a DERIVED set: discovery must actually find lanes.
+
+    An empty derived set makes every parametrized test below collapse to zero
+    cases and the file reports GREEN -- the same empty-set trap that certified
+    opencode, one level up in the test harness.
+    """
+    assert len(INDEPENDENCE_LANES) >= 3, (
+        f"lane discovery found {INDEPENDENCE_LANES}; expected at least the "
+        f"three sandboxed example lanes"
+    )
     for rel in INDEPENDENCE_LANES:
         assert (REPO_ROOT / rel).is_file(), rel
 

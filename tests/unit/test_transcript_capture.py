@@ -194,12 +194,18 @@ def test_copy_failure_raises_and_names_both_paths_without_leaking_bytes(
 def test_transcript_survives_regardless_of_command_outcome(
     tmp_path: Path, exit_shape: str
 ) -> None:
-    """Catches: capture wired to the success path only.
+    """LIBRARY scope only: capture succeeds for a present transcript.
 
-    The transcript lives on a HOST BIND written during the run, so it is
-    already present when the container exits -- however it exits. A capture
-    that only ran after a clean exit would lose exactly the runs whose
-    transcripts matter most (crashes and timeouts).
+    SCOPE CORRECTION (F-16a). This claimed to catch "capture wired to the
+    success path only" -- which it cannot: it calls ``_capture`` directly,
+    never invokes ``run_sandboxed_commands``, and the ``exit_shape``
+    parametrisation varies ONLY a naming string, so the three cases are
+    byte-identical in behaviour. It is the test a reviewer would have cited to
+    claim F-12's mutations were covered.
+
+    The real property -- that capture runs regardless of how the command exits
+    -- is carried by ``tests/unit/test_transcript_run_path_wiring.py``, which
+    drives the public boundary.
     """
     ws = tmp_path / f"cand-{exit_shape}"
     ws.mkdir()
