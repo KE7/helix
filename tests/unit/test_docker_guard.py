@@ -152,7 +152,12 @@ def test_preflight_with_the_production_runner_is_stopped_by_the_guard():
     reset_preflight_cache()
     with pytest.raises(Exception) as exc:
         preflight_auth(_sandboxed_config(), runner=production_docker_runner())
-    assert "helix-auth-claude" in str(exc.value)
+    # Preflight now probes DAEMON CAPABILITY before touching the volume, so the
+    # guard fires on that call -- strictly EARLIER than the auth-volume call
+    # this previously named. The property under test is that the production
+    # runner cannot reach Docker from a test path at all, not which call is
+    # blocked first.
+    assert "attempted to run Docker for real" in str(exc.value)
     reset_preflight_cache()
 
 
@@ -196,7 +201,17 @@ def test_run_evolution_unit_path_cannot_reach_docker(tmp_path, mocker):
     # every future test remembering to mock the right symbol.
     with pytest.raises(Exception) as exc:
         run_evolution(config, tmp_path, tmp_path / ".helix")
-    assert "helix-auth-claude" in str(exc.value)
+    message = str(exc.value)
+    # The guard stops the run before ANY Docker call succeeds. It now fires on
+    # the daemon-capability probe, which preflight performs BEFORE touching the
+    # volume -- strictly earlier than the auth-volume call this used to name.
+    # Asserting the specific blocked command would re-break the moment another
+    # earlier probe is added; the property that matters is that nothing
+    # reached Docker and no auth volume was touched.
+    assert "attempted to run Docker for real" in message
+    assert "helix-auth" not in message.split("Reason")[0].split("\n")[1], (
+        "the blocked call must not itself be an auth-volume operation"
+    )
 
 
 # ---------------------------------------------------------------------------

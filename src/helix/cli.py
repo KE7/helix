@@ -14,6 +14,8 @@ from rich.table import Table
 from rich.tree import Tree
 
 from helix import __version__
+from helix.backend_layout import layout_for
+from helix.subpath_bootstrap import auth_subpath_bootstrap_command
 from helix.backends import BACKENDS
 from helix.config import load_config
 from helix.logging_config import setup_file_logging
@@ -457,6 +459,49 @@ def _resolve_auth_runtime(backend: str, image: str | None) -> str:
         raise SystemExit(2) from exc
 
 
+def _ensure_auth_subpath(backend: str, image: str) -> None:
+    """Create the backend's auth directory inside the volume after login.
+
+    Volume mode mounts the store with ``volume-subpath``, and Docker requires
+    that directory to EXIST before the container starts. Without this, the
+    first agent run against a freshly-authenticated volume dies inside the
+    daemon with ``cannot access path ...: no such file or directory`` -- an
+    auth-shaped problem presented as an internal error.
+
+    ``login`` is the right place: it is the operation that establishes the
+    store, and it cannot itself use a subpath mount (it is what creates the
+    subpath). The narrow distinction against the standing rule holds --
+    creating the SUBPATH during login is legitimate; creating the VOLUME during
+    ``status`` is not, and ``status`` remains observation-only.
+
+    Idempotent, and creates an empty directory only: it never writes, moves or
+    removes a credential. Most CLIs will have created their own directory
+    during login already, in which case this is a no-op.
+    """
+    layout = layout_for(backend)
+    volume = sandbox_auth_volume_name(backend)
+    production_docker_runner()(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "node",
+            "--security-opt",
+            "no-new-privileges",
+            "-v",
+            f"{volume}:/helix-auth-root:rw",
+            image,
+            "sh",
+            "-c",
+            auth_subpath_bootstrap_command(layout.volume_subpath),
+        ],
+        check=False,
+    )
+
+
 def _stamp_auth_volume(backend: str, image: str) -> None:
     """Record HELIX-owned provenance in the volume after a successful login.
 
@@ -467,7 +512,9 @@ def _stamp_auth_volume(backend: str, image: str) -> None:
     from datetime import datetime, timezone
 
     try:
-        cli_version = probe_backend_cli_version(backend, image=image, runner=production_docker_runner())
+        cli_version = probe_backend_cli_version(
+            backend, image=image, runner=production_docker_runner()
+        )
         manifest = AuthVolumeManifest(
             backend=backend,
             cli_version=cli_version,
@@ -490,13 +537,11 @@ def _stamp_auth_volume(backend: str, image: str) -> None:
             )
         else:
             print_info(
-                f"Recorded auth provenance: {backend} / "
-                f"{cli_version or 'unknown CLI'}."
+                f"Recorded auth provenance: {backend} / {cli_version or 'unknown CLI'}."
             )
     except Exception:  # noqa: BLE001 - never fail a successful login
         print_warning(
-            "Could not record auth provenance stamp; provenance will report as "
-            "unknown."
+            "Could not record auth provenance stamp; provenance will report as unknown."
         )
 
 
@@ -558,6 +603,7 @@ def sandbox_login(
     )
     if result.returncode != 0:
         raise SystemExit(result.returncode)
+    _ensure_auth_subpath(backend, resolved_image)
     _stamp_auth_volume(backend, resolved_image)
 
 
@@ -616,7 +662,9 @@ def sandbox_status(
         # status text were both observed affirming credentials that a real
         # request rejected.  A real authenticated probe requires --verify.
         resolved_image = _resolve_auth_runtime(item, image if backend else None)
-        manifest = read_auth_manifest(item, image=resolved_image, runner=production_docker_runner())
+        manifest = read_auth_manifest(
+            item, image=resolved_image, runner=production_docker_runner()
+        )
         if manifest is None:
             console.print(
                 "  provenance: unknown (no HELIX stamp; written before HELIX "

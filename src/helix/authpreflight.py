@@ -56,6 +56,11 @@ from typing import Literal
 
 from helix.config import HelixConfig
 from helix.envpolicy import env_dict, resolve_env_grants
+from helix.backend_layout import layout_for
+from helix.subpath_bootstrap import (
+    assert_volume_subpath_supported,
+    missing_subpath_error,
+)
 from helix.exceptions import SandboxAuthConcurrencyError, SandboxAuthPreflightError
 from helix.sandbox import (
     AuthVolumeManifest,
@@ -284,6 +289,28 @@ def preflight_auth(
     run = runner
     image = resolve_sandbox_image(sandbox, backend)
 
+    # --- Stage -1: daemon capability, BEFORE touching the volume ------
+    #
+    # Volume mode mounts the store with ``volume-subpath``. On a daemon that
+    # cannot do that, the run dies inside Docker with an opaque error and
+    # there is no safe fallback -- the only other way to mount the store is
+    # over the whole container HOME, which is the defect this release removes.
+    #
+    # Checked here rather than at container start so the operator learns before
+    # a proposal is created or budget charged.
+    version = run(
+        [
+            "docker",
+            "version",
+            "--format",
+            "{{.Server.Version}}|{{.Server.APIVersion}}",
+        ],
+        check=False,
+    )
+    if version.returncode == 0:
+        server, _, api = (version.stdout or "").strip().partition("|")
+        assert_volume_subpath_supported(server_version=server, api_version=api)
+
     with _VolumeLock(volume):
         with _verdict_lock:
             cached = _verdicts.get(volume)
@@ -295,12 +322,53 @@ def preflight_auth(
         if not docker_volume_exists(volume, runner=run):
             raise SandboxAuthPreflightError(
                 f"sandbox auth volume {volume!r} does not exist.\n"
-                f"  sandbox.enabled = true and sandbox.auth = \"volume\", so the "
+                f'  sandbox.enabled = true and sandbox.auth = "volume", so the '
                 f"mutation agent has no credential path. HELIX will not fall "
                 f"back to environment variables.\n"
                 f"  No proposal was created and no budget was charged.",
                 remedy=f"helix sandbox login {backend}",
                 operation="auth preflight (stage 0: existence)",
+                suggestion=f"helix sandbox login {backend}",
+            )
+
+        # --- Stage 0b: the auth SUBPATH must exist ---------------------
+        #
+        # ``volume-subpath`` requires the directory to exist before the
+        # container starts. On a volume that exists but was never authenticated
+        # for this backend, the agent run otherwise dies with
+        # ``cannot access path ...: no such file or directory`` -- an auth
+        # problem wearing the costume of an internal Docker error.
+        #
+        # Read-only probe: it inspects, and never creates. Creating the subpath
+        # is ``login``'s job.
+        layout = layout_for(backend)
+        subpath_probe = run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--user",
+                "node",
+                "-v",
+                f"{volume}:/helix-auth-root:ro",
+                image,
+                "test",
+                "-d",
+                f"/helix-auth-root/{layout.volume_subpath}",
+            ],
+            check=False,
+        )
+        if subpath_probe.returncode != 0:
+            raise SandboxAuthPreflightError(
+                missing_subpath_error(
+                    backend=backend,
+                    volume=volume,
+                    subpath=layout.volume_subpath,
+                ),
+                remedy=f"helix sandbox login {backend}",
+                operation="auth preflight (stage 0b: auth subpath)",
                 suggestion=f"helix sandbox login {backend}",
             )
 
@@ -422,7 +490,7 @@ def preflight_auth(
                 f"  Diagnosis: {kind}\n"
                 f"  HELIX will not fall back to environment-variable "
                 f"authentication. To use environment credentials deliberately, "
-                f"set sandbox.auth = \"env\" and list the variables in "
+                f'set sandbox.auth = "env" and list the variables in '
                 f"sandbox.auth_env_allow — see the exposure disclosure in the "
                 f"docs before doing so.\n"
                 f"  No proposal was created and no budget was charged.",

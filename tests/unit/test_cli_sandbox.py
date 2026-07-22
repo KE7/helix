@@ -23,13 +23,12 @@ def test_sandbox_login_invokes_backend_auth_volume(mocker):
     mocker.patch("os.isatty", return_value=True)
     mocker.patch("helix.cli.docker_volume_exists", return_value=True)
     mocker.patch("helix.cli._stamp_auth_volume")
+    mocker.patch("helix.cli._ensure_auth_subpath")
     mock_run = mocker.patch(
         "helix.cli.run_sandbox_auth_command",
         return_value=CompletedProcess([], 0, stdout="", stderr=""),
     )
-    result = CliRunner().invoke(
-        cli, ["sandbox", "login", "cursor", "--image", PINNED]
-    )
+    result = CliRunner().invoke(cli, ["sandbox", "login", "cursor", "--image", PINNED])
 
     assert result.exit_code == 0
     mock_run.assert_called_once_with(
@@ -49,13 +48,12 @@ def test_login_announces_volume_creation(mocker):
     mocker.patch("os.isatty", return_value=True)
     mocker.patch("helix.cli.docker_volume_exists", return_value=False)
     mocker.patch("helix.cli._stamp_auth_volume")
+    mocker.patch("helix.cli._ensure_auth_subpath")
     mocker.patch(
         "helix.cli.run_sandbox_auth_command",
         return_value=CompletedProcess([], 0, stdout="", stderr=""),
     )
-    result = CliRunner().invoke(
-        cli, ["sandbox", "login", "cursor", "--image", PINNED]
-    )
+    result = CliRunner().invoke(cli, ["sandbox", "login", "cursor", "--image", PINNED])
     assert result.exit_code == 0
     assert "Creating auth volume" in result.output
 
@@ -112,9 +110,7 @@ def test_status_reports_unknown_provenance_without_promoting_it(mocker):
     mocker.patch("helix.cli.read_auth_manifest", return_value=None)
     mock_run = mocker.patch("helix.cli.run_sandbox_auth_command")
 
-    result = CliRunner().invoke(
-        cli, ["sandbox", "status", "claude", "--image", PINNED]
-    )
+    result = CliRunner().invoke(cli, ["sandbox", "status", "claude", "--image", PINNED])
 
     assert "provisioned" in result.output
     assert "provenance: unknown" in result.output

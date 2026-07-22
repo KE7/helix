@@ -117,6 +117,17 @@ class BackendHomeLayout:
     #: A check keyed on an explicit field cannot be defeated by an omission.
     unsupported_reason: str | None = None
 
+    #: Deliberate assertion that this backend's auth dir was MEASURED and
+    #: genuinely holds no per-run state.  Required when every ephemeral class
+    #: is empty.
+    #:
+    #: This closes the empty-set trap at the level of the CHECK'S SHAPE rather
+    #: than of one entry's data.  Correcting opencode fixed the instance; a
+    #: SIXTH backend added with empty sets would still have been certified
+    #: isolatable exactly as opencode was.  Emptiness must now be something a
+    #: human wrote on purpose, not something that happens when nobody looked.
+    measured_empty: bool = False
+
 
 # Private per-run scratch root, inside the tmpfs HOME.  Anything redirected
 # here dies with the container.
@@ -217,11 +228,32 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
         # PROVEN behaviourally against a positive control: without the knob, 4
         # sqlite files appear in ~/.codex; with it, 0 there and 6 in the
         # redirect directory.
+        # The FULL SQLite family, from ``ls`` of the real volume. The -shm and
+        # -wal siblings were missing from an earlier version of this entry,
+        # which made the module's "every path falls into exactly one class"
+        # claim FALSE against the artifact and would have made the drift
+        # detector false-positive on six real files the moment it was wired.
+        #
+        # The evidence was already in hand and misread: the CODEX_SQLITE_HOME
+        # control reported "0 in ~/.codex and SIX in the redirect dir" -- six,
+        # not the four then declared. The count was already saying the family
+        # was larger.
+        #
+        # No leak: SQLite creates -shm/-wal beside the main database, so the
+        # knob relocates them together, which is what the control observed.
         ephemeral_files={
             "state_5.sqlite": "CODEX_SQLITE_HOME",
+            "state_5.sqlite-shm": "CODEX_SQLITE_HOME",
+            "state_5.sqlite-wal": "CODEX_SQLITE_HOME",
             "logs_2.sqlite": "CODEX_SQLITE_HOME",
+            "logs_2.sqlite-shm": "CODEX_SQLITE_HOME",
+            "logs_2.sqlite-wal": "CODEX_SQLITE_HOME",
             "memories_1.sqlite": "CODEX_SQLITE_HOME",
+            "memories_1.sqlite-shm": "CODEX_SQLITE_HOME",
+            "memories_1.sqlite-wal": "CODEX_SQLITE_HOME",
             "goals_1.sqlite": "CODEX_SQLITE_HOME",
+            "goals_1.sqlite-shm": "CODEX_SQLITE_HOME",
+            "goals_1.sqlite-wal": "CODEX_SQLITE_HOME",
         },
         env_redirects={
             "CODEX_SQLITE_HOME": f"{HELIX_RUN_ROOT}/codex-sqlite",
@@ -278,6 +310,11 @@ BACKEND_LAYOUTS: dict[BackendName, BackendHomeLayout] = {
         backend="gemini",
         auth_dir="/home/node/.gemini",
         volume_subpath=".gemini",
+        # NOT PRESENT in the real helix-auth-gemini volume, which holds no
+        # OAuth credential at all (that volume was authenticated by API key).
+        # The path is taken from the CLI bundle, not from an artifact, so it
+        # is an UNVERIFIED declaration. Inert today -- gemini refuses volume
+        # mode -- but it must not be read as measured.
         credential_file="oauth_creds.json",
         ephemeral_subdirs=("tmp", "history"),
         # FAILS CLOSED under volume mode, deliberately.
@@ -383,6 +420,27 @@ def unisolatable_files(layout: BackendHomeLayout) -> tuple[str, ...]:
     )
 
 
+def assert_layout_is_declared_completely(layout: BackendHomeLayout) -> None:
+    """Reject a layout whose emptiness could be an omission rather than a fact.
+
+    A layout that classifies NOTHING passes every derived check trivially. That
+    is indistinguishable from "measured, and there is genuinely nothing" unless
+    somebody says which they mean -- so this requires either a non-empty
+    ephemeral class or an explicit ``measured_empty``.
+    """
+    if layout.ephemeral_subdirs or layout.ephemeral_files or layout.measured_empty:
+        return
+    raise UnsupportedBackendLayoutError(
+        f"layout for {layout.backend!r} classifies NO per-run state at all.\n"
+        f"  An empty layout passes every isolation check trivially, so it is "
+        f"indistinguishable from one that was never measured -- which is "
+        f"exactly how a backend gets certified isolated while its session "
+        f"state crosses runs.\n"
+        f"  If the auth directory was measured and genuinely holds no per-run "
+        f"state, set measured_empty=True deliberately. Otherwise measure it."
+    )
+
+
 def assert_layout_is_isolatable(layout: BackendHomeLayout) -> None:
     """Fail closed if this backend is unsupported, or if anything is unrelocatable.
 
@@ -394,6 +452,7 @@ def assert_layout_is_isolatable(layout: BackendHomeLayout) -> None:
     Gate 1 exists because gate 2 alone is defeated by emptiness: a layout that
     declares nothing passes it trivially.
     """
+    assert_layout_is_declared_completely(layout)
     if layout.unsupported_reason is not None:
         raise UnsupportedBackendLayoutError(
             f"backend {layout.backend!r} (CLI {layout.pinned_cli_version}) is "

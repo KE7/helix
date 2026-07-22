@@ -388,3 +388,71 @@ def test_emptying_the_sets_for_a_SUPPORTED_backend_is_not_silently_fine() -> Non
     )
     assert stripped.unsupported_reason is None
     assert_layout_is_isolatable(stripped)  # does not raise -- documented above
+
+
+def test_a_layout_that_classifies_nothing_is_rejected_outright() -> None:
+    """F-9: the empty-set trap fixed at the CHECK's shape, not one entry's data.
+
+    Correcting opencode fixed the INSTANCE. A sixth backend added with empty
+    sets would still have been certified isolatable exactly as opencode was,
+    because a layout classifying nothing passes every derived check trivially.
+
+    Catches: adding a backend without measuring its auth directory.
+    """
+    empty = BackendHomeLayout(
+        backend="codex",
+        auth_dir="/home/node/.x",
+        volume_subpath=".x",
+        credential_file="auth.json",
+    )
+    with pytest.raises(UnsupportedBackendLayoutError) as exc:
+        assert_layout_is_isolatable(empty)
+    assert "classifies NO per-run state" in str(exc.value)
+
+
+def test_deliberate_measured_empty_is_accepted() -> None:
+    """Non-vacuity: emptiness is allowed when a human ASSERTS it was measured.
+
+    Without this the check would be a blanket ban rather than a demand for an
+    explicit statement, and a genuinely stateless backend could never ship.
+    """
+    import dataclasses
+
+    empty = dataclasses.replace(
+        BackendHomeLayout(
+            backend="codex",
+            auth_dir="/home/node/.x",
+            volume_subpath=".x",
+            credential_file="auth.json",
+        ),
+        measured_empty=True,
+    )
+    assert_layout_is_isolatable(empty)  # does not raise
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_every_shipped_layout_classifies_something(backend: str) -> None:
+    """Every shipped entry must be a measurement, not a placeholder."""
+    layout = BACKEND_LAYOUTS[backend]
+    assert (
+        layout.ephemeral_subdirs or layout.ephemeral_files or layout.measured_empty
+    ), backend
+
+
+def test_codex_sqlite_family_includes_the_shm_and_wal_siblings() -> None:
+    """F-6: the declared family must match the measured one.
+
+    ``ls`` of the real volume shows -shm and -wal beside every SQLite database;
+    memories and goals WALs are live agent-memory transaction data. Omitting
+    them made the module's "every path falls into exactly one class" claim
+    false against the artifact, and would have made the drift detector
+    false-positive on six real files once wired.
+
+    Catches: trimming the family back to the base .sqlite names.
+    """
+    layout = BACKEND_LAYOUTS["codex"]
+    for stem in ("state_5", "logs_2", "memories_1", "goals_1"):
+        for suffix in ("", "-shm", "-wal"):
+            name = f"{stem}.sqlite{suffix}"
+            assert name in layout.ephemeral_files, name
+            assert layout.ephemeral_files[name] == "CODEX_SQLITE_HOME"

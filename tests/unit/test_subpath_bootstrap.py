@@ -118,3 +118,101 @@ def test_missing_subpath_message_explains_the_daemon_error_it_replaces() -> None
     )
     assert "helix sandbox login claude" in message
     assert "cannot access path" in message, "must name the error it pre-empts"
+
+
+# ---------------------------------------------------------------------------
+# The production path must CALL these, not merely be able to
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_calls_the_capability_check_before_touching_the_volume() -> None:
+    """Tested-but-uncalled is indistinguishable from working.
+
+    This is the CODEX_SQLITE_HOME defect class: a correct, well-tested helper
+    that the production artifact never invokes. The tests above prove the
+    function behaves; this proves preflight actually uses it, and does so
+    BEFORE any volume operation -- an operator must learn their daemon is too
+    old before a proposal is created or budget charged.
+
+    Catches: deleting the call while every test in this module still passes.
+    """
+    import subprocess
+
+    from helix.authpreflight import preflight_auth, reset_preflight_cache
+    from helix.config import (
+        AgentConfig,
+        EvaluatorConfig,
+        HelixConfig,
+        SandboxConfig,
+    )
+
+    calls: list[list[str]] = []
+
+    def recording_runner(args, **_kw):
+        calls.append(list(args))
+        # Report a daemon BELOW the floor: the capability check must reject it.
+        if args[:2] == ["docker", "version"]:
+            return subprocess.CompletedProcess(args, 0, stdout="24.0.9|1.43\n")
+        return subprocess.CompletedProcess(args, 0, stdout="")
+
+    config = HelixConfig(
+        objective="o",
+        evaluator=EvaluatorConfig(command="true", score_parser="helix_result"),
+        agent=AgentConfig(backend="claude"),
+        sandbox=SandboxConfig(enabled=True, image="i:latest", auth="volume"),
+    )
+
+    reset_preflight_cache()
+    try:
+        with pytest.raises(DockerCapabilityError):
+            preflight_auth(config, runner=recording_runner)
+    finally:
+        reset_preflight_cache()
+
+    assert calls, "preflight made no Docker call at all"
+    assert calls[0][:2] == ["docker", "version"], (
+        f"capability probe must come FIRST; got {calls[0]}"
+    )
+    # and nothing touched the auth volume before the refusal
+    assert not any("helix-auth" in " ".join(call) for call in calls), calls
+
+
+def test_preflight_capability_check_passes_on_a_supported_daemon() -> None:
+    """Non-vacuity control: the wiring is not an unconditional refusal.
+
+    Without this, deleting the version parsing and always raising would look
+    identical to a correct implementation in the test above.
+    """
+    import subprocess
+
+    from helix.authpreflight import preflight_auth, reset_preflight_cache
+    from helix.config import (
+        AgentConfig,
+        EvaluatorConfig,
+        HelixConfig,
+        SandboxConfig,
+    )
+
+    def runner(args, **_kw):
+        if args[:2] == ["docker", "version"]:
+            return subprocess.CompletedProcess(args, 0, stdout="29.6.1|1.55\n")
+        # volume does not exist -> preflight fails LATER, for a different and
+        # correct reason, proving it got past the capability gate
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+    config = HelixConfig(
+        objective="o",
+        evaluator=EvaluatorConfig(command="true", score_parser="helix_result"),
+        agent=AgentConfig(backend="claude"),
+        sandbox=SandboxConfig(enabled=True, image="i:latest", auth="volume"),
+    )
+
+    reset_preflight_cache()
+    try:
+        with pytest.raises(Exception) as exc:
+            preflight_auth(config, runner=runner)
+        assert not isinstance(exc.value, DockerCapabilityError), (
+            "a supported daemon must pass the capability gate"
+        )
+    finally:
+        reset_preflight_cache()

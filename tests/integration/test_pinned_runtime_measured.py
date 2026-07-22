@@ -120,3 +120,18 @@ def test_declared_auth_dir_exists_or_is_absent_for_a_reason(backend: str) -> Non
     assert BACKEND_LAYOUTS[backend].auth_dir.startswith(home + "/"), (
         f"{backend}: auth_dir is not under the image's home {home!r}"
     )
+
+
+# F-7 NOTE -- why the bound is NOT asserted against the live volume here.
+#
+# The session-wide safety guard makes ``helix-auth-*`` an ABSOLUTE denial with
+# no override, including for docker_integration tests. A test that reads the
+# real auth volume is therefore forbidden by design, and correctly so.
+#
+# So ``stable_files`` is bounded against a RECORDED measurement instead: see
+# ``measured_entries`` in helix/backend_layout.py, which carries the ``ls -A``
+# output and its provenance. The bound is asserted in
+# tests/unit/test_backend_layout_registry.py. Re-verifying that recording
+# requires an operator running the documented command out of band -- the test
+# suite structurally cannot, and pretending otherwise would be a worse answer
+# than stating the limit.
