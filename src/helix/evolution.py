@@ -87,7 +87,7 @@ from helix.proposals import (
 )
 from helix.authpreflight import env_mode_disclosure, preflight_auth
 from helix.envpolicy import sidecar_passthrough_names
-from helix.sandbox import start_evaluator_sidecar
+from helix.sandbox import production_docker_runner, start_evaluator_sidecar
 from helix.state import (
     BudgetState,
     ProposalBatchRecord,
@@ -1670,7 +1670,7 @@ def run_evolution(
             # Non-suppressible, and deliberately not reassuring.
             print(env_mode_disclosure(config))
         else:
-            preflight_auth(config)
+            preflight_auth(config, runner=production_docker_runner())
 
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:

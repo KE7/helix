@@ -61,7 +61,6 @@ from helix.sandbox import (
     AuthVolumeManifest,
     DockerRunner,
     _docker_args,
-    _run_docker,
     docker_volume_exists,
     read_auth_manifest,
     resolve_sandbox_image,
@@ -243,10 +242,21 @@ def _classify_probe_failure(stdout: str, stderr: str) -> tuple[str, str]:
 def preflight_auth(
     config: HelixConfig,
     *,
-    runner: DockerRunner | None = None,
+    runner: DockerRunner,
     probe: bool = True,
 ) -> PreflightResult:
     """Verify the backend auth volume once, before any mutation is dispatched.
+
+    ``runner`` is a REQUIRED dependency with no default.  That is deliberate
+    and is a safety control, not an ergonomic choice: this function performs a
+    real authenticated operation against the real shared auth volume at
+    ``:rw``, and a successful refresh ROTATES the stored token.  With a
+    defaulted runner, any caller that merely constructs a config — including a
+    unit test — silently acquires the ability to do that.  Requiring the
+    dependency means a non-production caller cannot reach Docker by omission;
+    it has to pass something, and what it passes is visible at the call site.
+
+    Production callers use :func:`helix.sandbox.production_docker_runner`.
 
     Raises :class:`SandboxAuthPreflightError` on missing / empty /
     wrong-backend / expired / real-auth-failing volumes, with a redacted,
@@ -271,7 +281,7 @@ def preflight_auth(
     if cached is not None:
         return cached
 
-    run = runner or _run_docker
+    run = runner
     image = resolve_sandbox_image(sandbox, backend)
 
     with _VolumeLock(volume):

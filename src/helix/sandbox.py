@@ -1224,9 +1224,19 @@ class AuthVolumeManifest:
         )
 
 
-def docker_volume_exists(
-    volume: str, *, runner: DockerRunner | None = None
-) -> bool:
+def production_docker_runner() -> DockerRunner:
+    """Return the real Docker entry point.
+
+    Exists so that production call sites name their Docker dependency
+    explicitly.  Helpers that touch the auth volume take a REQUIRED runner —
+    a defaulted one lets a non-production caller reach Docker by omission,
+    which is how a real authenticated probe against the shared credential
+    volume became reachable from the unit test suite.
+    """
+    return _run_docker
+
+
+def docker_volume_exists(volume: str, *, runner: DockerRunner) -> bool:
     """Return True iff the named Docker volume already exists.
 
     Uses ``docker volume inspect`` and **never** ``docker run -v``.  This is
@@ -1236,7 +1246,7 @@ def docker_volume_exists(
     provisioning it.  Any existence check routed through a container start is
     not an existence check.
     """
-    run = runner or _run_docker
+    run = runner
     result = run(["docker", "volume", "inspect", volume], check=False)
     return result.returncode == 0
 
@@ -1344,7 +1354,7 @@ def read_auth_manifest(
     agent_backend: str,
     *,
     image: str,
-    runner: DockerRunner | None = None,
+    runner: DockerRunner,
 ) -> AuthVolumeManifest | None:
     """Read the HELIX provenance stamp from an existing auth volume.
 
@@ -1358,7 +1368,7 @@ def read_auth_manifest(
     :func:`preflight_auth`.)  Callers must establish existence with
     :func:`docker_volume_exists` first, since mounting creates.
     """
-    run = runner or _run_docker
+    run = runner
     volume = sandbox_auth_volume_name(agent_backend)
     result = run(
         [
@@ -1403,7 +1413,7 @@ def probe_backend_cli_version(
     agent_backend: str,
     *,
     image: str,
-    runner: DockerRunner | None = None,
+    runner: DockerRunner,
 ) -> str:
     """Return the backend CLI version string reported by ``image``.
 
@@ -1414,7 +1424,7 @@ def probe_backend_cli_version(
     command = BACKEND_VERSION_COMMANDS.get(agent_backend)
     if command is None:
         return ""
-    run = runner or _run_docker
+    run = runner
     result = run(
         [
             "docker",

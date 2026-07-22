@@ -22,6 +22,7 @@ from helix.sandbox import (
     auth_manifest_write_args,
     docker_volume_exists,
     probe_backend_cli_version,
+    production_docker_runner,
     read_auth_manifest,
     resolve_auth_runtime_image,
     run_sandbox_auth_command,
@@ -439,7 +440,7 @@ def _resolve_auth_runtime(backend: str, image: str | None) -> str:
     volume = sandbox_auth_volume_name(backend)
     exists: bool | None
     try:
-        exists = docker_volume_exists(volume)
+        exists = docker_volume_exists(volume, runner=production_docker_runner())
     except Exception:  # noqa: BLE001 - Docker may be unavailable; stay informative
         exists = None
     try:
@@ -466,7 +467,7 @@ def _stamp_auth_volume(backend: str, image: str) -> None:
     from datetime import datetime, timezone
 
     try:
-        cli_version = probe_backend_cli_version(backend, image=image)
+        cli_version = probe_backend_cli_version(backend, image=image, runner=production_docker_runner())
         manifest = AuthVolumeManifest(
             backend=backend,
             cli_version=cli_version,
@@ -538,7 +539,7 @@ def sandbox_login(
     # R9: login MAY create the volume — that is its purpose — but only
     # intentionally, and it announces it.  Provisioning is never a side effect
     # the operator did not ask for.
-    if not docker_volume_exists(volume):
+    if not docker_volume_exists(volume, runner=production_docker_runner()):
         print_info(f"Creating auth volume [cyan]{volume}[/cyan].")
     if backend == "gemini":
         print_warning(
@@ -602,7 +603,7 @@ def sandbox_status(
         # observing the volume provisioned it, and "the volume exists" became
         # true forever after the first status call.  Existence is now
         # established with ``docker volume inspect`` only.
-        if not docker_volume_exists(volume):
+        if not docker_volume_exists(volume, runner=production_docker_runner()):
             console.print("  not provisioned", style="yellow")
             console.print(f"  Remedy: helix sandbox login {item}")
             exit_code = exit_code or 1
@@ -615,7 +616,7 @@ def sandbox_status(
         # status text were both observed affirming credentials that a real
         # request rejected.  A real authenticated probe requires --verify.
         resolved_image = _resolve_auth_runtime(item, image if backend else None)
-        manifest = read_auth_manifest(item, image=resolved_image)
+        manifest = read_auth_manifest(item, image=resolved_image, runner=production_docker_runner())
         if manifest is None:
             console.print(
                 "  provenance: unknown (no HELIX stamp; written before HELIX "
