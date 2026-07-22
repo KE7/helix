@@ -25,6 +25,7 @@ from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
 from helix.exceptions import (
+    HelixError,
     SandboxAuthImageError,
     SharedHomeMountError,
     VolumeModeUnsupportedError,
@@ -1486,35 +1487,96 @@ _AGENT_PRIVATE_HOME = "/home/node"
 _AGENT_ALLOWED_HOME_BINDS = (CONTAINER_TRANSCRIPT_PARENT,)
 
 
+# Every flag that can introduce a mount. A token beginning with one of these
+# is mount-like and MUST be understood; see ``_mount_destinations``.
+_MOUNT_FLAGS = ("--mount", "--tmpfs", "--volume", "-v")
+
+
+class UnparseableMountError(HelixError):
+    """A mount-like token the parser does not fully understand.
+
+    FAIL CLOSED. The parser previously enumerated the spellings it could
+    handle and IGNORED the rest, which meant every unrecognised spelling was a
+    silent bypass of the HOME guard. Docker accepts at least ten spellings on
+    this host -- spaced and equals-attached forms of ``-v``/``--volume``/
+    ``--mount``/``--tmpfs``, ``-v`` ATTACHED with no separator, and the
+    ``dst=`` / ``destination=`` / ``target=`` aliases -- and a future release
+    may add an eleventh.
+
+    So the question is inverted: anything mount-like that cannot be parsed
+    completely is an ERROR, not something to skip. Enumerating what we can
+    parse fails open by construction; refusing what we cannot fails closed.
+    """
+
+
 def _mount_destinations(args: list[str]) -> list[tuple[str, str]]:
     """Return ``(destination, kind)`` for every mount-bearing token in *args*.
 
-    A FRESH parser, deliberately not the one inherited from the earlier audit.
-    That one took its ``":" in spec`` branch only when ``"=" not in spec``, and
-    every tmpfs spec contains ``uid=1000`` -- so the private HOME tmpfs was
-    INVISIBLE to it, and its "no mount lands on HOME" result was much narrower
-    than it read. This parser handles all four syntaxes explicitly.
+    Raises :class:`UnparseableMountError` on any mount-like token it cannot
+    fully resolve, so an unrecognised spelling can never silently bypass the
+    HOME guard.
+
+    Two blind spots existed here in OPPOSITE directions, both recorded so
+    neither returns:
+
+    - The parser inherited from the earlier audit took its ``":" in spec``
+      branch only when ``"=" not in spec``. Every tmpfs spec contains
+      ``uid=1000``, so the private HOME tmpfs was INVISIBLE to it.
+    - The first rewrite fixed that by matching EXACT TOKENS, and thereby
+      dropped the equals-attached forms the inherited parser HAD handled via
+      ``tok.startswith(...)``. Verified against the audit branch: that
+      regression was mine.
     """
     found: list[tuple[str, str]] = []
-    for index, token in enumerate(args[:-1]):
-        spec = args[index + 1]
-        if token == "--tmpfs":
-            # ``/dst`` or ``/dst:opt=val,...``
+
+    def resolve(flag: str, spec: str) -> None:
+        if flag == "--tmpfs":
             found.append((spec.split(":", 1)[0], "tmpfs"))
-        elif token in {"-v", "--volume"}:
-            # ``src:dst[:mode]`` -- destination is the SECOND colon field, and
-            # a Windows-style drive letter is not a concern on these hosts.
+            return
+        if flag in {"-v", "--volume"}:
             parts = spec.split(":")
-            if len(parts) >= 2:
-                found.append((parts[1], "bind"))
-        elif token == "--mount":
-            fields = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
-            destination = (
-                fields.get("dst") or fields.get("destination") or fields.get("target")
+            if len(parts) < 2:
+                raise UnparseableMountError(
+                    f"cannot resolve a destination from {flag} {spec!r}"
+                )
+            found.append((parts[1], "bind"))
+            return
+        # --mount: comma-separated key=value, destination under any of three
+        # accepted aliases.
+        fields = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
+        destination = (
+            fields.get("dst") or fields.get("destination") or fields.get("target")
+        )
+        if not destination:
+            raise UnparseableMountError(
+                f"--mount spec names no dst=/destination=/target=: {spec!r}"
             )
-            if destination:
-                kind = "tmpfs" if fields.get("type") == "tmpfs" else "bind"
-                found.append((destination, kind))
+        found.append(
+            (destination, "tmpfs" if fields.get("type") == "tmpfs" else "bind")
+        )
+
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in {"-v", "--volume", "--mount", "--tmpfs"}:
+            if index + 1 >= len(args):
+                raise UnparseableMountError(f"{token} has no value")
+            resolve(token, args[index + 1])
+            index += 2
+            continue
+        if token.startswith(_MOUNT_FLAGS):
+            # equals-attached (``--volume=...``) or, for ``-v`` only, the value
+            # attached with no separator at all (``-v/path:/dst:ro``).
+            for flag in _MOUNT_FLAGS:
+                if token.startswith(flag + "="):
+                    resolve(flag, token[len(flag) + 1 :])
+                    break
+                if flag == "-v" and token.startswith("-v") and len(token) > 2:
+                    resolve("-v", token[2:])
+                    break
+            else:  # pragma: no cover - defensive
+                raise UnparseableMountError(f"unrecognised mount token: {token!r}")
+        index += 1
     return found
 
 

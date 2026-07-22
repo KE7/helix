@@ -478,6 +478,48 @@ that qualifier would overstate what was measured.
 
 ---
 
+---
+
+## 8d. WIRING TABLE — every control, its production call, and its wiring assertion
+
+**This table is a required artifact of the change, not documentation.**
+
+Four separate P1 findings in this branch were the *same* defect: a correct,
+well-tested function whose **production call** was unasserted. A library test
+cannot detect non-wiring, by construction — so each was found only by mutation,
+four times, at four different transition moments (wiring something new, or
+closing a different finding). The table exists so the next person inherits the
+checklist rather than rediscovering the lesson.
+
+**The rule:** every control needs a test that fails when its *call* is deleted,
+not only when its *body* is broken. Two constructions in this branch are the
+templates; do not invent a third:
+
+- `test_preflight_calls_the_capability_check_before_touching_the_volume` — a
+  recording runner asserting the call happens, and in the right order.
+- `test_env_mode_no_volume_paths.py` — an **exploding** runner (zero calls
+  cannot be distinguished from the *right* calls by inspecting a recording
+  mock), plus a non-vacuity control proving the runner is genuinely wired in.
+
+| Control | Production call site | Wiring assertion |
+|---|---|---|
+| `_assert_env_is_granted` | `sandbox.py:1613` | `test_T19_provenance_assertion_blocks_unregistered_callers` |
+| `assert_layout_is_isolatable` | `sandbox.py:1721` | argv-builder tests assert the raise propagates out of `_docker_args` |
+| `_assert_no_shared_home_mount` | `sandbox.py:1814` | `test_docker_args_actually_invokes_the_guard` **(F-20 — added after mutation showed the whole guard was deletable green)** |
+| `assert_volume_subpath_supported` | `authpreflight.py:312` | `test_preflight_calls_the_capability_check_before_touching_the_volume` |
+| `preflight_auth` | `evolution.py:1673` | **HELD INCIDENTALLY ONLY** — `test_docker_guard.py::test_run_evolution_unit_path_cannot_reach_docker`, whose stated purpose is something else. Needs a purpose-built assertion. |
+| `ensure_transcript_host_dir` | `sandbox.py:1877` | **MISSING (F-12/W2)** |
+| `capture_claude_transcript` | `sandbox.py:1911` | **MISSING (F-12/W1)** |
+| transcript raise propagation | `sandbox.py:1911` | **MISSING (F-12/W3)** — `TranscriptCaptureError` can be swallowed one frame up with a green suite, so F-1 is closed at the library boundary and open at the run path |
+| `env_mode_disclosure` emission | `evolution.py:1671` | **MISSING (F-17)** — content asserted, emission not |
+| subpath bootstrap call | `cli.py:510` | **MISSING (F-18/B1)** — result now bound and checked, but the call itself is unasserted |
+| `detect_drift` / `assert_no_drift` | **NO CALL SITE (F-5)** | n/a — retire or wire; an uncalled module that reads as a shipped control *is* the defect |
+
+Filling the remaining cells is required before the branch is final. An empty
+third column is not a documentation gap — it is an unprotected control.
+
+---
+
 ## 9. Remaining proof obligations before the mount rewrite lands
 
 For **each** pinned backend, both halves are required. A proof that shows only

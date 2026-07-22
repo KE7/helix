@@ -142,10 +142,14 @@ def test_parser_sees_tmpfs_specs() -> None:
     assert found["/workspace"] == "bind"
 
 
-def test_parser_handles_all_four_syntaxes() -> None:
-    """``-v``, ``--volume``, ``--mount`` and ``--tmpfs`` must all be parsed.
+def test_parser_handles_space_separated_forms() -> None:
+    """``-v``, ``--volume``, ``--mount`` and ``--tmpfs``, space-separated.
 
-    A syntax the parser does not understand is a syntax the guard cannot check.
+    NAME CORRECTED. This was called ``..._all_four_syntaxes``, which ASSERTED
+    COMPLETENESS while enumerating only the space-separated spellings -- so a
+    reviewer checking exhaustiveness found a green test saying yes, while the
+    equals-attached forms were unparsed and unguarded. Completeness is now
+    claimed only by the pair of tests, not by this one's name.
     """
     argv = [
         "-v",
@@ -160,3 +164,195 @@ def test_parser_handles_all_four_syntaxes() -> None:
     found = dict(_mount_destinations(argv))
     assert set(found) == {"/dst-v", "/dst-volume", "/dst-mount", "/dst-tmpfs"}
     assert found["/dst-tmpfs"] == "tmpfs"
+
+
+@pytest.mark.parametrize(
+    "rogue",
+    [
+        "--volume=/tmp/helix-shared-home:/home/node:rw",
+        "--mount=type=volume,src=helix-shared,dst=/home/node",
+        "--tmpfs=/home/node",
+    ],
+)
+def test_equals_attached_forms_are_parsed_and_guarded(rogue: str) -> None:
+    """Docker honours ``--flag=value``; a parser blind to it cannot guard it.
+
+    F-19: the first version of this parser matched EXACT TOKENS only, so
+    ``--volume=...:/home/node:rw`` and ``--mount=...,dst=/home/node`` were
+    skipped entirely and the full suite stayed green -- both in ENV MODE, the
+    demo path.
+
+    Recorded because the regression was mine and it went the opposite way to
+    the one it fixed: the INHERITED parser DID handle these, via
+    ``tok.startswith(("--mount=", "--tmpfs=", "--volume="))``. Verified against
+    the audit branch. The rewrite closed a tmpfs blindness and opened an
+    equals-form blindness the old parser did not have.
+    """
+    with pytest.raises(SharedHomeMountError):
+        _assert_no_shared_home_mount([*_ok_argv(), rogue])
+
+
+def test_equals_attached_parsing_is_not_merely_rejecting_everything() -> None:
+    """Non-vacuity for the test above.
+
+    A parser that raised on any token containing ``=`` would pass the rogue
+    cases for the wrong reason -- and every legitimate tmpfs spec contains
+    ``uid=1000``.
+    """
+    benign = [*_ok_argv(), "--tmpfs=/home/node/.cache/inner:rw,uid=1000,gid=1000"]
+    _assert_no_shared_home_mount(benign)
+    found = dict(_mount_destinations(["--volume=/a:/dst-eq:rw"]))
+    assert found == {"/dst-eq": "bind"}
+
+
+# ---------------------------------------------------------------------------
+# F-20: the guard's CALL must be asserted, not just its behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_docker_args_actually_invokes_the_guard() -> None:
+    """Deleting the call from ``_docker_args`` must RED.
+
+    Every test above calls ``_assert_no_shared_home_mount`` DIRECTLY, so all of
+    them -- including S1 and S2 -- go green again the moment the production
+    call is removed. The guard's own regression tests sit DOWNSTREAM of the
+    thing that is unprotected, so EA's bar fails for the guard itself: the
+    dangerous edit and the loud breakage were not the same edit.
+
+    This drives the real argv builder and requires the error to PROPAGATE OUT
+    OF ``_docker_args``. It is the same shape as
+    ``test_preflight_calls_the_capability_check_before_touching_the_volume``.
+    """
+    from pathlib import Path
+
+    from helix.config import SandboxConfig
+    from helix.envpolicy import EnvGrant
+    from helix.sandbox import _docker_args  # noqa: PLC2701 - argv builder under test
+    import helix.sandbox as sandbox_mod
+
+    grants = [
+        EnvGrant(
+            name="ANTHROPIC_API_KEY",
+            value="SYNTHETIC-NOT-REAL",
+            origin="auth_env_allow",
+            scopes=frozenset({"agent"}),
+        )
+    ]
+    config = SandboxConfig(
+        enabled=True,
+        image="i:latest",
+        network="none",
+        auth="env",
+        auth_env_allow=["ANTHROPIC_API_KEY"],
+    )
+
+    def build() -> list[str]:
+        return _docker_args(
+            ["sh", "-c", "true"],
+            {"ANTHROPIC_API_KEY": "SYNTHETIC-NOT-REAL"},
+            Path("/tmp/ws-cand"),
+            config,
+            "agent",
+            "i:latest",
+            "claude",
+            grants=grants,
+        )
+
+    # Non-vacuity: the unmodified builder produces a VALID argv.
+    assert build(), "baseline argv build failed for an unrelated reason"
+
+    # Inject a rogue whole-HOME bind into the emitted argv, exactly as a future
+    # edit adding a mount would, and require the guard to catch it at the end
+    # of _docker_args rather than in a direct call.
+    original = sandbox_mod.private_home_tmpfs_arg
+
+    def rogue() -> list[str]:
+        return [*original(), "-v", "/tmp/helix-shared-home:/home/node:rw"]
+
+    sandbox_mod.private_home_tmpfs_arg = rogue  # type: ignore[assignment]
+    try:
+        with pytest.raises(SharedHomeMountError):
+            build()
+    finally:
+        sandbox_mod.private_home_tmpfs_arg = original  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# F-19: the full spelling matrix, each POSITIVELY VERIFIED as accepted by Docker
+# ---------------------------------------------------------------------------
+#
+# All ten were probed against the real daemon (bind-mounting a temp dir and
+# checking the destination existed inside the container). This corpus is the
+# floor, NOT the source of correctness -- the parser FAILS CLOSED on anything
+# mount-like it cannot fully resolve, which is what survives Docker adding an
+# eleventh spelling.
+_ROGUE_SPELLINGS = [
+    "-v",
+    "/tmp/shared:/home/node:rw",  # spaced short
+    "-v/tmp/shared:/home/node:rw",  # ATTACHED, no sep
+    "--volume",
+    "/tmp/shared:/home/node:rw",  # spaced long
+    "--volume=/tmp/shared:/home/node:rw",  # equals
+    "--mount",
+    "type=volume,src=s,dst=/home/node",  # spaced, dst=
+    "--mount=type=volume,src=s,dst=/home/node",  # equals, dst=
+    "--mount",
+    "type=volume,src=s,destination=/home/node",  # destination=
+    "--mount",
+    "type=volume,src=s,target=/home/node",  # target=
+]
+
+
+@pytest.mark.parametrize(
+    "rogue",
+    [
+        ["-v", "/tmp/shared:/home/node:rw"],
+        ["-v/tmp/shared:/home/node:rw"],
+        ["--volume", "/tmp/shared:/home/node:rw"],
+        ["--volume=/tmp/shared:/home/node:rw"],
+        ["--mount", "type=volume,src=s,dst=/home/node"],
+        ["--mount=type=volume,src=s,dst=/home/node"],
+        ["--mount", "type=volume,src=s,destination=/home/node"],
+        ["--mount", "type=volume,src=s,target=/home/node"],
+    ],
+    ids=lambda r: r[0][:14],
+)
+def test_every_verified_docker_spelling_is_guarded(rogue: list[str]) -> None:
+    """Each spelling was confirmed ACCEPTED by Docker, so each must be guarded.
+
+    Catches: a parser that handles the spellings it was shown and silently
+    ignores the rest -- which is how ``--volume=`` and ``--mount=`` bypassed
+    the guard entirely while the suite stayed green, in ENV MODE.
+    """
+    with pytest.raises(SharedHomeMountError):
+        _assert_no_shared_home_mount([*_ok_argv(), *rogue])
+
+
+def test_unparseable_mount_like_token_fails_closed() -> None:
+    """The design rule, not the corpus: refuse what you cannot parse.
+
+    Enumerating parseable spellings fails OPEN by construction -- every
+    unrecognised form is a silent bypass. Refusing unresolvable mount-like
+    tokens fails CLOSED, which is the only version that survives a future
+    Docker release adding a spelling nobody here anticipated.
+
+    Catches: reverting to skip-what-you-do-not-understand.
+    """
+    from helix.sandbox import UnparseableMountError  # noqa: PLC2701
+
+    with pytest.raises(UnparseableMountError):
+        _mount_destinations(["--mount", "type=volume,src=s,no-destination-key=x"])
+    with pytest.raises(UnparseableMountError):
+        _mount_destinations(["--volume", "no-colon-so-no-destination"])
+    with pytest.raises(UnparseableMountError):
+        _mount_destinations(["--tmpfs"])  # flag with no value
+
+
+def test_fail_closed_does_not_reject_legitimate_argv() -> None:
+    """Non-vacuity: fail-closed must not mean fail-always.
+
+    Without this, making ``_mount_destinations`` raise unconditionally would
+    satisfy every test above.
+    """
+    assert _mount_destinations(_ok_argv())
+    _assert_no_shared_home_mount(_ok_argv())
