@@ -117,7 +117,19 @@ def test_mutation_sandbox_exposes_only_agent_and_public_contract(
     )
     mounts = [args[index + 1] for index, item in enumerate(args[:-1]) if item == "-v"]
     assert any(mount.endswith(":/workspace:rw") for mount in mounts)
-    assert "helix-auth-claude:/home/node:rw" in mounts
+    # This lane runs sandbox.auth = "env", so NO persistent auth volume is
+    # mounted -- previously this asserted "helix-auth-claude:/home/node:rw".
+    # A whole-HOME mount, at ANY mode, would re-expose every prior run's
+    # transcripts and sessions to this candidate.
+    assert not any("helix-auth-" in mount for mount in mounts), mounts
+    # Non-vacuity, replacing the auth mount as the "this is a real launch"
+    # marker: env mode must still provision a writable private HOME and a
+    # candidate-keyed transcript bind.
+    tmpfs = [args[i + 1] for i, item in enumerate(args[:-1]) if item == "--tmpfs"]
+    assert any(
+        spec.startswith("/home/node:") and "uid=1000" in spec for spec in tmpfs
+    ), tmpfs
+    assert any(mount.endswith("/home/node/.claude/projects:rw") for mount in mounts)
     assert all("docker.sock" not in mount for mount in mounts)
     assert all("swebench-live-capstone-2743-private" not in mount for mount in mounts)
     assert args[args.index("--cpus") + 1] == "2.0"
@@ -402,7 +414,9 @@ def test_inspection_rejects_nonterminal_task_or_batch(tmp_path: Path) -> None:
     state = _current_state()
     state["proposal_batches"][0]["phase"] = "applying"
     _write_state(tmp_path, state)
-    with pytest.raises(inspect_run.InspectionError, match="phase must equal 'complete'"):
+    with pytest.raises(
+        inspect_run.InspectionError, match="phase must equal 'complete'"
+    ):
         inspect_run.summarize(tmp_path)
 
 
@@ -447,7 +461,9 @@ def test_inspection_rejects_unaccounted_or_mismatched_budget(tmp_path: Path) -> 
     state = _current_state()
     state["proposal_batches"][0]["tasks"][1]["budget_charge"]["evaluations"] = 0
     _write_state(tmp_path, state)
-    with pytest.raises(inspect_run.InspectionError, match="does not equal budget delta"):
+    with pytest.raises(
+        inspect_run.InspectionError, match="does not equal budget delta"
+    ):
         inspect_run.summarize(tmp_path)
 
     state = _current_state()
@@ -502,9 +518,7 @@ def test_cleanup_removes_digest_tag_and_exact_image_id(
                     [
                         {
                             "Name": cleanup.PRIVATE_VOLUME,
-                            "Labels": {
-                                "com.helix.demo": "swebench-live-capstone-2743"
-                            },
+                            "Labels": {"com.helix.demo": "swebench-live-capstone-2743"},
                         }
                     ]
                 ),
@@ -513,7 +527,9 @@ def test_cleanup_removes_digest_tag_and_exact_image_id(
             subprocess.CompletedProcess(["docker"], 1, "", "missing"),
         ]
     )
-    monkeypatch.setattr(cleanup.subprocess, "run", lambda *_args, **_kwargs: next(volume_inspections))
+    monkeypatch.setattr(
+        cleanup.subprocess, "run", lambda *_args, **_kwargs: next(volume_inspections)
+    )
     report = cleanup.cleanup(remove_image=True)
     assert report["image_id_before"] == baseline_id
     assert report["image_id_after"] is None
@@ -607,8 +623,14 @@ def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
 
     shallow = tmp_path / "shallow"
     _git(
-        "clone", "--quiet", "--depth", "1", "--no-tags",
-        f"file://{testbed}", str(shallow), cwd=tmp_path,
+        "clone",
+        "--quiet",
+        "--depth",
+        "1",
+        "--no-tags",
+        f"file://{testbed}",
+        str(shallow),
+        cwd=tmp_path,
     )
     assert _git("rev-parse", "HEAD", cwd=shallow) == base
     assert _git("log", "--all", "--oneline", "--not", "HEAD", cwd=shallow) == ""
@@ -699,19 +721,31 @@ def test_agent_container_argv_carries_no_credential_when_host_env_is_clean(
 
     canary = "sk-ant-canary-value-must-not-reach-the-container"
 
-    # This lane needs NO config edit under 0.3.0: it has no passthrough_env,
-    # no sidecar, and auth defaults to "volume".
-    assert config.sandbox.resolved_auth() == "volume"
+    # UPDATED: this lane now selects sandbox.auth = "env" explicitly. It
+    # previously omitted `auth`, which resolves to volume mode SILENTLY -- and
+    # volume mode cannot support the per-candidate independence this lane's
+    # results are read as.
+    #
+    # The assertion below therefore INVERTS for the allowlisted name: under env
+    # mode the credential is deliberately injected, and that is the disclosed
+    # tradeoff. What must still hold is that ONLY the allowlisted name appears.
+    assert config.sandbox.resolved_auth() == "env"
+    assert config.sandbox.auth_env_allow == ["ANTHROPIC_API_KEY"]
 
-    # Clean host: no credential may appear in the launched container's argv.
+    # Clean host: nothing to inject, so no credential appears.
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     argv = agent_argv()
     assert not any(part.startswith("ANTHROPIC_API_KEY=") for part in argv)
     assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in argv)
     assert not any(canary in part for part in argv)
-    # Non-vacuity: the argv must be a real launch, not an empty list.
-    assert "helix-auth-claude:/home/node:rw" in argv
+    # Non-vacuity: the argv must be a real launch, not an empty list. The auth
+    # mount used to serve as this marker; env mode has none, so the private
+    # per-run HOME serves instead.
+    assert not any("helix-auth-" in part for part in argv), argv
+    assert any(
+        part.startswith("/home/node:") and "uid=1000" in part for part in argv
+    ), argv
     assert config.sandbox.image in argv
 
     # DIRTY HOST — the inversion. This is the assertion that used to require
@@ -722,11 +756,20 @@ def test_agent_container_argv_carries_no_credential_when_host_env_is_clean(
     monkeypatch.setenv("ANTHROPIC_API_KEY", canary)
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", canary + "-auth")
     dirty = agent_argv()
-    assert not any(part.startswith("ANTHROPIC_API_KEY=") for part in dirty)
-    assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in dirty)
-    assert not any(canary in part for part in dirty), (
-        "no credential value may reach the mutation agent's argv under "
-        'sandbox.auth = "volume"'
+    # ANTHROPIC_API_KEY IS allowlisted, so under env mode it is injected on
+    # purpose -- that is the disclosed tradeoff (the named host credential is
+    # present inside the agent container).
+    assert any(part == f"ANTHROPIC_API_KEY={canary}" for part in dirty), dirty
+    # ANTHROPIC_AUTH_TOKEN is NOT allowlisted and must NOT appear. It is the
+    # more dangerous of the two -- it overrides the OAuth path and suppresses
+    # refresh -- so an allowlist implemented as "any backend auth var" rather
+    # than "exactly the configured names" fails here.
+    assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in dirty), dirty
+    assert not any(f"{canary}-auth" in part for part in dirty), (
+        "only EXPLICITLY allowlisted credential names may reach the mutation "
+        'agent argv under sandbox.auth = "env"'
     )
-    # The volume — not an env var — is what authenticates the agent.
-    assert "helix-auth-claude:/home/node:rw" in dirty
+    # The allowlisted env var — not a volume — is what authenticates the agent
+    # in this mode, and NO persistent store is mounted, so there is no
+    # cross-run channel for a later candidate to read.
+    assert not any("helix-auth-" in part for part in dirty), dirty
