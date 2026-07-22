@@ -123,10 +123,19 @@ def test_lane_adds_no_core_source_changes_over_release_tip() -> None:
         check=True,
     ).stdout.split()
     assert changed, "expected the lane to add demo files"
-    for path in changed:
-        assert path.startswith(
-            ("examples/livebench_math/", "tests/examples/test_livebench_math.py")
-        ), f"lane unexpectedly modifies {path}"
+
+    # The load-bearing property is that no CORE source file changed: a core
+    # edit would mean a release commit was re-applied rather than inherited.
+    #
+    # Deliberately assert on src/ rather than allow-listing this lane's own
+    # paths. Once sibling demo lanes are merged into the release branch their
+    # files legitimately appear in this diff, so a lane-path allow-list fails
+    # on the integrated branch while proving nothing extra on the lane branch.
+    core_changes = [path for path in changed if path.startswith("src/")]
+    assert not core_changes, f"lane unexpectedly modifies core source: {core_changes}"
+
+    lane_files = [p for p in changed if p.startswith("examples/livebench_math/")]
+    assert lane_files, "expected the lane to add its own demo files"
 
 
 def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
