@@ -54,7 +54,7 @@ token refresh at all**. If an auth volume exists for that backend, an env-mode
 run consumes the credential path without maintaining it, and **the volume's
 stored token will go stale**.
 
-**Env mode mounts NO auth volume at all.** An earlier version of this document
+**In env mode the AGENT container mounts NO auth volume at all.** An earlier version of this document
 said it mounted the volume `:ro`, reasoning that a run which cannot refresh has
 no need of a writable mount. That reasoning addressed the wrong risk and the
 code now explicitly repudiates it: a read-only whole-HOME mount still exposes
@@ -100,8 +100,9 @@ Naming the same variable for both the agent and a credentialed sidecar is a
 ### Scope limit
 
 "No credential on the container argv" is **not** "no credential in the
-container". `/home/node` is mounted from the auth volume and the workspace
-mount carries whatever is in the candidate repo.
+container". In env mode the agent's `/home/node` is a private per-run tmpfs and
+no auth volume is mounted there, but the workspace mount still carries whatever
+is in the candidate repo.
 
 ## The preflight
 
@@ -130,8 +131,9 @@ not help.
 
 ### Preflight side effects, and what protects you
 
-The preflight starts a real container with the auth volume mounted **`:rw`**,
-and that has real consequences you should know about:
+The volume-mode preflight (not an agent container) starts a real container
+with the auth volume mounted **`:rw`**, and that has real consequences you
+should know about:
 
 - **It writes non-credential state into the auth volume.** The backend CLI
   creates its own files on startup — session state, caches, log directories,

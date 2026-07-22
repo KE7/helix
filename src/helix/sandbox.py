@@ -31,11 +31,9 @@ from helix.exceptions import (
     VolumeModeUnsupportedError,
 )
 from helix.transcripts import capture_claude_transcript
-from helix.backend_layout import assert_layout_is_isolatable, layout_for
+from helix.backend_layout import layout_for
 from helix.sandbox_home import (
     CONTAINER_TRANSCRIPT_PARENT,
-    NODE_GID,
-    NODE_UID,
     ensure_transcript_host_dir,
     private_home_tmpfs_arg,
     transcript_bind_arg,
@@ -1819,65 +1817,6 @@ def _docker_args(
                 "inside the agent container, and OAuth refresh is suppressed.\n\n"
                 "  `helix sandbox login` and `status` are unaffected."
             )
-
-            # --- RETIRED BELOW; unreachable. Retained only until the layout
-            # --- registry is removed, so the diff shows what was withdrawn.
-            # VOLUME MODE: private per-run HOME, with ONLY the backend's auth
-            # directory coming from the persistent store.
-            #
-            # The whole-HOME mount this replaces made the shared volume BE the
-            # container HOME, so every candidate saw every prior candidate's
-            # transcripts, sessions and caches.
-            #
-            # Fail closed first: a backend whose per-run state cannot be
-            # relocated off the shared store must not run here at all, rather
-            # than run and be reported as isolated.
-            layout = layout_for(agent_backend)
-            assert_layout_is_isolatable(layout)
-
-            args.extend(private_home_tmpfs_arg())
-            # Class 1: the auth directory only, via volume-subpath. Writable --
-            # OAuth rotation renames a temp file over the credential inside its
-            # own directory, so this cannot be :ro and cannot be a per-file
-            # bind (EBUSY on rename-over and unlink).
-            args.extend(
-                [
-                    "--mount",
-                    f"type=volume,src={sandbox_auth_volume_name(agent_backend)},"
-                    f"dst={layout.auth_dir},"
-                    f"volume-subpath={layout.volume_subpath}",
-                ]
-            )
-            # Class 2: per-run overlays on the directories inside the auth dir
-            # that carry per-run state. Transcripts get the candidate-keyed
-            # host bind instead, so capture keeps working.
-            for subdir in layout.ephemeral_subdirs:
-                target = f"{layout.auth_dir}/{subdir}"
-                if target == CONTAINER_TRANSCRIPT_PARENT:
-                    continue
-                args.extend(
-                    [
-                        "--tmpfs",
-                        f"{target}:rw,uid={NODE_UID},gid={NODE_GID},mode=0700",
-                    ]
-                )
-            # Class 3: regular files inside the auth dir that carry per-run
-            # state. NO mount can isolate these -- an overlay works on
-            # directories only, and a per-file bind is EBUSY on rename-over --
-            # so they are relocated wholesale by the backend's own env knob.
-            #
-            # Each redirect target also gets a tmpfs below, which guarantees the
-            # directory EXISTS (a missing target can silently send the files
-            # back to the shared directory) and makes it per-run.
-            class3_env = dict(layout.env_redirects)
-            for target in sorted(set(class3_env.values())):
-                args.extend(
-                    [
-                        "--tmpfs",
-                        f"{target}:rw,uid={NODE_UID},gid={NODE_GID},mode=0700",
-                    ]
-                )
-            args.extend(transcript_bind_arg(transcript_host_dir(workspace)))
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])

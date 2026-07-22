@@ -185,16 +185,24 @@ def test_F18_nonzero_bootstrap_is_not_silent(mocker) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mount_validation_is_the_last_statement_before_return() -> None:
+def test_no_argv_mutation_occurs_after_the_mount_validation() -> None:
     """Validate-then-append is the same hole as declare-then-not-apply.
 
-    "No argv mutation occurs after validation" previously held by INSPECTION.
-    That distinction -- checking the declaration instead of the artifact -- is
-    the subject of this entire audit, so it is now enforced structurally: the
-    guard call must be the LAST statement before ``return args``.
+    MEASURES THE PROPERTY DIRECTLY, by source position, rather than a
+    positional proxy. The previous version asserted the guard was "the last
+    statement before ``return args``" over ``func.body`` -- TOP-LEVEL
+    statements only. The guard call is nested inside ``if scope == "agent":``,
+    so what it actually located was the enclosing ``if``, not the call:
 
-    Catches: appending to ``args`` after the guard has run, which would let a
-    mount be added to the final argv without ever being validated.
+        append inside that ``if`` block, after the guard   -> NOT CAUGHT
+        append one indent out, after the ``if``            -> caught
+
+    It ran, it could fail, and it measured a node ADJACENT to the property --
+    the same sub-class as the W2 near-miss, arrived at while actively hunting
+    that class.
+
+    This walks every ``args`` mutation in ``_docker_args`` and requires none to
+    follow the guard call in source order, at any nesting depth.
     """
     import helix.sandbox as sandbox_mod
 
@@ -204,16 +212,46 @@ def test_mount_validation_is_the_last_statement_before_return() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "_docker_args"
     )
-    body = func.body
-    assert isinstance(body[-1], ast.Return), "_docker_args must end with a return"
 
-    guard_index = max(
-        index
-        for index, stmt in enumerate(body)
-        if "_assert_no_shared_home_mount" in ast.dump(stmt)
-    )
-    assert guard_index == len(body) - 2, (
-        "the mount validation must be the LAST statement before `return args`; "
-        f"found {len(body) - 2 - guard_index} statement(s) after it, which "
-        "could mutate the argv post-validation"
+    guard_lines = [
+        node.lineno
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_assert_no_shared_home_mount"
+    ]
+    assert guard_lines, "the mount validation call is missing from _docker_args"
+    guard_line = max(guard_lines)
+
+    mutations: list[int] = []
+    for node in ast.walk(func):
+        # args.extend(...) / args.append(...)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "args"
+            and node.func.attr in {"extend", "append", "insert"}
+        ):
+            mutations.append(node.lineno)
+        # args += ... / args[...] = ...
+        if isinstance(node, ast.AugAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == "args":
+                mutations.append(node.lineno)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "args"
+                ):
+                    mutations.append(node.lineno)
+
+    assert mutations, "found no argv mutations at all; the walk is broken"
+    late = [line for line in mutations if line > guard_line]
+    assert not late, (
+        f"argv is mutated at line(s) {late} AFTER the mount validation at line "
+        f"{guard_line}. A mount added there reaches the final argv unvalidated, "
+        f"at any nesting depth."
     )

@@ -370,36 +370,25 @@ Options for volume mode, none of which restore the guarantee:
 
 Approved: (1) + (2) for volume mode, and (3) for all demo lanes.
 
-### The drift detector, and what it cannot do
+### The drift detector — DESIGNED, IMPLEMENTED, THEN DELETED
 
-Implemented in `helix/auth_drift.py`. It compares directory **entry names**
-(never contents, so it works on files it cannot read and cannot leak anything
-into a diagnostic) against the set the registry classifies, and **fails loudly**
-on anything else. It **never cleans**: the shared volume holds root-owned
-incident evidence, and deletion is prohibited by *policy*, not by permissions —
-a `--user node` process can in fact unlink those files.
+A detection backstop was built and is now **removed from the tree**.
 
-Two limitations, in order of severity:
+It was never wired to a run path, and once volume mode was retired for agent
+execution there was no live path for it to guard. Its module docstring still
+opened by describing itself as a shipped control for `auth = "volume"` — a
+mode that no longer exists — which is the "declared but never wired" defect in
+its purest form. Shipping it with a caveat would have preserved exactly the
+false assurance this work exists to remove, so it was deleted.
 
-1. **WRITE-READ-DELETE defeats it completely — this is the sharper one.**
-   Candidate A writes, candidate B reads, candidate B deletes. At the end of the
-   run the directory matches the expected set exactly, the detector reports
-   **clean**, and a full cross-candidate channel has carried information leaving
-   no trace. **No end-of-run comparison can ever see this** — not this
-   implementation and not a better one. Closing it would require continuous
-   observation, which is a different mechanism.
+Its limitations are recorded here because they explain why it would not have
+rescued volume mode even if wired:
 
-2. **It races against concurrent candidates.** With
-   `num_parallel_proposals > 1` several agents share the directory at once. A
-   file created and removed between observations is missed, and an unexpected
-   entry cannot be attributed to a particular candidate — a report says
-   *something* wrote it, never *who*.
-
-> **A clean drift report is not evidence of isolation.** It means no unexpected
-> entry *survived to the end of the run*. Both limitations are asserted in the
-> test suite, including a test that deliberately asserts the detector reports
-> clean on a completed write-read-delete channel, so a future reader cannot
-> mistake silence for proof.
+1. **Write-read-delete defeats any end-of-run comparison.** Candidate A writes,
+   B reads, B deletes; the directory then matches expectations exactly. No
+   end-of-run check can see this — not that implementation, not a better one.
+2. **It races concurrent candidates**, and cannot attribute an unexpected entry
+   to a particular one.
 
 ### Pre-existing class-3 files, and what remains in the shared directory
 
@@ -501,19 +490,97 @@ templates; do not invent a third:
   cannot be distinguished from the *right* calls by inspecting a recording
   mock), plus a non-vacuity control proving the runner is genuinely wired in.
 
+### The three defect classes this change kept producing
+
+Named because they are distinct, and because a reviewer who knows only the
+first will not see the other two.
+
+**1. The check cannot fail (vacuity).** Twelve instances. A guard that passes
+because it was given nothing to check, parses nothing, or asserts a string that
+is never reached. The sharpest was `opencode`: a fail-closed check cannot
+distinguish *"declares nothing unrelocatable"* from *"declares nothing"*,
+because an empty set trivially satisfies "no unrelocatable member" — so the
+registry certified as safe the backend whose session database sat beside the
+credential. Every allow/deny registry anywhere has this trap.
+
+**2. The check does not run (unasserted call).** Four instances —
+`capture_claude_transcript`, `ensure_transcript_host_dir`, the transcript raise
+propagation, the disclosure emission — plus two modules with no call site at
+all. A correct, well-tested function whose *production call* nothing asserts.
+**A library test cannot detect non-wiring, by construction**, so each was found
+only by mutation, and each appeared at a moment of transition: wiring something
+new, or closing a different finding. The wiring table below exists so this class
+is *visible* rather than rediscovered.
+
+**3. The check measures a value it constructed (computed expectation).** The
+newest, and the one with no prior name. A test that **computes what it expects
+instead of observing what shipped** is the same declaration-vs-artifact error in
+test form — the check runs, it *can* fail, and it is asserting against a value
+the test invented rather than one the system produced.
+
+The instance: the first version of `test_W2_...` recomputed the transcript bind
+path from `cwd` and **passed while the directory was absent**, because
+production keys the bind off the per-call *temp* workspace. It called the right
+production function with the wrong input, which is subtler than reimplementing
+the logic and is not caught by "don't duplicate production code in tests". The
+correction is to read the path **out of the emitted argv**.
+
+It generalises: *any assertion whose expected value is computed by the test
+rather than extracted from the artifact is suspect.* Note where it was nearly
+written — into the fix for class 2.
+
+**A second instance, worth recording because of who produced it.** The first
+"no argv mutation after validation" test asserted that the guard was the last
+statement in `_docker_args`'s **top-level** body. The guard call is nested
+inside `if scope == "agent":`, so the statement it actually located was the
+enclosing `if` — not the call. An append *inside* that block, after the guard,
+was **not caught**; the same append one indent out **was**. It ran, it could
+fail, and it measured a node *adjacent to* the property.
+
+That instance was designed by one person and implemented by another, both of
+whom had already named this class and were actively hunting it. The remedy is
+to measure the property directly — walk every `args` mutation and require none
+to follow the guard call in source order, at any nesting depth — rather than a
+positional proxy for it.
+
+> **No line numbers, deliberately.** An earlier version of this table cited
+> `file:line` for every control. Every `sandbox.py` row was **wrong in the
+> commit that created them** — off by exactly 40 lines, because the table was
+> written against a pre-commit state of the file and never re-derived. One row
+> pointed a reader at a comment inside the *retired, unreachable* volume-mode
+> block.
+>
+> The table had been predicted to rot "at control number eleven". **It rotted
+> at commit zero**, before any new control existed. A hand-typed table of code
+> locations is a declaration about the artifact, which is what this entire
+> finding list has been about — so the table became an instance of the class it
+> was created to prevent.
+>
+> Locations are now stated as *function names*, which move with the code, and
+> the exact call sites are **located by AST** in
+> `tests/unit/test_wiring_table_is_current.py`, which asserts each control has
+> **exactly one** production call site. Generated, never typed.
+
 | Control | Production call site | Wiring assertion |
 |---|---|---|
-| `_assert_env_is_granted` | `sandbox.py:1613` | `test_T19_provenance_assertion_blocks_unregistered_callers` |
-| `assert_layout_is_isolatable` | `sandbox.py:1721` | argv-builder tests assert the raise propagates out of `_docker_args` |
-| `_assert_no_shared_home_mount` | `sandbox.py:1814` | `test_docker_args_actually_invokes_the_guard` **(F-20 — added after mutation showed the whole guard was deletable green)** |
-| `assert_volume_subpath_supported` | `authpreflight.py:312` | `test_preflight_calls_the_capability_check_before_touching_the_volume` |
-| `preflight_auth` | `evolution.py:1673` | **HELD INCIDENTALLY ONLY** — `test_docker_guard.py::test_run_evolution_unit_path_cannot_reach_docker`, whose stated purpose is something else. Needs a purpose-built assertion. |
-| `ensure_transcript_host_dir` | `sandbox.py:1877` | **MISSING (F-12/W2)** |
-| `capture_claude_transcript` | `sandbox.py:1911` | **MISSING (F-12/W1)** |
-| transcript raise propagation | `sandbox.py:1911` | **MISSING (F-12/W3)** — `TranscriptCaptureError` can be swallowed one frame up with a green suite, so F-1 is closed at the library boundary and open at the run path |
-| `env_mode_disclosure` emission | `evolution.py:1671` | **MISSING (F-17)** — content asserted, emission not |
-| subpath bootstrap call | `cli.py:510` | **MISSING (F-18/B1)** — result now bound and checked, but the call itself is unasserted |
-| `detect_drift` / `assert_no_drift` | **NO CALL SITE (F-5)** | n/a — retire or wire; an uncalled module that reads as a shipped control *is* the defect |
+| `_assert_env_is_granted` | `sandbox.py` | `test_T19_provenance_assertion_blocks_unregistered_callers` |
+| ~~`assert_layout_is_isolatable`~~ | **NO CALL SITE — retired** | Its only caller was the volume-mode branch, deleted with the retirement. Kept in `backend_layout.py` as the evidence record for why each backend was refused; it is no longer a live control. |
+| `_assert_no_shared_home_mount` | `sandbox.py` — `_docker_args`, final statement | `test_docker_args_actually_invokes_the_guard` **(F-20 — added after mutation showed the whole guard was deletable green)** |
+| `_assert_agent_argv_uses_only_known_flags` | `sandbox.py` — `_docker_args`, before the mount parser | `test_docker_args_actually_invokes_the_argv_allowlist` **(F-21 — this row was itself added only because the derivation test flagged it missing)** |
+| `private_home_tmpfs_arg` | `sandbox.py` (`_docker_args`, agent scope) | `test_env_mode_home_is_private_and_uid_correct` — asserts the emitted argv, incl. `uid=1000` |
+| `transcript_bind_arg` | `sandbox.py` (`_docker_args`, agent scope) | `test_env_mode_binds_a_candidate_keyed_transcript_dir` |
+| `transcript_host_dir` | `sandbox.py` (`_docker_args` + `run_sandboxed_commands`) | `test_distinct_candidates_get_distinct_transcript_roots`; ordering by `test_W2_run_path_creates_the_bind_dir_before_any_container` |
+| `layout_for` | `sandbox.py` — mount guard; `cli.py` — `_ensure_auth_subpath` | `test_docker_args_actually_invokes_the_guard`; `test_F18_login_invokes_the_subpath_bootstrap` |
+| `auth_subpath_bootstrap_command` | `cli.py` — `_ensure_auth_subpath` (`_ensure_auth_subpath`) | `test_F18_login_invokes_the_subpath_bootstrap` |
+| `assert_volume_subpath_supported` | `authpreflight.py` — `preflight_auth` | `test_preflight_calls_the_capability_check_before_touching_the_volume` |
+| `missing_subpath_error` | `authpreflight.py` — `preflight_auth` (stage 0b) | `test_missing_subpath_message_explains_the_daemon_error_it_replaces`; reached via the same preflight call asserted above |
+| `preflight_auth` | `evolution.py` — `run_evolution` | **HELD INCIDENTALLY ONLY** — `test_docker_guard.py::test_run_evolution_unit_path_cannot_reach_docker`, whose stated purpose is something else. Needs a purpose-built assertion. |
+| `ensure_transcript_host_dir` | `sandbox.py` | **MISSING (F-12/W2)** |
+| `capture_claude_transcript` | `sandbox.py` | **MISSING (F-12/W1)** |
+| transcript raise propagation | `sandbox.py` | **MISSING (F-12/W3)** — `TranscriptCaptureError` can be swallowed one frame up with a green suite, so F-1 is closed at the library boundary and open at the run path |
+| `env_mode_disclosure` emission | `evolution.py` — `run_evolution` | **MISSING (F-17)** — content asserted, emission not |
+| subpath bootstrap call | `cli.py` — `_ensure_auth_subpath` | **MISSING (F-18/B1)** — result now bound and checked, but the call itself is unasserted |
+| ~~`detect_drift` / `assert_no_drift`~~ | **DELETED** | n/a — retired with volume mode. It had zero call sites and described itself as a shipped control for a mode that no longer exists; an uncalled module that reads as a shipped control *is* the defect, so it was removed rather than left with a caveat. |
 
 Filling the remaining cells is required before the branch is final. An empty
 third column is not a documentation gap — it is an unprotected control.

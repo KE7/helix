@@ -13,6 +13,7 @@ unconditional error.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -64,13 +65,56 @@ def test_guide_does_not_carry_the_repudiated_ro_reasoning() -> None:
     assert "mounts NO auth volume" in text or "mounts no auth volume" in text
 
 
-def test_guide_scopes_the_mount_claim_to_agent_containers() -> None:
-    """Catches: the FALSE absolute "HELIX never mounts the auth volume".
+def test_every_mount_claim_in_the_guide_carries_a_scope_qualifier() -> None:
+    """POSITIVE property, replacing a single-literal denylist.
 
-    ``helix sandbox login`` genuinely mounts it at HOME -- that is its purpose
-    -- so an unscoped claim would be untrue, and would be F-14 repeating itself
-    in the opposite direction.
+    The previous version asserted that one exact string --
+    ``HELIX never mounts the auth volume`` -- was absent. That is a
+    single-literal denylist standing in for a WORDING CLASS, in a document
+    nobody writes from a template: the exact literal was caught, while the
+    paraphrase "The auth volume is never mounted over HOME by HELIX." sailed
+    through. F-14 recurring is exactly what this guard exists to prevent, and
+    it was one paraphrase away.
+
+    So the property is asserted directly: any sentence that talks about
+    MOUNTING the AUTH VOLUME must also name WHO -- agent, login, status, or
+    logout. Unscoped, such a sentence is false in one direction or the other,
+    because agent containers no longer mount it and login still does.
     """
     text = GUIDE.read_text()
-    assert "HELIX never mounts the auth volume" not in text
-    assert "AGENT container" in text or "agent container" in text
+    # crude sentence split is fine here: we want over- rather than
+    # under-inclusion, and a fragment that mentions both terms still must scope
+    sentences = re.split(r"(?<=[.!?])\s+|\n\n", text)
+    qualifiers = ("agent", "login", "status", "logout", "`helix sandbox")
+
+    offenders = [
+        sentence.strip()
+        for sentence in sentences
+        if "mount" in sentence.lower()
+        and "auth volume" in sentence.lower()
+        and not any(word in sentence.lower() for word in qualifiers)
+    ]
+    assert not offenders, (
+        "unscoped claims about mounting the auth volume -- each must say WHO, "
+        "since agent containers no longer mount it and `helix sandbox login` "
+        f"still does: {offenders}"
+    )
+
+
+def test_the_scope_guard_actually_fires_on_an_unscoped_paraphrase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity, in the direction the old guard failed.
+
+    The old literal check passed on a paraphrase. This proves the replacement
+    catches one, rather than merely catching the original literal.
+    """
+    import tests.unit.test_operator_docs_truthfulness as module
+
+    fake = tmp_path / "sandbox-auth.md"
+    fake.write_text(
+        GUIDE.read_text() + "\n\nThe auth volume is never mounted over HOME by HELIX.\n"
+    )
+    monkeypatch.setattr(module, "GUIDE", fake)
+    with pytest.raises(AssertionError):
+        module.test_every_mount_claim_in_the_guide_carries_a_scope_qualifier()
