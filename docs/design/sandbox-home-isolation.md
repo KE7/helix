@@ -365,11 +365,41 @@ Options for volume mode, none of which restore the guarantee:
    never describe it as candidate independence.
 2. **Add a detection control** — after each run, compare the auth directory
    against the pinned expected entry set and fail loudly on anything
-   unexpected. This converts a silent channel into a noisy one; it is
-   detection, not prevention, and it is racy against concurrent candidates.
+   unexpected.
 3. **Use env mode** for any lane that must assert independence.
 
-Recommendation: (1) + (2) for volume mode, and (3) for the demo lanes.
+Approved: (1) + (2) for volume mode, and (3) for all demo lanes.
+
+### The drift detector, and what it cannot do
+
+Implemented in `helix/auth_drift.py`. It compares directory **entry names**
+(never contents, so it works on files it cannot read and cannot leak anything
+into a diagnostic) against the set the registry classifies, and **fails loudly**
+on anything else. It **never cleans**: the shared volume holds root-owned
+incident evidence, and deletion is prohibited by *policy*, not by permissions —
+a `--user node` process can in fact unlink those files.
+
+Two limitations, in order of severity:
+
+1. **WRITE-READ-DELETE defeats it completely — this is the sharper one.**
+   Candidate A writes, candidate B reads, candidate B deletes. At the end of the
+   run the directory matches the expected set exactly, the detector reports
+   **clean**, and a full cross-candidate channel has carried information leaving
+   no trace. **No end-of-run comparison can ever see this** — not this
+   implementation and not a better one. Closing it would require continuous
+   observation, which is a different mechanism.
+
+2. **It races against concurrent candidates.** With
+   `num_parallel_proposals > 1` several agents share the directory at once. A
+   file created and removed between observations is missed, and an unexpected
+   entry cannot be attributed to a particular candidate — a report says
+   *something* wrote it, never *who*.
+
+> **A clean drift report is not evidence of isolation.** It means no unexpected
+> entry *survived to the end of the run*. Both limitations are asserted in the
+> test suite, including a test that deliberately asserts the detector reports
+> clean on a completed write-read-delete channel, so a future reader cannot
+> mistake silence for proof.
 
 ---
 
