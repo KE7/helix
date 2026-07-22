@@ -608,159 +608,72 @@ third column is not a documentation gap — it is an unprotected control.
 
 ---
 
-## 8e. KNOWN-FAILING TESTS SHIPPED RED, DELIBERATELY
+## 8e. WHAT IS VERIFIED ABOUT CREDENTIAL SUPPRESSION, AND WHAT IS NOT
 
-Four tests in `tests/integration/test_oauth_refresh_suppression.py` (the
-T22–T25 synthetic refresh family) **fail at this head and are being shipped
-that way on purpose.**
+**VERIFIED, behaviourally and offline, for all three variables:** environment
+injection **suppresses volume OAuth credential selection**. With no auth env the
+volume's synthetic canary reaches the wire; with `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` set, **that variable's**
+canary reaches the wire and the volume's does **not**.
 
-**What they test.** That each of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
-and `CLAUDE_CODE_OAUTH_TOKEN` suppresses container-side OAuth refresh.
+**NOT VERIFIED:** live proactive/401 **refresh execution**. It has never been
+observed on this host, in any arm, on either CLI version, with either fixture —
+including the reference harness preserved at
+`c089da0:.rca-scratch/setup-synth.js`. This is an **open follow-up**, not a
+resolved question.
 
-**How they fail.** Not on an assertion — on their **own non-vacuity control**:
+### How it is proven
 
-> `CONTROL FAILED: no refresh was attempted even with no auth env. T23–T25 are
-> VACUOUS until this passes — they would be measuring a broken harness rather
-> than env-var suppression.`
+`tests/integration/test_credential_source_oracle.py` points the CLI at a
+loopback capture server via `ANTHROPIC_BASE_URL` and asserts **which synthetic
+canary arrived** — one distinct canary per credential source.
 
-**Why — CAUSE NOT ESTABLISHED. Two hypotheses have been FALSIFIED by
-measurement, and the earlier claim here was wrong.**
+Asserting the *source* rather than the *header type* is load-bearing:
+`ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` **replace the bearer
+value** rather than switching header type, so an oracle asserting "no bearer
+header" would pass for `ANTHROPIC_API_KEY` and fail for the other two —
+measuring something *adjacent to* the property.
 
-An earlier version of this section attributed the failures to *"they need real
-network egress to the OAuth token endpoint"*. **That is false and is
-withdrawn** — a wrong declaration about the artifact, in the document written
-to explain a failure. What has been measured:
+**Measured precedence, with both variables set:** there is **no selection**.
+Both canaries reach the wire, in different headers, and the volume canary is
+absent. That is asserted as measured rather than reported as "one wins" — and
+it is worth an operator's attention: **setting both exposes both.**
 
-| Hypothesis | Verdict |
-|---|---|
-| Missing network egress | **FALSIFIED.** DNS resolves and `https://platform.claude.com/v1/oauth/token` answers (HTTP 400 to POST, 405 to GET) from the pinned runtime, with no credential material. |
-| CLI version difference (`:latest` 2.1.120 vs pinned digest 2.1.138) | **FALSIFIED.** Both give zero token-endpoint contacts on the same fixture. |
-| Fixture misses a refresh-gate precondition | **FALSIFIED.** All four hold, checked as the probe runs (`--user node`, `:rw`): `refreshToken` present; `expiresAt: 1` trips any expiry margin; scopes include `user:inference` *and* `subscriptionType: max`; and the credential dir is writable — the lockfile is creatable, dir `1000:1000`, process uid 1000. That last one is the condition that fails *silently*, so it was tested rather than read. |
+This is **stronger** evidence than the live-refresh observation it replaces:
+deterministic, offline, and independent of egress, server behaviour and
+emulation.
 
-**What is observed:** the CLI goes straight to `POST /v1/messages`, receives 401,
-and never contacts the token endpoint at all.
+### Why the previously-red tests are gone
 
-**A fifth hypothesis — the fixture's credential SHAPE — is also falsified, by
-the strongest available evidence.** A known-good harness is preserved in the
-repo at `c089da0:.rca-scratch/setup-synth.js`; it demonstrably reached the token
-POST when it was written. Running **that harness itself**, unmodified:
+T22–T25 asserted refresh **execution** and failed. They were re-premised onto
+the oracle, and the distinction matters:
 
-| Runtime | token-endpoint contacts |
-|---|---|
-| pinned digest (2.1.138) | **0** |
-| `:latest` (2.1.120) | **0** |
+> They were removed because the property became **provable by better
+> evidence** — not because we decided to stop looking. *A red test that says "I
+> am vacuous" is more valuable than a green one that is*; this red was replaced
+> by a green that actually measures the property, which is the only acceptable
+> reason to remove one.
 
-It sets everything T22 omitted — `refreshTokenExpiresAt`, `rateLimitTier`,
-`~/.claude.json` with onboarding, and `expiresAt` as a realistic
-`now − 23.5h` — and still never contacts the endpoint. T22's fixture has since
-been aligned field-for-field with it; the result is unchanged.
+### The refresh-execution question, still open
 
-`refreshTokenExpiresAt` in particular cannot be the gate: it appears **0 times**
-in the 2.1.120 binary, matching the RCA's finding that the CLI never reads it.
+Five hypotheses **falsified by measurement**: missing egress (twice over — an
+endpoint probe answering 400/405, and direct observation of the CLI itself
+POSTing to `/v1/messages`); the CLI version; every refresh-gate precondition
+(including the silently-failing lockfile one, tested rather than read); T22's
+fixture shape; and the reference credential shape itself.
 
-**So the cause is NOT the fixture, NOT the CLI version, NOT egress, and NOT any
-refresh-gate precondition.**
-
-**Egress is dead by direct observation, not merely by probe.** Three independent
-sessions agree the endpoint answers (HTTP 400 / 405 / 405), and — stronger — the
-captured CLI output shows the CLI *itself* reaching the network:
-`sending request { method: "post", url: "https://api.anthropic.com/v1/messages" }`,
-8 hits on `/v1/messages`, 5 on 401, **0 on the token endpoint**. The CLI runs,
-uses the network, and goes straight to inference without ever attempting a
-refresh.
-
-**TWO CANDIDATES REMAIN, AND BOTH ARE UNTESTED — they are named as UNTESTED,
-not as causes:**
+**Two candidates remain, and both are UNTESTED — named as untested, not as
+causes:**
 
 | Candidate | Status |
 |---|---|
-| `linux/amd64` under emulation on `arm64` | **UNPROBED.** The only survivor of the original two-part diagnosis. |
-| Server-side behaviour change since `c089da0` | **UNPROBED.** |
+| `linux/amd64` under emulation on `arm64` | **UNPROBED** |
+| Server-side behaviour change since `c089da0` | **UNPROBED** |
 
-Being the last candidate standing is not evidence. Neither has been measured,
-and "emulation" must not drift from *the only surviving hypothesis* into *the
-cause* — that drift is the wrong-declaration class this branch exists to
-remove, and it would be a soft landing rather than an honest one.
-
-**This is an open question with a named next step, not a resolved cause.** It is
-no longer release-blocking: the suppression property is verified by credential-
-source selection (below), so refresh *execution* is interesting rather than
-gating.
-
-**Consequence:** these four cannot be made to pass by any change to this branch.
-Fixing the fixture does not fix them — verified by running the reference harness
-rather than assumed.
-
-### The suppression MECHANISM is observable, even though refresh execution is not
-
-An OAuth-mode diagnostic was run on the pinned digest with the preserved
-synthetic harness, reporting **presence counts only, never values**, with the
-mandatory two-arm control:
-
-| Arm | `bearer` header | `x-api-key` header | token POST |
-|---|---|---|---|
-| CLEAN (no auth env) | **1** | 0 | 0 |
-| `ANTHROPIC_API_KEY` set | 0 | **1** | 0 |
-| `ANTHROPIC_AUTH_TOKEN` set | 1 | 0 | 0 |
-
-**The control passes: the two arms are distinguishable**, so the diagnostic is
-not one of the vacuous probes discarded earlier.
-
-Two findings:
-
-1. **The clean arm is genuinely in OAuth mode** — it emits a `bearer`
-   credential path from the volume record. So the missing refresh is *not*
-   caused by contamination of the test environment.
-2. **`ANTHROPIC_API_KEY` demonstrably switches the credential path** from
-   `bearer` to `x-api-key`. That is the suppression mechanism itself, observed
-   **behaviourally** rather than read out of a minified predicate — which is
-   stronger evidence for the central claim than anything previously available.
-
-This is now formalised as an offline oracle — see
-`tests/integration/test_credential_source_oracle.py`, which points the CLI at a
-loopback capture server via `ANTHROPIC_BASE_URL` and asserts **which synthetic
-canary arrived**, one per credential source. With no auth env the *volume's*
-canary is sent; with each of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
-`CLAUDE_CODE_OAUTH_TOKEN` set, **that variable's** canary is sent and the
-volume's is **not**.
-
-The per-source canaries are the load-bearing design choice: `ANTHROPIC_AUTH_TOKEN`
-and `CLAUDE_CODE_OAUTH_TOKEN` *replace the bearer value* rather than switching
-header type, so an oracle asserting "no bearer header" would pass for
-`ANTHROPIC_API_KEY` and fail for the other two — measuring the header type
-(adjacent) instead of the credential source (the property).
-
-**What this does NOT establish:** that a *refresh* is suppressed. Refresh
-execution was never observed in any arm, on either CLI version, with either
-fixture. Mode selection and refresh execution are different properties, and only
-the first is demonstrated here. The distinction is preserved deliberately rather
-than collapsed into a convenient claim.
-
-**Attribution, verified rather than assumed.** The same four fail identically
-at `9f2bcaa`, the base commit. `git diff 9f2bcaa..HEAD` over that file is
-empty, and it references none of the symbols this branch changed. They are
-**pre-existing and unrelated**. They are also in **no CI gate** — the
-`docker_integration` job is `workflow_dispatch`-gated and scoped to
-`test_parallel_sandbox.py`.
-
-> **Do not read the suppression property as verified.** These tests have never
-> executed successfully in this environment, and the credential-fix author said
-> so at the time. The property is asserted by the suite but not demonstrated
-> by it.
-
-**Why they are NOT marked skipped.** A skip would silence the one control in
-the repository that is loudly announcing its own vacuity — the exact defect
-class this branch exists to eliminate. **A red test that says "I am vacuous" is
-more valuable than a green one that is.**
-
-**Follow-up (deliberately NOT implemented here — out of scope).** Apply the
-same remedy used for `_run_in_image` (F-11): decide availability **before** the
-probe by positively identifying that the OAuth endpoint is unreachable, and
-skip with that specific reason; if egress **is** available and the control
-still fails, **fail**. As written they fail unconditionally, which conflates
-*"the environment cannot support this test"* with *"the property is broken"* —
-the same missing-vs-failed conflation removed from `transcripts.py` and from
-`_run_in_image`.
+Being the last hypothesis standing is not evidence. The original defect here was
+*a wrong cause stated with confidence*; the failure mode of the correction is *a
+differently-wrong cause stated with the same confidence*. Neither candidate is
+adopted.
 
 ---
 

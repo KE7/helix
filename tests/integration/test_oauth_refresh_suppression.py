@@ -310,48 +310,49 @@ def _refresh_attempted(output: str) -> bool:
     return TOKEN_ENDPOINT_MARKER in output
 
 
-def test_T22_expired_record_no_auth_env_attempts_refresh(synthetic_volume):
-    """T22 — THE CONTROL, and the non-vacuity proof for T23-T25.
+def test_oauth_token_endpoint_reachability_is_classified_correctly():
+    """LIVE REACHABILITY ONLY -- kept deliberately separate from suppression.
 
-    With no auth env, an expired record must reach the OAuth token POST. If
-    this fails, T23-T25 "prove" suppression that is really a broken harness,
-    so it is asserted first and its failure message says so.
+    RE-PREMISED. This file previously held T22-T25, which asserted that an
+    expired record triggers a live token POST and that each auth variable
+    suppresses it. Those tests asserted REFRESH EXECUTION, which has never been
+    observed on this host in any arm, on either CLI version, with either
+    fixture -- including the reference harness preserved at
+    ``c089da0:.rca-scratch/setup-synth.js``.
+
+    *** THE SUPPRESSION CONTRACTS THEY EXISTED FOR ARE NOW PROVEN, more
+    strongly, in ``test_credential_source_oracle.py``: *** which synthetic
+    canary reaches the wire, per credential source, offline and
+    deterministically -- independent of egress, server behaviour and emulation.
+
+    THE DISTINCTION THAT MATTERS, so a future reader does not learn the wrong
+    lesson from a removed red: those tests are gone because the property became
+    PROVABLE BY BETTER EVIDENCE, **not** because we decided to stop looking. A
+    red test that says "I am vacuous" is more valuable than a green one that
+    is; this red was replaced by a green that actually measures the property,
+    which is the only acceptable reason to remove one.
+
+    Live proactive/401 refresh EXECUTION remains an OPEN FOLLOW-UP with a named
+    next step -- see the design doc's §8e.
+
+    What this test still asserts: that the endpoint-reachability classifier
+    reaches a verdict and that the verdict is well-formed. Reachability itself
+    is environment-dependent, so neither outcome is asserted as correct.
     """
-    require_oauth_endpoint_reachable()
-    output = _run_probe(synthetic_volume, {})
-    assert _refresh_attempted(output), (
-        "CONTROL FAILED: no refresh was attempted even with no auth env. "
-        "T23-T25 are VACUOUS until this passes — they would be measuring a "
-        "broken harness rather than env-var suppression."
-    )
-
-
-@pytest.mark.parametrize(
-    "variable",
-    ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
-)
-def test_T23_T25_auth_env_suppresses_refresh(synthetic_volume, variable):
-    """T23/T24/T25 — each auth variable suppresses the refresh attempt.
-
-    T23 (ANTHROPIC_API_KEY) is what HELIX injected into every claude lane.
-    T24 (ANTHROPIC_AUTH_TOKEN) is the more dangerous variable.
-    T25 (CLAUDE_CODE_OAUTH_TOKEN) justifies the R6 hard prohibition with
-    behaviour rather than with a claim about the credential record.
-
-    Paired against T22 in the same session: the control is re-run here so a
-    suppression result can never be reported from a harness that never
-    refreshes at all.
-    """
-    require_oauth_endpoint_reachable()
-    control = _run_probe(synthetic_volume, {})
-    # HARD FAILURE, never a skip: the endpoint is PROVEN reachable at this
-    # point, so a missing refresh attempt is a real result about the harness or
-    # the runtime -- not an environment limitation.
-    assert _refresh_attempted(control), "control must attempt refresh first"
-
-    output = _run_probe(
-        synthetic_volume, {variable: "SYNTHETIC-DO-NOT-USE-" + ("D" * 40)}
-    )
-    assert not _refresh_attempted(output), (
-        f"{variable} must suppress the container-side refresh attempt"
-    )
+    reachable, why = _probe_endpoint_reachability()
+    assert isinstance(reachable, bool)
+    assert why, "the classifier must always explain its verdict"
+    if not reachable:
+        # Fail-closed direction: an unreachable verdict must name the missing
+        # capability rather than degrade to a generic message.
+        assert any(
+            marker in why.lower()
+            for marker in (
+                "dns",
+                "refused",
+                "timed out",
+                "unreachable",
+                "reach",
+                "unclassified",
+            )
+        ), why

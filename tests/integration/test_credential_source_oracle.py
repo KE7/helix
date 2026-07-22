@@ -257,3 +257,68 @@ def test_which_source_returns_names_only() -> None:
     assert result == {"volume"}
     assert all(isinstance(name, str) for name in result)
     assert not any(_CANARY[name] in name for name in result)
+
+
+# ---------------------------------------------------------------------------
+# LB3 -- distinctness IS the mechanism
+# ---------------------------------------------------------------------------
+
+
+def test_the_per_source_canaries_are_all_distinct() -> None:
+    """Catches: making the canaries identical, which is LB2 by the back door.
+
+    Source-based assertion only works if the sources are distinguishable. If a
+    future edit made two canaries equal, every "which canary arrived" assertion
+    would silently degrade into "some canary arrived" -- i.e. back to measuring
+    the header type, which is the adjacency defect this oracle exists to avoid.
+    """
+    values = list(_CANARY.values())
+    assert len(set(values)) == len(values), "per-source canaries must be distinct"
+    # and no canary may be a substring of another, or containment matching lies
+    for name, canary in _CANARY.items():
+        others = [v for k, v in _CANARY.items() if k != name]
+        assert not any(canary in other for other in others), name
+
+
+# ---------------------------------------------------------------------------
+# LB8 -- PRECEDENCE, asserted from measurement rather than assumed
+# ---------------------------------------------------------------------------
+
+
+def test_both_variables_set_still_suppresses_the_volume_credential(
+    capture_server, oauth_volume
+):
+    """The BOTH-SET case. Precedence is half the claim, so it gets an arm.
+
+    MEASURED RESULT, and it is NOT "one variable wins": with both
+    ``ANTHROPIC_API_KEY`` and ``ANTHROPIC_AUTH_TOKEN`` set, BOTH canaries reach
+    the wire -- the CLI sends them in DIFFERENT headers (``x-api-key`` and the
+    bearer) rather than selecting between them.
+
+    So this asserts what was observed rather than a tidier story:
+      - the VOLUME credential is still suppressed (the invariant that matters);
+      - and both injected credentials are transmitted.
+
+    That second half is worth an operator's attention: setting both EXPOSES
+    BOTH. It is asserted here so the behaviour cannot change silently, and so
+    nobody later documents a precedence that does not exist.
+    """
+    _run_cli(
+        oauth_volume,
+        capture_server,
+        {
+            "ANTHROPIC_API_KEY": _CANARY["ANTHROPIC_API_KEY"],
+            "ANTHROPIC_AUTH_TOKEN": _CANARY["ANTHROPIC_AUTH_TOKEN"],
+        },
+    )
+    assert _Capture.seen, "no requests captured; this assertion would be vacuous"
+    sources = _which_source(_Capture.seen)
+
+    assert "volume" not in sources, (
+        f"the volume OAuth credential survived with both variables set; "
+        f"sources seen: {sorted(sources)}"
+    )
+    assert sources == {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}, (
+        f"expected BOTH injected credentials on the wire (measured behaviour: "
+        f"the CLI does not select between them); sources seen: {sorted(sources)}"
+    )
