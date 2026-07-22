@@ -24,7 +24,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
-from helix.exceptions import SandboxAuthImageError
+from helix.exceptions import SandboxAuthImageError, SharedHomeMountError
 from helix.transcripts import capture_claude_transcript
 from helix.backend_layout import assert_layout_is_isolatable, layout_for
 from helix.sandbox_home import (
@@ -1474,6 +1474,104 @@ def _assert_env_is_granted(
         )
 
 
+# Allowed mount DESTINATIONS for an agent container, by exact path.
+#
+# ``/home/node`` itself is allowed ONLY as a tmpfs (the private per-run HOME).
+# The transcript bind is the one non-tmpfs mount permitted beneath HOME.
+_AGENT_PRIVATE_HOME = "/home/node"
+_AGENT_ALLOWED_HOME_BINDS = (CONTAINER_TRANSCRIPT_PARENT,)
+
+
+def _mount_destinations(args: list[str]) -> list[tuple[str, str]]:
+    """Return ``(destination, kind)`` for every mount-bearing token in *args*.
+
+    A FRESH parser, deliberately not the one inherited from the earlier audit.
+    That one took its ``":" in spec`` branch only when ``"=" not in spec``, and
+    every tmpfs spec contains ``uid=1000`` -- so the private HOME tmpfs was
+    INVISIBLE to it, and its "no mount lands on HOME" result was much narrower
+    than it read. This parser handles all four syntaxes explicitly.
+    """
+    found: list[tuple[str, str]] = []
+    for index, token in enumerate(args[:-1]):
+        spec = args[index + 1]
+        if token == "--tmpfs":
+            # ``/dst`` or ``/dst:opt=val,...``
+            found.append((spec.split(":", 1)[0], "tmpfs"))
+        elif token in {"-v", "--volume"}:
+            # ``src:dst[:mode]`` -- destination is the SECOND colon field, and
+            # a Windows-style drive letter is not a concern on these hosts.
+            parts = spec.split(":")
+            if len(parts) >= 2:
+                found.append((parts[1], "bind"))
+        elif token == "--mount":
+            fields = dict(item.split("=", 1) for item in spec.split(",") if "=" in item)
+            destination = (
+                fields.get("dst") or fields.get("destination") or fields.get("target")
+            )
+            if destination:
+                kind = "tmpfs" if fields.get("type") == "tmpfs" else "bind"
+                found.append((destination, kind))
+    return found
+
+
+def _assert_no_shared_home_mount(
+    args: list[str], *, allowed_auth_dir: str | None = None
+) -> None:
+    """Reject ANY mount that could make the agent's HOME shared.
+
+    This is the mount-side counterpart of ``_assert_env_is_granted``, and it
+    exists for the same reason that one does: the original defect was created
+    by a NEW MOUNT being added, and every existing guard asked "is the AUTH
+    VOLUME on HOME?" -- a NAME-scoped question. The property is
+    DESTINATION-scoped: *nothing* shared may land on HOME, whatever it is
+    called. A rogue bind or a differently-named volume at ``/home/node``
+    reproduces the original cross-candidate defect exactly while passing every
+    auth-volume assertion.
+
+    Agent scope only. ``helix sandbox login`` legitimately mounts the auth
+    volume at HOME -- that is what the volume is for -- and it builds its argv
+    without going through this function at all.
+    """
+    seen_private_home = 0
+    for destination, kind in _mount_destinations(args):
+        normalised = destination.rstrip("/") or "/"
+        if normalised == _AGENT_PRIVATE_HOME:
+            if kind != "tmpfs":
+                raise SharedHomeMountError(
+                    f"a non-tmpfs mount targets the agent's HOME: {destination!r}.\n"
+                    "  Whatever its source is called, this makes HOME shared "
+                    "across candidates -- the original cross-run defect.\n"
+                    "  Only the private per-run tmpfs may target /home/node."
+                )
+            seen_private_home += 1
+            continue
+        if normalised in {"/", "/home"}:
+            raise SharedHomeMountError(
+                f"a mount targets an ANCESTOR of the agent's HOME: "
+                f"{destination!r}, which shares HOME transitively."
+            )
+        if normalised.startswith(_AGENT_PRIVATE_HOME + "/") and kind != "tmpfs":
+            # The backend's own auth directory is the ONE shared mount volume
+            # mode is allowed, and only at the exact path the registry declares
+            # -- a nested mount anywhere else is the S3 shape.
+            permitted = set(_AGENT_ALLOWED_HOME_BINDS)
+            if allowed_auth_dir:
+                permitted.add(allowed_auth_dir.rstrip("/"))
+            if normalised not in permitted:
+                raise SharedHomeMountError(
+                    f"an undeclared non-tmpfs mount targets a path inside the "
+                    f"agent's HOME: {destination!r}.\n"
+                    "  Only the candidate-keyed transcript bind "
+                    f"({CONTAINER_TRANSCRIPT_PARENT}) is permitted there."
+                )
+    if seen_private_home != 1:
+        raise SharedHomeMountError(
+            f"expected exactly ONE private tmpfs at {_AGENT_PRIVATE_HOME}; "
+            f"found {seen_private_home}. Zero means the agent inherits the "
+            f"image's shared HOME; more than one is ambiguous."
+        )
+
+
 def _docker_args(
     command: list[str],
     env: dict[str, str],
@@ -1619,6 +1717,18 @@ def _docker_args(
 
     args.append(image)
     args.extend(command)
+
+    # Independent RE-CHECK of the assembled argv, mirroring
+    # ``_assert_env_is_granted`` above. Both exist because a later-added call
+    # site is how the original defects were introduced, and a construction-time
+    # convention cannot catch that -- only a check over the FINAL artifact can.
+    if scope == "agent":
+        auth_dir = (
+            layout_for(agent_backend).auth_dir
+            if agent_backend and sandbox.resolved_auth() == "volume"
+            else None
+        )
+        _assert_no_shared_home_mount(args, allowed_auth_dir=auth_dir)
     return args
 
 

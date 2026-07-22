@@ -239,3 +239,16 @@ def format_error_context(
     if suggestion:
         lines.append(f"[HELIX ERROR] Suggestion: {suggestion}")
     return "\n".join(lines)
+
+
+class SharedHomeMountError(HelixError):
+    """An agent container's argv contains a mount that would share HOME.
+
+    Destination-scoped, not name-scoped: the check asks "what lands on
+    /home/node", never "is this the auth volume".  A rogue bind or a
+    differently-named volume reproduces the original cross-candidate defect
+    while passing every auth-volume assertion.
+
+    AGENT scope only.  ``helix sandbox login`` mounts the auth volume at HOME
+    legitimately and does not pass through ``_docker_args``.
+    """
