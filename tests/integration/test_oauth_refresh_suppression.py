@@ -53,6 +53,12 @@ _SYNTHETIC_REFRESH = "sk-ant-ort01-SYNTHETIC-DO-NOT-USE-" + ("E" * 74)
 
 TOKEN_ENDPOINT_MARKER = "/v1/oauth/token"
 
+# Fixed offsets from a captured timestamp rather than a live ``Date.now()``,
+# so the fixture is deterministic.
+_NOW_MS = 1784719800000
+_EXPIRED_AT_MS = _NOW_MS - int(23.5 * 3600 * 1000)
+_REFRESH_EXPIRES_AT_MS = _NOW_MS + 21 * 24 * 3600 * 1000
+
 
 # ---------------------------------------------------------------------------
 # Capability preflight -- distinguish "cannot test here" from "property broken"
@@ -192,10 +198,28 @@ def synthetic_volume():
         "claudeAiOauth": {
             "accessToken": _SYNTHETIC_ACCESS,
             "refreshToken": _SYNTHETIC_REFRESH,
-            # 23.5 hours in the past, in epoch MILLISECONDS, so the CLI's
-            # proactive-on-expiry gate (5-minute margin) is tripped.
-            "expiresAt": 1,
-            "scopes": ["user:inference", "user:profile"],
+            # 23.5 hours in the past, in epoch MILLISECONDS, matching the
+            # reference harness at c089da0:.rca-scratch/setup-synth.js.
+            #
+            # THE PREVIOUS VALUE WAS THE LITERAL ``1`` -- epoch +1ms, i.e.
+            # 1970 -- under a comment claiming "23.5 hours in the past". The
+            # comment described a value the code did not contain: a wrong
+            # declaration sitting directly above the artifact, in the file
+            # whose failure was being explained. Corrected regardless of
+            # causality, which is separately recorded below as NOT the cause.
+            "expiresAt": _EXPIRED_AT_MS,
+            # Set for parity with the reference harness. NOTE: the pinned CLI
+            # never reads this key -- 0 occurrences in the 2.1.120 binary,
+            # matching the RCA's finding -- so it cannot gate anything.
+            "refreshTokenExpiresAt": _REFRESH_EXPIRES_AT_MS,
+            "rateLimitTier": "default_claude_max_20x",
+            "scopes": [
+                "user:file_upload",
+                "user:inference",
+                "user:mcp_servers",
+                "user:profile",
+                "user:sessions:claude_code",
+            ],
             "subscriptionType": "max",
         }
     }

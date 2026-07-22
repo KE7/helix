@@ -640,10 +640,33 @@ to explain a failure. What has been measured:
 **What is observed:** the CLI goes straight to `POST /v1/messages`, receives 401,
 and never contacts the token endpoint at all.
 
-**Remaining candidates, untested:** that the pinned CLI performs no
-*proactive-on-expiry* refresh in headless `-p` mode — in which case T22's
-premise, not its fixture, is wrong — and the `linux/amd64`-under-emulation half
-of the original diagnosis, which no probe has touched.
+**A fifth hypothesis — the fixture's credential SHAPE — is also falsified, by
+the strongest available evidence.** A known-good harness is preserved in the
+repo at `c089da0:.rca-scratch/setup-synth.js`; it demonstrably reached the token
+POST when it was written. Running **that harness itself**, unmodified:
+
+| Runtime | token-endpoint contacts |
+|---|---|
+| pinned digest (2.1.138) | **0** |
+| `:latest` (2.1.120) | **0** |
+
+It sets everything T22 omitted — `refreshTokenExpiresAt`, `rateLimitTier`,
+`~/.claude.json` with onboarding, and `expiresAt` as a realistic
+`now − 23.5h` — and still never contacts the endpoint. T22's fixture has since
+been aligned field-for-field with it; the result is unchanged.
+
+`refreshTokenExpiresAt` in particular cannot be the gate: it appears **0 times**
+in the 2.1.120 binary, matching the RCA's finding that the CLI never reads it.
+
+**So the cause is NOT the fixture, NOT the CLI version, NOT egress, and NOT any
+refresh-gate precondition.** What changed between `c089da0` and now is **not
+established**, and is not guessed at here. Remaining untested candidates: a
+server-side behaviour change, and the `linux/amd64`-under-emulation half of the
+original diagnosis, which no probe has touched.
+
+**Consequence:** these four cannot be made to pass by any change to this branch.
+Fixing the fixture does not fix them — verified by running the reference harness
+rather than assumed.
 
 **Attribution, verified rather than assumed.** The same four fail identically
 at `9f2bcaa`, the base commit. `git diff 9f2bcaa..HEAD` over that file is
