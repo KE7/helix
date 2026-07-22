@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — credential isolation for sandboxed mutation agents
+
+HELIX changes how sandboxed mutation agents authenticate. Previously, a
+sandboxed agent container received both a mounted backend auth volume **and**
+any backend credentials present in the host environment. The environment
+injection happened *after* environment scrubbing, so tests asserting on the
+scrubber reported a clean environment while the credential still reached the
+container. Three separate mechanisms could place a credential in a
+mutation-agent container: a per-backend table in HELIX core, a wildcard
+passthrough of `HELIX_`-prefixed variables, and the `passthrough_env` / `env`
+configuration fields. Only the first was widely understood.
+
+**What changed.** Sandboxed agent authentication is now explicit.
+`sandbox.auth = "volume"` (the default) authenticates solely from the backend
+auth volume and places no credentials in the container. `sandbox.auth = "env"`
+is an explicit opt-in that injects only the variables named in
+`sandbox.auth_env_allow`, and prints a non-suppressible disclosure of the
+variable names and the container's network exposure. **There is no automatic
+fallback between the two modes in either direction.** Non-sandboxed runs are
+unchanged and continue to authenticate from the environment.
+
+Every variable reaching a container now carries a recorded origin and an
+explicit scope authorization. As a result, credentials scoped to a private
+evaluator sidecar can no longer reach a mutation agent through a configuration
+change elsewhere — including a change to the agent backend name, which
+previously altered which credentials were injected with no other visible
+signal.
+
+**Environment credentials suppress token refresh — what is and is not
+established.**
+
+- **Established:** setting `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` turns
+  OAuth mode off in the backend CLI, which prevents **container-side** token
+  refresh — both the proactive-on-expiry path and the 401-triggered path.
+  `CLAUDE_CODE_OAUTH_TOKEN` has the same net effect by a different mechanism.
+- **Established:** with no such variable present, an expired credential record
+  does reach the token-refresh request, headless and without a terminal.
+  Refresh is not interactive-gated.
+- **Not established:** why the previously provisioned shared credential record
+  is rejected by the server. Token rotation or invalidation remains a
+  hypothesis, and other causes — including a separate CLI on the host
+  refreshing the same account — remain live.
+
+Because HELIX injected these variables into every sandboxed agent container,
+container-side refresh could not occur there. **Removing the injection is
+therefore not only hardening: it is what makes volume-based authentication
+self-sustaining inside containers**, since a container that authenticates from
+the volume can now renew it. This does not by itself explain or repair the
+currently-rejected record, and HELIX makes no claim that it does.
+
+Consequently `sandbox.auth = "env"` is documented as a **tradeoff, not an
+equivalent alternative**: it disables OAuth refresh in the container and will
+let a mounted auth volume's token go stale. The mode announces this at
+startup.
+
+**Runtime identity.** `helix sandbox login`, `status` and `logout` previously
+resolved their runner image to a default `:latest` tag rather than the image
+the project pins, and could not consult the project configuration at all — so
+credentials were written by a different CLI build than runs consume. These
+commands now use the configured runtime identity, and refuse with an
+actionable error rather than silently falling back to a default when no image
+can be determined.
+
+**Unsound signals removed.** HELIX no longer treats the presence of a
+credential file, or a backend's own status text, as evidence of working
+authentication. Both were observed reporting success against credentials that
+a real request rejected. Authentication is now verified once per run, before
+any mutation is dispatched, by a real authenticated operation using the exact
+runner image and backend the run will use. Failures abort before dispatch with
+a redacted, actionable message and **no proposal, budget, or run-state side
+effects**, and distinguish a failed token refresh from a failed request after
+a successful refresh, because those have different remedies.
+
+**Volume lifecycle.** `docker run -v name:/path` silently creates a missing
+named volume, so a mount could never fail and an unauthenticated host produced
+a successful-looking container whose failure appeared mid-run. Volume
+existence is now established with a side-effect-free inspection, and `helix
+sandbox status` is idempotent — it no longer creates the volume it is asked to
+report on. Auth volumes now record the backend and CLI version that
+provisioned them, and a mismatch against the configured runner image is
+reported; a missing record reports as **unknown**, which is never treated as
+valid.
+
+**Preflight side effects.** The preflight starts a real container with the
+auth volume mounted read-write. The backend CLI writes non-credential state
+there on startup (session files, caches, logs, a config backup), and a
+successful refresh rotates the stored refresh token — which is the intended
+repair path, and the reason the volume must never be probed through a copy.
+The preflight makes one billable inference call, recorded separately as *auth
+overhead*; it does **not** enter the evaluation budget, so budget-conservation
+checks are unaffected. See `docs/sandbox-auth.md` for the safeguards.
+
+**Silent failure in credential paths.** A backend's token-refresh path can
+fail silently — logging internally, returning a negative result, and surfacing
+no user-visible signal. The preflight performs a real authenticated operation
+against a writable auth volume specifically so such a failure is observed
+before a run begins rather than inferred from a run that degraded.
+
+**A note on tests that defend defects.** Four tests in this codebase were
+found asserting the behaviour they should have prevented: two encoded the
+credential injection as expected output, one required `helix sandbox login` to
+resolve a default image tag, and one asserted `status` starts a container. All
+passed continuously while the properties they appeared to protect were false.
+A test that encodes current behaviour without asserting the intended
+*property* will faithfully defend the defect. The replacement suite asserts on
+the final container argv across all three injection origins together — never
+on the scrubber alone, which is structurally incapable of catching this — and
+each test states the mutation it catches and is demonstrated failing when that
+mutation is reintroduced.
+
+#### Migration
+
+- Configurations with `sandbox.enabled = false` are **unaffected**.
+- Sandboxed configurations that relied on host environment credentials
+  reaching the agent must now declare that explicitly: set
+  `sandbox.auth = "env"` and list the variables in `sandbox.auth_env_allow`.
+- Top-level `passthrough_env` no longer grants agent scope under a sandbox.
+  Use `sandbox.agent_passthrough_env` for non-credential agent variables, and
+  `sandbox.auth_env_allow` for credentials.
+- `CLAUDE_CODE_OAUTH_TOKEN` is rejected in `sandbox.auth_env_allow`: it
+  permanently disables OAuth token refresh, which would trade one problem for
+  another.
+- `HELIX_`-prefixed variables no longer reach a **sandboxed agent** by
+  wildcard. A registry of HELIX's own names still propagates, and
+  `sandbox.agent_passthrough_env` covers the rest. Evaluator and sidecar scope
+  are unchanged.
+- Existing auth volumes have no provenance record and report **unknown** until
+  re-provisioned with `helix sandbox login <backend>`.
+- `helix sandbox status` no longer creates the volume it is asked to report
+  on. Scripts that relied on that must call `helix sandbox login`.
+- `examples/formulacode` requires a config edit (its template is updated): it
+  used top-level `passthrough_env = ["ANTHROPIC_API_KEY"]` and now declares
+  `auth = "env"` with `auth_env_allow`. Other bundled examples need no edit.
+
 ## [0.3.0] - 2026-07-20
 
 ### Added
