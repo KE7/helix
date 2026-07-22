@@ -71,11 +71,7 @@ def write_json(path: Path, payload: object) -> None:
 
 
 def json_lines(args: list[str]) -> list[dict[str, Any]]:
-    return [
-        json.loads(line)
-        for line in run(args).stdout.splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in run(args).stdout.splitlines() if line.strip()]
 
 
 def image_record(reference: str) -> dict[str, Any]:
@@ -169,7 +165,10 @@ def baseline(output: Path) -> dict[str, Any]:
             "console_version": version,
         },
         "credential_lengths": {
-            name: {"present": bool(os.environ.get(name)), "length": len(os.environ.get(name, ""))}
+            name: {
+                "present": bool(os.environ.get(name)),
+                "length": len(os.environ.get(name, "")),
+            }
             for name in SECRET_NAMES
         },
         "resources": resource_snapshot(),
@@ -302,7 +301,11 @@ def live_capture(run_dir: Path, output: Path) -> dict[str, Any]:
             if container not in owned
         ],
     }
-    payload: dict[str, Any] = {"run_dir": str(run_dir), "snapshots": [], "candidates": {}}
+    payload: dict[str, Any] = {
+        "run_dir": str(run_dir),
+        "snapshots": [],
+        "candidates": {},
+    }
     if output.is_file():
         payload = json.loads(output.read_text(encoding="utf-8"))
     payload.setdefault("snapshots", []).append(snapshot)
@@ -406,7 +409,9 @@ def run_helix(
     transcript.parent.mkdir(parents=True, exist_ok=True)
     started_at_ns = time.time_ns()
     with transcript.open("wb") as handle:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
         assert process.stdout is not None
         while chunk := process.stdout.read(65536):
             sys.stdout.buffer.write(chunk)
@@ -438,7 +443,11 @@ def export_run(run_dir: Path, destination: Path) -> dict[str, Any]:
         if source.is_dir():
             shutil.copytree(source, target, symlinks=True)
             copied.append(name)
-    payload = {"run_dir": str(run_dir.resolve()), "destination": str(destination.resolve()), "copied": copied}
+    payload = {
+        "run_dir": str(run_dir.resolve()),
+        "destination": str(destination.resolve()),
+        "copied": copied,
+    }
     write_json(destination / "export.json", payload)
     return payload
 
@@ -512,9 +521,7 @@ def main() -> int:
         elif args.command == "manifest":
             result = manifest(args.run_dir, args.output)
         elif args.command == "run-helix":
-            return run_helix(
-                args.run_dir, args.mode, args.status_file, args.transcript
-            )
+            return run_helix(args.run_dir, args.mode, args.status_file, args.transcript)
         elif args.command == "export":
             result = export_run(args.run_dir, args.destination)
         else:

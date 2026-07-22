@@ -81,10 +81,10 @@ def test_mutation_sandbox_exposes_only_agent_and_public_contract(
     for sensitive in (
         "prepare.py",
         "evaluate.py",
-            "official_runner.py",
-            "pins.py",
-            "evidence.py",
-            "helix.toml",
+        "official_runner.py",
+        "pins.py",
+        "evidence.py",
+        "helix.toml",
         "cleanup.py",
         "SOURCE.md",
     ):
