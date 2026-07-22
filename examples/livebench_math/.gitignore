@@ -1,0 +1,10 @@
+.helix/
+.helix_artifacts/
+helix_batch.json
+.pytest_cache/
+__pycache__/
+*.pyc
+*.log
+.env
+.env.*
+run-evidence/

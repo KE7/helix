@@ -1,0 +1,5 @@
+datasets==3.6.0
+immutabledict==4.2.1
+lark==1.2.2
+python-Levenshtein==0.27.1
+sympy==1.13.3
