@@ -316,6 +316,63 @@ suite red**.
 
 ---
 
+## 8b. The denylist escape — volume mode cannot guarantee independence
+
+`CODEX_SQLITE_HOME` is **proven to work**, against a properly established
+positive control (production flags, git workspace, synthetic API key):
+
+| Configuration | `~/.codex/*.sqlite*` | redirect dir |
+|---|---|---|
+| no knob (positive control) | **4** | — |
+| `CODEX_SQLITE_HOME` set | **0** | **6** |
+
+So codex's headline concern — `memories`/`goals`/`state` SQLite as siblings of
+`auth.json` — is closable, and `memories/` `sessions/` `shell_snapshots/` are
+directories that class-2 overlays handle. After redirection the only class-3
+siblings left are `config.toml` and `installation_id`.
+
+**But testing those revealed the real limit.** With the **full approved
+layout** — subpath auth mount, every class-2 overlay, and the SQLite redirect —
+a candidate wrote an *unenumerated* file into the shared auth directory and the
+next candidate read it verbatim:
+
+```
+candidate A: echo … > ~/.codex/notes-for-next-candidate.txt
+candidate B: cat  …  -> AGENT-INVENTED-CHANNEL
+```
+
+This is not a gap in the path list; it is **structural**. The auth directory
+must be writable, because OAuth rotation requires atomic rename in the
+credential's own directory. The agent runs as `node` and therefore can create
+**any** file there. A denylist can only mask paths that are enumerated in
+advance; a path invented at runtime is not one of them.
+
+**Consequence, stated plainly:**
+
+> Volume mode closes **incidental** cross-run state — the enumerated layout,
+> which is what contaminated the three completed demos. It **cannot** prevent a
+> deliberate or merely curious agent from opening a channel to the next
+> candidate. For a benchmark whose premise is candidate independence, volume
+> mode's isolation claim must be scoped to incidental state and must not be
+> stated as independence.
+
+Env mode has no such hole: there is no shared store, so there is no directory to
+invent a file in. That is why env mode is a first-class mode and not a fallback.
+
+Options for volume mode, none of which restore the guarantee:
+
+1. **Scope the claim** — ship volume mode with the limitation documented, and
+   never describe it as candidate independence.
+2. **Add a detection control** — after each run, compare the auth directory
+   against the pinned expected entry set and fail loudly on anything
+   unexpected. This converts a silent channel into a noisy one; it is
+   detection, not prevention, and it is racy against concurrent candidates.
+3. **Use env mode** for any lane that must assert independence.
+
+Recommendation: (1) + (2) for volume mode, and (3) for the demo lanes.
+
+---
+
 ## 9. Remaining proof obligations before the mount rewrite lands
 
 For **each** pinned backend, both halves are required. A proof that shows only

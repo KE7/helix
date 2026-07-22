@@ -493,11 +493,27 @@ def test_env_mode_transcript_bind_is_candidate_specific():
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Verdicts established during the audit, asserted here as behaviour rather
-# than restated as prose.
+# Verdicts asserted as behaviour rather than restated as prose.
+#
+# UPDATED: swebench_live and livebench_math were "volume" at audit time --
+# because they OMITTED ``auth`` entirely, and omission resolves to volume mode
+# silently.  They now select env mode explicitly.
+#
+# The reason is not stylistic.  Volume mode cannot support a
+# candidate-independence claim: the auth directory must stay writable for OAuth
+# rotation, so an agent can create an unenumerated file that the next candidate
+# reads; and on the pinned claude digest the CLI itself keeps per-run state in
+# that shared HOME (a cleanup sentinel that makes the next candidate skip its
+# cleanup pass, an MCP auth cache, and a policy file whose on-disk hash shapes
+# the next candidate's outbound request).  These three lanes publish
+# per-candidate measurements, so they must run in the only mode that mounts no
+# persistent store.
+#
+# If a lane ever reverts to omitting ``auth``, this matrix fails -- which is
+# the point, since the omission itself is invisible in review.
 LANE_VERDICTS = {
-    "swebench_live": "volume",
-    "livebench_math": "volume",
+    "swebench_live": "env",
+    "livebench_math": "env",
     "formulacode": "env",
 }
 

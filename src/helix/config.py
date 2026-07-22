@@ -659,8 +659,29 @@ class SandboxConfig(BaseModel):
     def resolved_auth(self) -> str | None:
         """Return the effective auth mode, or None when the sandbox is off.
 
-        The default is ``"volume"`` — the safe mode — so every existing
-        sandboxed lane becomes strictly safer without editing anything.
+        Omission resolves to ``"volume"``.
+
+        .. warning::
+
+           An earlier version of this docstring called ``"volume"`` *the safe
+           mode*.  That characterisation is FALSE and was removed rather than
+           softened, because it is exactly the kind of comment that gets
+           trusted later.
+
+           Volume mode is safer than the historical whole-HOME mount for
+           **incidental** cross-run state, and that is all it is.  It CANNOT
+           support a candidate-independence claim: the auth directory must be
+           writable for OAuth rotation, so a mutation agent can create an
+           unenumerated file there that the next candidate reads.  Proven by
+           canary through the completed isolation design.
+
+           Only ``"env"`` can support an independence claim, because it mounts
+           no persistent store at all.
+
+           Because omission resolves here silently, a config that says nothing
+           gets the mode that cannot claim independence.  Callers that intend
+           to assert independence must select ``"env"`` explicitly; see
+           :func:`helix.authpreflight.env_mode_disclosure`.
         """
         if not self.enabled:
             return None
@@ -765,8 +786,8 @@ def _validate_sandbox_auth(config: HelixConfig) -> None:
 
     if mode == "volume" and sandbox.auth_env_allow:
         raise ValueError(
-            "sandbox.auth_env_allow is set but sandbox.auth = \"volume\", so no "
-            "environment credentials will be injected. Set auth = \"env\" or "
+            'sandbox.auth_env_allow is set but sandbox.auth = "volume", so no '
+            'environment credentials will be injected. Set auth = "env" or '
             "remove auth_env_allow."
         )
 
