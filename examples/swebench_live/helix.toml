@@ -13,6 +13,7 @@ protected_files = [
   "prepare.py",
   "cleanup.py",
   "inspect_run.py",
+  "evidence.py",
   "TASK.md",
 ]
 
@@ -75,6 +76,7 @@ omit_from_agent = [
   "cleanup.py",
   "cleanup-proof.json",
   "evaluate.py",
+  "evidence.py",
   "helix.toml",
   "inspect_run.py",
   "official_runner.py",

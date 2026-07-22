@@ -81,9 +81,10 @@ def test_mutation_sandbox_exposes_only_agent_and_public_contract(
     for sensitive in (
         "prepare.py",
         "evaluate.py",
-        "official_runner.py",
-        "pins.py",
-        "helix.toml",
+            "official_runner.py",
+            "pins.py",
+            "evidence.py",
+            "helix.toml",
         "cleanup.py",
         "SOURCE.md",
     ):
@@ -665,6 +666,54 @@ def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
     runner.CANDIDATE_REPO = full
     with pytest.raises(ValueError):
         runner._candidate_repository_provenance()
+
+
+def test_evidence_manifest_is_deterministic_and_non_vacuous(tmp_path: Path) -> None:
+    evidence = _load("swebench_live_evidence_manifest", "evidence.py")
+    helix_dir = tmp_path / ".helix"
+    attempts = helix_dir / "attempts"
+    evaluations = tmp_path / "artifacts" / "evaluations"
+    attempts.mkdir(parents=True)
+    evaluations.mkdir(parents=True)
+    state = {
+        "proposal_batches": [{"phase": "complete", "tasks": []}],
+        "budget": {"evaluations": 1},
+        "frontier": ["seed"],
+        "active_frontier": {"instance": "seed"},
+    }
+    (helix_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (attempts / "one.json").write_text('{"status":"rejected"}\n', encoding="utf-8")
+    (evaluations / "one.json").write_text('{"accuracy":0}\n', encoding="utf-8")
+
+    first = evidence.manifest(tmp_path, tmp_path / "manifest-1.json")
+    second = evidence.manifest(tmp_path, tmp_path / "manifest-2.json")
+    assert first == second
+    assert first["non_vacuous"] is True
+    assert first["substantive_key_count"] >= 13
+    assert first["independent_digest_count"] >= 3
+
+
+def test_evidence_secret_scan_reports_counts_and_lengths_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = _load("swebench_live_evidence_secret_scan", "evidence.py")
+    secret = "test-only-literal-credential"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    scanned = tmp_path / "scanned"
+    scanned.mkdir()
+    (scanned / "one.bin").write_bytes(b"before " + secret.encode() + b" after")
+    output = tmp_path / "scan.json"
+
+    result = evidence.secret_scan([scanned], output)
+    report = next(
+        item
+        for item in result["reports"]
+        if item["credential_name"] == "ANTHROPIC_API_KEY"
+    )
+    assert report["credential_length"] == len(secret)
+    assert report["hit_count"] == 1
+    assert report["files_with_hits"] == 1
+    assert secret not in output.read_text(encoding="utf-8")
 
 
 def test_no_credentialed_sidecar_so_passthrough_env_must_be_empty() -> None:

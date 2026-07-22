@@ -131,6 +131,11 @@ df -h .
 
 ## Inspect, resume, and expected artifacts
 
+`evidence.py` provides deterministic manifests, literal-value secret scans,
+live run-owned container/worktree/transcript attribution, and a console-script
+launcher that writes the actual HELIX exit status to a dedicated JSON file.
+It never cleans resources and never records credential values.
+
 ```bash
 uv run --project /path/to/helix-repo helix frontier --dir .
 uv run --project /path/to/helix-repo helix attempts --path .helix --json
