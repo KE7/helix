@@ -85,6 +85,7 @@ from helix.proposals import (
     TerminalProposalOutcome,
     TopKImprovements,
 )
+from helix.envpolicy import sidecar_passthrough_names
 from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
@@ -1666,8 +1667,16 @@ def run_evolution(
                 suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
             )
         sidecar = config.evaluator.sidecar
-        sidecar_passthrough_env = list(
-            dict.fromkeys([*config.passthrough_env, *sidecar.passthrough_env])
+        # The union of top-level ``passthrough_env`` with the sidecar's own
+        # list used to live here.  It meant two config fields one indent apart
+        # had opposite blast radii: a name added to the top-level list reached
+        # BOTH the sidecar and the agent, with nothing in the reviewed file
+        # recording that it had.  Scope authorization is now expressed once,
+        # in ``helix.envpolicy``: ``config_passthrough`` grants evaluator and
+        # sidecar scope, ``sidecar_passthrough`` grants sidecar scope only,
+        # and neither grants agent scope under a sandbox.
+        sidecar_passthrough_env = sidecar_passthrough_names(
+            config.passthrough_env, sidecar.passthrough_env
         )
         with start_evaluator_sidecar(
             sidecar,

@@ -24,6 +24,32 @@ from helix.sandbox import (
     sandbox_auth_volume_name,
     start_evaluator_sidecar,
 )
+from helix.envpolicy import EnvGrant
+
+
+def _agent_grants(env: dict[str, str] | None = None) -> list[EnvGrant]:
+    """Declare an explicit agent-scope grant for each supplied variable.
+
+    These tests exercise mounts, sync-back, transcripts and redaction — not
+    credential policy — so they state plainly that the environment they pass
+    is authorized.  Credential policy has its own suite
+    (``test_sandbox_auth_policy.py``), which asserts on the FINAL docker argv
+    across all three origins together.
+
+    Passing grants is mandatory for agent scope: constructing an agent
+    container environment from a bare dict is exactly the shape of the bug
+    this release fixes, so ``_docker_args`` rejects it.
+    """
+    return [
+        EnvGrant(
+            name=name,
+            value=value,
+            origin="helix_internal",
+            scopes=frozenset({"agent"}),
+        )
+        for name, value in (env or {}).items()
+    ]
+
 
 
 _SYNTHETIC_SECRET = "synthetic-sentinel-secret-for-redaction-tests"
@@ -330,6 +356,7 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
         env={"HELIX_DEBUG": "1"},
         sandbox=cfg,
         scope="agent",
+        grants=_agent_grants({"HELIX_DEBUG": "1"}),
         sync_back=True,
         agent_backend="codex",
     )
@@ -1673,6 +1700,7 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
         env={},
         sandbox=cfg,
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -1727,6 +1755,7 @@ def test_agent_sync_tolerates_inaccessible_workspace_paths(
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -1775,6 +1804,7 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -1839,6 +1869,7 @@ def test_agent_sync_tolerates_inaccessible_backend_transcripts(
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -1877,6 +1908,7 @@ def test_agent_sync_recovers_rootless_workspace_permissions(tmp_path: Path, mock
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -1929,6 +1961,7 @@ def test_agent_sync_skips_relax_when_host_owner_available(tmp_path: Path, mocker
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -1999,6 +2032,7 @@ def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
         env={},
         sandbox=SandboxConfig(enabled=True, omit_from_agent=["private/token.txt"]),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -2027,6 +2061,7 @@ def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
         env={},
         sandbox=SandboxConfig(enabled=True, omit_from_agent=["private"]),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -2057,6 +2092,7 @@ def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -2091,6 +2127,7 @@ def test_sync_preserves_existing_host_special_files_when_skipped(
         env={},
         sandbox=SandboxConfig(enabled=True),
         scope="agent",
+        grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
         agent_backend="claude",
@@ -2123,6 +2160,7 @@ def test_special_file_skip_can_be_disabled(tmp_path: Path, mocker):
             env={},
             sandbox=SandboxConfig(enabled=True, skip_special_files=False),
             scope="agent",
+            grants=_agent_grants(),
             sync_back=True,
             image="helix-test:latest",
             agent_backend="claude",

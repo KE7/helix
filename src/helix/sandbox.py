@@ -23,6 +23,7 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
+from helix.envpolicy import EnvGrant
 from helix.exceptions import SandboxAuthImageError
 
 
@@ -1462,6 +1463,47 @@ def auth_manifest_write_args(
     ]
 
 
+def _assert_env_is_granted(
+    env: dict[str, str],
+    grants: list[EnvGrant] | None,
+    scope: Literal["agent", "evaluator"],
+) -> None:
+    """Second, INDEPENDENT check that every emitted variable carries a grant.
+
+    This is defence in depth, not belt-and-braces duplication.  The original
+    bug was created by a *new call site* (``_add_backend_auth_env``) added
+    downstream of the control everyone was asserting on: the scrubber reported
+    a clean environment while the credential still reached the container.  A
+    check that lives at the point of emission — where ``-e KEY=VALUE`` is
+    actually constructed — cannot be bypassed by adding another upstream
+    mutation, because there is nowhere downstream left to hide.
+
+    Agent scope REQUIRES grants.  A caller that reaches this function with a
+    bare dict for an agent container has bypassed the resolver, and that is
+    precisely the shape of the regression this guards against, so it is an
+    error rather than a permissive fallback.
+    """
+    if scope == "agent" and grants is None:
+        raise ValueError(
+            "sandboxed agent environment was built without provenance grants. "
+            "Every variable entering a mutation-agent container must be "
+            "resolved through helix.envpolicy.resolve_env_grants so its origin "
+            "and scope are recorded. Constructing the environment dict "
+            "directly bypasses the credential policy."
+        )
+    if grants is None:
+        return
+    granted = {g.name for g in grants if g.authorizes(scope)}
+    # HOME and PATH are set by _docker_args itself, to container-fixed values.
+    ungranted = sorted(set(env) - granted - {"HOME", "PATH"})
+    if ungranted:
+        raise ValueError(
+            f"refusing to pass ungranted environment variable(s) to a "
+            f"{scope} container: {', '.join(ungranted)}. "
+            "No EnvGrant authorizes these names for this scope."
+        )
+
+
 def _docker_args(
     command: list[str],
     env: dict[str, str],
@@ -1472,7 +1514,9 @@ def _docker_args(
     agent_backend: str | None,
     network: str | None = None,
     container_name: str | None = None,
+    grants: list[EnvGrant] | None = None,
 ) -> list[str]:
+    _assert_env_is_granted(env, grants, scope)
     args = [
         "docker",
         "run",
@@ -1493,7 +1537,15 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        args.extend(["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"])
+        # Under env mode the run provably cannot refresh the volume's token
+        # (the injected variables turn OAuth mode off), so mounting :rw would
+        # offer a write path that will never be used for its purpose while
+        # leaving the credential record writable by agent code. Making the
+        # non-maintenance structural beats letting it happen invisibly.
+        mount_mode = "ro" if sandbox.resolved_auth() == "env" else "rw"
+        args.extend(
+            ["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:{mount_mode}"]
+        )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])
@@ -1535,6 +1587,7 @@ def run_sandboxed_commands(
     image: str | None = None,
     agent_backend: str | None = None,
     input_text: str | None = None,
+    grants: list[EnvGrant] | None = None,
 ) -> list[subprocess.CompletedProcess[str]]:
     """Run commands in one Docker sandbox workspace copy."""
     if not commands:
@@ -1565,8 +1618,18 @@ def run_sandboxed_commands(
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None
         )
         command_env = dict(env)
+        command_grants = list(grants) if grants is not None else None
         if sidecar_runtime is not None:
             command_env["HELIX_EVALUATOR_ENDPOINT"] = sidecar_runtime.endpoint
+            if command_grants is not None:
+                command_grants.append(
+                    EnvGrant(
+                        name="HELIX_EVALUATOR_ENDPOINT",
+                        value=sidecar_runtime.endpoint,
+                        origin="helix_internal",
+                        scopes=frozenset({"agent", "evaluator", "sidecar"}),
+                    )
+                )
         results = []
         try:
             for command in commands:
@@ -1581,6 +1644,7 @@ def run_sandboxed_commands(
                     agent_backend,
                     sidecar_runtime.network if sidecar_runtime is not None else None,
                     container_name=container_name,
+                    grants=command_grants,
                 )
                 try:
                     results.append(
@@ -1631,6 +1695,7 @@ def run_sandboxed_command(
     image: str | None = None,
     agent_backend: str | None = None,
     input_text: str | None = None,
+    grants: list[EnvGrant] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one command in a Docker sandbox using a copy of *cwd* as workspace."""
     return run_sandboxed_commands(
@@ -1643,6 +1708,7 @@ def run_sandboxed_command(
         image=image,
         agent_backend=agent_backend,
         input_text=input_text,
+        grants=grants,
     )[0]
 
 
@@ -1735,6 +1801,7 @@ def run_command(
     sync_back: bool = False,
     image: str | None = None,
     agent_backend: str | None = None,
+    grants: list[EnvGrant] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a HELIX subprocess either directly or through the configured sandbox."""
     if sandbox is not None and sandbox.enabled:
@@ -1747,6 +1814,7 @@ def run_command(
             sync_back=sync_back,
             image=image,
             agent_backend=agent_backend,
+            grants=grants,
         )
     return subprocess.run(
         command,

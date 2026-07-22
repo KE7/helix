@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.backends import backend_display_name
 from helix.display import UsageStats, print_warning
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -20,7 +20,7 @@ from helix.exceptions import (
     RateLimitError,
     print_helix_error,
 )
-from helix.executor import _scrub_environment
+from helix.envpolicy import EnvGrant, env_dict, resolve_env_grants
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
@@ -719,11 +719,20 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
-    """Pass official headless auth env vars without requiring TOML config."""
-    for key in BACKEND_AUTH_ENV.get(backend, ()):
-        if key in os.environ and key not in env:
-            env[key] = os.environ[key]
+# ``_add_backend_auth_env`` used to live here.  It ran AFTER
+# ``_scrub_environment`` and re-added each backend's auth variables straight
+# from ``os.environ``, so every scrubber-level test reported a clean
+# environment while the credential still reached the container.  Its guard
+# (``key not in env``) also meant ``passthrough_env`` and the ``HELIX_*``
+# wildcard took PRECEDENCE over the backend table rather than being
+# subordinate to it — which is why gating only the table would have been
+# theatre, and why a shipped lane config injected a credential through a
+# channel the table never mentioned.
+#
+# Credential policy now lives in ``helix.envpolicy.resolve_env_grants`` and is
+# re-checked independently at the point of emission in
+# ``helix.sandbox._docker_args``.  Do not reintroduce a post-resolution
+# environment mutation here.
 
 
 def _build_backend_args(
@@ -1565,12 +1574,45 @@ def invoke_claude_code(
         prompt_artifact_name,
     )
     cmd_str = shlex.join(args)
-    backend_env = _scrub_environment(
-        passthrough_env=passthrough_env, fixed_env=fixed_env
+    # ONE resolver decides what may enter the agent environment, across all
+    # three origins together (backend table, passthrough/env config, HELIX_*
+    # wildcard).  ``_docker_args`` re-checks the result independently.
+    sandbox_enabled = sandbox is not None and sandbox.enabled
+    grants = resolve_env_grants(
+        scope="agent",
+        backend=backend,
+        sandbox_enabled=sandbox_enabled,
+        auth_mode=sandbox.resolved_auth() if sandbox is not None else None,
+        auth_env_allow=sandbox.auth_env_allow if sandbox is not None else None,
+        agent_passthrough_env=(
+            sandbox.agent_passthrough_env if sandbox is not None else None
+        ),
+        config_passthrough_env=passthrough_env,
+        config_env=fixed_env,
     )
-    _add_backend_auth_env(backend_env, backend)
+    backend_env = env_dict(grants, "agent")
+    def _grant_internal(name: str, value: str) -> None:
+        """Register a HELIX-set runtime variable as a first-class grant.
+
+        These are HELIX's own non-credential runtime settings, not host
+        environment values.  They are added as grants rather than written
+        straight into the dict so that the independent check in
+        ``_docker_args`` stays exhaustive — an ungranted key is an error, and
+        that is what makes a future post-resolution mutation fail loudly
+        instead of silently widening exposure.
+        """
+        backend_env[name] = value
+        grants.append(
+            EnvGrant(
+                name=name,
+                value=value,
+                origin="helix_internal",
+                scopes=frozenset({"agent"}),
+            )
+        )
+
     if backend == "gemini":
-        backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+        _grant_internal("GEMINI_CLI_TRUST_WORKSPACE", "true")
     if backend == "opencode":
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
@@ -1592,11 +1634,11 @@ def invoke_claude_code(
         # database in the candidate-specific /workspace mount instead. Direct
         # subprocesses use the equivalent directory in their real worktree.
         if sandbox is not None and sandbox.enabled:
-            backend_env["XDG_DATA_HOME"] = "/workspace/.helix_opencode_state"
+            _grant_internal("XDG_DATA_HOME", "/workspace/.helix_opencode_state")
         else:
             opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
             opencode_state_dir.mkdir(parents=True, exist_ok=True)
-            backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
+            _grant_internal("XDG_DATA_HOME", str(opencode_state_dir))
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
         result = run_sandboxed_command(
@@ -1608,6 +1650,7 @@ def invoke_claude_code(
             sync_back=True,
             image=sandbox_image,
             agent_backend=backend,
+            grants=grants,
         )
     else:
         result = subprocess.run(

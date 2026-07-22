@@ -625,6 +625,47 @@ class SandboxConfig(BaseModel):
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
     claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
 
+    # --- Credential policy (0.3.0) -------------------------------------
+    # ``auth`` is the explicit, no-fallback choice of credential path for a
+    # sandboxed mutation agent.  It is deliberately NOT auto-detected: every
+    # signal available at mount time was measured reporting success against
+    # credentials a real request rejected, so auto-detection trades a
+    # credential leak for an outage whenever it guesses wrong.
+    #
+    # ``None`` means "unset".  It is only valid while ``enabled`` is False,
+    # where the auth mode is inert and today's environment-variable behaviour
+    # is preserved exactly.
+    auth: Literal["volume", "env"] | None = None
+    auth_env_allow: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Credential variable names injected into the sandboxed mutation "
+            'agent. Meaningful only when auth = "env". This REPLACES the '
+            "per-backend table in helix/backends.py rather than unioning with "
+            "it, so the allowlist lives in the file a reviewer reads."
+        ),
+    )
+    agent_passthrough_env: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-credential variable names passed through to a sandboxed "
+            "mutation agent. Top-level passthrough_env no longer grants agent "
+            "scope under a sandbox; use this for deliberate agent-scope "
+            "passthrough."
+        ),
+    )
+    require_cli_match: bool = False
+
+    def resolved_auth(self) -> str | None:
+        """Return the effective auth mode, or None when the sandbox is off.
+
+        The default is ``"volume"`` — the safe mode — so every existing
+        sandboxed lane becomes strictly safer without editing anything.
+        """
+        if not self.enabled:
+            return None
+        return self.auth or "volume"
+
 
 class WorktreeConfig(BaseModel):
     """Configuration for git worktree management.
@@ -690,6 +731,87 @@ class HelixConfig(BaseModel):
                     "command, and endpoint."
                 )
         _validate_agent_effort(self.agent)
+        _validate_sandbox_auth(self)
+
+
+def _validate_sandbox_auth(config: HelixConfig) -> None:
+    """Enforce the sandbox credential-policy matrix at config load.
+
+    Every check here fires before Docker is touched.  These are hard errors,
+    not warnings: shipping a policy check as a warning is the failure mode
+    that created this situation in the first place.
+    """
+    from helix.envpolicy import FORBIDDEN_AUTH_ENV_NAMES
+
+    sandbox = config.sandbox
+
+    # R1: a non-sandboxed run always uses environment auth. Setting ``auth``
+    # there means the author believes something false about their own run.
+    if not sandbox.enabled and sandbox.auth is not None:
+        raise ValueError(
+            "sandbox.auth is only meaningful when sandbox.enabled = true. "
+            "Non-sandboxed runs always use environment-variable auth. "
+            "Remove sandbox.auth."
+        )
+
+    mode = sandbox.resolved_auth()
+
+    # R3: env mode with an empty allowlist injects nothing, so the author
+    # asked for a credential path that cannot carry a credential.
+    if mode == "env" and not sandbox.auth_env_allow:
+        raise ValueError(
+            'sandbox.auth = "env" requires a non-empty sandbox.auth_env_allow.'
+        )
+
+    if mode == "volume" and sandbox.auth_env_allow:
+        raise ValueError(
+            "sandbox.auth_env_allow is set but sandbox.auth = \"volume\", so no "
+            "environment credentials will be injected. Set auth = \"env\" or "
+            "remove auth_env_allow."
+        )
+
+    # R6: CLAUDE_CODE_OAUTH_TOKEN is never an env-mode mechanism. It does not
+    # merely bypass refresh — it makes the credential accessor return a record
+    # with a null refresh token, disabling refresh permanently. Trading a leak
+    # for an unrefreshable auth path is not a trade HELIX offers.
+    for name in sandbox.auth_env_allow:
+        if name in FORBIDDEN_AUTH_ENV_NAMES:
+            raise ValueError(
+                f"{name} cannot be used for sandbox env auth: it disables "
+                "OAuth token refresh permanently. Use ANTHROPIC_API_KEY, or "
+                'use sandbox.auth = "volume".'
+            )
+
+    # T14: the mechanical, backend-independent, lane-independent replacement
+    # for livebench's backend tripwire. The sidecar credential boundary
+    # (fix 94f9751) requires the agent and sidecar credential sets to be
+    # disjoint, and this enforces it for every lane regardless of backend.
+    sidecar = config.evaluator.sidecar
+    if sidecar is not None:
+        agent_names = set(sandbox.auth_env_allow) | set(sandbox.agent_passthrough_env)
+        shared = sorted(agent_names & set(sidecar.passthrough_env))
+        if shared:
+            names = ", ".join(repr(n) for n in shared)
+            raise ValueError(
+                f"{names} appears in both sandbox.auth_env_allow/"
+                "agent_passthrough_env and evaluator.sidecar.passthrough_env. "
+                "The sidecar credential boundary (fix 94f9751) requires these "
+                "sets to be disjoint."
+            )
+
+    # A name that is absent from the environment is a warning, never an error:
+    # CI dry-runs must still be able to load the config.
+    import os as _os
+
+    for name in sandbox.auth_env_allow:
+        if name not in _os.environ:
+            warnings.warn(
+                f"sandbox.auth_env_allow names {name!r}, which is not set in "
+                "the environment; the mutation agent will receive no value "
+                "for it.",
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 def _validate_agent_effort(agent: AgentConfig) -> None:
