@@ -27,6 +27,56 @@ import inspect_run  # noqa: E402
 import scoring  # noqa: E402
 
 
+RELEASE_TIP = "c9371f4"
+RELEASE_ANCESTORS = ("4622413", "94f9751", "402dcc8", "e5c260f", RELEASE_TIP)
+REPO_ROOT = Path(__file__).parents[2]
+
+
+def test_lane_runtime_is_the_exact_current_release() -> None:
+    """Criterion 2: the imported helix is THIS worktree, at 0.3.0, and the
+    branch descends from the canonical 0.3.0 release line.
+
+    This lane previously forked at 84c7bcd and re-implemented the core fixes
+    locally, which left it on 0.2.1 with none of these commits as ancestors.
+    """
+    import subprocess
+
+    import helix
+
+    assert Path(helix.__file__).resolve().is_relative_to(REPO_ROOT.resolve())
+    assert helix.__version__ == "0.3.0"
+
+    for commit in RELEASE_ANCESTORS:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+        assert result.returncode == 0, f"{commit} is not an ancestor of HEAD"
+
+
+def test_lane_adds_no_core_source_changes_over_release_tip() -> None:
+    """The lane must be purely additive: demo files only, no core src/ edits.
+
+    A core edit here would mean a duplicated release commit was re-applied
+    instead of inherited.
+    """
+    import subprocess
+
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", f"{RELEASE_TIP}..HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert changed, "expected the lane to add demo files"
+    for path in changed:
+        assert path.startswith(
+            ("examples/livebench_math/", "tests/examples/test_livebench_math.py")
+        ), f"lane unexpectedly modifies {path}"
+
+
 def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
     assert constants.GEPA_BLOG_COMMIT == "121084499247e7ddfa05ec453a53e0d644838b7a"
     assert constants.TERRARIUM_COMMIT == "e2c8b59079ed26de2d38e8aaf4ac2b4437703fe9"

@@ -36,8 +36,12 @@ official scorer computation itself is unchanged.
 
 - Docker Desktop with at least 4 GiB available to a worker container
 - Python 3.11+ and `uv`
-- a clean HELIX 0.3.0 worktree containing canonical core fixes `94f9751`,
-  `402dcc8`, and `e5c260f` (the lane began from feature base `84c7bcd`)
+- a clean HELIX 0.3.0 worktree built directly on the canonical release tip
+  `c9371f4`, which carries release metadata `4622413` and core fixes
+  `94f9751`, `402dcc8`, and `e5c260f`. Verify with:
+  `git merge-base --is-ancestor c9371f4 HEAD && python -c "import helix; print(helix.__version__)"`
+  (expect exit 0 and `0.3.0`). This lane adds only
+  `examples/livebench_math/` and its test module on top of that tip.
 - `OPENAI_API_KEY` exported in the shell; never put it in this directory
 - access to the pinned linux/arm64 runner
   `ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d`, GitHub, Hugging Face, and the OpenAI API during setup/run
