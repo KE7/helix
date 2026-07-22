@@ -1,6 +1,5 @@
 objective = "Optimize NetworkX connected_components and weakly_connected_components for the official FormulaCode networkx_networkx_7971 adversarial disconnected-graph workload while preserving upstream correctness. Modify only production files under networkx/."
 rng_seed = 7971
-passthrough_env = ["ANTHROPIC_API_KEY"]
 
 [evaluator]
 command = "__PYTHON__ .formulacode/evaluator.py"
@@ -35,6 +34,20 @@ background = "FormulaCode task networkx_networkx_7971 at NetworkX base a986762f.
 
 [sandbox]
 enabled = true
+# 0.3.0 credential policy. This lane genuinely wants ENVIRONMENT auth: it runs
+# against a host-exported ANTHROPIC_API_KEY rather than a mounted auth volume.
+#
+# That intent used to be expressed as a TOP-LEVEL `passthrough_env =
+# ["ANTHROPIC_API_KEY"]`, which reached the mutation agent through a channel
+# the per-backend table in helix/backends.py never mentions — so a fix that
+# gated only that table would have left this lane injecting silently. It is
+# now declared where a reviewer reads it, and it is opt-in.
+#
+# Env mode is a TRADEOFF, not an equivalent alternative to auth = "volume":
+# setting these variables turns OAuth mode off in the backend CLI, so this run
+# performs no container-side token refresh at all.
+auth = "env"
+auth_env_allow = ["ANTHROPIC_API_KEY"]
 evaluator = false
 image = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
 network = "bridge"

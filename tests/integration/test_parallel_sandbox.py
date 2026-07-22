@@ -18,7 +18,31 @@ from helix.config import SandboxConfig
 from helix.sandbox import run_sandboxed_command
 
 
-pytestmark = pytest.mark.docker_integration
+pytestmark = [
+    pytest.mark.docker_integration,
+    # PRE-EXISTING HAZARD, surfaced by the session-wide safety guard rather
+    # than introduced by it.
+    #
+    # ``run_sandboxed_command(scope="agent", agent_backend="opencode")``
+    # mounts the SHARED credential volume ``helix-auth-opencode`` at ``:rw``
+    # — and because ``docker run -v`` silently CREATES a missing named
+    # volume, running this test also provisions that volume on any host where
+    # it does not yet exist. Neither is acceptable for a test: a container
+    # holding a shared credential volume ``:rw`` can trigger an OAuth refresh,
+    # and a successful refresh ROTATES the stored token for every lane.
+    #
+    # These tests assert workspace isolation and container cleanup, none of
+    # which needs real credentials. They must be rewritten to run against a
+    # DISPOSABLE volume with SYNTHETIC credentials before they can be enabled
+    # again. Skipping rather than deleting keeps the gap visible.
+    pytest.mark.skip(
+        reason=(
+            "mounts the SHARED helix-auth-opencode volume :rw (and would "
+            "create it if absent); rewrite against a disposable volume with "
+            "synthetic credentials first"
+        )
+    ),
+]
 
 _FIXTURE_IMAGE = os.environ.get("HELIX_DOCKER_TEST_IMAGE", "helix-runner-base:latest")
 

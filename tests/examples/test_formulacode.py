@@ -248,7 +248,26 @@ def test_pins_and_parallel_isolation_configuration_are_exact() -> None:
     )
     assert pins["task"]["task_id"] == "networkx_networkx_7971"
     config = (DEMO_ROOT / "helix.toml.template").read_text()
-    assert 'passthrough_env = ["ANTHROPIC_API_KEY"]' in config
+
+    # 0.3.0 migration. This assertion is INVERTED: it previously required
+    # `passthrough_env = ["ANTHROPIC_API_KEY"]` to be present at top level.
+    #
+    # That entry injected a credential into the sandboxed mutation agent
+    # through the `config_passthrough` channel, which the per-backend table in
+    # helix/backends.py never mentions — so a fix gating only that table would
+    # have left this lane injecting silently while every argv assertion
+    # written against the table passed. This lane is the concrete proof that
+    # the expanded scope was necessary.
+    #
+    # The lane genuinely wants environment auth, so the migration is
+    # semantically correct rather than a workaround: the intent moves to an
+    # explicit, reviewable, opt-in declaration.
+    assert 'passthrough_env = ["ANTHROPIC_API_KEY"]' not in config, (
+        "top-level passthrough_env no longer grants agent scope under a "
+        "sandbox; declare env auth explicitly instead"
+    )
+    assert 'auth = "env"' in config
+    assert 'auth_env_allow = ["ANTHROPIC_API_KEY"]' in config
     assert "num_parallel_proposals = 2" in config
     assert "mutations_per_parent = 2" in config
     assert "rng_seed = 7971" in config

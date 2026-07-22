@@ -36,6 +36,7 @@ def _digest_of(image: str) -> str:
     return image.split("@", 1)[1]
 
 
+@pytest.mark.docker_integration
 def test_runner_pin_is_registry_resolvable_not_a_local_image_id() -> None:
     """The runner pin must resolve in the REGISTRY, not merely parse as a digest.
 
@@ -124,18 +125,48 @@ def test_lane_adds_no_core_source_changes_over_release_tip() -> None:
     ).stdout.split()
     assert changed, "expected the lane to add demo files"
 
-    # The load-bearing property is that no CORE source file changed: a core
-    # edit would mean a release commit was re-applied rather than inherited.
-    #
-    # Deliberately assert on src/ rather than allow-listing this lane's own
-    # paths. Once sibling demo lanes are merged into the release branch their
-    # files legitimately appear in this diff, so a lane-path allow-list fails
-    # on the integrated branch while proving nothing extra on the lane branch.
-    core_changes = [path for path in changed if path.startswith("src/")]
-    assert not core_changes, f"lane unexpectedly modifies core source: {core_changes}"
-
     lane_files = [p for p in changed if p.startswith("examples/livebench_math/")]
     assert lane_files, "expected the lane to add its own demo files"
+
+    # The load-bearing property is that THIS LANE contributes no core src/
+    # edit: such an edit would mean a release commit was re-applied instead of
+    # inherited.
+    #
+    # Attribute per COMMIT rather than over the whole RELEASE_TIP..HEAD diff.
+    # The integration branch also carries core release work that is not the
+    # lane's (0.3.0's sandbox-auth fix, for example), and a whole-diff
+    # assertion cannot tell the two apart — it would fail on legitimate core
+    # work while proving nothing extra about the lane. A lane commit is one
+    # that touches this lane's directory; those commits must touch no src/.
+    lane_commits = subprocess.run(
+        [
+            "git",
+            "log",
+            "--format=%H",
+            f"{RELEASE_TIP}..HEAD",
+            "--",
+            "examples/livebench_math/",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert lane_commits, "expected at least one commit touching the lane"
+
+    offenders: dict[str, list[str]] = {}
+    for commit in lane_commits:
+        touched = subprocess.run(
+            ["git", "show", "--name-only", "--format=", commit],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+        core = [path for path in touched if path.startswith("src/")]
+        if core:
+            offenders[commit] = core
+    assert not offenders, f"lane commits unexpectedly modify core source: {offenders}"
 
 
 def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
@@ -344,18 +375,25 @@ def test_agent_command_environment_excludes_sidecar_key(
 
 def _agent_env_names_in_docker_argv(config: Any) -> list[str]:
     """Env var NAMES on the real agent docker argv, via the production path."""
-    from helix.mutator import _add_backend_auth_env
+    from helix.envpolicy import env_dict, resolve_env_grants
     from helix.sandbox import _docker_args
 
-    env = _scrub_environment(
-        passthrough_env=config.passthrough_env, fixed_env=config.env
+    # ONE resolver decides agent scope across all three origins; the argv is
+    # then independently re-checked against the grants. A test that stops at
+    # the scrubber stops one step too early — that gap is what hid the bug.
+    grants = resolve_env_grants(
+        scope="agent",
+        backend=config.agent.backend,
+        sandbox_enabled=config.sandbox.enabled,
+        auth_mode=config.sandbox.resolved_auth(),
+        auth_env_allow=config.sandbox.auth_env_allow,
+        agent_passthrough_env=config.sandbox.agent_passthrough_env,
+        config_passthrough_env=config.passthrough_env,
+        config_env=config.env,
     )
-    # The production sequence re-adds backend auth AFTER scrubbing, so a test
-    # that stops at the scrubber stops one step too early.
-    _add_backend_auth_env(env, config.agent.backend)
     argv = _docker_args(
         ["true"],
-        env,
+        env_dict(grants, "agent"),
         Path("/tmp"),
         config.sandbox,
         "agent",
@@ -363,6 +401,7 @@ def _agent_env_names_in_docker_argv(config: Any) -> list[str]:
         config.agent.backend,
         None,
         container_name="test-probe",
+        grants=grants,
     )
     return [
         arg.split("=", 1)[0]
@@ -392,24 +431,73 @@ def test_sidecar_key_never_reaches_agent_docker_argv(
     assert config.evaluator.sidecar.passthrough_env == ["OPENAI_API_KEY"]
 
 
-def test_backend_choice_is_what_keeps_the_solver_key_out_of_the_agent() -> None:
-    """Guard the assumption the sidecar boundary silently depends on.
+def test_backend_rename_cannot_change_agent_credential_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T4/T14 — REPLACES the old backend tripwire.
 
-    ``BACKEND_AUTH_ENV`` re-adds each backend's auth vars after scrubbing.
-    ``opencode`` lists OPENAI_API_KEY, so switching this demo to that backend
-    would hand the solver credential straight to the mutation agent and
-    silently defeat the sidecar isolation, with no config looking wrong.
+    The previous guard asserted ``config.agent.backend == "claude"`` and that
+    ``BACKEND_AUTH_ENV["opencode"]`` still lists OPENAI_API_KEY. That was a
+    tripwire on a current VALUE in one lane's file: it detected an edit, it
+    prevented nothing, and a new lane inherited no protection from it.
+
+    The property that actually matters is mechanical and lane-independent:
+    under a sandbox, the backend table grants NOTHING to agent scope, so
+    renaming the backend cannot change agent credential flow. The one-word
+    edit that used to hand the solver key to the mutation agent is now inert.
+
+    Non-vacuity: the two argvs are compared against each other AND each is
+    asserted non-empty via its mount, so an empty-argv bug cannot pass.
     """
     from helix.backends import BACKEND_AUTH_ENV
 
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-solver-must-not-reach-the-agent")
     config = load_config(ROOT / "helix.toml")
-    assert config.agent.backend == "claude"
-    assert "OPENAI_API_KEY" not in BACKEND_AUTH_ENV.get(config.agent.backend, ())
-    # Documents the hazard rather than asserting the whole table is safe.
-    assert "OPENAI_API_KEY" in BACKEND_AUTH_ENV["opencode"], (
-        "if this changes, revisit whether the backend allowlist still governs "
-        "sidecar credential isolation"
+
+    # Precondition: the hazard is real — opencode's table DOES list the key.
+    assert "OPENAI_API_KEY" in BACKEND_AUTH_ENV["opencode"]
+
+    as_claude = _agent_env_names_in_docker_argv(config)
+    renamed = config.model_copy(
+        update={"agent": config.agent.model_copy(update={"backend": "opencode"})}
     )
+    as_opencode = _agent_env_names_in_docker_argv(renamed)
+
+    assert "OPENAI_API_KEY" not in as_claude
+    assert "OPENAI_API_KEY" not in as_opencode, (
+        "renaming the backend must not change agent credential flow"
+    )
+    # Non-vacuity: both argvs are real launches carrying HELIX's own env.
+    assert "HOME" in as_claude and "HOME" in as_opencode
+
+
+def test_agent_and_sidecar_credential_sets_must_be_disjoint() -> None:
+    """T14 — the mechanical, backend- and lane-independent boundary guard.
+
+    Config load must REFUSE a configuration that names the same variable for
+    the agent and for the credentialed sidecar. This enforces fix 94f9751's
+    boundary for every lane, rather than relying on a backend name happening
+    not to list the key.
+    """
+    from helix.config import load_config as _load
+
+    config = _load(ROOT / "helix.toml")
+    assert config.evaluator.sidecar is not None
+    assert config.evaluator.sidecar.passthrough_env == ["OPENAI_API_KEY"]
+
+    # Naming the sidecar's credential in the agent's allowlist must be
+    # refused at CONFIG LOAD, before Docker is touched.
+    payload = config.model_dump()
+    payload["sandbox"]["auth"] = "env"
+    payload["sandbox"]["auth_env_allow"] = ["OPENAI_API_KEY"]
+    with pytest.raises(ValueError, match="disjoint"):
+        type(config).model_validate(payload)
+
+    # Non-vacuity: the SAME payload with a different, non-shared name loads
+    # fine — so the failure above is the disjointness rule, not a config that
+    # simply cannot be rebuilt from its own dump.
+    payload["sandbox"]["auth_env_allow"] = ["ANTHROPIC_API_KEY"]
+    type(config).model_validate(payload)
 
 
 def test_agent_image_and_evaluator_image_are_separate_trust_domains() -> None:

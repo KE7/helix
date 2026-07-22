@@ -164,9 +164,17 @@ def _docker_safety_guard(request, monkeypatch):
     import os
     import subprocess
 
-    docker_allowed = bool(
-        request.node.get_closest_marker("docker_integration")
-    ) and os.environ.get(_DOCKER_OPT_IN_ENV) == "1"
+    marked = bool(request.node.get_closest_marker("docker_integration"))
+    opted_in = os.environ.get(_DOCKER_OPT_IN_ENV) == "1"
+    if marked and not opted_in:
+        # Skip rather than fail: these tests declare their need for a real
+        # daemon honestly, and a default-deny suite should report them as not
+        # run rather than as broken. The helix-auth-* denial still applies to
+        # them when they DO run — that one has no override.
+        pytest.skip(
+            f"requires a real Docker daemon; set {_DOCKER_OPT_IN_ENV}=1 to run"
+        )
+    docker_allowed = marked and opted_in
 
     # subprocess.* aliases
     for name in ("run", "call", "check_call", "check_output", "Popen"):

@@ -111,6 +111,9 @@ def test_mutation_sandbox_exposes_only_agent_and_public_contract(
         "agent",
         config.sandbox.image or "",
         "claude",
+        # Agent scope requires provenance grants; an empty environment has an
+        # empty (but present) grant list.
+        grants=[],
     )
     mounts = [args[index + 1] for index, item in enumerate(args[:-1]) if item == "-v"]
     assert any(mount.endswith(":/workspace:rw") for mount in mounts)
@@ -644,44 +647,61 @@ def test_agent_container_argv_carries_no_credential_when_host_env_is_clean(
 ) -> None:
     """(c) Behavioral guard on the REAL production launch sequence.
 
-    Scope, stated exactly: this proves the agent container's docker argv
-    carries no credential WHEN THE HOST ENVIRONMENT IS CLEAN.  It does NOT
-    prove that no secret can ever enter a container.  HELIX injects backend
-    auth env AFTER scrubbing (mutator._add_backend_auth_env), so on a host
-    that exports ANTHROPIC_API_KEY the key IS rendered into the container's
-    argv as ``-e ANTHROPIC_API_KEY=...``.  That exposure is asserted below so
-    it is recorded rather than hidden; if core HELIX later stops injecting it,
-    the second half fails loudly and this test must be updated.
+    INVERTED for 0.3.0.  This test previously ASSERTED THE INJECTION — that a
+    dirty host renders ``-e ANTHROPIC_API_KEY=<value>`` into the mutation
+    agent's argv — on the reasoning that recording the exposure was better
+    than hiding it.  That was the right instinct and the wrong assertion: a
+    test that encodes current behaviour without asserting the intended
+    PROPERTY will faithfully defend the defect. Under ``sandbox.auth =
+    "volume"`` (the default) the correct assertion is that NO credential-
+    bearing ``-e`` appears, on a clean host or a dirty one.
 
-    A scrubber-only assertion is insufficient: _scrub_environment removes the
-    key and the injection happens downstream of it, so such a test passes
-    while the key still reaches the container.
+    Scope, stated exactly: this proves the agent container's docker argv
+    carries no credential. It does NOT prove that no secret can ever reach the
+    container — ``/home/node`` is mounted from the auth volume and the
+    workspace mount carries whatever is in the candidate repo. The argv is
+    where THIS bug lived.
+
+    A scrubber-only assertion is insufficient and always was: the injection
+    happened downstream of the scrubber, so such a test passes while the key
+    still reaches the container. This asserts on the FINAL docker argv,
+    across all three origins together.
     """
     from pathlib import Path as _Path
 
     from helix.config import load_config
-    from helix.executor import _scrub_environment
-    from helix.mutator import _add_backend_auth_env
+    from helix.envpolicy import env_dict, resolve_env_grants
     from helix.sandbox import _docker_args
 
     config = load_config(EXAMPLE / "helix.toml")
 
     def agent_argv() -> list[str]:
-        env = _scrub_environment(
-            passthrough_env=config.passthrough_env, fixed_env=config.env
+        grants = resolve_env_grants(
+            scope="agent",
+            backend=config.agent.backend,
+            sandbox_enabled=config.sandbox.enabled,
+            auth_mode=config.sandbox.resolved_auth(),
+            auth_env_allow=config.sandbox.auth_env_allow,
+            agent_passthrough_env=config.sandbox.agent_passthrough_env,
+            config_passthrough_env=config.passthrough_env,
+            config_env=config.env,
         )
-        _add_backend_auth_env(env, config.agent.backend)
         return _docker_args(
             ["claude", "--version"],
-            env,
+            env_dict(grants, "agent"),
             _Path("/tmp/helix-guard-workspace"),
             config.sandbox,
             "agent",
             config.sandbox.image or "",
             config.agent.backend,
+            grants=grants,
         )
 
     canary = "sk-ant-canary-value-must-not-reach-the-container"
+
+    # This lane needs NO config edit under 0.3.0: it has no passthrough_env,
+    # no sidecar, and auth defaults to "volume".
+    assert config.sandbox.resolved_auth() == "volume"
 
     # Clean host: no credential may appear in the launched container's argv.
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
@@ -690,14 +710,23 @@ def test_agent_container_argv_carries_no_credential_when_host_env_is_clean(
     assert not any(part.startswith("ANTHROPIC_API_KEY=") for part in argv)
     assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in argv)
     assert not any(canary in part for part in argv)
-    # The auth volume is what actually authenticates a sandboxed agent.
+    # Non-vacuity: the argv must be a real launch, not an empty list.
     assert "helix-auth-claude:/home/node:rw" in argv
+    assert config.sandbox.image in argv
 
-    # Dirty host: documents the known, escalated core-HELIX exposure.  The
-    # scrubber alone would report clean here, which is exactly the trap.
+    # DIRTY HOST — the inversion. This is the assertion that used to require
+    # the credential to be present. Both claude variables are set, and
+    # ANTHROPIC_AUTH_TOKEN is the more dangerous of the two (it overrides the
+    # OAuth path and suppresses refresh), so a fix that filtered only
+    # ANTHROPIC_API_KEY must still fail here.
     monkeypatch.setenv("ANTHROPIC_API_KEY", canary)
-    scrubbed = _scrub_environment(
-        passthrough_env=config.passthrough_env, fixed_env=config.env
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", canary + "-auth")
+    dirty = agent_argv()
+    assert not any(part.startswith("ANTHROPIC_API_KEY=") for part in dirty)
+    assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in dirty)
+    assert not any(canary in part for part in dirty), (
+        "no credential value may reach the mutation agent's argv under "
+        'sandbox.auth = "volume"'
     )
-    assert not any(canary in value for value in scrubbed.values())
-    assert any(part == f"ANTHROPIC_API_KEY={canary}" for part in agent_argv())
+    # The volume — not an env var — is what authenticates the agent.
+    assert "helix-auth-claude:/home/node:rw" in dirty
