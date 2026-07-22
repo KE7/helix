@@ -20,6 +20,10 @@ DATASET_PARQUET_SIZE = 8_872_150
 TASK_ID = "capstone-engine__capstone-2743"
 TASK_REPOSITORY = "capstone-engine/capstone"
 TASK_BASE_COMMIT = "56db8c2b690eb6372c91f8d76621f43a33c4dbe4"
+# Public upstream commit that resolves the pinned issue.  This pin is never
+# copied into a mutation sandbox; the root-only task runner uses it solely to
+# prove that the candidate clone cannot reach (or even read) the gold object.
+TASK_GOLD_FIX_COMMIT = "717d8b051997bacf48481eace9df357caedc0bca"
 
 OFFICIAL_IMAGE_REPOSITORY = (
     "docker.io/starryzhang/sweb.eval.x86_64.capstone-engine_1776_capstone-2743"

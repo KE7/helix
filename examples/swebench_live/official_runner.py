@@ -22,6 +22,7 @@ CANDIDATE_REPO = Path("/tmp/candidate-repo")
 ISSUE_FILE = Path("/tmp/problem_statement.txt")
 CANDIDATE_UID = 65534
 CANDIDATE_GID = 65534
+GOLD_FIX_COMMIT = "717d8b051997bacf48481eace9df357caedc0bca"
 
 
 def _command(command: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -73,6 +74,79 @@ def _drop_privileges() -> None:
     os.setuid(CANDIDATE_UID)
 
 
+def _git_at(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+
+def _candidate_repository_provenance() -> dict[str, Any]:
+    """Prove the shallow candidate clone cannot recover the gold fix.
+
+    The official image deliberately contains a full upstream repository, so
+    the source-side checks make this proof non-vacuous.  The candidate-side
+    checks are stronger than ref reachability alone: the gold commit object
+    must not exist in the clone at all.  Any ambiguity aborts evaluation.
+    """
+
+    base_commit = _git("rev-parse", "HEAD").stdout.strip()
+    source_commits = _git("rev-list", "--all").stdout.splitlines()
+    source_extra_count = len([commit for commit in source_commits if commit != base_commit])
+    if GOLD_FIX_COMMIT not in source_commits:
+        raise ValueError("gold fix is not reachable in the official source repository")
+    if source_extra_count == 0:
+        raise ValueError("official source repository has no history beyond base_commit")
+
+    cloned_head = _git_at(CANDIDATE_REPO, "rev-parse", "HEAD").stdout.strip()
+    shallow = _git_at(
+        CANDIDATE_REPO, "rev-parse", "--is-shallow-repository"
+    ).stdout.strip()
+    candidate_commits = _git_at(CANDIDATE_REPO, "rev-list", "--all").stdout.splitlines()
+    extra_commits = _git_at(
+        CANDIDATE_REPO, "rev-list", "--all", "--not", "HEAD"
+    ).stdout.splitlines()
+    tags = _git_at(CANDIDATE_REPO, "tag", "--list").stdout.splitlines()
+    gold_reachable = GOLD_FIX_COMMIT in candidate_commits
+    gold_object_present = (
+        _git_at(CANDIDATE_REPO, "cat-file", "-e", f"{GOLD_FIX_COMMIT}^{{commit}}")
+        .returncode
+        == 0
+    )
+
+    if cloned_head != base_commit:
+        raise ValueError("candidate repository HEAD does not match base_commit")
+    if shallow != "true":
+        raise ValueError("candidate repository is not shallow")
+    if candidate_commits != [base_commit]:
+        raise ValueError("candidate repository exposes commits beyond base_commit")
+    if extra_commits:
+        raise ValueError("candidate repository exposes commits beyond base_commit")
+    if tags:
+        raise ValueError("candidate repository exposes tags")
+    if gold_reachable or gold_object_present:
+        raise ValueError("candidate repository exposes the gold fix")
+
+    return {
+        "candidate_repository": {
+            "head": cloned_head,
+            "base_commit": base_commit,
+            "is_shallow": True,
+            "commit_count": len(candidate_commits),
+            "extra_commit_count": len(extra_commits),
+            "tag_count": len(tags),
+            "source_extra_commit_count": source_extra_count,
+            "gold_fix_commit": GOLD_FIX_COMMIT,
+            "gold_fix_source_reachable": True,
+            "gold_fix_candidate_reachable": False,
+            "gold_fix_object_present": False,
+        }
+    }
+
+
 def _run_candidate(problem_statement: str, timeout: int) -> tuple[str, dict[str, Any]]:
     shutil.rmtree(CANDIDATE_REPO, ignore_errors=True)
     # A full clone of /testbed copies every ref in the official task image.
@@ -95,27 +169,9 @@ def _run_candidate(problem_statement: str, timeout: int) -> tuple[str, dict[str,
         check=True,
         timeout=120,
     )
-    # Fail closed if the candidate repository can still reach anything beyond
-    # base_commit; scoring a run on a leaking repository is worse than failing.
-    base_commit = _git("rev-parse", "HEAD").stdout.strip()
-    cloned_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=CANDIDATE_REPO,
-        text=True,
-        capture_output=True,
-        timeout=60,
-    ).stdout.strip()
-    if cloned_head != base_commit:
-        raise ValueError("candidate repository HEAD does not match base_commit")
-    extra = subprocess.run(
-        ["git", "log", "--all", "--oneline", "--not", "HEAD"],
-        cwd=CANDIDATE_REPO,
-        text=True,
-        capture_output=True,
-        timeout=60,
-    ).stdout.strip()
-    if extra:
-        raise ValueError("candidate repository exposes commits beyond base_commit")
+    # Fail closed if the candidate repository can reach anything beyond the
+    # base or if the known gold object is present even without a ref.
+    provenance = _candidate_repository_provenance()
     ISSUE_FILE.write_text(problem_statement, encoding="utf-8")
     ISSUE_FILE.chmod(0o444)
     CANDIDATE_SCRIPT.chmod(0o555)
@@ -165,6 +221,7 @@ def _run_candidate(problem_statement: str, timeout: int) -> tuple[str, dict[str,
     patch = patch_result.stdout if patch_result.returncode == 0 else ""
     shutil.rmtree(CANDIDATE_REPO, ignore_errors=True)
     return patch, {
+        **provenance,
         "candidate_exit_code": returncode,
         "candidate_timed_out": timed_out,
         "candidate_seconds": round(time.monotonic() - started, 3),
