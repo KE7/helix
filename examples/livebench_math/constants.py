@@ -36,7 +36,14 @@ SOLVER_MAX_TOKENS = 32_000
 SOLVER_TIMEOUT_SECONDS = 180
 SOLVER_RETRIES = 0
 
+# The mutation engine only edits prompt.txt. It never sees ground truth and is
+# not part of the scored pipeline: the solver below is called directly by the
+# protected sidecar and scored by the official LiveBench scorers. Swapping the
+# proposer backend therefore cannot change what the benchmark measures.
 PUBLICATION_PROPOSER_MODEL = "gpt-5-mini"
-# Explicit smoke deviation: the publication model returns HTTP 400 through
-# Codex ChatGPT OAuth in the pinned runner; this supported model is used.
-SMOKE_PROPOSER_MODEL = "gpt-5.4"
+# Explicit smoke deviation. The lane originally proposed through a codex runner
+# that was never published to GHCR, so it was not reproducible off this host.
+# The published, registry-resolvable claude runner is used instead; this also
+# retires the codex-only HTTP 400 workaround the gpt-5.4 pin existed for.
+SMOKE_PROPOSER_BACKEND = "claude"
+SMOKE_PROPOSER_MODEL = "haiku"

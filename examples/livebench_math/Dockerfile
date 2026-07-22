@@ -1,4 +1,4 @@
-FROM ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d
+FROM ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba
 
 USER root
 LABEL org.opencontainers.image.title="HELIX LiveBench-Math disposable evaluator"

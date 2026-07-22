@@ -43,16 +43,42 @@ official scorer computation itself is unchanged.
   (expect exit 0 and `0.3.0`). This lane adds only
   `examples/livebench_math/` and its test module on top of that tip.
 - `OPENAI_API_KEY` exported in the shell; never put it in this directory
-- access to the pinned linux/arm64 runner
-  `ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d`, GitHub, Hugging Face, and the OpenAI API during setup/run
+- a one-time `helix sandbox login claude`, which stores credentials in the
+  `helix-auth-claude` Docker volume. No host key is passed into the runner.
+- access to the pinned runner
+  `ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba`, GitHub, Hugging Face, and the OpenAI API during setup/run
+
+### Runner provenance
+
+The runner is pinned by a **registry manifest digest**, verifiable from any
+host with `docker manifest inspect <image>`. This matters: an earlier revision
+of this demo pinned a codex runner digest that was correctly *shaped* but had
+never been published to GHCR. That hash was the local image **config ID**, a
+different hash space from a registry manifest digest, so the demo only worked
+on the one machine that happened to have the image cached. `RepoDigests` was
+empty, which is the tell. `test_runner_pin_is_registry_resolvable_not_a_local_image_id`
+now performs the network resolution so string-shaped fakes cannot pass again.
+
+This image is published for `linux/amd64` only. On arm64 hosts it runs under
+emulation, which is fine for the correctness-oriented run below but means
+wall-clock timings from an arm64 host are not comparable to native ones.
+
+The mutation engine is the claude runner rather than a codex runner. This does
+not change what the benchmark measures: the agent only edits `prompt.txt`,
+while the solver (`gpt-4.1-mini`) is invoked directly by the protected sidecar
+and graded by the official LiveBench scorers. The proposer is outside the
+scored path.
 
 Run every command below from this directory.
 
 ## Setup and scorer gate
 
 ```sh
-docker pull --platform linux/arm64 \
-  ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d
+docker manifest inspect \
+  ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba \
+  > /dev/null && echo "runner pin resolves in registry"
+docker pull \
+  ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba
 docker build --progress=plain \
   -t helix-livebench-math:e2c8b590-smoke .
 docker run --rm helix-livebench-math:e2c8b590-smoke \

@@ -17,7 +17,7 @@ from helix.sandbox import _copy_tree_contents
 
 
 ROOT = Path(__file__).parents[2] / "examples" / "livebench_math"
-CODEX_RUNNER_IMAGE = "ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771b140aad4e64a93cd812d31bdba202d6aeacc71a15138ae47ec557e4d"
+RUNNER_IMAGE = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
 sys.path.insert(0, str(ROOT))
 
 import constants  # noqa: E402
@@ -30,6 +30,58 @@ import scoring  # noqa: E402
 RELEASE_TIP = "c9371f4"
 RELEASE_ANCESTORS = ("4622413", "94f9751", "402dcc8", "e5c260f", RELEASE_TIP)
 REPO_ROOT = Path(__file__).parents[2]
+
+
+def _digest_of(image: str) -> str:
+    return image.split("@", 1)[1]
+
+
+def test_runner_pin_is_registry_resolvable_not_a_local_image_id() -> None:
+    """The runner pin must resolve in the REGISTRY, not merely parse as a digest.
+
+    This lane previously pinned
+    ``ghcr.io/ke7/helix-evo-runner-codex@sha256:18cba771...``, which is
+    correctly *shaped* but was never published. The hash was the local image
+    config ID (``RepoDigests`` was empty), a different hash space from a
+    registry manifest digest. It ran green here purely because the image was
+    cached locally, and was unreproducible anywhere else.
+
+    String-equality assertions cannot catch that, so this test performs the
+    network resolution. It skips (never silently passes) when docker or the
+    network is unavailable.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is None:
+        pytest.skip("docker unavailable")
+
+    assert "@sha256:" in RUNNER_IMAGE, "runner must be pinned by digest, not a tag"
+
+    probe = subprocess.run(
+        ["docker", "manifest", "inspect", RUNNER_IMAGE],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0 and "manifest unknown" not in probe.stderr.lower():
+        pytest.skip(f"registry unreachable: {probe.stderr.strip()[:120]}")
+    assert probe.returncode == 0, (
+        f"{RUNNER_IMAGE} does not resolve in the registry "
+        f"({probe.stderr.strip()[:120]}). A digest that only exists locally is "
+        "not a content-addressed pin."
+    )
+
+    # A registry manifest digest must never equal a local image config ID.
+    local = subprocess.run(
+        ["docker", "image", "inspect", RUNNER_IMAGE, "--format", "{{.Id}}"],
+        capture_output=True,
+        text=True,
+    )
+    if local.returncode == 0:
+        assert local.stdout.strip() != _digest_of(RUNNER_IMAGE), (
+            "pin equals the local image config ID, so it is a local build "
+            "wearing a registry-digest costume"
+        )
 
 
 def test_lane_runtime_is_the_exact_current_release() -> None:
@@ -90,7 +142,8 @@ def test_manifest_pins_exact_revisions_and_representative_smoke_ids() -> None:
     }
     assert len(set(constants.SMOKE_IDS["train"] + constants.SMOKE_IDS["val"])) == 8
     assert constants.PUBLICATION_PROPOSER_MODEL == "gpt-5-mini"
-    assert constants.SMOKE_PROPOSER_MODEL == "gpt-5.4"
+    assert constants.SMOKE_PROPOSER_MODEL == "haiku"
+    assert constants.SMOKE_PROPOSER_BACKEND == "claude"
 
 
 def test_official_dispatch_routes_all_math_families() -> None:
@@ -249,11 +302,9 @@ def test_parallel_and_baseline_configs_pin_expected_shapes() -> None:
     assert p2n2["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert one["agent"]["model"] == constants.SMOKE_PROPOSER_MODEL
     assert p2n2["sandbox"]["enabled"] and p2n2["sandbox"]["evaluator"]
-    assert p2n2["sandbox"]["image"] == CODEX_RUNNER_IMAGE
-    assert one["sandbox"]["image"] == CODEX_RUNNER_IMAGE
-    assert (ROOT / "Dockerfile").read_text().splitlines()[0] == (
-        f"FROM {CODEX_RUNNER_IMAGE}"
-    )
+    assert p2n2["sandbox"]["image"] == RUNNER_IMAGE
+    assert one["sandbox"]["image"] == RUNNER_IMAGE
+    assert (ROOT / "Dockerfile").read_text().splitlines()[0] == (f"FROM {RUNNER_IMAGE}")
     assert p2n2["evaluator"]["sidecar"]["image"].startswith("helix-livebench-math:")
     assert p2n2["evaluator"]["sidecar"]["runner_image"].startswith(
         "helix-livebench-math:"
@@ -285,7 +336,7 @@ def test_agent_command_environment_excludes_sidecar_key(
 def test_agent_image_and_evaluator_image_are_separate_trust_domains() -> None:
     config = load_config(ROOT / "helix.toml")
     assert config.evaluator.sidecar is not None
-    assert config.sandbox.image == CODEX_RUNNER_IMAGE
+    assert config.sandbox.image == RUNNER_IMAGE
     assert config.evaluator.sidecar.image == "helix-livebench-math:e2c8b590-smoke"
     assert config.evaluator.sidecar.resolved_runner_image == (
         "helix-livebench-math:e2c8b590-smoke"
