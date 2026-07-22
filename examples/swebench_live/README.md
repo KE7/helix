@@ -34,11 +34,43 @@ logs, image, or cache is committed. `prepare.py` checks out only the pinned
 dataset revision in a temporary directory, validates the parquet size/hash and
 row contract, writes private fields to a labeled Docker volume, and deletes the
 temporary checkout. Mutation runs in the pinned Claude Docker runner and sees
-only `coding_agent.py` plus the public `TASK.md`; it receives no private task
-row, credentials, evaluator/config/setup/source files, Docker socket, or task
-volume. The evaluator remains host-side so it can launch the official sandbox.
+only `coding_agent.py` plus the public `TASK.md` (verified from a live
+container's bind mount, not only from configuration); it receives no private
+task row, evaluator/config/setup/source files, Docker socket, or task volume.
+The evaluator remains host-side so it can launch the official sandbox.
 The task-container network is disabled, and candidate code runs as an
 unprivileged user that cannot read the root-only private task volume.
+
+### Credential exposure: what is and is not true
+
+The mutation agent authenticates from the `helix-auth-claude` volume mounted
+at `/home/node`. That volume alone is sufficient to authenticate.
+
+However, **this demo does not guarantee that no credential enters the agent
+container.** HELIX builds the agent environment by calling
+`_scrub_environment` (which correctly removes credentials) and then
+`mutator._add_backend_auth_env`, which re-adds `ANTHROPIC_API_KEY` /
+`ANTHROPIC_AUTH_TOKEN` from the host environment if they are set.
+`sandbox._docker_args` then renders every environment entry as
+`-e KEY=VALUE`. Therefore:
+
+- On a host where those variables are **unset**, no credential reaches the
+  agent container. This is the case asserted by the regression guard.
+- On a host where `ANTHROPIC_API_KEY` **is set**, the real key is passed into
+  the agent container and is visible via `docker inspect` and process argv to
+  any local user with Docker access.
+
+For a volume-authenticated lane the injection is redundant. It is core HELIX
+behaviour rather than a property of this example, and it has been escalated as
+a follow-up (candidate fix: skip `_add_backend_auth_env` when a sandbox auth
+volume is configured). Note that a scrubber-only test cannot detect this,
+because the injection happens *after* scrubbing; the guard in
+`tests/examples/test_swebench_live.py` therefore asserts on the resulting
+docker argv. To run with no credential in any container, unset
+`ANTHROPIC_API_KEY` before invoking `helix evolve`.
+
+No secret value appears in this repository, and none appeared in the run's
+ledger, artifacts, or logs (verified by searching for the literal key value).
 
 ## Exact setup and smoke
 

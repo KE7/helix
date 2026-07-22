@@ -612,3 +612,92 @@ def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
     assert "GOLD ANSWER" not in _git("log", "--all", "-p", cwd=shallow)
     (shallow / "src.c").write_text("candidate fix\n", encoding="utf-8")
     assert "candidate fix" in _git("diff", "--binary", "--text", "HEAD", cwd=shallow)
+
+
+def test_no_credentialed_sidecar_so_passthrough_env_must_be_empty() -> None:
+    """(a)+(b) Scope guard, asserted for THIS lane's reason.
+
+    This lane's evaluator is host-side with no credentialed sidecar, so no
+    credential should be forwarded anywhere.  This is NOT a universal rule:
+    a lane with a protected evaluator sidecar legitimately sets
+    ``passthrough_env`` so the sidecar can receive a key while the mutation
+    agent cannot.  Assert the effective PARSED values, not raw TOML keys --
+    ``passthrough_env`` is a top-level HelixConfig field (and separately an
+    EvaluatorSidecarConfig field); it is not a SandboxConfig field, so a
+    ``[sandbox]`` key of that name is a pydantic error and asserting its
+    absence there would guard an impossible condition.
+    """
+    from helix.config import HelixConfig, SandboxConfig, load_config
+
+    assert "passthrough_env" in HelixConfig.model_fields
+    assert "passthrough_env" not in SandboxConfig.model_fields
+
+    config = load_config(EXAMPLE / "helix.toml")
+    assert config.sandbox.evaluator is False, "this lane evaluates on the host"
+    assert config.evaluator.sidecar is None, "no credentialed sidecar on this lane"
+    assert config.passthrough_env == []
+    assert config.env == {}
+
+
+def test_agent_container_argv_carries_no_credential_when_host_env_is_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c) Behavioral guard on the REAL production launch sequence.
+
+    Scope, stated exactly: this proves the agent container's docker argv
+    carries no credential WHEN THE HOST ENVIRONMENT IS CLEAN.  It does NOT
+    prove that no secret can ever enter a container.  HELIX injects backend
+    auth env AFTER scrubbing (mutator._add_backend_auth_env), so on a host
+    that exports ANTHROPIC_API_KEY the key IS rendered into the container's
+    argv as ``-e ANTHROPIC_API_KEY=...``.  That exposure is asserted below so
+    it is recorded rather than hidden; if core HELIX later stops injecting it,
+    the second half fails loudly and this test must be updated.
+
+    A scrubber-only assertion is insufficient: _scrub_environment removes the
+    key and the injection happens downstream of it, so such a test passes
+    while the key still reaches the container.
+    """
+    from pathlib import Path as _Path
+
+    from helix.config import load_config
+    from helix.executor import _scrub_environment
+    from helix.mutator import _add_backend_auth_env
+    from helix.sandbox import _docker_args
+
+    config = load_config(EXAMPLE / "helix.toml")
+
+    def agent_argv() -> list[str]:
+        env = _scrub_environment(
+            passthrough_env=config.passthrough_env, fixed_env=config.env
+        )
+        _add_backend_auth_env(env, config.agent.backend)
+        return _docker_args(
+            ["claude", "--version"],
+            env,
+            _Path("/tmp/helix-guard-workspace"),
+            config.sandbox,
+            "agent",
+            config.sandbox.image or "",
+            config.agent.backend,
+        )
+
+    canary = "sk-ant-canary-value-must-not-reach-the-container"
+
+    # Clean host: no credential may appear in the launched container's argv.
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    argv = agent_argv()
+    assert not any(part.startswith("ANTHROPIC_API_KEY=") for part in argv)
+    assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in argv)
+    assert not any(canary in part for part in argv)
+    # The auth volume is what actually authenticates a sandboxed agent.
+    assert "helix-auth-claude:/home/node:rw" in argv
+
+    # Dirty host: documents the known, escalated core-HELIX exposure.  The
+    # scrubber alone would report clean here, which is exactly the trap.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", canary)
+    scrubbed = _scrub_environment(
+        passthrough_env=config.passthrough_env, fixed_env=config.env
+    )
+    assert not any(canary in value for value in scrubbed.values())
+    assert any(part == f"ANTHROPIC_API_KEY={canary}" for part in agent_argv())
