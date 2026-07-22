@@ -301,3 +301,35 @@ def test_docker_sdk_is_not_a_dependency():
                 if (node.module or "").split(".")[0] == "docker":
                     offenders.append(f"{path.relative_to(SRC)}:{node.lineno}")
     assert not offenders, f"docker SDK imported in src/helix: {offenders}"
+
+
+def test_synthetic_refresh_harness_refuses_shared_auth_volumes():
+    """The synthetic-harness refusal rule, checked on EVERY PR.
+
+    The T22-T25 refresh tests are integration-tier and skip by default, so
+    their own safety rule would otherwise go unexercised in normal CI. This
+    imports that rule and asserts it directly, at unit tier.
+
+    The rule matters because a typo in a volume name does not fail loudly:
+    ``docker run -v`` silently CREATES the volume it names, so a mistyped
+    disposable name would provision a new volume, and a mistyped shared name
+    would reach real credential state.
+    """
+    import importlib.util
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "integration"
+        / "test_oauth_refresh_suppression.py"
+    )
+    spec = importlib.util.spec_from_file_location("_refresh_harness", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    for shared in ("helix-auth-claude", "helix-auth-opencode", "helix-auth-gemini"):
+        with pytest.raises(AssertionError):
+            module._assert_disposable(shared)
+    # Positive counterpart: a genuinely disposable name is accepted, so the
+    # rule discriminates rather than refusing everything.
+    module._assert_disposable("helix-refreshtest-abc123")

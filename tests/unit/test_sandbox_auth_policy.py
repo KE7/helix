@@ -642,3 +642,85 @@ def test_C7_probe_classifier_input_is_helix_controlled():
     kind, remedy = _classify_probe_failure("", "something went wrong")
     assert kind == "ambiguous"
     assert "could not distinguish" in remedy
+
+
+# ---------------------------------------------------------------------------
+# T15 — the NEW error messages are themselves a redaction risk
+# ---------------------------------------------------------------------------
+
+
+def test_T15_new_error_paths_never_contain_a_credential_value(monkeypatch):
+    """T15 — every new diagnostic surface is checked for credential values.
+
+    The new preflight and config messages are the risk: existing redaction
+    covers existing paths, and a new diagnostic path bypasses it by default.
+
+    Non-vacuity: the canary is FIRST asserted to be present in the
+    un-redacted argv, so this cannot pass against a no-op that renders
+    nothing at all.
+    """
+    from helix.authpreflight import env_mode_disclosure
+    from helix.exceptions import SandboxAuthPreflightError
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", CANARY)
+    config = make_config(auth="env", auth_env_allow=["ANTHROPIC_API_KEY"])
+
+    # Non-vacuity precondition: the value IS rendered somewhere unredacted.
+    argv = agent_docker_argv(config)
+    assert any(CANARY in part for part in argv), (
+        "canary must appear in the raw argv, or this test proves nothing"
+    )
+
+    # The env-mode disclosure names variables, never values.
+    disclosure = env_mode_disclosure(config)
+    assert "ANTHROPIC_API_KEY" in disclosure
+    assert CANARY not in disclosure
+    assert "tradeoff, not an equivalent" in disclosure
+
+    # Preflight errors carry a remedy and no credential value.
+    exc = SandboxAuthPreflightError(
+        "backend authentication failed", remedy="helix sandbox login claude"
+    )
+    for surface in (str(exc), exc.format_full(), exc.remedy):
+        assert CANARY not in surface
+
+    # EnvGrant redacts its value in repr, so a grant in a traceback or an
+    # assertion diff cannot leak a secret.
+    grant = next(g for g in agent_grants(config) if g.name == "ANTHROPIC_API_KEY")
+    assert CANARY not in repr(grant)
+    assert "<redacted" in repr(grant)
+
+
+# ---------------------------------------------------------------------------
+# C6 — a DELIBERATELY ACCEPTED hole, neither silently fixed nor undocumented
+# ---------------------------------------------------------------------------
+
+
+def test_C6_sandbox_enabled_toggle_is_an_accepted_documented_hole(monkeypatch):
+    """C6 — toggling ``sandbox.enabled`` still changes the auth mechanism.
+
+    This is an ACCEPTED hole, recorded rather than silently fixed or silently
+    left undocumented. Requiring an explicit ``auth`` when the sandbox is off
+    would break every non-sandboxed config and violate the preserved
+    invariant, so the flip remains possible.
+
+    The partial mitigation IS enforced, and this test pins both halves: a
+    config that DECLARED an intent cannot silently lose it (declaring ``auth``
+    while disabled is a hard error), while a config that never declared one
+    still flips silently.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", CANARY)
+
+    # Undeclared: the flip is silent. This is the accepted hole, asserted so
+    # its scope is visible rather than implied.
+    sandboxed = env_dict(agent_grants(make_config()), "agent")
+    unsandboxed = env_dict(agent_grants(make_config(enabled=False)), "agent")
+    assert "ANTHROPIC_API_KEY" not in sandboxed
+    assert unsandboxed["ANTHROPIC_API_KEY"] == CANARY, (
+        "documents the accepted hole: disabling the sandbox moves the run to "
+        "env auth with no declaration anywhere"
+    )
+
+    # Declared: refused, so an intent that WAS stated cannot be silently lost.
+    with pytest.raises(ValueError, match="only meaningful when"):
+        make_config(enabled=False, auth="volume")
