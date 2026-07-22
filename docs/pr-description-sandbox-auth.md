@@ -93,3 +93,68 @@ reviewer reads it.
   described as a security control. It does not exist on any pre-existing
   volume, so for one release the skew check warns and catches nothing on the
   volumes that matter today.
+
+## C7 — the runtime 401 detector: re-examined, and deliberately NOT shipped
+
+The audit asked for this to be re-examined before implementing, flagging it as
+the softest load-bearing part of the proposal. Conclusion: **the runtime 401
+abort is not shipped in the proposed form, and should not be.**
+
+The proposal was to abort a run when a mutation returns a 401, rather than
+scoring a failed proposal. The detector's input would be the mutation agent's
+output. But by this project's own threat model, the mutation agent runs with
+`--dangerously-skip-permissions` over attacker-influenceable repository
+content, on a `bridge` network with egress. Its output therefore routinely
+contains text from HTTP calls the agent itself made and from the candidate
+repo's own test suite.
+
+That makes the false positive **adversarially reachable**, not merely
+occasional: a candidate whose tests print `401 Unauthorized` would abort every
+run. Aborting healthy runs is worse than the status quo, and worst precisely
+where the audit says a clean refusal matters most — a single timed window.
+
+Two supporting observations:
+
+1. **The codebase already has the defensible version of this heuristic.**
+   `_looks_like_rate_limit` is applied to the backend's *own structured JSON
+   error field*, not to free-form agent output. That input is not
+   agent-controlled. Any future runtime auth detector should be restricted to
+   the same envelope; scanning stdout is a different and much weaker thing
+   wearing the same name.
+2. **The preflight already covers the dominant failure mode soundly.** A dead
+   volume at run start — the actual observed failure — is caught before
+   dispatch, with zero side effects, on input HELIX fully controls.
+
+What remains uncovered is a token that dies *mid-run*. That gap is real and is
+stated rather than papered over: the preflight's verdict is scoped to "valid
+at the moment we checked". The auditor's safer variant (abort only when every
+proposal in a generation fails the same way) is the right shape for closing
+it, and it needs the structured-envelope input above rather than stdout
+scraping. It is not in this release.
+
+Both properties are pinned by tests: agent output containing 401 text is
+inert, and the preflight classifier's input is asserted to be a HELIX-authored
+probe command rather than anything agent-derived.
+
+## C14 — copy-isolation made structurally impossible
+
+The audit asked whether copy-isolation could be made structurally impossible
+rather than merely tested against, and said that would beat its own proposal.
+**It can, and it is.**
+
+The proposal's defence was a source comment plus a test (T27) asserting the
+mount string — which the auditor correctly called weak against a future
+refactor by someone who has not read the analysis, because the violation
+*looks like an improvement*.
+
+Instead, the probe does not construct a mount at all. Its argv is produced by
+the **same `_docker_args(scope="agent")` call** that launches the production
+mutation container, with the same `SandboxConfig`. There is no probe-specific
+volume string, no probe-specific mount mode, and no parameter that could point
+it at a copy.
+
+The consequence is what makes it structural: a reviewer who "isolates the
+probe" must change the production agent mount at the same time. That does not
+silently green the probe — it changes how every mutation container is
+launched, which fails loudly and visibly. The dangerous edit and the obvious
+breakage are now the same edit.

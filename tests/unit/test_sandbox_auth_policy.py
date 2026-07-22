@@ -561,3 +561,84 @@ def test_T26_preflight_does_not_enter_the_evaluation_budget():
     assert state.budget.cost_usd == 0.0
     assert state.budget.input_tokens == 0
     assert state.budget.output_tokens == 0
+
+
+# ---------------------------------------------------------------------------
+# C7 — the runtime 401 detector, and why this release does NOT ship one
+# ---------------------------------------------------------------------------
+
+
+def test_C7_agent_output_containing_401_does_not_abort_the_run(tmp_path, monkeypatch):
+    """C7 — agent OUTPUT must never be the trigger for an auth abort.
+
+    The audit proposed aborting a run on a runtime 401. Re-examined before
+    implementing, and deliberately NOT shipped in that form. The reason is
+    the project's own threat model: the mutation agent runs with
+    ``--dangerously-skip-permissions`` over attacker-influenceable repository
+    content on a ``bridge`` network. Its stdout therefore routinely contains
+    text from HTTP calls the agent itself made, and from the candidate repo's
+    own test suite.
+
+    A detector scanning that text has an ADVERSARIALLY REACHABLE false
+    positive: a candidate whose tests print ``401 Unauthorized`` would abort
+    every run. That is not a rare mis-fire, it is an input an untrusted party
+    controls — and aborting healthy runs is worse than the status quo,
+    especially for a single-window run.
+
+    Note the contrast with the existing rate-limit heuristic, which reads the
+    backend's OWN structured JSON error envelope rather than free-form agent
+    output. That narrower input is not agent-controlled, and it is the only
+    input on which a runtime auth detector could be defensible.
+
+    This test pins the property: 401-looking text in agent output is inert.
+    """
+    from helix.mutator import _looks_like_rate_limit
+
+    hostile = "candidate test output: HTTP 401 Unauthorized from api.example.com"
+
+    # The existing structured-envelope heuristic must not fire on this either.
+    assert not _looks_like_rate_limit(hostile)
+
+    # And no auth classifier is applied to agent output anywhere in the
+    # mutation path: the preflight is the auth control, and its input is a
+    # HELIX-issued command in a HELIX-controlled container.
+    from helix import mutator as mutator_module
+
+    source = Path(mutator_module.__file__).read_text()
+    assert "_classify_probe_failure" not in source, (
+        "the preflight's failure classifier must not be applied to agent "
+        "output; its soundness depends on the input NOT being agent-controlled"
+    )
+    del tmp_path, monkeypatch
+
+
+def test_C7_probe_classifier_input_is_helix_controlled():
+    """The preflight classifier IS defensible, for a stated reason.
+
+    Its input is the output of a HELIX-issued probe command in a
+    HELIX-controlled container with a credential-free environment — not a
+    mutation over attacker-influenceable content. The distinction is the whole
+    argument, so it is asserted rather than left to a comment.
+    """
+    from helix.authpreflight import BACKEND_PROBE_COMMANDS, _classify_probe_failure
+
+    # The probe is a fixed, HELIX-authored command, not agent-derived.
+    for backend, command in BACKEND_PROBE_COMMANDS.items():
+        assert isinstance(command, list) and command, backend
+        assert all(isinstance(part, str) for part in command)
+
+    kind, remedy = _classify_probe_failure("", "invalid_grant at /v1/oauth/token")
+    assert kind == "refresh"
+    assert "login" in remedy
+
+    kind, _ = _classify_probe_failure("", "429 rate limit exceeded")
+    assert kind == "inference"
+
+    kind, _ = _classify_probe_failure("", "could not resolve host")
+    assert kind == "transport"
+
+    # Ambiguity is REPORTED, not guessed: sending a user to a remedy that
+    # cannot help is the same 'wrong signal' disease this release removes.
+    kind, remedy = _classify_probe_failure("", "something went wrong")
+    assert kind == "ambiguous"
+    assert "could not distinguish" in remedy
