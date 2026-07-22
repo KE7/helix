@@ -39,7 +39,7 @@ background = """Work only on coding_agent.py. Do not edit evaluator, configurati
 [sandbox]
 enabled = true
 evaluator = false
-image = "sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b"
+image = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
 network = "bridge"
 cpus = 2.0
 memory = "2g"

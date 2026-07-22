@@ -48,9 +48,18 @@ def test_parallel_config_loads_with_supported_schema_and_measured_limits() -> No
     assert "allowed_tools" not in raw["agent"]
     assert config.sandbox.enabled is True
     assert config.sandbox.evaluator is False
+    # The runner must be pinned by a REGISTRY digest, not a bare local image
+    # ID.  A bare "sha256:..." resolves only on the host that built it, so the
+    # demo would be unreproducible elsewhere and would die at dispatch (HELIX
+    # never runs `docker pull`) on any machine lacking that local layer.
     assert config.sandbox.image == (
-        "sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b"
+        "ghcr.io/ke7/helix-evo-runner-claude"
+        "@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
     )
+    assert not config.sandbox.image.startswith("sha256:")
+    repository, _, digest = config.sandbox.image.partition("@")
+    assert "/" in repository, "runner pin must be registry-qualified"
+    assert digest.startswith("sha256:") and len(digest) == 71
     assert config.sandbox.cpus == 2.0
     assert config.sandbox.memory == "2g"
     assert config.sandbox.pids_limit == 256
@@ -556,3 +565,50 @@ def test_patch_staging_does_not_follow_candidate_planted_symlink(
     # Staging is per-call and cleaned up, leaving no candidate-reachable residue.
     assert not staged[0].exists()
     assert not staged[0].parent.exists()
+
+
+def test_candidate_clone_cannot_reach_commits_past_base(tmp_path: Path) -> None:
+    """The official task image's /testbed carries upstream history past
+    base_commit, including the commit that fixes the task instance.  Cloning it
+    with full refs hands the candidate the gold patch, so the runner must clone
+    shallowly and must fail closed if anything beyond base_commit is reachable.
+    """
+    runner_source = (EXAMPLE / "official_runner.py").read_text(encoding="utf-8")
+    assert "--depth" in runner_source and "--no-tags" in runner_source
+    assert "--no-hardlinks" not in runner_source
+    assert "exposes commits beyond base_commit" in runner_source
+
+    def _git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
+        ).stdout.strip()
+
+    testbed = tmp_path / "testbed"
+    testbed.mkdir()
+    _git("init", "-q", ".", cwd=testbed)
+    _git("config", "user.email", "t@t", cwd=testbed)
+    _git("config", "user.name", "t", cwd=testbed)
+    (testbed / "src.c").write_text("buggy\n", encoding="utf-8")
+    _git("add", ".", cwd=testbed)
+    _git("commit", "-qm", "base", cwd=testbed)
+    base = _git("rev-parse", "HEAD", cwd=testbed)
+    (testbed / "src.c").write_text("GOLD ANSWER\n", encoding="utf-8")
+    _git("commit", "-qam", "Handle zero case (#2743)", cwd=testbed)
+    _git("branch", "upstream-fix", cwd=testbed)
+    _git("checkout", "-q", base, cwd=testbed)
+
+    full = tmp_path / "full"
+    _git("clone", "--quiet", "--no-hardlinks", str(testbed), str(full), cwd=tmp_path)
+    leaked = _git("log", "--all", "--oneline", "--not", "HEAD", cwd=full)
+    assert "#2743" in leaked, "fixture must reproduce the leak the runner had"
+
+    shallow = tmp_path / "shallow"
+    _git(
+        "clone", "--quiet", "--depth", "1", "--no-tags",
+        f"file://{testbed}", str(shallow), cwd=tmp_path,
+    )
+    assert _git("rev-parse", "HEAD", cwd=shallow) == base
+    assert _git("log", "--all", "--oneline", "--not", "HEAD", cwd=shallow) == ""
+    assert "GOLD ANSWER" not in _git("log", "--all", "-p", cwd=shallow)
+    (shallow / "src.c").write_text("candidate fix\n", encoding="utf-8")
+    assert "candidate fix" in _git("diff", "--binary", "--text", "HEAD", cwd=shallow)

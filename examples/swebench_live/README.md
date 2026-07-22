@@ -11,7 +11,7 @@ hashes, image digest, licensing, and the already-passing upstream gold command.
 - macOS or Linux; Python 3.11+; `uv`; Git and Git LFS; Docker 24+.
 - Claude Code authenticated on the host (`claude auth status`).
 - The content-addressed Claude runner image
-  `sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b`
+  `ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba`
   (local `ghcr.io/ke7/helix-evo-runner-claude:0.2.0`, `linux/arm64`) and
   an authenticated `helix-auth-claude` Docker volume.
 - At least 8 CPUs and enough space for the pinned 2.49 GB official task image.
@@ -41,9 +41,9 @@ cd examples/swebench_live
 docker image inspect \
   docker.io/starryzhang/sweb.eval.x86_64.capstone-engine_1776_capstone-2743@sha256:c3d6222106db9afce1eaf6036f67d540011e46ea8e59419097c32d0555032ed9
 docker image inspect \
-  sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b
+  ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba
 uv run --project /path/to/helix-repo helix sandbox status claude \
-  --image sha256:016259fef07b7344f924fad0129a19cb2541248e5f4c9af98ef462579aeb8d1b
+  --image ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba
 uv run --with pyarrow python prepare.py
 python3 evaluate.py --gold-smoke
 ```
