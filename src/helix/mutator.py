@@ -745,6 +745,31 @@ def _build_backend_args(
         args = [
             "claude",
             "--dangerously-skip-permissions",
+            # Ignore ALL MCP configuration that HELIX did not supply.
+            #
+            # The candidate worktree is the agent's cwd (``/workspace``), so a
+            # candidate-authored ``.mcp.json`` is inside Claude Code's default
+            # discovery path, and ``--dangerously-skip-permissions`` above
+            # removes the approval prompt that would otherwise gate it.
+            #
+            # Verified on the pinned runtime (2.1.120) with a positive control:
+            # WITHOUT this flag a candidate-authored ``.mcp.json`` caused the
+            # agent to SPAWN the command named in it; WITH the flag it did not.
+            # That is two defects, not one:
+            #   1. candidate-controlled process execution and network egress --
+            #      a candidate can point the agent at an arbitrary endpoint;
+            #   2. a cross-run channel -- MCP server NAMES are persisted as keys
+            #      in ``~/.claude/mcp-needs-auth-cache.json``, which lives in
+            #      the shared auth directory, so a name chosen by one candidate
+            #      is observable by later ones.
+            #
+            # Passed with NO ``--mcp-config``, so no MCP servers load at all.
+            # HELIX has no MCP configuration surface in 0.3.0; if one is ever
+            # added it must be mounted OUTSIDE the candidate worktree, omitted
+            # from the agent-visible tree, and passed TOGETHER with this flag.
+            # The invariant: a candidate must never select an endpoint or a
+            # server name through its worktree.
+            "--strict-mcp-config",
             "--print",
             "--output-format",
             "json",
@@ -1591,6 +1616,7 @@ def invoke_claude_code(
         config_env=fixed_env,
     )
     backend_env = env_dict(grants, "agent")
+
     def _grant_internal(name: str, value: str) -> None:
         """Register a HELIX-set runtime variable as a first-class grant.
 

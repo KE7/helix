@@ -417,17 +417,74 @@ def test_T6_unrelated_volume_does_not_authenticate():
     assert "helix-auth-claude:/home/node:rw" not in argv
 
 
-def test_env_mode_mounts_auth_volume_read_only():
-    """Structural consequence of env mode (§2.7).
+def test_env_mode_mounts_no_auth_volume_at_all():
+    """Env mode must not mount the persistent auth volume in ANY mode.
 
-    An env-mode run provably cannot refresh the volume, so mounting it :rw
-    would offer a write path never used for its purpose while leaving the
-    credential record writable by agent code.
+    SUPERSEDES ``test_env_mode_mounts_auth_volume_read_only``, which asserted
+    that env mode mounts the volume ``:ro``.  That earlier reasoning --
+    "an env-mode run cannot refresh the volume, so a writable mount is an
+    unused write path" -- addressed the wrong risk and is now known to be
+    wrong in a way that matters.
+
+    A read-only mount over the whole HOME still exposes every prior run's
+    transcripts, sessions, caches and config for READING.  Read access IS the
+    cross-candidate channel; write access was never the defect.  ``:ro``
+    therefore removed a hazard nobody was exploiting while preserving the one
+    that contaminated three benchmark demos.
+
+    Catches: any reintroduction of a ``helix-auth-*`` mount into env mode, at
+    any mode string, including a "harmless" read-only one.
     """
     config = make_config(auth="env", auth_env_allow=["ANTHROPIC_API_KEY"])
     argv = agent_docker_argv(config)
-    assert "helix-auth-claude:/home/node:ro" in argv
-    assert "helix-auth-claude:/home/node:rw" not in argv
+    joined = " ".join(argv)
+    assert "helix-auth-" not in joined, joined
+
+
+def test_env_mode_gets_private_home_and_candidate_transcript_bind():
+    """Env mode must still provide a writable HOME and capture transcripts.
+
+    Non-vacuity for the test above: dropping the auth mount without
+    provisioning a replacement HOME would make that assertion pass while
+    leaving the agent with the image's baked ``/home/node`` -- and would
+    silently break transcript capture, which is coupled to the old mount.
+
+    The ``uid``/``gid`` options are asserted explicitly: a bare tmpfs yields a
+    root-owned HOME that uid 1000 cannot write, failing every mutation agent.
+    """
+    config = make_config(auth="env", auth_env_allow=["ANTHROPIC_API_KEY"])
+    argv = agent_docker_argv(config)
+
+    home = [
+        argv[i + 1]
+        for i, tok in enumerate(argv)
+        if tok == "--tmpfs" and argv[i + 1].startswith("/home/node:")
+    ]
+    assert home, f"env mode must provision a private per-run HOME: {argv}"
+    assert "uid=1000" in home[0] and "gid=1000" in home[0], home[0]
+
+    binds = [
+        argv[i + 1]
+        for i, tok in enumerate(argv)
+        if tok == "-v" and argv[i + 1].endswith("/home/node/.claude/projects:rw")
+    ]
+    assert binds, f"env mode must bind a candidate transcript dir: {argv}"
+
+
+def test_env_mode_transcript_bind_is_candidate_specific():
+    """Distinct candidates must get distinct transcript roots.
+
+    Catches: keying transcripts on anything shared across candidates -- which
+    is the current defect, where the project key is ``-workspace`` for every
+    candidate of every run and the candidate id never enters the path at all.
+    """
+    from helix.sandbox_home import transcript_host_dir
+
+    a = transcript_host_dir(Path("/tmp/helix/cand-a"))
+    b = transcript_host_dir(Path("/tmp/helix/cand-b"))
+    assert a != b, (a, b)
+    # and never inside the workspace, which is synced back into the candidate
+    assert Path("/tmp/helix/cand-a") not in a.parents
 
 
 # ---------------------------------------------------------------------------

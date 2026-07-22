@@ -25,6 +25,12 @@ from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
 from helix.exceptions import SandboxAuthImageError
+from helix.sandbox_home import (
+    ensure_transcript_host_dir,
+    private_home_tmpfs_arg,
+    transcript_bind_arg,
+    transcript_host_dir,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1547,15 +1553,27 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        # Under env mode the run provably cannot refresh the volume's token
-        # (the injected variables turn OAuth mode off), so mounting :rw would
-        # offer a write path that will never be used for its purpose while
-        # leaving the credential record writable by agent code. Making the
-        # non-maintenance structural beats letting it happen invisibly.
-        mount_mode = "ro" if sandbox.resolved_auth() == "env" else "rw"
-        args.extend(
-            ["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:{mount_mode}"]
-        )
+        if sandbox.resolved_auth() == "env":
+            # ENV MODE: mount NO auth volume at all.
+            #
+            # This previously mounted the volume ``:ro``, reasoning that env
+            # mode cannot refresh the token so a writable mount was
+            # unnecessary.  That reasoning addressed the wrong risk.  A
+            # read-only mount over the whole HOME still exposes every prior
+            # run's transcripts, sessions and caches for READING, which is
+            # precisely the cross-candidate channel -- read access is the
+            # defect, not write access.
+            #
+            # Env mode therefore gets a private per-run HOME and no shared
+            # store whatsoever.  The cross-run channel does not exist in this
+            # mode rather than being masked, which is why its isolation claim
+            # does not depend on any denylist being complete.
+            args.extend(private_home_tmpfs_arg())
+            args.extend(transcript_bind_arg(transcript_host_dir(workspace)))
+        else:
+            args.extend(
+                ["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"]
+            )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])
@@ -1640,6 +1658,13 @@ def run_sandboxed_commands(
                         scopes=frozenset({"agent", "evaluator", "sidecar"}),
                     )
                 )
+        # Create the candidate transcript directory before any container
+        # starts.  Docker auto-creates a missing bind source as ``root:root``,
+        # which would hand the agent a transcript directory its own uid cannot
+        # write -- silently, and only for transcripts.
+        if scope == "agent" and sandbox.resolved_auth() == "env":
+            ensure_transcript_host_dir(transcript_host_dir(workspace))
+
         results = []
         try:
             for command in commands:
