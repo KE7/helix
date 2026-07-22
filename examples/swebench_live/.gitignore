@@ -1,0 +1,13 @@
+.helix/
+.cache/
+.venv/
+artifacts/
+best-export/
+cleanup-proof.json
+helix_batch.json
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

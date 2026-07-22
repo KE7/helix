@@ -1,0 +1,67 @@
+objective = """Evolve coding_agent.py into a robust, autonomous source-repair agent for the pinned SWE-bench-Live Capstone task. The agent must inspect the clean repository and issue statement, make the smallest correct production-code change, preserve existing behavior, and emit a git patch. Official resolution is the only score."""
+rng_seed = 2743
+
+[evaluator]
+command = "python3 evaluate.py"
+score_parser = "json_accuracy"
+include_stdout = true
+include_stderr = true
+protected_files = [
+  "evaluate.py",
+  "official_runner.py",
+  "pins.py",
+  "prepare.py",
+  "cleanup.py",
+  "inspect_run.py",
+  "TASK.md",
+]
+
+[evolution]
+max_generations = 1
+max_evaluations = 9
+max_workers = 2
+num_parallel_proposals = 2
+mutations_per_parent = 2
+proposal_selection = "best_improvement"
+minibatch_size = 1
+cache_evaluation = false
+acceptance_criterion = "strict_improvement"
+frontier_type = "instance"
+merge_enabled = false
+
+[agent]
+backend = "claude"
+model = "haiku"
+effort = "low"
+max_turns = 12
+background = """Work only on coding_agent.py. Do not edit evaluator, configuration, task-description, pin, setup, inspection, cleanup, or attribution files. coding_agent.py is executed as an unprivileged user in a fresh official SWE-bench-Live task container with /testbed as the repository and a public issue file. It may inspect files and run local commands through Python subprocesses. It must make the smallest defensible source fix in /testbed; do not hard-code or reconstruct benchmark test patches, do not use network access, and do not weaken tests. Read TASK.md for the public issue and artifact contract."""
+
+[sandbox]
+enabled = true
+evaluator = false
+image = "ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba"
+network = "bridge"
+cpus = 2.0
+memory = "2g"
+timeout_seconds = 900
+pids_limit = 256
+omit_from_agent = [
+  ".gitignore",
+  "README.md",
+  "SOURCE.md",
+  "THIRD_PARTY_NOTICES.md",
+  "cleanup.py",
+  "cleanup-proof.json",
+  "evaluate.py",
+  "helix.toml",
+  "inspect_run.py",
+  "official_runner.py",
+  "pins.py",
+  "prepare.py",
+  "artifacts",
+  "__pycache__",
+  ".helix_artifacts",
+]
+
+[worktree]
+base_dir = ".helix/worktrees"
