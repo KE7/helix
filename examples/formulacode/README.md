@@ -13,6 +13,28 @@ uses two public training cases and two larger validation cases so a laptop can
 exercise a genuine HELIX P=2, N=2 run. Its scores must be labeled **smoke-subset
 scores**, never FormulaCode leaderboard scores.
 
+## Recorded result of the accepted 0.3.0 demo run
+
+The verification run that qualified this lane for the 0.3.0 release produced a
+**negative optimization result**, recorded here so it is not overstated
+elsewhere:
+
+- **0 of 4 proposals were accepted.** All four failed correctness, fell back to
+  baseline (`failure_kind=correctness_failure`, `success=false`,
+  `correctness=0.0`, speedup clamped to `1.0`).
+- The frontier **retained the seed** `g0-s0` at advantage `-107.5204`; no
+  candidate improved on it.
+- Total cost: **$0.1651**.
+
+What this run demonstrates is **scheduler, ledger, resume, and cleanup
+integrity** — a real P=2, N=2 with four distinct proposal IDs, worktrees, and
+concurrent containers; a terminal fail-closed ledger with conserved budget
+(`2+0+4+0 = 6 == 8 - 2`); two byte-identical resumes; and zero task-created
+residue. It does **not** demonstrate any improvement on FormulaCode, and these
+numbers are smoke-subset figures, not leaderboard performance. A run in which
+every proposal is rejected is a valid and honest outcome for an integrity
+demo: the fail-closed path is exactly what is being exercised.
+
 ## Exact sources and licenses
 
 All machine-readable pins live in [`pins.json`](pins.json):
