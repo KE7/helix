@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -44,11 +45,26 @@ def _git(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
 
 
 def _apply_patch(patch: str) -> bool:
-    patch_file = Path("/tmp/helix-solution.patch")
-    patch_file.write_text(patch, encoding="utf-8")
-    result = _git("apply", "--reject", "--whitespace=nowarn", str(patch_file))
-    patch_file.unlink(missing_ok=True)
-    return result.returncode == 0
+    # The candidate runs as an unprivileged user with write access to /tmp and
+    # can pre-create a fixed patch path as a symlink before it exits.  Writing
+    # through it would follow the link and clobber an arbitrary file as root.
+    # A fresh root-owned 0700 directory is unpredictable and untraversable, so
+    # the candidate cannot plant a link inside it.
+    staging = Path(tempfile.mkdtemp(prefix="helix-apply-"))
+    try:
+        os.chmod(staging, 0o700)
+        patch_file = staging / "solution.patch"
+        fd = os.open(
+            patch_file,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(patch)
+        result = _git("apply", "--reject", "--whitespace=nowarn", str(patch_file))
+        return result.returncode == 0
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _drop_privileges() -> None:

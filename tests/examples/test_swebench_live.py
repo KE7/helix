@@ -517,3 +517,42 @@ def test_cleanup_removes_digest_tag_and_exact_image_id(
         "rm",
         f"{cleanup.OFFICIAL_IMAGE_REPOSITORY}:latest",
     ] in output_calls
+
+
+def test_patch_staging_does_not_follow_candidate_planted_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The candidate shares /tmp with the root runner and may plant a symlink.
+
+    Staging the solution patch at a fixed, candidate-writable path would let an
+    unprivileged candidate redirect a root-owned write to an arbitrary file.
+    """
+    runner = _load("swebench_live_runner_staging", "official_runner.py")
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched\n", encoding="utf-8")
+    planted = Path("/tmp/helix-solution.patch")
+    if planted.exists() or planted.is_symlink():
+        planted.unlink()
+    planted.symlink_to(victim)
+
+    staged: list[Path] = []
+
+    def _fake_git(*args: str, timeout: int = 60):
+        staged.append(Path(args[-1]))
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    monkeypatch.setattr(runner, "_git", _fake_git)
+    try:
+        assert runner._apply_patch("SOLUTION-PATCH-BODY") is True
+    finally:
+        if planted.is_symlink() or planted.exists():
+            planted.unlink()
+
+    # The root write must not have followed the planted symlink.
+    assert victim.read_text(encoding="utf-8") == "untouched\n"
+    assert len(staged) == 1
+    assert staged[0] != planted
+    # Staging is per-call and cleaned up, leaving no candidate-reachable residue.
+    assert not staged[0].exists()
+    assert not staged[0].parent.exists()
