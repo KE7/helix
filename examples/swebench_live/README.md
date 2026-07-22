@@ -12,8 +12,16 @@ hashes, image digest, licensing, and the already-passing upstream gold command.
 - Claude Code authenticated on the host (`claude auth status`).
 - The content-addressed Claude runner image
   `ghcr.io/ke7/helix-evo-runner-claude@sha256:6be6fef217bd083c462abbe2388c6a33a896a34812522de15516b59837293cba`
-  (local `ghcr.io/ke7/helix-evo-runner-claude:0.2.0`, `linux/arm64`) and
-  an authenticated `helix-auth-claude` Docker volume.
+  and an authenticated `helix-auth-claude` Docker volume.
+  This runner is published as a **single-arch `linux/amd64`** image (the
+  manifest is not a manifest list, so there is no `linux/arm64` variant to
+  select). On an Apple Silicon host it therefore runs under Docker Desktop
+  emulation, which makes agent turns slower. HELIX passes no `--platform`
+  flag and relies on the host default. The pin is deliberately a registry
+  digest rather than a bare local image ID: a bare `sha256:` ID has empty
+  `RepoDigests` and resolves only on the host that built it, and because
+  HELIX never runs `docker pull`, such a pin dies at dispatch on any other
+  machine.
 - At least 8 CPUs and enough space for the pinned 2.49 GB official task image.
 - The official image is `linux/amd64`. Docker Desktop emulation was validated on
   an Apple Silicon host with Docker capacity 31,490,187,264 bytes and 14 CPUs.
