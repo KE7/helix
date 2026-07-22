@@ -13,21 +13,36 @@ A separate agent owns the ``src/helix`` auth changes.  This file deliberately
 touches no production module and adds no fixtures to the existing
 ``tests/unit/test_sandbox.py``, so it cannot collide with that work.
 
-Why ``xfail(strict=True)``
---------------------------
-The isolation assertions describe behaviour HELIX does **not** have at
-3bf6c80 — they are the *fail-before* half of a fail-before/pass-after pair.
-Marking them ``strict`` keeps this branch green today and turns the suite RED
-(XPASS is a failure) the moment the structural fix lands, forcing whoever
-lands it to flip the marker and reconcile with this audit rather than
-silently diverging.  The two *guard* tests at the bottom are unmarked: they
-must pass both before and after the fix.
+Status: the ``xfail(strict=True)`` markers have been FLIPPED
+-----------------------------------------------------------
+These assertions were authored as the *fail-before* half of a
+fail-before/pass-after pair, marked ``strict`` so that a passing test would
+turn the suite RED and force whoever landed the fix to reconcile with the
+audit rather than diverge silently.  The structural fix has landed and the
+markers are removed; the assertions now hold directly.
+
+Two reconciliations were required and are recorded rather than applied
+quietly:
+
+1. The helper needed provenance grants (see below). Ported verbatim, every
+   assertion died on a ``ValueError`` *before* an argv existed, so all 16
+   strict xfails "passed" for a reason unrelated to mount layout -- and would
+   have kept xfailing after the fix, destroying the very signal this suite
+   provides.
+
+2. ``claude`` and ``gemini`` now FAIL CLOSED under volume mode: their per-run
+   state cannot be relocated off the shared store, so HELIX refuses to run
+   them there rather than report an isolated run that is not isolated. For
+   those backends the isolation questions are answered by *refusal*, which is
+   a stronger outcome than a clean mount layout, and the tests assert the
+   refusal.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from helix.backend_layout import UnsupportedBackendLayoutError
 from helix.backends import BACKENDS
 from helix.envpolicy import EnvGrant
 from helix.sandbox import (
@@ -60,6 +75,13 @@ _GRANTS = [
 ]
 
 
+# Backends that REFUSE to run under volume mode because their per-run state
+# cannot be relocated off the shared store. For these the isolation questions
+# below are answered by refusal, which is a stronger outcome than a clean mount
+# layout: HELIX declines to run rather than report an isolated run that is not.
+_VOLUME_FAIL_CLOSED = {"claude", "gemini"}
+
+
 def _agent_argv(backend: str) -> list[str]:
     return _docker_args(
         ["claude", "-p", "prompt"],
@@ -88,14 +110,6 @@ def _mount_targets(argv: list[str]) -> list[str]:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "3bf6c80 mounts the persistent auth volume over the whole container "
-        "HOME for every mutation agent (sandbox.py:1197). Proven leaky by "
-        "behavioural canary test A->B on disposable synthetic volumes."
-    ),
-)
 def test_agent_container_does_not_mount_auth_volume_over_whole_home(
     backend: str,
 ) -> None:
@@ -105,20 +119,24 @@ def test_agent_container_does_not_mount_auth_volume_over_whole_home(
     ``-v helix-auth-<backend>:/home/node:rw`` (or ``:ro``, or any mount of the
     persistent auth volume whose destination is exactly ``/home/node``).
 
+    FLIPPED from ``xfail(strict=True)``: the structural fix has landed, so this
+    now asserts the invariant directly.
+
     Non-vacuity: ``test_guard_audit_helpers_see_the_real_mount`` below asserts
-    the very string this test forbids IS present today, so the parser and the
-    volume-name spelling are both exercised.
+    that the parser still finds the auth mount at its NEW, narrowed
+    destination -- so "no whole-HOME mount" cannot pass because the parser
+    stopped seeing mounts.
     """
+    if backend in _VOLUME_FAIL_CLOSED:
+        with pytest.raises(UnsupportedBackendLayoutError):
+            _agent_argv(backend)
+        return
     volume = sandbox_auth_volume_name(backend)
     for spec in _mount_targets(_agent_argv(backend)):
         assert not spec.startswith(f"{volume}:/home/node"), spec
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.xfail(
-    strict=True,
-    reason="no per-run HOME is provisioned at 3bf6c80; HOME is the shared volume",
-)
 def test_agent_container_gets_a_private_per_run_home(backend: str) -> None:
     """Each mutation agent must get its own empty HOME.
 
@@ -126,6 +144,10 @@ def test_agent_container_gets_a_private_per_run_home(backend: str) -> None:
     (which would leave the image's baked ``/home/node`` shared through the
     read-only image layer and silently break credential persistence).
     """
+    if backend in _VOLUME_FAIL_CLOSED:
+        with pytest.raises(UnsupportedBackendLayoutError):
+            _agent_argv(backend)
+        return
     specs = _mount_targets(_agent_argv(backend))
     # A per-run HOME is a mount whose DESTINATION is /home/node and whose
     # SOURCE is not the persistent auth volume: a tmpfs (``/home/node``),
@@ -185,17 +207,6 @@ _CLASS2_SUBDIRS = {
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "no narrowed credential mount exists at 3bf6c80/9f2bcaa. Re-expressed "
-        "from the audit's original form, which asserted the auth mount must "
-        "not target ~/.claude -- the approved architecture mounts EXACTLY "
-        "there, and the original assertion was vacuous for a --mount spec "
-        "(f-string with no placeholder, unused loop variable, and dst is not "
-        "the end of a type=volume,...,volume-subpath=... spec)."
-    ),
-)
 def test_shared_auth_state_is_narrower_than_home(backend: str) -> None:
     """Persistent sharing must be narrower than HOME *in effect*, not just in dst.
 
@@ -217,6 +228,10 @@ def test_shared_auth_state_is_narrower_than_home(backend: str) -> None:
     falsifiable: deleting any single overlay from the production mount layer
     turns this red for that backend.
     """
+    if backend in _VOLUME_FAIL_CLOSED:
+        with pytest.raises(UnsupportedBackendLayoutError):
+            _agent_argv(backend)
+        return
     volume = sandbox_auth_volume_name(backend)
     specs = _mount_targets(_agent_argv(backend))
     shared = [spec for spec in specs if volume in spec]
@@ -244,10 +259,6 @@ def test_shared_auth_state_is_narrower_than_home(backend: str) -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="transcripts are read back out of the shared volume at 3bf6c80",
-)
 def test_transcript_root_is_not_inside_shared_persistent_state() -> None:
     """``claude_transcript_root`` must not point into the shared volume.
 
@@ -259,7 +270,9 @@ def test_transcript_root_is_not_inside_shared_persistent_state() -> None:
     co-resident there.
     """
     default_root = SandboxConfig(enabled=True).claude_transcript_root
-    assert not default_root.startswith("/home/node/.claude/projects"), default_root
+    assert default_root is None or not default_root.startswith(
+        "/home/node/.claude/projects"
+    ), default_root
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +332,26 @@ def test_guard_audit_helpers_see_the_real_mount() -> None:
     assertions pass for the wrong reason.  At 3bf6c80 it documents the defect
     itself: the agent argv really does mount the shared volume over HOME.
     """
-    specs = _mount_targets(_agent_argv("claude"))
+    # ``claude`` now FAILS CLOSED under volume mode, so it can no longer serve
+    # as the non-vacuity subject -- there is no argv to parse. ``codex`` is the
+    # backend proven isolatable (CODEX_SQLITE_HOME relocates its agent memory
+    # and goals databases), so it carries the control.
+    specs = _mount_targets(_agent_argv("codex"))
     assert specs, "argv parser found no mounts at all"
-    assert any(spec.startswith("helix-auth-claude:/home/node") for spec in specs), (
-        "expected the (defective) whole-HOME auth mount at this commit; if this "
-        "fails the fix has landed — flip the xfail markers above and re-verify "
-        "against the audit memo."
+
+    # The parser must still find the persistent auth volume -- at its NEW,
+    # narrowed destination. Without this, every "no whole-HOME mount"
+    # assertion above could pass simply because the parser stopped seeing
+    # mounts, or because the volume name changed, or because credentials
+    # stopped being mounted at all (the D2/D3 over-correction).
+    volume = sandbox_auth_volume_name("codex")
+    auth_specs = [spec for spec in specs if volume in spec]
+    assert auth_specs, f"parser found no {volume} mount; credentials must still persist"
+    assert any("volume-subpath=" in spec for spec in auth_specs), auth_specs
+    assert not any(spec.startswith(f"{volume}:/home/node") for spec in auth_specs), (
+        "the whole-HOME mount is back"
     )
+
+    # And a per-run HOME must be present, so the narrowed mount is not simply
+    # sitting on top of the image's shared /home/node.
+    assert any(spec.startswith("/home/node:") for spec in specs), specs

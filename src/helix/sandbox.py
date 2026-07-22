@@ -26,7 +26,11 @@ from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.envpolicy import EnvGrant
 from helix.exceptions import SandboxAuthImageError
 from helix.transcripts import capture_claude_transcript
+from helix.backend_layout import assert_layout_is_isolatable, layout_for
 from helix.sandbox_home import (
+    CONTAINER_TRANSCRIPT_PARENT,
+    NODE_GID,
+    NODE_UID,
     ensure_transcript_host_dir,
     private_home_tmpfs_arg,
     transcript_bind_arg,
@@ -1500,6 +1504,7 @@ def _docker_args(
     ]
     if container_name:
         args.extend(["--name", container_name])
+    class3_env: dict[str, str] = {}
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
@@ -1521,9 +1526,62 @@ def _docker_args(
             args.extend(private_home_tmpfs_arg())
             args.extend(transcript_bind_arg(transcript_host_dir(workspace)))
         else:
+            # VOLUME MODE: private per-run HOME, with ONLY the backend's auth
+            # directory coming from the persistent store.
+            #
+            # The whole-HOME mount this replaces made the shared volume BE the
+            # container HOME, so every candidate saw every prior candidate's
+            # transcripts, sessions and caches.
+            #
+            # Fail closed first: a backend whose per-run state cannot be
+            # relocated off the shared store must not run here at all, rather
+            # than run and be reported as isolated.
+            layout = layout_for(agent_backend)
+            assert_layout_is_isolatable(layout)
+
+            args.extend(private_home_tmpfs_arg())
+            # Class 1: the auth directory only, via volume-subpath. Writable --
+            # OAuth rotation renames a temp file over the credential inside its
+            # own directory, so this cannot be :ro and cannot be a per-file
+            # bind (EBUSY on rename-over and unlink).
             args.extend(
-                ["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"]
+                [
+                    "--mount",
+                    f"type=volume,src={sandbox_auth_volume_name(agent_backend)},"
+                    f"dst={layout.auth_dir},"
+                    f"volume-subpath={layout.volume_subpath}",
+                ]
             )
+            # Class 2: per-run overlays on the directories inside the auth dir
+            # that carry per-run state. Transcripts get the candidate-keyed
+            # host bind instead, so capture keeps working.
+            for subdir in layout.ephemeral_subdirs:
+                target = f"{layout.auth_dir}/{subdir}"
+                if target == CONTAINER_TRANSCRIPT_PARENT:
+                    continue
+                args.extend(
+                    [
+                        "--tmpfs",
+                        f"{target}:rw,uid={NODE_UID},gid={NODE_GID},mode=0700",
+                    ]
+                )
+            # Class 3: regular files inside the auth dir that carry per-run
+            # state. NO mount can isolate these -- an overlay works on
+            # directories only, and a per-file bind is EBUSY on rename-over --
+            # so they are relocated wholesale by the backend's own env knob.
+            #
+            # Each redirect target also gets a tmpfs below, which guarantees the
+            # directory EXISTS (a missing target can silently send the files
+            # back to the shared directory) and makes it per-run.
+            class3_env = dict(layout.env_redirects)
+            for target in sorted(set(class3_env.values())):
+                args.extend(
+                    [
+                        "--tmpfs",
+                        f"{target}:rw,uid={NODE_UID},gid={NODE_GID},mode=0700",
+                    ]
+                )
+            args.extend(transcript_bind_arg(transcript_host_dir(workspace)))
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])
@@ -1542,6 +1600,16 @@ def _docker_args(
         key: value for key, value in env.items() if key not in {"HOME", "PATH"}
     }
     container_env["HOME"] = "/home/node"
+    # Class-3 relocation knobs. Set here, alongside HOME and PATH, because they
+    # are HELIX-internal non-credential RUNTIME settings rather than host
+    # environment values -- the same category as the two above, and subject to
+    # the same rule: they are HELIX's to set and never carry user data.
+    #
+    # Load-bearing: without these the registry would DECLARE a backend
+    # isolatable while the argv left its per-run files in the shared auth
+    # directory. That is the exact shape of a control that reports success
+    # while the property is false, so the argv is asserted to carry them.
+    container_env.update(class3_env)
     container_env["PATH"] = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
@@ -1612,7 +1680,7 @@ def run_sandboxed_commands(
         # starts.  Docker auto-creates a missing bind source as ``root:root``,
         # which would hand the agent a transcript directory its own uid cannot
         # write -- silently, and only for transcripts.
-        if scope == "agent" and sandbox.resolved_auth() == "env":
+        if scope == "agent":
             ensure_transcript_host_dir(transcript_host_dir(workspace))
 
         results = []

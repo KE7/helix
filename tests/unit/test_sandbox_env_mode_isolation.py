@@ -75,7 +75,15 @@ def test_env_mode_argv_contains_no_auth_volume_reference(backend: str) -> None:
     assert "helix-auth-" not in joined, joined
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
+# claude and gemini FAIL CLOSED under volume mode -- their per-run state cannot
+# be relocated off the shared store -- so they have no volume-mode argv to
+# inspect. The non-vacuity control below uses the backends that do.
+_VOLUME_FAIL_CLOSED = {"claude", "gemini"}
+
+
+@pytest.mark.parametrize(
+    "backend", [b for b in BACKENDS if b not in _VOLUME_FAIL_CLOSED]
+)
 def test_volume_mode_still_mounts_the_auth_volume(backend: str) -> None:
     """Non-vacuity control for the assertion above."""
     grants = [

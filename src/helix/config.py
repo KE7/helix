@@ -623,7 +623,26 @@ class SandboxConfig(BaseModel):
     omit_from_agent: list[str] = Field(default_factory=list)
     preserve_backend_transcripts: bool = True
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
-    claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
+    claude_transcript_root: str | None = None
+    """Transcript directory for NON-sandboxed runs only. ``None`` = derive it.
+
+    The former default, ``/home/node/.claude/projects/-workspace``, was wrong
+    in two ways.
+
+    It was a CONTAINER path applied on the HOST: this field is consulted only
+    when the sandbox is disabled (see ``mutator._collect_backend_transcript_
+    artifacts``), where the agent runs as the host user and ``/home/node``
+    almost never exists. ``None`` selects the correct local default,
+    ``~/.claude/projects/-workspace``, still overridable via
+    ``HELIX_CLAUDE_TRANSCRIPT_ROOT``.
+
+    And its ``-workspace`` component was the shared project key at the centre
+    of the cross-candidate defect: because every sandboxed workspace mounts at
+    ``/workspace``, every candidate of every run wrote into ONE directory.
+    Sandboxed transcripts no longer come from here at all -- they are read from
+    a candidate-keyed host bind (see :mod:`helix.transcripts`), so no value of
+    this field can reintroduce that sharing.
+    """
 
     # --- Credential policy (0.3.0) -------------------------------------
     # ``auth`` is the explicit, no-fallback choice of credential path for a

@@ -243,3 +243,84 @@ def test_registry_does_not_claim_candidate_independence() -> None:
     text = (mod.__doc__ or "").lower()
     assert "not a candidate-independence guarantee" in text
     assert "incidental" in text
+
+
+# ---------------------------------------------------------------------------
+# The argv must APPLY the registry, not merely declare it
+# ---------------------------------------------------------------------------
+
+
+def _volume_argv(backend: str) -> list[str]:
+    from pathlib import Path
+
+    from helix.config import SandboxConfig
+    from helix.envpolicy import EnvGrant
+    from helix.sandbox import _docker_args  # noqa: PLC2701 - argv is under test
+
+    return _docker_args(
+        ["sh", "-c", "true"],
+        {"X": "1"},
+        Path("/tmp/ws-cand"),
+        SandboxConfig(enabled=True, image="i:latest", network="none", auth="volume"),
+        "agent",
+        "i:latest",
+        backend,
+        grants=[
+            EnvGrant(
+                name="X",
+                value="1",
+                origin="helix_internal",
+                scopes=frozenset({"agent"}),
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [b for b in BACKENDS if b not in FAIL_CLOSED_UNDER_VOLUME_MODE],
+)
+def test_argv_applies_every_class2_overlay(backend: str) -> None:
+    """Each class-2 subdir must be individually re-isolated in the FINAL argv.
+
+    Catches: a registry entry that exists but is never emitted -- the shape of
+    a control that reports success while the property is false.
+    """
+    layout = BACKEND_LAYOUTS[backend]
+    joined = " ".join(_volume_argv(backend))
+    for subdir in layout.ephemeral_subdirs:
+        assert f"{layout.auth_dir}/{subdir}" in joined, subdir
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [b for b in BACKENDS if b not in FAIL_CLOSED_UNDER_VOLUME_MODE],
+)
+def test_argv_applies_every_class3_env_redirect(backend: str) -> None:
+    """Class-3 knobs must reach the container ENVIRONMENT, not just the registry.
+
+    This is the regression that motivated the test: the registry declared
+    CODEX_SQLITE_HOME and ``_docker_args`` never set it, so codex was reported
+    isolatable while its agent memory and goals databases were still being
+    written into the shared auth directory.
+
+    Also asserts the redirect TARGET is mounted: a knob pointing at a directory
+    that does not exist can silently fall back to the shared location.
+    """
+    layout = BACKEND_LAYOUTS[backend]
+    argv = _volume_argv(backend)
+    joined = " ".join(argv)
+    for knob, target in layout.env_redirects.items():
+        assert f"{knob}={target}" in argv, f"{knob} not set in argv"
+        assert f"{target}:rw" in joined, f"{target} not mounted"
+
+
+def test_codex_memory_databases_are_redirected_in_the_final_argv() -> None:
+    """The headline leak, asserted end to end on the argv.
+
+    codex keeps memories/goals/state SQLite as REGULAR FILES beside auth.json;
+    no overlay can mask a sibling file. If this fails, a candidate can read the
+    previous candidate's agent memory.
+    """
+    argv = _volume_argv("codex")
+    assert "CODEX_SQLITE_HOME=/home/node/.helix-run/codex-sqlite" in argv, argv

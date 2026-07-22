@@ -565,7 +565,14 @@ class TestSandboxConfig:
         assert cfg.skip_special_files is True
         assert cfg.preserve_backend_transcripts is True
         assert cfg.transcript_artifact_dir == ".helix_artifacts/backend_transcripts"
-        assert cfg.claude_transcript_root == "/home/node/.claude/projects/-workspace"
+        # Default is now None, meaning "derive the local root".
+        #
+        # The former default was a CONTAINER path applied on the HOST -- this
+        # field is consulted only when the sandbox is DISABLED -- and its
+        # "-workspace" component was the shared project key at the centre of
+        # the cross-candidate defect. Sandboxed transcripts no longer come from
+        # here at all; they are read from a candidate-keyed host bind.
+        assert cfg.claude_transcript_root is None
 
     def test_sandboxed_evaluator_requires_sidecar(self):
         with pytest.raises(ValueError, match=r"\[evaluator.sidecar\]"):

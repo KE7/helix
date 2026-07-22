@@ -271,6 +271,16 @@ def _endpoint_duplicated_argv(
     ]
 
 
+# Backend used by tests that need a working VOLUME-mode sandbox but are not
+# about credential policy (sync-back, permissions, artifacts).
+#
+# ``claude`` and ``gemini`` now fail closed under volume mode -- their per-run
+# state cannot be relocated off the shared auth store -- so they cannot launch
+# there. ``codex`` is isolatable (CODEX_SQLITE_HOME relocates its agent memory
+# and goals databases), so it stands in wherever the backend is incidental.
+VOLUME_BACKEND = "codex"
+
+
 def _is_workspace_chown(args: list[str]) -> bool:
     """True for either workspace-recovery helper (chown or permission-relax).
 
@@ -379,7 +389,15 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     assert "helix-test:latest" in docker_call
     assert "-e" in docker_call
     assert "HOME=/home/node" in docker_call
-    assert "helix-auth-codex:/home/node:rw" in docker_call
+    # The auth volume persists but is NO LONGER the container HOME. The old
+    # form asserted "helix-auth-<b>:/home/node:rw", which is precisely the
+    # whole-HOME mount that let every candidate read every prior candidate's
+    # transcripts, sessions and caches.
+    assert f"helix-auth-{VOLUME_BACKEND}" in joined
+    assert f"helix-auth-{VOLUME_BACKEND}:/home/node" not in joined
+    assert "volume-subpath=" in joined
+    # ...on top of a private, uid-correct per-run HOME.
+    assert "/home/node:rw,uid=1000,gid=1000" in joined
     assert f"{tmp_path}:" not in joined
     assert "/workspace:rw" in joined
     chown_calls = [call for call in calls if _is_workspace_chown(call)]
@@ -1702,7 +1720,7 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "keep.py").read_text() == "new\n"
@@ -1757,7 +1775,7 @@ def test_agent_sync_tolerates_inaccessible_workspace_paths(
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "keep.py").read_text() == "new\n"
@@ -1813,7 +1831,7 @@ def test_agent_transcript_capture_no_longer_remounts_the_auth_volume(
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "main.py").read_text() == "new\n"
@@ -1874,7 +1892,7 @@ def test_agent_sync_tolerates_inaccessible_backend_transcripts(
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "main.py").read_text() == "new\n"
@@ -1913,7 +1931,7 @@ def test_agent_sync_recovers_rootless_workspace_permissions(tmp_path: Path, mock
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert workspace_root is not None
@@ -1966,7 +1984,7 @@ def test_agent_sync_skips_relax_when_host_owner_available(tmp_path: Path, mocker
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "main.py").read_text() == "new\n"
@@ -2037,7 +2055,7 @@ def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "main.py").read_text() == "new\n"
@@ -2066,7 +2084,7 @@ def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert not (source / "private").exists()
@@ -2097,7 +2115,7 @@ def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "regular.txt").read_text() == "ok\n"
@@ -2132,7 +2150,7 @@ def test_sync_preserves_existing_host_special_files_when_skipped(
         grants=_agent_grants(),
         sync_back=True,
         image="helix-test:latest",
-        agent_backend="claude",
+        agent_backend=VOLUME_BACKEND,
     )
 
     assert (source / "existing.pipe").exists()
@@ -2165,7 +2183,7 @@ def test_special_file_skip_can_be_disabled(tmp_path: Path, mocker):
             grants=_agent_grants(),
             sync_back=True,
             image="helix-test:latest",
-            agent_backend="claude",
+            agent_backend=VOLUME_BACKEND,
         )
 
 
