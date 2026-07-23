@@ -3,7 +3,7 @@
   "registry_prefix": "ghcr.io/ke7/helix-evo-runner",
   "base": {
     "dockerfile": "docker/base.Dockerfile",
-    "dockerfile_sha256": "d7e97b4596bba55ff3f47287e202577286adc4b8cd024535be80d2117052433a",
+    "dockerfile_sha256": "ccdad52ee7829244538d54048d986ba3f31e2cd7e00d4189650ccb344493da16",
     "node_image": "node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3",
     "debian_snapshot": "20260720T000000Z",
     "uv_version": "0.11.7",
@@ -17,7 +17,7 @@
         "sha256": "5985a15a92bd9a170fc1947abb1fbc3e9828c5a430ad85b5bed8356c20b67a71"
       }
     },
-    "immutable_tag": "runtime-node22-uv0.11.7-snapshot20260720-r4e53e10310cb",
+    "immutable_tag": "runtime-node22-uv0.11.7-snapshot20260720-r8e3581a8e350",
     "smoke_command": "python --version && uv --version && git --version && rg --version"
   },
   "backends": {

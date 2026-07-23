@@ -35,10 +35,11 @@ RUN case "${TARGETARCH}" in \
         arm64) uv_wheel="${UV_ARM64_WHEEL}"; uv_sha="${UV_ARM64_SHA256}" ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 2 ;; \
     esac \
-    && curl -fsSL "$uv_wheel" -o /tmp/uv.whl \
-    && echo "${uv_sha}  /tmp/uv.whl" | sha256sum --check --strict \
-    && python3 -m pip install --break-system-packages --no-cache-dir /tmp/uv.whl \
-    && rm -f /tmp/uv.whl \
+    && uv_path="/tmp/${uv_wheel##*/}" \
+    && curl -fsSL "$uv_wheel" -o "$uv_path" \
+    && echo "${uv_sha}  ${uv_path}" | sha256sum --check --strict \
+    && python3 -m pip install --break-system-packages --no-cache-dir "$uv_path" \
+    && rm -f "$uv_path" \
     && ln -s /usr/bin/python3 /usr/local/bin/python
 
 LABEL org.opencontainers.image.source="https://github.com/KE7/helix" \
