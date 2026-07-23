@@ -32,6 +32,9 @@ The base is pinned to
 `node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`,
 Debian snapshot `20260720T000000Z`, and `uv==0.11.7`. The two `uv` wheels have
 architecture-specific `files.pythonhosted.org` URLs and SHA-256 digests.
+The CA-less slim base bootstraps from the snapshot's HTTP endpoint while APT
+still verifies Debian's signed release metadata; all later artifact downloads
+use HTTPS plus the recorded content digest.
 Changing any base recipe input requires a new base recipe tag; backend
 immutable tags are bound to that tag, the backend Dockerfile hash, and every
 backend artifact URL/checksum by a digest suffix. The resulting OCI digest,
