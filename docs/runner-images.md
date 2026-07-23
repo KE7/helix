@@ -109,8 +109,10 @@ images.
 ## Local Codex proof
 
 Use new task-specific tags; do not reuse `latest` or any preserved tag. Build
-the exact base recipe first, then pass that content by local image ID to the
-backend build:
+the exact base recipe first, record its local content ID, then pass its unique
+task tag to the backend build. (BuildKit does not portably accept a daemon
+image ID in `FROM`; the protected workflow instead uses the registry digest
+directly.)
 
 ```sh
 docker build \
@@ -118,10 +120,10 @@ docker build \
   --tag helix-runner-base:luna-proof \
   .
 
-base_id="$(docker image inspect --format '{{.Id}}' \
-  helix-runner-base:luna-proof)"
+docker image inspect --format '{{.Id}}' \
+  helix-runner-base:luna-proof
 docker build \
-  --build-arg "BASE_IMAGE=${base_id}" \
+  --build-arg BASE_IMAGE=helix-runner-base:luna-proof \
   --tag helix-runner-codex:0.145.0-luna-proof \
   --file docker/codex.Dockerfile .
 
