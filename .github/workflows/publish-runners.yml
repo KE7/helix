@@ -141,7 +141,7 @@ jobs:
           printf '[]\n' > /tmp/promotions.json
           for backend in claude codex cursor gemini opencode; do
             version="$(jq -r --arg backend "$backend" '.backends[$backend].version' /tmp/resolved-runner-versions.json)"
-            promotion_guard="$(jq -r --arg backend "$backend" '.backends[$backend].promotion_guard_version' /tmp/resolved-runner-versions.json)"
+            promotion_guard_tag="$(jq -r --arg backend "$backend" '.backends[$backend].promotion_guard_immutable_tag // ""' /tmp/resolved-runner-versions.json)"
             tag="$(python tools/runner_images.py image-tag \
               --catalog /tmp/resolved-runner-versions.json \
               --backend "$backend")"
@@ -158,11 +158,12 @@ jobs:
                 --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
                 --source-ref "$ATTESTATION_SOURCE_REF" \
                 --deny-self-hosted-runners
-              jq --arg backend "$backend" --arg version "$version" \
-                '.[$backend] = $version' /tmp/published.json \
+              jq --arg backend "$backend" --arg tag "$tag" \
+                '.[$backend] = $tag' /tmp/published.json \
                 > /tmp/published.next.json
               mv /tmp/published.next.json /tmp/published.json
-              if [[ "$version" == "$promotion_guard" ]] && \
+              if [[ -n "$promotion_guard_tag" ]] && \
+                [[ "$tag" == "$promotion_guard_tag" ]] && \
                 docker buildx imagetools inspect \
                   "${IMAGE_PREFIX}-${backend}:latest" >/dev/null 2>&1; then
                 latest_digest="$(docker buildx imagetools inspect \
@@ -434,6 +435,14 @@ jobs:
               npm)
                 echo "CLI_TARBALL=$(jq -r '.tarball' <<< "$item")"
                 echo "CLI_SHA512=$(jq -r '.sha512' <<< "$item")"
+                echo "CLI_SHARED_TARBALL=$(jq -r '.artifacts.shared[0].tarball // \"\"' <<< "$item")"
+                echo "CLI_SHARED_SHA512=$(jq -r '.artifacts.shared[0].sha512 // \"\"' <<< "$item")"
+                echo "CLI_AMD64_TARBALL=$(jq -r '.artifacts.amd64[0].tarball' <<< "$item")"
+                echo "CLI_AMD64_SHA512=$(jq -r '.artifacts.amd64[0].sha512' <<< "$item")"
+                echo "CLI_AMD64_FALLBACK_TARBALL=$(jq -r '.artifacts.amd64[1].tarball // \"\"' <<< "$item")"
+                echo "CLI_AMD64_FALLBACK_SHA512=$(jq -r '.artifacts.amd64[1].sha512 // \"\"' <<< "$item")"
+                echo "CLI_ARM64_TARBALL=$(jq -r '.artifacts.arm64[0].tarball' <<< "$item")"
+                echo "CLI_ARM64_SHA512=$(jq -r '.artifacts.arm64[0].sha512' <<< "$item")"
                 ;;
               codex)
                 echo "CLI_TARBALL=$(jq -r '.tarball' <<< "$item")"

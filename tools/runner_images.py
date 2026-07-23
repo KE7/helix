@@ -29,6 +29,21 @@ NPM_PACKAGES = {
     "gemini": "@google/gemini-cli",
     "opencode": "opencode-ai",
 }
+NPM_ARTIFACT_PACKAGES: dict[str, dict[str, tuple[str, ...]]] = {
+    "claude": {
+        "amd64": ("@anthropic-ai/claude-code-linux-x64",),
+        "arm64": ("@anthropic-ai/claude-code-linux-arm64",),
+    },
+    "gemini": {
+        "shared": ("@lydell/node-pty",),
+        "amd64": ("@lydell/node-pty-linux-x64",),
+        "arm64": ("@lydell/node-pty-linux-arm64",),
+    },
+    "opencode": {
+        "amd64": ("opencode-linux-x64", "opencode-linux-x64-baseline"),
+        "arm64": ("opencode-linux-arm64",),
+    },
+}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
@@ -82,6 +97,36 @@ def _semver_tuple(value: str) -> tuple[int, int, int]:
     if not match:
         raise RunnerPlanError(f"expected stable semantic version, got {value!r}")
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+
+
+def _optional_dependencies(release: Mapping[str, Any], context: str) -> dict[str, str]:
+    raw = release.get("optionalDependencies", {})
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RunnerPlanError(f"{context}: optional dependencies must be an object")
+    dependencies: dict[str, str] = {}
+    for package, version in sorted(raw.items()):
+        if not isinstance(package, str) or not package or any(
+            ord(character) <= 0x20 for character in package
+        ):
+            raise RunnerPlanError(f"{context}: invalid optional package name")
+        if not isinstance(version, str):
+            raise RunnerPlanError(f"{context}: invalid version for {package}")
+        try:
+            _semver_tuple(version)
+        except RunnerPlanError:
+            alias = re.fullmatch(
+                r"npm:(@[0-9A-Za-z._-]+/[0-9A-Za-z._-]+|[0-9A-Za-z._-]+)"
+                r"@([0-9A-Za-z][0-9A-Za-z._+-]*)",
+                version,
+            )
+            if alias is None or not VERSION_RE.fullmatch(alias.group(2)):
+                raise RunnerPlanError(
+                    f"{context}: optional dependency {package} is not exact"
+                ) from None
+        dependencies[package] = version
+    return dependencies
 
 
 def base_immutable_tag(base: Mapping[str, Any]) -> str:
@@ -159,6 +204,12 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             promotion_guard
         ):
             raise RunnerPlanError(f"{name}: invalid promotion guard version")
+        promotion_guard_tag = item.get("promotion_guard_immutable_tag")
+        if promotion_guard_tag is not None and (
+            not isinstance(promotion_guard_tag, str)
+            or not TAG_RE.fullmatch(promotion_guard_tag)
+        ):
+            raise RunnerPlanError(f"{name}: invalid promotion guard immutable tag")
         if not isinstance(item.get("smoke_command"), str):
             raise RunnerPlanError(f"{name}: missing smoke command")
         if item.get("dockerfile") != f"docker/{name}.Dockerfile":
@@ -179,6 +230,56 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             _require_url(item.get("tarball"), "registry.npmjs.org")
             if not SHA512_RE.fullmatch(str(item.get("sha512", ""))):
                 raise RunnerPlanError(f"{name}: invalid sha512")
+            optional_dependencies = item.get("optional_dependencies")
+            if not isinstance(optional_dependencies, dict):
+                raise RunnerPlanError(f"{name}: optional dependency map is required")
+            _optional_dependencies(
+                {"optionalDependencies": optional_dependencies}, f"{name} launcher"
+            )
+        if kind == "npm":
+            artifacts = item.get("artifacts")
+            expected_groups = NPM_ARTIFACT_PACKAGES[name]
+            if not isinstance(artifacts, dict) or tuple(sorted(artifacts)) != tuple(
+                sorted(expected_groups)
+            ):
+                raise RunnerPlanError(
+                    f"{name}: exact content-pinned artifact groups are required"
+                )
+            for group, expected_packages in expected_groups.items():
+                group_artifacts = artifacts[group]
+                if not isinstance(group_artifacts, list) or tuple(
+                    artifact.get("package")
+                    for artifact in group_artifacts
+                    if isinstance(artifact, dict)
+                ) != expected_packages:
+                    raise RunnerPlanError(
+                        f"{name}/{group}: exact artifact packages are required"
+                    )
+                for artifact in group_artifacts:
+                    if not isinstance(artifact, dict):
+                        raise RunnerPlanError(
+                            f"{name}/{group}: artifact must be an object"
+                        )
+                    version_value = artifact.get("version")
+                    if not isinstance(version_value, str):
+                        raise RunnerPlanError(
+                            f"{name}/{group}: artifact version is required"
+                        )
+                    _semver_tuple(version_value)
+                    _require_url(artifact.get("tarball"), "registry.npmjs.org")
+                    if not SHA512_RE.fullmatch(str(artifact.get("sha512", ""))):
+                        raise RunnerPlanError(
+                            f"{name}/{group}: invalid artifact sha512"
+                        )
+                    artifact_optional = artifact.get("optional_dependencies")
+                    if not isinstance(artifact_optional, dict):
+                        raise RunnerPlanError(
+                            f"{name}/{group}: artifact dependency map is required"
+                        )
+                    _optional_dependencies(
+                        {"optionalDependencies": artifact_optional},
+                        f"{name}/{group}/{artifact['package']}",
+                    )
         if kind in {"codex", "cursor"}:
             platforms = item.get("platforms")
             if not isinstance(platforms, dict) or tuple(sorted(platforms)) != PLATFORMS:
@@ -196,6 +297,11 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 raise RunnerPlanError("codex required reasoning effort must be xhigh")
             for platform in PLATFORMS:
                 source = item["platforms"][platform]
+                suffix = "linux-x64" if platform == "amd64" else "linux-arm64"
+                if source.get("package_version") != f"{version}-{suffix}":
+                    raise RunnerPlanError(
+                        f"codex/{platform}: unexpected platform package version"
+                    )
                 _require_url(source.get("tarball"), "registry.npmjs.org")
                 if not SHA512_RE.fullmatch(str(source.get("sha512", ""))):
                     raise RunnerPlanError(f"codex/{platform}: invalid sha512")
@@ -233,7 +339,7 @@ def validate_catalog_files(catalog: dict[str, Any], catalog_path: Path) -> None:
             )
 
 
-def parse_npm_metadata(package: str, payload: bytes) -> dict[str, str]:
+def parse_npm_metadata(package: str, payload: bytes) -> dict[str, Any]:
     metadata = json.loads(payload)
     try:
         version = metadata["dist-tags"]["latest"]
@@ -245,8 +351,7 @@ def parse_npm_metadata(package: str, payload: bytes) -> dict[str, str]:
         raise RunnerPlanError(f"{package}: incomplete npm metadata") from exc
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise RunnerPlanError(f"{package}: invalid latest version")
-    if "-" in version and not version.startswith("2026."):
-        raise RunnerPlanError(f"{package}: prerelease latest is not publishable")
+    _semver_tuple(version)
     if not isinstance(integrity, str) or not integrity.startswith("sha512-"):
         raise RunnerPlanError(f"{package}: missing sha512 integrity")
     try:
@@ -262,10 +367,13 @@ def parse_npm_metadata(package: str, payload: bytes) -> dict[str, str]:
         "version": version,
         "tarball": tarball,
         "sha512": sha512,
+        "optional_dependencies": _optional_dependencies(
+            release, f"{package}@{version}"
+        ),
     }
 
 
-def parse_npm_release(package: str, version: str, payload: bytes) -> dict[str, str]:
+def parse_npm_release(package: str, version: str, payload: bytes) -> dict[str, Any]:
     metadata = json.loads(payload)
     try:
         actual_version = metadata["version"]
@@ -280,6 +388,8 @@ def parse_npm_release(package: str, version: str, payload: bytes) -> dict[str, s
         raise RunnerPlanError(
             f"{package}: requested {version!r}, registry returned {actual_version!r}"
         )
+    if not VERSION_RE.fullmatch(version):
+        raise RunnerPlanError(f"{package}: unsafe release version {version!r}")
     if not isinstance(integrity, str) or not integrity.startswith("sha512-"):
         raise RunnerPlanError(f"{package}@{version}: missing sha512 integrity")
     try:
@@ -297,6 +407,9 @@ def parse_npm_release(package: str, version: str, payload: bytes) -> dict[str, s
         "version": version,
         "tarball": tarball,
         "sha512": sha512,
+        "optional_dependencies": _optional_dependencies(
+            metadata, f"{package}@{version}"
+        ),
     }
 
 
@@ -374,6 +487,7 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                         "smoke_command",
                         "minimum_version",
                         "promotion_guard_version",
+                        "promotion_guard_immutable_tag",
                         "model_catalog_command",
                         "required_model",
                         "required_reasoning_effort",
@@ -405,6 +519,43 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                         "tarball": platform_metadata["tarball"],
                         "sha512": platform_metadata["sha512"],
                     }
+            else:
+                artifact_groups = NPM_ARTIFACT_PACKAGES[name]
+                npm["artifacts"] = {}
+                transitive_optional: dict[str, str] = {}
+                for group in ("shared", "amd64", "arm64"):
+                    if group not in artifact_groups:
+                        continue
+                    npm["artifacts"][group] = []
+                    for artifact_package in artifact_groups[group]:
+                        version_source = (
+                            transitive_optional
+                            if name == "gemini" and group != "shared"
+                            else npm["optional_dependencies"]
+                        )
+                        artifact_version = version_source.get(artifact_package)
+                        if artifact_version is None:
+                            raise RunnerPlanError(
+                                f"{name}: upstream optional dependency closure "
+                                f"does not contain {artifact_package}"
+                            )
+                        artifact_encoded = urllib.parse.quote(
+                            artifact_package, safe=""
+                        )
+                        artifact_metadata = parse_npm_release(
+                            artifact_package,
+                            artifact_version,
+                            _fetch(
+                                "https://registry.npmjs.org/"
+                                f"{artifact_encoded}/"
+                                f"{urllib.parse.quote(artifact_version, safe='')}"
+                            ),
+                        )
+                        npm["artifacts"][group].append(artifact_metadata)
+                        if name == "gemini" and group == "shared":
+                            transitive_optional.update(
+                                artifact_metadata["optional_dependencies"]
+                            )
             resolved["backends"][name] = npm
         else:
             cursor: dict[str, Any] = dict(
@@ -417,6 +568,9 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                     "dockerfile_sha256": item["dockerfile_sha256"],
                     "installer": item["installer"],
                     "promotion_guard_version": item["promotion_guard_version"],
+                    "promotion_guard_immutable_tag": item[
+                        "promotion_guard_immutable_tag"
+                    ],
                     "smoke_command": item["smoke_command"],
                     "platforms": {
                         platform: {
@@ -431,6 +585,8 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                     cursor["platforms"][platform]["sha256"] = _fetch_sha256(
                         cursor["platforms"][platform]["tarball"]
                     )
+            cursor.pop("amd64_tarball")
+            cursor.pop("arm64_tarball")
             resolved["backends"][name] = cursor
     return resolved
 
@@ -446,10 +602,13 @@ def _backend_source_identity(item: Mapping[str, Any]) -> dict[str, Any]:
                 "package": item["package"],
                 "tarball": item["tarball"],
                 "sha512": item["sha512"],
+                "optional_dependencies": item["optional_dependencies"],
             }
         )
     if item["kind"] == "codex":
         identity["platforms"] = item["platforms"]
+    elif item["kind"] == "npm":
+        identity["artifacts"] = item["artifacts"]
     elif item["kind"] == "cursor":
         identity.update(
             {
@@ -491,7 +650,7 @@ def immutable_tag(item: Mapping[str, Any], base_tag: str) -> str:
 
 
 def change_plan(
-    resolved: dict[str, Any], published_versions: dict[str, str]
+    resolved: dict[str, Any], published_tags: dict[str, str]
 ) -> dict[str, Any]:
     validate_catalog(resolved)
     changed: list[dict[str, Any]] = []
@@ -499,17 +658,19 @@ def change_plan(
     for name in BACKENDS:
         item = resolved["backends"][name]
         version = item["version"]
-        if published_versions.get(name) == version:
+        tag = immutable_tag(item, str(resolved["base"]["immutable_tag"]))
+        if published_tags.get(name) == tag:
             continue
         changed.append(
             {
                 "name": name,
                 "dockerfile": item["dockerfile"],
                 "version": version,
-                "immutable_tag": immutable_tag(
-                    item, str(resolved["base"]["immutable_tag"])
+                "immutable_tag": tag,
+                "promotion_approved": (
+                    version == item["promotion_guard_version"]
+                    and tag == item["promotion_guard_immutable_tag"]
                 ),
-                "promotion_approved": version == item["promotion_guard_version"],
             }
         )
         for platform, runner in (

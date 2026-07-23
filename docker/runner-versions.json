@@ -24,12 +24,43 @@
     "claude": {
       "kind": "npm",
       "dockerfile": "docker/claude.Dockerfile",
-      "dockerfile_sha256": "87ba7996b7c1176072d1d9c697c7010fe2f410b0382a7dea7845e48635aecf68",
+      "dockerfile_sha256": "a4f8c619f0d2a921448db4d272b487c845c6e55e2dc573f5df5c698e5b065685",
       "package": "@anthropic-ai/claude-code",
       "version": "2.1.218",
       "promotion_guard_version": "2.1.138",
+      "promotion_guard_immutable_tag": null,
       "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.218.tgz",
       "sha512": "04757de75aee21ae905da6450c5d70461c3100e90089a7c1d803961bac064542786a9689f66973a750452c08467c6d12927c00caa05e9ea793ea78ade9ab78b9",
+      "optional_dependencies": {
+        "@anthropic-ai/claude-code-darwin-arm64": "2.1.218",
+        "@anthropic-ai/claude-code-darwin-x64": "2.1.218",
+        "@anthropic-ai/claude-code-linux-arm64": "2.1.218",
+        "@anthropic-ai/claude-code-linux-arm64-musl": "2.1.218",
+        "@anthropic-ai/claude-code-linux-x64": "2.1.218",
+        "@anthropic-ai/claude-code-linux-x64-musl": "2.1.218",
+        "@anthropic-ai/claude-code-win32-arm64": "2.1.218",
+        "@anthropic-ai/claude-code-win32-x64": "2.1.218"
+      },
+      "artifacts": {
+        "amd64": [
+          {
+            "package": "@anthropic-ai/claude-code-linux-x64",
+            "version": "2.1.218",
+            "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.218.tgz",
+            "sha512": "7b5df6900e1d562a6454858aeba8e90a771b26f2eabee8369c3df35c401d99a8afb97356bdf41b31a5e5e82d13d92bac122980a038ab673e7b32a28819555570",
+            "optional_dependencies": {}
+          }
+        ],
+        "arm64": [
+          {
+            "package": "@anthropic-ai/claude-code-linux-arm64",
+            "version": "2.1.218",
+            "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64/-/claude-code-linux-arm64-2.1.218.tgz",
+            "sha512": "09c6d5402cd777d127964b4210fae412585d059baa2168647a29d11b152e65ae9a6a5e21e89fbc0dba3e3a77dc84113377599a8510d02bc05c906040628cefda",
+            "optional_dependencies": {}
+          }
+        ]
+      },
       "smoke_command": "claude --version"
     },
     "codex": {
@@ -40,8 +71,17 @@
       "version": "0.145.0",
       "minimum_version": "0.145.0",
       "promotion_guard_version": "0.125.0",
+      "promotion_guard_immutable_tag": null,
       "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
       "sha512": "fcf48f485ba38e39a2c9516f1b6caefe0ace161b167689131fcb762865a15d2a3f3399ff7480ec9dbb273bcdbfedb2ed2280eecd07fb013054316a8f59020d95",
+      "optional_dependencies": {
+        "@openai/codex-darwin-arm64": "npm:@openai/codex@0.145.0-darwin-arm64",
+        "@openai/codex-darwin-x64": "npm:@openai/codex@0.145.0-darwin-x64",
+        "@openai/codex-linux-arm64": "npm:@openai/codex@0.145.0-linux-arm64",
+        "@openai/codex-linux-x64": "npm:@openai/codex@0.145.0-linux-x64",
+        "@openai/codex-win32-arm64": "npm:@openai/codex@0.145.0-win32-arm64",
+        "@openai/codex-win32-x64": "npm:@openai/codex@0.145.0-win32-x64"
+      },
       "platforms": {
         "amd64": {
           "package_version": "0.145.0-linux-x64",
@@ -67,6 +107,7 @@
       "installer_sha256": "c621c1d7715abeb5205f2cc2d21c5100aeefd13d6d5619f487eb7fef4bed4195",
       "version": "2026.07.20-8cc9c0b",
       "promotion_guard_version": "2026.04.17-787b533",
+      "promotion_guard_immutable_tag": null,
       "platforms": {
         "amd64": {
           "tarball": "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/x64/agent-cli-package.tar.gz",
@@ -82,23 +123,112 @@
     "gemini": {
       "kind": "npm",
       "dockerfile": "docker/gemini.Dockerfile",
-      "dockerfile_sha256": "d8199318abbd375d9d716b8ad3c262f63ea73ae8eeda9709107767679cf30139",
+      "dockerfile_sha256": "a2d543159cdf7c30775d003420675df9555e6a4b41cad5fedbbb4e9e0681f4b8",
       "package": "@google/gemini-cli",
       "version": "0.52.0",
       "promotion_guard_version": "0.39.1",
+      "promotion_guard_immutable_tag": null,
       "tarball": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.52.0.tgz",
       "sha512": "ffa16f7ef95cb0e26d9f7340813a79fdc6bdc52ea799ab78a2d43e3445684fa968be62363798c7c6d06a1ad8cb528f9cbc17c682d4765a69023f1c691e3afad5",
+      "optional_dependencies": {
+        "@github/keytar": "7.10.6",
+        "@lydell/node-pty": "1.1.0",
+        "@lydell/node-pty-darwin-arm64": "1.1.0",
+        "@lydell/node-pty-darwin-x64": "1.1.0",
+        "@lydell/node-pty-linux-x64": "1.1.0",
+        "@lydell/node-pty-win32-arm64": "1.1.0",
+        "@lydell/node-pty-win32-x64": "1.1.0",
+        "node-pty": "1.0.0"
+      },
+      "artifacts": {
+        "shared": [
+          {
+            "package": "@lydell/node-pty",
+            "version": "1.1.0",
+            "tarball": "https://registry.npmjs.org/@lydell/node-pty/-/node-pty-1.1.0.tgz",
+            "sha512": "5430fc2ed94c4ceacf296317500701f7e2d392dceeba7aab3309184750cc441912e8b42b0adfb4fd6b35a36acc9a5fe7de0b9e3e94bb73184717b366e4ae2233",
+            "optional_dependencies": {
+              "@lydell/node-pty-darwin-arm64": "1.1.0",
+              "@lydell/node-pty-darwin-x64": "1.1.0",
+              "@lydell/node-pty-linux-arm64": "1.1.0",
+              "@lydell/node-pty-linux-x64": "1.1.0",
+              "@lydell/node-pty-win32-arm64": "1.1.0",
+              "@lydell/node-pty-win32-x64": "1.1.0"
+            }
+          }
+        ],
+        "amd64": [
+          {
+            "package": "@lydell/node-pty-linux-x64",
+            "version": "1.1.0",
+            "tarball": "https://registry.npmjs.org/@lydell/node-pty-linux-x64/-/node-pty-linux-x64-1.1.0.tgz",
+            "sha512": "35c36a4530f5e104febd7704baa492be6598fb4f965019f6b9113c10dd332ad0e9204afd77e622163d7a52a76ce907dc2c21df6660be2eced8cf04daa839da9c",
+            "optional_dependencies": {}
+          }
+        ],
+        "arm64": [
+          {
+            "package": "@lydell/node-pty-linux-arm64",
+            "version": "1.1.0",
+            "tarball": "https://registry.npmjs.org/@lydell/node-pty-linux-arm64/-/node-pty-linux-arm64-1.1.0.tgz",
+            "sha512": "cb20c199a9427c7a4b890313db3c8b72a2f615acb85f2eeb22cf061f876a28b9c4be232f3c638aecb003564280b1bb325c148848bdcbb759b532dc613c7e9c92",
+            "optional_dependencies": {}
+          }
+        ]
+      },
       "smoke_command": "gemini --version"
     },
     "opencode": {
       "kind": "npm",
       "dockerfile": "docker/opencode.Dockerfile",
-      "dockerfile_sha256": "c9f98cc89a49ce0408f4570ec29db5113a8f13917368d05fefdb13b82923de7e",
+      "dockerfile_sha256": "35b7eec3bf0a4abdee6fd8b87fe4950dafa3a682b9125cb7f2455309a1b80743",
       "package": "opencode-ai",
       "version": "1.18.4",
       "promotion_guard_version": "1.14.24",
+      "promotion_guard_immutable_tag": null,
       "tarball": "https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.18.4.tgz",
       "sha512": "07ca4502cd60d79f1953e0ba792889cffe59846ed5af6987ed9eebb981072c4940957f6d7a1ad14e7cd34e08d2c47636bf067fe55a65c11de874553e0da8bc8e",
+      "optional_dependencies": {
+        "opencode-darwin-arm64": "1.18.4",
+        "opencode-darwin-x64": "1.18.4",
+        "opencode-darwin-x64-baseline": "1.18.4",
+        "opencode-linux-arm64": "1.18.4",
+        "opencode-linux-arm64-musl": "1.18.4",
+        "opencode-linux-x64": "1.18.4",
+        "opencode-linux-x64-baseline": "1.18.4",
+        "opencode-linux-x64-baseline-musl": "1.18.4",
+        "opencode-linux-x64-musl": "1.18.4",
+        "opencode-windows-arm64": "1.18.4",
+        "opencode-windows-x64": "1.18.4",
+        "opencode-windows-x64-baseline": "1.18.4"
+      },
+      "artifacts": {
+        "amd64": [
+          {
+            "package": "opencode-linux-x64",
+            "version": "1.18.4",
+            "tarball": "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.4.tgz",
+            "sha512": "982899b8a401a911d586da76d181437cd7f9714c13b7afc8f7c3052500c97434d68209e40153a78ad413992b76710c283c9f7856b4700e1672637a48637f8242",
+            "optional_dependencies": {}
+          },
+          {
+            "package": "opencode-linux-x64-baseline",
+            "version": "1.18.4",
+            "tarball": "https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.18.4.tgz",
+            "sha512": "2e5548bf9e20a4cf08e902550285b9baf71a54ee33fb2e43b307d40acc60683d025a08c46d42da880019212fcbf8de6b470fe31dea9c1d25e22a29c566dd31c3",
+            "optional_dependencies": {}
+          }
+        ],
+        "arm64": [
+          {
+            "package": "opencode-linux-arm64",
+            "version": "1.18.4",
+            "tarball": "https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.4.tgz",
+            "sha512": "de0070f70784efa8e5a0d3c698fbf397718947c6fab1cc1200437150a45d277582902eea723266e3d285c9fa858cee7efb51f54368db9aaab1020b79ba9aa831",
+            "optional_dependencies": {}
+          }
+        ]
+      },
       "smoke_command": "opencode --version"
     }
   }

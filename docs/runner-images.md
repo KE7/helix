@@ -24,9 +24,16 @@ timeout, or a host change fails closed.
 Cursor's installer is never executed in an image. The workflow hashes the
 installer, extracts its single embedded release version, downloads both
 official Linux architecture archives, and hashes those archives before a
-build. Codex is stricter still: its launcher tarball and its exact
-`linux-x64`/`linux-arm64` native tarballs are independently verified and
-extracted without a second npm resolution.
+build. No backend Dockerfile runs `npm install`. Claude, Codex, and OpenCode
+extract their verified launcher plus the exact Linux native package selected
+for each architecture. OpenCode's amd64 image includes both its AVX2 and
+baseline binaries and chooses at runtime. Gemini extracts its verified bundle
+plus the exact `@lydell/node-pty` selector and architecture package; its
+documented child-process fallback remains available without the unneeded
+optional keychain and legacy PTY modules. The manifest records the launcher's
+full optional-dependency map and every extracted child package URL and SHA-512
+digest, so neither a build nor a same-version upstream republish can introduce
+an unmeasured package.
 
 The base is pinned to
 `node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`,
@@ -68,12 +75,14 @@ BuildKit SBOM, and signed provenance remain the byte-exact release identity.
    single promotion job moves `latest` tags and compensates by restoring every
    already-moved tag if a later move fails.
 
-The daily job deliberately does **not** move `latest` when a CLI version is
-newer than the checked-in HOME-layout measurement in
-`src/helix/backend_layout.py`. In that case the immutable image is published
-and retained, but `latest` remains the known rollback image until the layout is
-remeasured and its guard version is updated. This prevents a routine upstream
-release from silently invalidating HELIX's shared-auth isolation evidence.
+The daily job deliberately does **not** move `latest` when a CLI is newer than
+the checked-in HOME-layout measurement in `src/helix/backend_layout.py`, or
+when any launcher, native artifact, Dockerfile, or base-recipe input differs
+from that measurement. Promotion requires both the measured version and the
+exact measured immutable recipe tag. A same-version content republish therefore
+gets a different immutable tag and cannot inherit approval. The immutable image
+is retained, but `latest` remains the known rollback image until the layout is
+remeasured and both guard fields are updated.
 
 Pull requests cannot invoke this publishing workflow. Its discovery, change
 matrix, collision policy, platform parity, model-catalog contract, and static

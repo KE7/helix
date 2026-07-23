@@ -95,11 +95,12 @@ def test_npm_discovery_fails_closed_on_untrusted_or_malformed_sources(
         )
 
 
-def test_npm_discovery_rejects_prerelease_latest() -> None:
-    with pytest.raises(RunnerPlanError, match="prerelease"):
+@pytest.mark.parametrize("version", ["0.146.0-beta.1", "2026.1.0-beta.1"])
+def test_npm_discovery_rejects_prerelease_latest(version: str) -> None:
+    with pytest.raises(RunnerPlanError, match="stable semantic version"):
         parse_npm_metadata(
             "@openai/codex",
-            _npm_payload(version="0.146.0-beta.1"),
+            _npm_payload(version=version),
         )
 
 
@@ -117,8 +118,11 @@ def test_cursor_installer_requires_one_unambiguous_version() -> None:
 
 def test_change_plan_builds_only_changed_backends_on_both_native_arches() -> None:
     catalog = _catalog()
-    published = {name: item["version"] for name, item in catalog["backends"].items()}
-    published["codex"] = "0.130.0"
+    published = {
+        name: immutable_tag(item, catalog["base"]["immutable_tag"])
+        for name, item in catalog["backends"].items()
+    }
+    published["codex"] = "cli-0.130.0-rold"
     plan = change_plan(catalog, published)
     assert plan["changed"] == [
         {
@@ -139,8 +143,28 @@ def test_change_plan_builds_only_changed_backends_on_both_native_arches() -> Non
 
 def test_change_plan_is_empty_when_every_published_version_matches() -> None:
     catalog = _catalog()
-    published = {name: item["version"] for name, item in catalog["backends"].items()}
+    published = {
+        name: immutable_tag(item, catalog["base"]["immutable_tag"])
+        for name, item in catalog["backends"].items()
+    }
     assert change_plan(catalog, published) == {"changed": [], "builds": []}
+
+
+def test_same_version_content_drift_rebuilds_and_cannot_promote() -> None:
+    catalog = _catalog()
+    item = catalog["backends"]["gemini"]
+    old_tag = immutable_tag(item, catalog["base"]["immutable_tag"])
+    item["promotion_guard_version"] = item["version"]
+    item["promotion_guard_immutable_tag"] = old_tag
+    published = {
+        name: immutable_tag(backend, catalog["base"]["immutable_tag"])
+        for name, backend in catalog["backends"].items()
+    }
+    item["sha512"] = "a" * 128
+    plan = change_plan(catalog, published)
+    changed = next(entry for entry in plan["changed"] if entry["name"] == "gemini")
+    assert changed["immutable_tag"] != old_tag
+    assert changed["promotion_approved"] is False
 
 
 def test_immutable_tag_collision_is_idempotent_or_fails_hard() -> None:
@@ -196,6 +220,22 @@ def test_catalog_rejects_backend_source_or_luna_contract_drift() -> None:
     catalog["backends"]["codex"]["required_reasoning_effort"] = "high"
     with pytest.raises(RunnerPlanError, match="must be xhigh"):
         validate_catalog(catalog)
+
+
+def test_current_promotion_guard_approves_only_exact_content_identity() -> None:
+    catalog = _catalog()
+    item = catalog["backends"]["claude"]
+    item["promotion_guard_version"] = item["version"]
+    item["promotion_guard_immutable_tag"] = immutable_tag(
+        item, catalog["base"]["immutable_tag"]
+    )
+    plan = change_plan(catalog, {})
+    changed = next(entry for entry in plan["changed"] if entry["name"] == "claude")
+    assert changed["promotion_approved"] is True
+    item["sha512"] = "a" * 128
+    plan = change_plan(catalog, {})
+    changed = next(entry for entry in plan["changed"] if entry["name"] == "claude")
+    assert changed["promotion_approved"] is False
 
 
 def test_codex_catalog_requires_luna_and_exact_second_highest_xhigh() -> None:
@@ -262,6 +302,10 @@ def test_dockerfiles_do_not_install_a_floating_backend_cli() -> None:
         assert "CLI_VERSION=" in text
         checksum = "SHA256=" if backend == "cursor" else "SHA512="
         assert checksum in text
+        if backend in {"claude", "gemini", "opencode"}:
+            assert "npm install" not in text
+            assert "npm cache" not in text
+            assert "TARGETARCH" in text
 
 
 def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
@@ -288,5 +332,7 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, revision in uses)
     assert "smoke-${{ matrix.arch }}.json" in text
     assert "verify-build-evidence" in text
+    assert "promotion_guard_immutable_tag" in text
+    assert "CLI_AMD64_FALLBACK_SHA512" in text
     assert "TARGET_DIGEST: ${{ inputs.target_digest }}" in text
     assert "BACKEND: ${{ inputs.backend }}" in text
