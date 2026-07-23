@@ -34,6 +34,7 @@ RUN case "${TARGETARCH}" in \
         -C /opt/gemini/node_modules/@lydell/node-pty \
     && tar -xzf /tmp/gemini-pty-platform.tgz --strip-components=1 \
         -C "/opt/gemini/node_modules/@lydell/${platform_name}" \
+    && chmod 0755 /opt/gemini/bundle/gemini.js \
     && ln -s /opt/gemini/bundle/gemini.js /usr/local/bin/gemini \
     && rm -f /tmp/gemini-cli.tgz /tmp/gemini-pty.tgz \
         /tmp/gemini-pty-platform.tgz

@@ -24,7 +24,7 @@
     "claude": {
       "kind": "npm",
       "dockerfile": "docker/claude.Dockerfile",
-      "dockerfile_sha256": "a4f8c619f0d2a921448db4d272b487c845c6e55e2dc573f5df5c698e5b065685",
+      "dockerfile_sha256": "6bd37f4ec21904988c03f193ca239ce4e42ae386806085dabd2aa20cf80a9dd3",
       "package": "@anthropic-ai/claude-code",
       "version": "2.1.218",
       "promotion_guard_version": "2.1.138",
@@ -123,7 +123,7 @@
     "gemini": {
       "kind": "npm",
       "dockerfile": "docker/gemini.Dockerfile",
-      "dockerfile_sha256": "a2d543159cdf7c30775d003420675df9555e6a4b41cad5fedbbb4e9e0681f4b8",
+      "dockerfile_sha256": "7de170b8f79723f2ad55669fce09425f204cae2efaa9667f8e0b2f636c904b3d",
       "package": "@google/gemini-cli",
       "version": "0.52.0",
       "promotion_guard_version": "0.39.1",

@@ -26,6 +26,7 @@ RUN case "${TARGETARCH}" in \
     && tar -xzf /tmp/claude-code.tgz --strip-components=1 -C /opt/claude \
     && tar -xzf /tmp/claude-platform.tgz --strip-components=1 \
         -C "/opt/claude/node_modules/@anthropic-ai/${platform_name}" \
+    && chmod 0755 /opt/claude/cli-wrapper.cjs \
     && ln -s /opt/claude/cli-wrapper.cjs /usr/local/bin/claude \
     && rm -f /tmp/claude-code.tgz /tmp/claude-platform.tgz
 
