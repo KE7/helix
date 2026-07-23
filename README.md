@@ -488,6 +488,9 @@ shared base first with
 build the backend image you need, for example
 `docker build -t helix-runner-codex:latest -f docker/codex.Dockerfile .`, and
 set `[sandbox].image` to that local tag.
+The exact upstream pins, daily multi-architecture publication gate, provenance,
+and rollback procedure are documented in
+[`docs/runner-images.md`](docs/runner-images.md).
 
 Evaluator sidecar images are benchmark-specific and are not published by HELIX.
 Use `ghcr.io/ke7/helix-evo-runner-base` or `docker/base.Dockerfile` as a base

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "registry_prefix": "ghcr.io/ke7/helix-evo-runner",
+  "base": {
+    "dockerfile": "docker/base.Dockerfile",
+    "node_image": "node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3",
+    "uv_version": "0.11.7",
+    "immutable_tag": "runtime-node22-uv0.11.7-6c74791e557c",
+    "smoke_command": "python --version && uv --version && git --version && rg --version"
+  },
+  "backends": {
+    "claude": {
+      "kind": "npm",
+      "dockerfile": "docker/claude.Dockerfile",
+      "package": "@anthropic-ai/claude-code",
+      "version": "2.1.218",
+      "promotion_guard_version": "2.1.138",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.218.tgz",
+      "sha512": "04757de75aee21ae905da6450c5d70461c3100e90089a7c1d803961bac064542786a9689f66973a750452c08467c6d12927c00caa05e9ea793ea78ade9ab78b9",
+      "smoke_command": "claude --version"
+    },
+    "codex": {
+      "kind": "codex",
+      "dockerfile": "docker/codex.Dockerfile",
+      "package": "@openai/codex",
+      "version": "0.145.0",
+      "minimum_version": "0.145.0",
+      "promotion_guard_version": "0.125.0",
+      "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0.tgz",
+      "sha512": "fcf48f485ba38e39a2c9516f1b6caefe0ace161b167689131fcb762865a15d2a3f3399ff7480ec9dbb273bcdbfedb2ed2280eecd07fb013054316a8f59020d95",
+      "platforms": {
+        "amd64": {
+          "package_version": "0.145.0-linux-x64",
+          "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-linux-x64.tgz",
+          "sha512": "bbcc3c2cbbf70efb1fac30a8b302c87a66744a83445f28b9d755ac7c5b1289851ace4f6a32c07f36d53c37dbe101f37b9990312c5a0c7b1e2feba2631ee656c0"
+        },
+        "arm64": {
+          "package_version": "0.145.0-linux-arm64",
+          "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-linux-arm64.tgz",
+          "sha512": "f0e2dc3d7680a25fc53ab4680f15a12221c815aef7291b0ce3510aa1c8d164ec224f84dc7a5cc95a7ddd1f28ae49beed796176e6baec96f48fcaf8542d845109"
+        }
+      },
+      "smoke_command": "codex --version",
+      "model_catalog_command": "codex debug models --bundled",
+      "required_model": "gpt-5.6-luna",
+      "required_reasoning_effort": "xhigh"
+    },
+    "cursor": {
+      "kind": "cursor",
+      "dockerfile": "docker/cursor.Dockerfile",
+      "installer": "https://cursor.com/install",
+      "installer_sha256": "c621c1d7715abeb5205f2cc2d21c5100aeefd13d6d5619f487eb7fef4bed4195",
+      "version": "2026.07.20-8cc9c0b",
+      "promotion_guard_version": "2026.04.17-787b533",
+      "platforms": {
+        "amd64": {
+          "tarball": "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/x64/agent-cli-package.tar.gz",
+          "sha256": "6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4"
+        },
+        "arm64": {
+          "tarball": "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/arm64/agent-cli-package.tar.gz",
+          "sha256": "2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb"
+        }
+      },
+      "smoke_command": "cursor-agent --version"
+    },
+    "gemini": {
+      "kind": "npm",
+      "dockerfile": "docker/gemini.Dockerfile",
+      "package": "@google/gemini-cli",
+      "version": "0.52.0",
+      "promotion_guard_version": "0.39.1",
+      "tarball": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.52.0.tgz",
+      "sha512": "ffa16f7ef95cb0e26d9f7340813a79fdc6bdc52ea799ab78a2d43e3445684fa968be62363798c7c6d06a1ad8cb528f9cbc17c682d4765a69023f1c691e3afad5",
+      "smoke_command": "gemini --version"
+    },
+    "opencode": {
+      "kind": "npm",
+      "dockerfile": "docker/opencode.Dockerfile",
+      "package": "opencode-ai",
+      "version": "1.18.4",
+      "promotion_guard_version": "1.14.24",
+      "tarball": "https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.18.4.tgz",
+      "sha512": "07ca4502cd60d79f1953e0ba792889cffe59846ed5af6987ed9eebb981072c4940957f6d7a1ad14e7cd34e08d2c47636bf067fe55a65c11de874553e0da8bc8e",
+      "smoke_command": "opencode --version"
+    }
+  }
+}
