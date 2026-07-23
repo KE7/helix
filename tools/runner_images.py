@@ -16,15 +16,23 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 
 BACKENDS = ("claude", "codex", "cursor", "gemini", "opencode")
 PLATFORMS = ("amd64", "arm64")
+NPM_PACKAGES = {
+    "claude": "@anthropic-ai/claude-code",
+    "codex": "@openai/codex",
+    "gemini": "@google/gemini-cli",
+    "opencode": "opencode-ai",
+}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
+TAG_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}$")
 CURSOR_VERSION_RE = re.compile(r"2026\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+")
 
 
@@ -49,8 +57,22 @@ def write_json(path: Path, value: object) -> None:
 def _require_url(value: object, host: str) -> str:
     if not isinstance(value, str):
         raise RunnerPlanError("expected URL string")
+    if not value or any(ord(character) <= 0x20 for character in value):
+        raise RunnerPlanError(f"URL contains whitespace or controls: {value!r}")
     parsed = urllib.parse.urlparse(value)
-    if parsed.scheme != "https" or parsed.hostname != host:
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RunnerPlanError(f"untrusted upstream URL: {value!r}") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or not parsed.path.startswith("/")
+        or parsed.fragment
+    ):
         raise RunnerPlanError(f"untrusted upstream URL: {value!r}")
     return value
 
@@ -62,17 +84,70 @@ def _semver_tuple(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
+def base_immutable_tag(base: Mapping[str, Any]) -> str:
+    identity = {
+        key: base[key]
+        for key in (
+            "dockerfile",
+            "dockerfile_sha256",
+            "node_image",
+            "debian_snapshot",
+            "uv_version",
+            "uv_wheels",
+        )
+    }
+    material = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    fingerprint = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+    snapshot_date = str(base["debian_snapshot"])[:8]
+    tag = (
+        f"runtime-node22-uv{base['uv_version']}-"
+        f"snapshot{snapshot_date}-r{fingerprint}"
+    )
+    if not TAG_RE.fullmatch(tag):
+        raise RunnerPlanError(f"derived base image tag is unsafe: {tag!r}")
+    return tag
+
+
 def validate_catalog(catalog: dict[str, Any]) -> None:
     if catalog.get("schema_version") != 1:
         raise RunnerPlanError("unsupported runner catalog schema")
+    if catalog.get("registry_prefix") not in {
+        None,
+        "ghcr.io/ke7/helix-evo-runner",
+    }:
+        raise RunnerPlanError("unexpected runner registry prefix")
     if tuple(sorted(catalog.get("backends", {}))) != tuple(sorted(BACKENDS)):
         raise RunnerPlanError("runner catalog must contain exactly the five backends")
     base = catalog.get("base")
     if not isinstance(base, dict):
         raise RunnerPlanError("missing base configuration")
     node_image = base.get("node_image")
-    if not isinstance(node_image, str) or "@sha256:" not in node_image:
+    if not isinstance(node_image, str) or not re.fullmatch(
+        r"node:[^@\s]+@sha256:[0-9a-f]{64}", node_image
+    ):
         raise RunnerPlanError("base node image must be digest-pinned")
+    if base.get("dockerfile") != "docker/base.Dockerfile":
+        raise RunnerPlanError("unexpected base dockerfile")
+    if not SHA256_RE.fullmatch(str(base.get("dockerfile_sha256", ""))):
+        raise RunnerPlanError("base dockerfile sha256 is required")
+    if not isinstance(base.get("uv_version"), str):
+        raise RunnerPlanError("base uv version is required")
+    if not re.fullmatch(r"\d{8}T\d{6}Z", str(base.get("debian_snapshot", ""))):
+        raise RunnerPlanError("base Debian snapshot timestamp is invalid")
+    uv_wheels = base.get("uv_wheels")
+    if not isinstance(uv_wheels, dict) or tuple(sorted(uv_wheels)) != PLATFORMS:
+        raise RunnerPlanError("base requires exact amd64/arm64 uv wheels")
+    for platform in PLATFORMS:
+        wheel = uv_wheels[platform]
+        _require_url(wheel.get("url"), "files.pythonhosted.org")
+        if not SHA256_RE.fullmatch(str(wheel.get("sha256", ""))):
+            raise RunnerPlanError(f"base uv/{platform}: invalid sha256")
+    if not TAG_RE.fullmatch(str(base.get("immutable_tag", ""))):
+        raise RunnerPlanError("base immutable tag is invalid")
+    if base["immutable_tag"] != base_immutable_tag(base):
+        raise RunnerPlanError("base immutable tag is not bound to all recipe inputs")
+    if not isinstance(base.get("smoke_command"), str):
+        raise RunnerPlanError("base smoke command is required")
 
     for name in BACKENDS:
         item = catalog["backends"][name]
@@ -86,8 +161,21 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             raise RunnerPlanError(f"{name}: invalid promotion guard version")
         if not isinstance(item.get("smoke_command"), str):
             raise RunnerPlanError(f"{name}: missing smoke command")
+        if item.get("dockerfile") != f"docker/{name}.Dockerfile":
+            raise RunnerPlanError(f"{name}: unexpected dockerfile")
+        if not SHA256_RE.fullmatch(str(item.get("dockerfile_sha256", ""))):
+            raise RunnerPlanError(f"{name}: missing dockerfile sha256")
         kind = item.get("kind")
+        expected_kind = (
+            "codex" if name == "codex" else "cursor" if name == "cursor" else "npm"
+        )
+        if kind != expected_kind:
+            raise RunnerPlanError(
+                f"{name}: expected backend kind {expected_kind!r}, got {kind!r}"
+            )
         if kind in {"npm", "codex"}:
+            if item.get("package") != NPM_PACKAGES[name]:
+                raise RunnerPlanError(f"{name}: unexpected npm package")
             _require_url(item.get("tarball"), "registry.npmjs.org")
             if not SHA512_RE.fullmatch(str(item.get("sha512", ""))):
                 raise RunnerPlanError(f"{name}: invalid sha512")
@@ -98,12 +186,22 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         if kind == "codex":
             if _semver_tuple(version) < _semver_tuple(str(item["minimum_version"])):
                 raise RunnerPlanError("codex is below its declared minimum version")
+            if _semver_tuple(str(item["minimum_version"])) < (0, 145, 0):
+                raise RunnerPlanError("codex minimum must remain at least 0.145.0")
+            if item.get("model_catalog_command") != "codex debug models --bundled":
+                raise RunnerPlanError("codex model catalog command changed")
+            if item.get("required_model") != "gpt-5.6-luna":
+                raise RunnerPlanError("codex required model must be gpt-5.6-luna")
+            if item.get("required_reasoning_effort") != "xhigh":
+                raise RunnerPlanError("codex required reasoning effort must be xhigh")
             for platform in PLATFORMS:
                 source = item["platforms"][platform]
                 _require_url(source.get("tarball"), "registry.npmjs.org")
                 if not SHA512_RE.fullmatch(str(source.get("sha512", ""))):
                     raise RunnerPlanError(f"codex/{platform}: invalid sha512")
         elif kind == "cursor":
+            if item.get("installer") != "https://cursor.com/install":
+                raise RunnerPlanError("cursor: unexpected installer")
             _require_url(item.get("installer"), "cursor.com")
             if not SHA256_RE.fullmatch(str(item.get("installer_sha256", ""))):
                 raise RunnerPlanError("cursor: invalid installer sha256")
@@ -112,6 +210,27 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 _require_url(source.get("tarball"), "downloads.cursor.com")
                 if not SHA256_RE.fullmatch(str(source.get("sha256", ""))):
                     raise RunnerPlanError(f"cursor/{platform}: invalid sha256")
+
+
+def validate_catalog_files(catalog: dict[str, Any], catalog_path: Path) -> None:
+    """Prove that every declared Dockerfile digest matches the checkout."""
+    validate_catalog(catalog)
+    repository_root = catalog_path.resolve().parent.parent
+    entries = [("base", catalog["base"])]
+    entries.extend((name, catalog["backends"][name]) for name in BACKENDS)
+    for name, item in entries:
+        relative = Path(str(item["dockerfile"]))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RunnerPlanError(f"{name}: unsafe dockerfile path")
+        dockerfile = (repository_root / relative).resolve()
+        if repository_root not in dockerfile.parents:
+            raise RunnerPlanError(f"{name}: dockerfile escapes repository")
+        actual = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
+        if actual != item["dockerfile_sha256"]:
+            raise RunnerPlanError(
+                f"{name}: dockerfile sha256 mismatch: expected "
+                f"{item['dockerfile_sha256']}, got {actual}"
+            )
 
 
 def parse_npm_metadata(package: str, payload: bytes) -> dict[str, str]:
@@ -209,7 +328,10 @@ def _fetch(url: str, timeout: float = 30.0) -> bytes:
         headers={"User-Agent": "helix-runner-version-audit/1"},
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
+        payload = response.read()
+    if not isinstance(payload, bytes):
+        raise RunnerPlanError(f"upstream returned non-bytes payload for {url!r}")
+    return payload
 
 
 def _fetch_sha256(url: str, timeout: float = 180.0) -> str:
@@ -236,9 +358,11 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
         if item["kind"] in {"npm", "codex"}:
             package = item["package"]
             encoded = urllib.parse.quote(package, safe="")
-            npm = parse_npm_metadata(
-                package,
-                _fetch(f"https://registry.npmjs.org/{encoded}"),
+            npm: dict[str, Any] = dict(
+                parse_npm_metadata(
+                    package,
+                    _fetch(f"https://registry.npmjs.org/{encoded}"),
+                )
             )
             npm.update(
                 {
@@ -246,6 +370,7 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                     for key in (
                         "kind",
                         "dockerfile",
+                        "dockerfile_sha256",
                         "smoke_command",
                         "minimum_version",
                         "promotion_guard_version",
@@ -282,11 +407,14 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                     }
             resolved["backends"][name] = npm
         else:
-            cursor = parse_cursor_installer(_fetch(str(item["installer"])))
+            cursor: dict[str, Any] = dict(
+                parse_cursor_installer(_fetch(str(item["installer"])))
+            )
             cursor.update(
                 {
                     "kind": "cursor",
                     "dockerfile": item["dockerfile"],
+                    "dockerfile_sha256": item["dockerfile_sha256"],
                     "installer": item["installer"],
                     "promotion_guard_version": item["promotion_guard_version"],
                     "smoke_command": item["smoke_command"],
@@ -307,10 +435,59 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
     return resolved
 
 
-def immutable_tag(version: str) -> str:
+def _backend_source_identity(item: Mapping[str, Any]) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        key: item[key]
+        for key in ("kind", "dockerfile", "dockerfile_sha256", "version")
+    }
+    if item["kind"] in {"npm", "codex"}:
+        identity.update(
+            {
+                "package": item["package"],
+                "tarball": item["tarball"],
+                "sha512": item["sha512"],
+            }
+        )
+    if item["kind"] == "codex":
+        identity["platforms"] = item["platforms"]
+    elif item["kind"] == "cursor":
+        identity.update(
+            {
+                "installer": item["installer"],
+                "installer_sha256": item["installer_sha256"],
+                "platforms": item["platforms"],
+            }
+        )
+    return identity
+
+
+def immutable_tag(item: Mapping[str, Any], base_tag: str) -> str:
+    version = item.get("version")
+    if not isinstance(version, str):
+        raise RunnerPlanError("backend version is missing")
     if not VERSION_RE.fullmatch(version):
         raise RunnerPlanError(f"unsafe image version {version!r}")
-    return f"cli-{version.replace('+', '_')}"
+    if len(version) > 80:
+        raise RunnerPlanError("image version is too long")
+    if not TAG_RE.fullmatch(base_tag):
+        raise RunnerPlanError(f"unsafe base image tag {base_tag!r}")
+    # Docker tags cannot contain "+". Bind the readable version to all source
+    # inputs and the base recipe so ambiguity or recipe drift changes the
+    # immutable identity.
+    readable = re.sub(r"[^0-9A-Za-z_.-]", "-", version)
+    material = json.dumps(
+        {
+            "base_tag": base_tag,
+            "backend": _backend_source_identity(item),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    fingerprint = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
+    tag = f"cli-{readable}-r{fingerprint}"
+    if not TAG_RE.fullmatch(tag):
+        raise RunnerPlanError(f"derived image tag is unsafe: {tag!r}")
+    return tag
 
 
 def change_plan(
@@ -329,7 +506,9 @@ def change_plan(
                 "name": name,
                 "dockerfile": item["dockerfile"],
                 "version": version,
-                "immutable_tag": immutable_tag(version),
+                "immutable_tag": immutable_tag(
+                    item, str(resolved["base"]["immutable_tag"])
+                ),
                 "promotion_approved": version == item["promotion_guard_version"],
             }
         )
@@ -401,6 +580,47 @@ def verify_platforms(payload: dict[str, Any]) -> None:
         )
 
 
+def verify_build_evidence(
+    directory: Path,
+    *,
+    backend: str,
+    version: str,
+) -> list[str]:
+    """Validate the two native smoke records and return their digests.
+
+    Artifact filenames are architecture-qualified so downloading multiple
+    artifacts into one directory cannot overwrite evidence.  The merge job
+    trusts only the JSON fields after this exact-set validation; it never
+    derives a digest from an uploaded filename.
+    """
+    if backend not in BACKENDS:
+        raise RunnerPlanError(f"unknown backend {backend!r}")
+    records: dict[str, str] = {}
+    paths = sorted(directory.glob("smoke-*.json"))
+    if len(paths) != 2:
+        raise RunnerPlanError(
+            f"{backend}: expected exactly two smoke records, found {len(paths)}"
+        )
+    for path in paths:
+        record = load_json(path)
+        if record.get("backend") != backend or record.get("version") != version:
+            raise RunnerPlanError(f"{path}: backend/version mismatch")
+        platform = record.get("platform")
+        digest = record.get("digest")
+        if platform not in {"linux/amd64", "linux/arm64"}:
+            raise RunnerPlanError(f"{path}: invalid platform {platform!r}")
+        if not isinstance(digest, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", digest
+        ):
+            raise RunnerPlanError(f"{path}: invalid digest")
+        if platform in records:
+            raise RunnerPlanError(f"{backend}: duplicate evidence for {platform}")
+        records[platform] = digest
+    if set(records) != {"linux/amd64", "linux/arm64"}:
+        raise RunnerPlanError(f"{backend}: incomplete platform evidence")
+    return [records["linux/amd64"], records["linux/arm64"]]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -421,6 +641,14 @@ def _parser() -> argparse.ArgumentParser:
     collision = subparsers.add_parser("check-collision")
     collision.add_argument("--existing")
     collision.add_argument("--candidate", required=True)
+    tag = subparsers.add_parser("image-tag")
+    tag.add_argument("--catalog", type=Path, required=True)
+    tag.add_argument("--backend", choices=BACKENDS, required=True)
+    evidence = subparsers.add_parser("verify-build-evidence")
+    evidence.add_argument("--input-dir", type=Path, required=True)
+    evidence.add_argument("--backend", required=True)
+    evidence.add_argument("--version", required=True)
+    evidence.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -428,7 +656,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "validate":
-            validate_catalog(load_json(args.catalog))
+            catalog = load_json(args.catalog)
+            validate_catalog_files(catalog, args.catalog)
         elif args.command == "discover":
             write_json(
                 args.output,
@@ -448,6 +677,28 @@ def main(argv: list[str] | None = None) -> int:
             verify_platforms(load_json(args.input))
         elif args.command == "check-collision":
             assert_immutable_collision(args.existing or None, args.candidate)
+        elif args.command == "image-tag":
+            catalog = load_json(args.catalog)
+            validate_catalog(catalog)
+            print(
+                immutable_tag(
+                    catalog["backends"][args.backend],
+                    str(catalog["base"]["immutable_tag"]),
+                )
+            )
+        elif args.command == "verify-build-evidence":
+            write_json(
+                args.output,
+                {
+                    "backend": args.backend,
+                    "version": args.version,
+                    "digests": verify_build_evidence(
+                        args.input_dir,
+                        backend=args.backend,
+                        version=args.version,
+                    ),
+                },
+            )
         else:  # pragma: no cover - argparse enforces the command set
             raise AssertionError(args.command)
     except (OSError, json.JSONDecodeError, RunnerPlanError) as exc:

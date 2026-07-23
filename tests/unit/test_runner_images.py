@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -11,9 +13,12 @@ from tools.runner_images import (
     RunnerPlanError,
     assert_immutable_collision,
     change_plan,
+    immutable_tag,
     parse_cursor_installer,
     parse_npm_metadata,
     validate_catalog,
+    validate_catalog_files,
+    verify_build_evidence,
     verify_codex_catalog,
     verify_platforms,
 )
@@ -53,7 +58,7 @@ def _npm_payload(
 
 
 def test_checked_in_runner_catalog_is_complete_and_content_pinned() -> None:
-    validate_catalog(_catalog())
+    validate_catalog_files(_catalog(), CATALOG_PATH)
 
 
 def test_npm_discovery_parses_version_tarball_and_integrity() -> None:
@@ -67,6 +72,13 @@ def test_npm_discovery_parses_version_tarball_and_integrity() -> None:
     ("tarball", "integrity"),
     [
         ("https://evil.invalid/codex.tgz", "sha512-YQ=="),
+        (
+            "https://registry.npmjs.org/codex.tgz\nCLI_SHA512=bad",
+            (
+                "sha512-/PSPSFujjjmiyVFvG2yu/grOFhsWdokTH8t2KGWhXSo/"
+                "M5n/dIDsnbsnO82/7bLtIoDuzQf7ATBUMWqPWQINlQ=="
+            ),
+        ),
         (
             "https://registry.npmjs.org/@openai/codex/-/codex.tgz",
             "sha256-not-accepted",
@@ -113,7 +125,9 @@ def test_change_plan_builds_only_changed_backends_on_both_native_arches() -> Non
             "name": "codex",
             "dockerfile": "docker/codex.Dockerfile",
             "version": "0.145.0",
-            "immutable_tag": "cli-0.145.0",
+            "immutable_tag": immutable_tag(
+                catalog["backends"]["codex"], catalog["base"]["immutable_tag"]
+            ),
             "promotion_approved": False,
         }
     ]
@@ -135,6 +149,53 @@ def test_immutable_tag_collision_is_idempotent_or_fails_hard() -> None:
     assert_immutable_collision(digest, digest)
     with pytest.raises(RunnerPlanError, match="collision"):
         assert_immutable_collision("sha256:" + "b" * 64, digest)
+
+
+def test_immutable_version_tags_are_collision_resistant_and_base_bound() -> None:
+    catalog = _catalog()
+    base = catalog["base"]["immutable_tag"]
+    item = copy.deepcopy(catalog["backends"]["codex"])
+    item["version"] = "1.0+foo"
+    first = immutable_tag(item, base)
+    item["version"] = "1.0-foo"
+    assert first != immutable_tag(item, base)
+    item["version"] = "1.0+foo"
+    assert first != immutable_tag(item, base + "-next")
+    item["sha512"] = "a" * 128
+    assert first != immutable_tag(item, base)
+    assert re.fullmatch(r"[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}", first)
+
+
+def test_checked_in_dockerfile_hashes_fail_closed_on_recipe_drift() -> None:
+    catalog = _catalog()
+    catalog["backends"]["codex"]["dockerfile_sha256"] = "0" * 64
+    with pytest.raises(RunnerPlanError, match="dockerfile sha256 mismatch"):
+        validate_catalog_files(catalog, CATALOG_PATH)
+
+
+def test_base_immutable_identity_changes_with_catalog_only_inputs() -> None:
+    catalog = _catalog()
+    catalog["base"]["uv_wheels"]["arm64"]["sha256"] = "a" * 64
+    with pytest.raises(RunnerPlanError, match="all recipe inputs"):
+        validate_catalog(catalog)
+
+
+def test_catalog_rejects_unknown_backend_kind() -> None:
+    catalog = _catalog()
+    catalog["backends"]["claude"]["kind"] = "unexpected"
+    with pytest.raises(RunnerPlanError, match="backend kind"):
+        validate_catalog(catalog)
+
+
+def test_catalog_rejects_backend_source_or_luna_contract_drift() -> None:
+    catalog = _catalog()
+    catalog["backends"]["claude"]["package"] = "lookalike-package"
+    with pytest.raises(RunnerPlanError, match="npm package"):
+        validate_catalog(catalog)
+    catalog = _catalog()
+    catalog["backends"]["codex"]["required_reasoning_effort"] = "high"
+    with pytest.raises(RunnerPlanError, match="must be xhigh"):
+        validate_catalog(catalog)
 
 
 def test_codex_catalog_requires_luna_and_exact_second_highest_xhigh() -> None:
@@ -169,6 +230,30 @@ def test_manifest_parity_requires_exact_linux_amd64_and_arm64() -> None:
         verify_platforms(payload)
 
 
+def test_build_evidence_requires_two_unique_native_smoke_records(
+    tmp_path: Path,
+) -> None:
+    for arch in ("amd64", "arm64"):
+        (tmp_path / f"smoke-{arch}.json").write_text(
+            json.dumps(
+                {
+                    "backend": "codex",
+                    "version": "0.145.0",
+                    "platform": f"linux/{arch}",
+                    "digest": "sha256:" + ("a" if arch == "amd64" else "b") * 64,
+                }
+            ),
+            encoding="utf-8",
+        )
+    assert verify_build_evidence(tmp_path, backend="codex", version="0.145.0") == [
+        "sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+    ]
+    (tmp_path / "smoke-arm64.json").unlink()
+    with pytest.raises(RunnerPlanError, match="exactly two"):
+        verify_build_evidence(tmp_path, backend="codex", version="0.145.0")
+
+
 def test_dockerfiles_do_not_install_a_floating_backend_cli() -> None:
     for backend in ("claude", "codex", "cursor", "gemini", "opencode"):
         text = (ROOT / "docker" / f"{backend}.Dockerfile").read_text()
@@ -190,3 +275,18 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert "verify-codex-catalog" in text
     assert "check-collision" in text
     assert "attest-build-provenance" in text
+    assert "github.repository == 'KE7/helix'" in text
+    assert "github.event.repository.default_branch == 'main'" in text
+    assert "github.ref == 'refs/heads/main'" in text
+    assert '--signer-workflow "$ATTESTATION_SIGNER_WORKFLOW"' in text
+    assert '--source-ref "$ATTESTATION_SOURCE_REF"' in text
+    assert "--deny-self-hosted-runners" in text
+    assert "cache-from:" not in text
+    assert "cache-to:" not in text
+    uses = re.findall(r"uses:\s+([^@\s]+)@([^\s#]+)", text)
+    assert uses
+    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, revision in uses)
+    assert "smoke-${{ matrix.arch }}.json" in text
+    assert "verify-build-evidence" in text
+    assert "TARGET_DIGEST: ${{ inputs.target_digest }}" in text
+    assert "BACKEND: ${{ inputs.backend }}" in text

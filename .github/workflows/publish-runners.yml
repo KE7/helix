@@ -40,22 +40,57 @@ env:
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
   CATALOG: docker/runner-versions.json
   EVIDENCE_RETENTION_DAYS: 90
+  ATTESTATION_SIGNER_WORKFLOW: https://github.com/KE7/helix/.github/workflows/publish-runners.yml
+  ATTESTATION_SOURCE_REF: refs/heads/main
 
 jobs:
+  guard:
+    name: Authorize protected release context
+    if: >-
+      ${{
+        github.repository == 'KE7/helix' &&
+        github.event.repository.default_branch == 'main' &&
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm the protected repository and default branch
+        env:
+          EXPECTED_REPOSITORY: KE7/helix
+          EXPECTED_REF: refs/heads/main
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+          ACTUAL_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACTUAL_REPOSITORY" == "$EXPECTED_REPOSITORY" ]]
+          [[ "$ACTUAL_REF" == "$EXPECTED_REF" ]]
+
   resolve:
     name: Resolve changed upstream CLIs
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.operation == 'refresh' }}
+    needs: guard
+    if: >-
+      ${{
+        needs.guard.result == 'success' &&
+        (github.event_name != 'workflow_dispatch' || inputs.operation == 'refresh')
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
+      attestations: read
     outputs:
       base_changed: ${{ steps.plan.outputs.base_changed }}
+      base_digest: ${{ steps.plan.outputs.base_digest }}
       base_tag: ${{ steps.plan.outputs.base_tag }}
       changed: ${{ steps.plan.outputs.changed }}
       builds: ${{ steps.plan.outputs.builds }}
+      promotions: ${{ steps.plan.outputs.promotions }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Validate checked-in source policy
         run: python tools/runner_images.py validate --catalog "$CATALOG"
@@ -68,59 +103,118 @@ jobs:
           --output /tmp/resolved-runner-versions.json
 
       - name: Log in to GHCR read-only
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Select only unpublished CLI versions
+      - name: Trust only attested, two-platform immutable releases
         id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+          base_tag="$(jq -r '.base.immutable_tag' /tmp/resolved-runner-versions.json)"
+          base_image="${IMAGE_PREFIX}-base:${base_tag}"
+          base_digest=""
+          if docker buildx imagetools inspect "$base_image" >/dev/null 2>&1; then
+            docker buildx imagetools inspect "$base_image" \
+              --format '{{json .Manifest}}' > /tmp/base-manifest.json
+            python tools/runner_images.py verify-platforms \
+              --input /tmp/base-manifest.json
+            base_digest="$(jq -r '.digest' /tmp/base-manifest.json)"
+            [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            gh attestation verify \
+              "oci://${IMAGE_PREFIX}-base@${base_digest}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+              --source-ref "$ATTESTATION_SOURCE_REF" \
+              --deny-self-hosted-runners
+            base_changed=false
+          else
+            base_changed=true
+          fi
+
           printf '{}\n' > /tmp/published.json
+          printf '[]\n' > /tmp/promotions.json
           for backend in claude codex cursor gemini opencode; do
             version="$(jq -r --arg backend "$backend" '.backends[$backend].version' /tmp/resolved-runner-versions.json)"
-            tag="cli-${version//+/_}"
+            promotion_guard="$(jq -r --arg backend "$backend" '.backends[$backend].promotion_guard_version' /tmp/resolved-runner-versions.json)"
+            tag="$(python tools/runner_images.py image-tag \
+              --catalog /tmp/resolved-runner-versions.json \
+              --backend "$backend")"
             image="${IMAGE_PREFIX}-${backend}:${tag}"
             if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+              docker buildx imagetools inspect "$image" \
+                --format '{{json .Manifest}}' > "/tmp/${backend}-manifest.json"
+              python tools/runner_images.py verify-platforms \
+                --input "/tmp/${backend}-manifest.json"
+              digest="$(jq -r '.digest' "/tmp/${backend}-manifest.json")"
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              gh attestation verify "oci://${IMAGE_PREFIX}-${backend}@${digest}" \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+                --source-ref "$ATTESTATION_SOURCE_REF" \
+                --deny-self-hosted-runners
               jq --arg backend "$backend" --arg version "$version" \
                 '.[$backend] = $version' /tmp/published.json \
                 > /tmp/published.next.json
               mv /tmp/published.next.json /tmp/published.json
+              if [[ "$version" == "$promotion_guard" ]] && \
+                docker buildx imagetools inspect \
+                  "${IMAGE_PREFIX}-${backend}:latest" >/dev/null 2>&1; then
+                latest_digest="$(docker buildx imagetools inspect \
+                  "${IMAGE_PREFIX}-${backend}:latest" \
+                  --format '{{json .Manifest}}' | jq -r '.digest')"
+                [[ "$latest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+                if [[ "$latest_digest" != "$digest" ]]; then
+                  jq \
+                    --arg name "$backend" \
+                    --arg version "$version" \
+                    --arg immutable_tag "$tag" \
+                    --arg target_digest "$digest" \
+                    '. + [{
+                      name:$name,
+                      version:$version,
+                      immutable_tag:$immutable_tag,
+                      target_digest:$target_digest,
+                      promotion_approved:true
+                    }]' /tmp/promotions.json > /tmp/promotions.next.json
+                  mv /tmp/promotions.next.json /tmp/promotions.json
+                fi
+              fi
             fi
           done
           python tools/runner_images.py plan \
             --resolved /tmp/resolved-runner-versions.json \
             --published /tmp/published.json \
             --output /tmp/runner-plan.json
-          base_tag="$(jq -r '.base.immutable_tag' /tmp/resolved-runner-versions.json)"
-          if docker buildx imagetools inspect "${IMAGE_PREFIX}-base:${base_tag}" >/dev/null 2>&1; then
-            base_changed=false
-          else
-            base_changed=true
-          fi
           echo "base_changed=${base_changed}" >> "$GITHUB_OUTPUT"
+          echo "base_digest=${base_digest}" >> "$GITHUB_OUTPUT"
           echo "base_tag=${base_tag}" >> "$GITHUB_OUTPUT"
           echo "changed=$(jq -c '.changed' /tmp/runner-plan.json)" >> "$GITHUB_OUTPUT"
           echo "builds=$(jq -c '.builds' /tmp/runner-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "promotions=$(jq -c . /tmp/promotions.json)" >> "$GITHUB_OUTPUT"
           jq . /tmp/runner-plan.json >> "$GITHUB_STEP_SUMMARY"
+          jq . /tmp/promotions.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Retain the exact resolved build plan
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resolved-runner-plan
           path: |
             /tmp/resolved-runner-versions.json
             /tmp/published.json
             /tmp/runner-plan.json
+            /tmp/promotions.json
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
   build-base:
     name: Build base (${{ matrix.arch }})
-    needs: resolve
+    needs: [guard, resolve]
     if: ${{ needs.resolve.outputs.base_changed == 'true' }}
     strategy:
       fail-fast: false
@@ -137,13 +231,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: resolved-runner-plan
           path: /tmp/plan
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -156,21 +250,24 @@ jobs:
           {
             echo 'value<<HELIX_ARGS'
             echo "NODE_BASE=$(jq -r '.base.node_image' /tmp/plan/resolved-runner-versions.json)"
+            echo "DEBIAN_SNAPSHOT=$(jq -r '.base.debian_snapshot' /tmp/plan/resolved-runner-versions.json)"
             echo "UV_VERSION=$(jq -r '.base.uv_version' /tmp/plan/resolved-runner-versions.json)"
+            echo "UV_AMD64_WHEEL=$(jq -r '.base.uv_wheels.amd64.url' /tmp/plan/resolved-runner-versions.json)"
+            echo "UV_AMD64_SHA256=$(jq -r '.base.uv_wheels.amd64.sha256' /tmp/plan/resolved-runner-versions.json)"
+            echo "UV_ARM64_WHEEL=$(jq -r '.base.uv_wheels.arm64.url' /tmp/plan/resolved-runner-versions.json)"
+            echo "UV_ARM64_SHA256=$(jq -r '.base.uv_wheels.arm64.sha256' /tmp/plan/resolved-runner-versions.json)"
             echo HELIX_ARGS
           } >> "$GITHUB_OUTPUT"
 
       - name: Build base by untagged digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/base.Dockerfile
           platforms: ${{ matrix.platform }}
           build-args: ${{ steps.args.outputs.value }}
           outputs: type=image,name=${{ env.IMAGE_PREFIX }}-base,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=runner-base-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=runner-base-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
 
@@ -186,7 +283,7 @@ jobs:
           mkdir -p /tmp/digests
           touch "/tmp/digests/${digest#sha256:}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digests-base-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -195,7 +292,7 @@ jobs:
 
   merge-base:
     name: Validate and publish immutable base manifest
-    needs: [resolve, build-base]
+    needs: [guard, resolve, build-base]
     if: ${{ needs.resolve.outputs.base_changed == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -203,29 +300,39 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/digests
           pattern: digests-base-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create candidate, validate parity, and enforce immutable tag
+      - name: Create candidate, validate parity, and reserve immutable identity
         id: manifest
         working-directory: /tmp/digests
         shell: bash
         run: |
           set -euo pipefail
           candidate="${IMAGE_PREFIX}-base:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker buildx imagetools create -t "$candidate" \
-            $(printf "${IMAGE_PREFIX}-base@sha256:%s " *)
+          mapfile -t digest_files < <(
+            find . -maxdepth 1 -type f -printf '%f\n' | sort
+          )
+          [[ "${#digest_files[@]}" -eq 2 ]]
+          digest_refs=()
+          for digest in "${digest_files[@]}"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            digest_refs+=("${IMAGE_PREFIX}-base@sha256:${digest}")
+          done
+          docker buildx imagetools create -t "$candidate" "${digest_refs[@]}"
           candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -r '.digest')"
           docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' > /tmp/base-manifest.json
           python "$GITHUB_WORKSPACE/tools/runner_images.py" verify-platforms --input /tmp/base-manifest.json
@@ -236,32 +343,54 @@ jobs:
           fi
           python "$GITHUB_WORKSPACE/tools/runner_images.py" check-collision \
             ${existing:+--existing "$existing"} --candidate "$candidate_digest"
-          if [[ -z "$existing" ]]; then
-            docker buildx imagetools create -t "$immutable" "${IMAGE_PREFIX}-base@${candidate_digest}"
-          fi
           echo "digest=${candidate_digest}" >> "$GITHUB_OUTPUT"
+          echo "existing=${existing}" >> "$GITHUB_OUTPUT"
 
       - name: Attach signed GitHub build provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-name: ${{ env.IMAGE_PREFIX }}-base
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
-      - name: Promote base convenience tag after validation
-        run: >-
-          docker buildx imagetools create
-          -t "${IMAGE_PREFIX}-base:latest"
-          "${IMAGE_PREFIX}-base@${{ steps.manifest.outputs.digest }}"
+      - name: Publish immutable base tag only after attestation succeeds
+        env:
+          CANDIDATE_DIGEST: ${{ steps.manifest.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.manifest.outputs.existing }}
+          IMMUTABLE_TAG: ${{ needs.resolve.outputs.base_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh attestation verify \
+            "oci://${IMAGE_PREFIX}-base@${CANDIDATE_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$ATTESTATION_SOURCE_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+          if [[ -z "$EXISTING_DIGEST" ]]; then
+            docker buildx imagetools create \
+              -t "${IMAGE_PREFIX}-base:${IMMUTABLE_TAG}" \
+              "${IMAGE_PREFIX}-base@${CANDIDATE_DIGEST}"
+          fi
+          actual="$(docker buildx imagetools inspect \
+            "${IMAGE_PREFIX}-base:${IMMUTABLE_TAG}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual" == "$CANDIDATE_DIGEST" ]]
 
   build-backends:
     name: Build ${{ matrix.name }} (${{ matrix.arch }})
-    needs: [resolve, merge-base]
+    needs: [guard, resolve, merge-base]
     if: >-
       ${{
         always() &&
         needs.resolve.result == 'success' &&
-        (needs.merge-base.result == 'success' || needs.merge-base.result == 'skipped') &&
+        (
+          (needs.resolve.outputs.base_changed == 'true' && needs.merge-base.result == 'success') ||
+          (needs.resolve.outputs.base_changed == 'false' && needs.merge-base.result == 'skipped')
+        ) &&
         needs.resolve.outputs.builds != '[]'
       }}
     strategy:
@@ -273,13 +402,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: resolved-runner-plan
           path: /tmp/plan
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -292,9 +421,14 @@ jobs:
           set -euo pipefail
           backend="${{ matrix.name }}"
           item="$(jq -c --arg backend "$backend" '.backends[$backend]' /tmp/plan/resolved-runner-versions.json)"
+          base_digest="${{ needs.merge-base.outputs.digest }}"
+          if [[ -z "$base_digest" ]]; then
+            base_digest="${{ needs.resolve.outputs.base_digest }}"
+          fi
+          [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
             echo 'value<<HELIX_ARGS'
-            echo "BASE_IMAGE=${IMAGE_PREFIX}-base:${{ needs.resolve.outputs.base_tag }}"
+            echo "BASE_IMAGE=${IMAGE_PREFIX}-base@${base_digest}"
             echo "CLI_VERSION=$(jq -r '.version' <<< "$item")"
             case "$(jq -r '.kind' <<< "$item")" in
               npm)
@@ -325,7 +459,7 @@ jobs:
 
       - name: Build backend by untagged digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -334,8 +468,6 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
           outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=runner-${{ matrix.name }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=runner-${{ matrix.name }}-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
 
@@ -361,29 +493,29 @@ jobs:
               codex debug models --bundled > /tmp/codex-models.json
             python tools/runner_images.py verify-codex-catalog --input /tmp/codex-models.json
           fi
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${digest#sha256:}"
+          mkdir -p /tmp/smoke-evidence
           jq -n \
             --arg backend "${{ matrix.name }}" \
             --arg platform "${{ matrix.platform }}" \
             --arg digest "$digest" \
             --arg version "$version" \
             '{backend:$backend,platform:$platform,digest:$digest,version:$version}' \
-            > /tmp/smoke-evidence.json
+            > "/tmp/smoke-evidence/smoke-${{ matrix.arch }}.json"
+          if [[ "${{ matrix.name }}" == codex ]]; then
+            cp /tmp/codex-models.json \
+              "/tmp/smoke-evidence/codex-models-${{ matrix.arch }}.json"
+          fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digests-${{ matrix.name }}-${{ matrix.arch }}
-          path: |
-            /tmp/digests/*
-            /tmp/smoke-evidence.json
-            /tmp/codex-models.json
-          if-no-files-found: ignore
+          path: /tmp/smoke-evidence/
+          if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
   merge-backends:
     name: Validate and publish ${{ matrix.name }} immutable manifest
-    needs: [resolve, build-backends]
+    needs: [guard, resolve, build-backends]
     if: ${{ needs.resolve.outputs.changed != '[]' }}
     strategy:
       fail-fast: false
@@ -396,14 +528,14 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/downloads
           pattern: digests-${{ matrix.name }}-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -414,12 +546,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/digests
-          find /tmp/downloads -maxdepth 1 -type f -name '[0-9a-f]*' -exec cp {} /tmp/digests/ \;
-          [[ "$(find /tmp/digests -type f | wc -l)" -eq 2 ]]
+          python tools/runner_images.py verify-build-evidence \
+            --input-dir /tmp/downloads \
+            --backend "${{ matrix.name }}" \
+            --version "${{ matrix.version }}" \
+            --output /tmp/build-evidence.json
           candidate="${IMAGE_PREFIX}-${{ matrix.name }}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker buildx imagetools create -t "$candidate" \
-            $(printf "${IMAGE_PREFIX}-${{ matrix.name }}@sha256:%s " /tmp/digests/* | sed 's#/tmp/digests/##g')
+          mapfile -t digest_refs < <(
+            jq -r --arg image "${IMAGE_PREFIX}-${{ matrix.name }}" \
+              '.digests[] | $image + "@" + .' /tmp/build-evidence.json
+          )
+          [[ "${#digest_refs[@]}" -eq 2 ]]
+          docker buildx imagetools create -t "$candidate" "${digest_refs[@]}"
           docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' > /tmp/manifest.json
           python tools/runner_images.py verify-platforms --input /tmp/manifest.json
           candidate_digest="$(jq -r '.digest' /tmp/manifest.json)"
@@ -430,29 +568,56 @@ jobs:
           fi
           python tools/runner_images.py check-collision \
             ${existing:+--existing "$existing"} --candidate "$candidate_digest"
-          if [[ -z "$existing" ]]; then
-            docker buildx imagetools create -t "$immutable" \
-              "${IMAGE_PREFIX}-${{ matrix.name }}@${candidate_digest}"
-          fi
-          mkdir -p /tmp/release
-          jq -n \
-            --arg backend "${{ matrix.name }}" \
-            --arg version "${{ matrix.version }}" \
-            --arg digest "$candidate_digest" \
-            --arg immutable_tag "${{ matrix.immutable_tag }}" \
-            --argjson promotion_approved "${{ matrix.promotion_approved }}" \
-            '{backend:$backend,version:$version,digest:$digest,immutable_tag:$immutable_tag,promotion_approved:$promotion_approved}' \
-            > "/tmp/release/${{ matrix.name }}.json"
           echo "digest=${candidate_digest}" >> "$GITHUB_OUTPUT"
+          echo "existing=${existing}" >> "$GITHUB_OUTPUT"
 
       - name: Attach signed GitHub build provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-name: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish immutable tag and release record after attestation
+        env:
+          CANDIDATE_DIGEST: ${{ steps.manifest.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.manifest.outputs.existing }}
+          BACKEND: ${{ matrix.name }}
+          VERSION: ${{ matrix.version }}
+          IMMUTABLE_TAG: ${{ matrix.immutable_tag }}
+          PROMOTION_APPROVED: ${{ matrix.promotion_approved }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}"
+          gh attestation verify "oci://${image}@${CANDIDATE_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$ATTESTATION_SOURCE_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+          if [[ -z "$EXISTING_DIGEST" ]]; then
+            docker buildx imagetools create -t "${image}:${IMMUTABLE_TAG}" \
+              "${image}@${CANDIDATE_DIGEST}"
+          fi
+          actual="$(docker buildx imagetools inspect \
+            "${image}:${IMMUTABLE_TAG}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual" == "$CANDIDATE_DIGEST" ]]
+          mkdir -p /tmp/release
+          jq -n \
+            --arg backend "$BACKEND" \
+            --arg version "$VERSION" \
+            --arg digest "$CANDIDATE_DIGEST" \
+            --arg immutable_tag "$IMMUTABLE_TAG" \
+            --argjson promotion_approved "$PROMOTION_APPROVED" \
+            '{backend:$backend,version:$version,digest:$digest,immutable_tag:$immutable_tag,promotion_approved:$promotion_approved}' \
+            > "/tmp/release/${BACKEND}.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.name }}
           path: /tmp/release/${{ matrix.name }}.json
@@ -460,70 +625,179 @@ jobs:
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
   promote:
-    name: Promote ${{ matrix.name }} convenience tag
-    needs: [resolve, merge-backends]
-    if: ${{ needs.resolve.outputs.changed != '[]' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.resolve.outputs.changed) }}
+    name: Promote validated convenience tags as one compensated transaction
+    needs: [guard, resolve, build-backends, merge-backends]
+    if: >-
+      ${{
+        always() &&
+        needs.resolve.result == 'success' &&
+        (needs.build-backends.result == 'success' || needs.build-backends.result == 'skipped') &&
+        (needs.merge-backends.result == 'success' || needs.merge-backends.result == 'skipped') &&
+        (needs.resolve.outputs.changed != '[]' || needs.resolve.outputs.promotions != '[]')
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      attestations: read
       packages: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ needs.resolve.outputs.changed != '[]' }}
         with:
-          name: release-${{ matrix.name }}
+          pattern: release-*
           path: /tmp/release
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Save rollback target and move latest
-        if: ${{ matrix.promotion_approved }}
+      - name: Preflight every target and save durable rollback tags
+        env:
+          CHANGED_JSON: ${{ needs.resolve.outputs.changed }}
+          PROMOTIONS_JSON: ${{ needs.resolve.outputs.promotions }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          image="${IMAGE_PREFIX}-${{ matrix.name }}"
-          next="$(jq -r '.digest' "/tmp/release/${{ matrix.name }}.json")"
-          previous=""
-          if docker buildx imagetools inspect "${image}:latest" >/dev/null 2>&1; then
-            previous="$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -r '.digest')"
-          fi
-          docker buildx imagetools create -t "${image}:latest" "${image}@${next}"
-          actual="$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -r '.digest')"
-          [[ "$actual" == "$next" ]]
-          jq -n \
-            --arg backend "${{ matrix.name }}" \
-            --arg previous_digest "$previous" \
-            --arg promoted_digest "$next" \
-            --arg immutable_tag "${{ matrix.immutable_tag }}" \
-            --arg run_id "$GITHUB_RUN_ID" \
-            '{backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,run_id:$run_id}' \
-            > "/tmp/rollback-${{ matrix.name }}.json"
-          cat "/tmp/rollback-${{ matrix.name }}.json" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/promotion
+          jq -c '.[]' <<< "$PROMOTIONS_JSON" > /tmp/approved.jsonl
+          jq -c '.[] | select(.promotion_approved == true)' \
+            <<< "$CHANGED_JSON" >> /tmp/approved.jsonl
+          while IFS= read -r planned; do
+            [[ -n "$planned" ]] || continue
+            backend="$(jq -r '.name' <<< "$planned")"
+            [[ "$backend" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+            release="/tmp/release/${backend}.json"
+            if [[ -f "$release" ]]; then
+              jq -e --arg backend "$backend" \
+                '.backend == $backend and .promotion_approved == true' \
+                "$release" >/dev/null
+              next="$(jq -r '.digest' "$release")"
+              immutable_tag="$(jq -r '.immutable_tag' "$release")"
+            else
+              next="$(jq -r '.target_digest' <<< "$planned")"
+              immutable_tag="$(jq -r '.immutable_tag' <<< "$planned")"
+            fi
+            [[ "$next" =~ ^sha256:[0-9a-f]{64}$ ]]
+            image="${IMAGE_PREFIX}-${backend}"
+            docker buildx imagetools inspect "${image}@${next}" \
+              --format '{{json .Manifest}}' > "/tmp/${backend}-next.json"
+            python tools/runner_images.py verify-platforms \
+              --input "/tmp/${backend}-next.json"
+            gh attestation verify "oci://${image}@${next}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+              --source-ref "$ATTESTATION_SOURCE_REF" \
+              --deny-self-hosted-runners
 
-      - name: Preserve latest until the runtime layout is remeasured
-        if: ${{ !matrix.promotion_approved }}
+            # Automatic promotion requires a recoverable previous target.
+            docker buildx imagetools inspect "${image}:latest" \
+              --format '{{json .Manifest}}' > "/tmp/${backend}-previous.json"
+            python tools/runner_images.py verify-platforms \
+              --input "/tmp/${backend}-previous.json"
+            previous="$(jq -r '.digest' "/tmp/${backend}-previous.json")"
+            [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
+            rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            existing=""
+            if docker buildx imagetools inspect \
+              "${image}:${rollback_tag}" >/dev/null 2>&1; then
+              existing="$(docker buildx imagetools inspect \
+                "${image}:${rollback_tag}" \
+                --format '{{json .Manifest}}' | jq -r '.digest')"
+            fi
+            python tools/runner_images.py check-collision \
+              ${existing:+--existing "$existing"} --candidate "$previous"
+            if [[ -z "$existing" ]]; then
+              docker buildx imagetools create -t "${image}:${rollback_tag}" \
+                "${image}@${previous}"
+            fi
+            jq -n \
+              --arg backend "$backend" \
+              --arg previous_digest "$previous" \
+              --arg promoted_digest "$next" \
+              --arg immutable_tag "$immutable_tag" \
+              --arg rollback_tag "$rollback_tag" \
+              '{backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag}' \
+              > "/tmp/promotion/${backend}.json"
+          done < /tmp/approved.jsonl
+
+      - name: Move latest tags with compensating rollback on any failure
+        id: move
+        shell: bash
         run: |
-          echo "Published ${{ matrix.immutable_tag }} but did not move latest." >> "$GITHUB_STEP_SUMMARY"
-          echo "The checked-in backend HOME-layout measurement is for an older CLI." >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          mkdir -p /tmp/rollback-ledger
+          : > /tmp/moved-backends
+          restore_moved_tags() {
+            status=$?
+            trap - ERR
+            set +e
+            if [[ -s /tmp/moved-backends ]]; then
+              mapfile -t moved < /tmp/moved-backends
+              restore_failed=0
+              for ((index=${#moved[@]} - 1; index >= 0; index--)); do
+                backend="${moved[$index]}"
+                previous="$(jq -r '.previous_digest' "/tmp/promotion/${backend}.json")"
+                docker buildx imagetools create \
+                  -t "${IMAGE_PREFIX}-${backend}:latest" \
+                  "${IMAGE_PREFIX}-${backend}@${previous}" || restore_failed=1
+              done
+              if [[ "$restore_failed" -ne 0 ]]; then
+                echo "Compensating rollback was incomplete; durable rollback tags remain." >&2
+              fi
+            fi
+            exit "$status"
+          }
+          trap restore_moved_tags ERR
+          for record in /tmp/promotion/*.json; do
+            [[ -e "$record" ]] || break
+            backend="$(jq -r '.backend' "$record")"
+            [[ "$backend" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+            next="$(jq -r '.promoted_digest' "$record")"
+            image="${IMAGE_PREFIX}-${backend}"
+            # Record before mutation so an ambiguous registry failure is also
+            # compensated back to the known previous digest.
+            echo "$backend" >> /tmp/moved-backends
+            docker buildx imagetools create -t "${image}:latest" "${image}@${next}"
+            actual="$(docker buildx imagetools inspect "${image}:latest" \
+              --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "$actual" == "$next" ]]
+            jq --arg run_id "$GITHUB_RUN_ID" \
+              '. + {run_id:$run_id}' "$record" \
+              > "/tmp/rollback-ledger/${backend}.json"
+          done
+          trap - ERR
+          if [[ ! -s /tmp/moved-backends ]]; then
+            echo "promoted=false" >> "$GITHUB_OUTPUT"
+            echo "No convenience tag was eligible for automatic promotion." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "Immutable releases remain available; latest is unchanged." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "promoted=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - uses: actions/upload-artifact@v4
-        if: ${{ matrix.promotion_approved }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ steps.move.outputs.promoted == 'true' }}
         with:
-          name: rollback-${{ matrix.name }}
-          path: /tmp/rollback-${{ matrix.name }}.json
+          name: rollback-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/rollback-ledger/
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
   rollback-verify:
     name: Verify rollback target (${{ matrix.arch }})
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback' }}
+    needs: guard
+    if: >-
+      ${{
+        needs.guard.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.operation == 'rollback'
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -539,26 +813,30 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Validate and smoke the exact rollback digest
+        env:
+          BACKEND: ${{ inputs.backend }}
+          TARGET_DIGEST: ${{ inputs.target_digest }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${{ inputs.backend }}" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
-          [[ "${{ inputs.target_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          image="${IMAGE_PREFIX}-${{ inputs.backend }}@${{ inputs.target_digest }}"
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$TARGET_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}@${TARGET_DIGEST}"
           docker pull --platform "${{ matrix.platform }}" "$image"
-          smoke="$(jq -r '.backends["${{ inputs.backend }}"].smoke_command' "$CATALOG")"
+          smoke="$(jq -r --arg backend "$BACKEND" \
+            '.backends[$backend].smoke_command' "$CATALOG")"
           docker run --rm --platform "${{ matrix.platform }}" --network none --read-only \
             --tmpfs /tmp:rw,nosuid,nodev \
             --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
             --user 1000:1000 "$image" sh -lc "$smoke"
-          if [[ "${{ inputs.backend }}" == codex ]]; then
+          if [[ "$BACKEND" == codex ]]; then
             docker run --rm --platform "${{ matrix.platform }}" --network none --read-only \
               --tmpfs /tmp:rw,nosuid,nodev \
               --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
@@ -568,37 +846,83 @@ jobs:
 
   rollback-promote:
     name: Roll back convenience tag
-    needs: rollback-verify
+    needs: [guard, rollback-verify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      attestations: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Validate parity and move latest to the verified digest
+        env:
+          BACKEND: ${{ inputs.backend }}
+          TARGET_DIGEST: ${{ inputs.target_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          image="${IMAGE_PREFIX}-${{ inputs.backend }}"
-          target="${{ inputs.target_digest }}"
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$TARGET_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}"
+          target="$TARGET_DIGEST"
           docker buildx imagetools inspect "${image}@${target}" --format '{{json .Manifest}}' > /tmp/manifest.json
           python tools/runner_images.py verify-platforms --input /tmp/manifest.json
+          gh attestation verify "oci://${image}@${target}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$ATTESTATION_SOURCE_REF" \
+            --deny-self-hosted-runners
           previous="$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
+          rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          existing=""
+          if docker buildx imagetools inspect \
+            "${image}:${rollback_tag}" >/dev/null 2>&1; then
+            existing="$(docker buildx imagetools inspect \
+              "${image}:${rollback_tag}" \
+              --format '{{json .Manifest}}' | jq -r '.digest')"
+          fi
+          python tools/runner_images.py check-collision \
+            ${existing:+--existing "$existing"} --candidate "$previous"
+          if [[ -z "$existing" ]]; then
+            docker buildx imagetools create -t "${image}:${rollback_tag}" \
+              "${image}@${previous}"
+          fi
+          moved=false
+          restore_previous() {
+            status=$?
+            trap - ERR
+            set +e
+            if [[ "$moved" == true ]]; then
+              docker buildx imagetools create -t "${image}:latest" \
+                "${image}@${previous}"
+            fi
+            exit "$status"
+          }
+          trap restore_previous ERR
+          # Set before mutation so an ambiguous registry failure is restored.
+          moved=true
           docker buildx imagetools create -t "${image}:latest" "${image}@${target}"
+          actual="$(docker buildx imagetools inspect "${image}:latest" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual" == "$target" ]]
           jq -n \
-            --arg backend "${{ inputs.backend }}" \
+            --arg backend "$BACKEND" \
             --arg previous_digest "$previous" \
             --arg promoted_digest "$target" \
+            --arg rollback_tag "$rollback_tag" \
             --arg run_id "$GITHUB_RUN_ID" \
-            '{operation:"rollback",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,run_id:$run_id}' \
+            '{operation:"rollback",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id}' \
             > /tmp/rollback-ledger.json
-      - uses: actions/upload-artifact@v4
+          trap - ERR
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rollback-ledger
           path: /tmp/rollback-ledger.json
@@ -607,8 +931,9 @@ jobs:
 
   notify-failure:
     name: Notify maintainers on refresh failure
-    if: ${{ always() && failure() }}
+    if: ${{ always() && needs.guard.result == 'success' && failure() }}
     needs:
+      - guard
       - resolve
       - build-base
       - merge-base
@@ -622,7 +947,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const title = "Automated runner image refresh failed";
