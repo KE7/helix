@@ -929,6 +929,30 @@ def promote_latest_tags(
         raise exc
 
 
+def _retry_artifact_roots(
+    input_dir: Path,
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    if input_dir.is_symlink():
+        raise RunnerPlanError("retry artifact has a symlinked input root")
+    if not input_dir.is_dir():
+        raise RunnerPlanError("retry artifact input root is not a directory")
+    if output_dir.is_symlink():
+        raise RunnerPlanError("retry artifact has a symlinked output root")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise RunnerPlanError("retry artifact output root is not a directory")
+
+    input_root = input_dir.resolve(strict=True)
+    output_root = output_dir.resolve(strict=False)
+    if (
+        input_root == output_root
+        or input_root in output_root.parents
+        or output_root in input_root.parents
+    ):
+        raise RunnerPlanError("retry artifact input and output roots overlap")
+    return input_root, output_root
+
+
 def select_retry_artifacts(
     input_dir: Path,
     output_dir: Path,
@@ -940,6 +964,7 @@ def select_retry_artifacts(
 ) -> dict[str, int]:
     if current_attempt < 1:
         raise RunnerPlanError("current workflow attempt must be positive")
+    input_root, output_root = _retry_artifact_roots(input_dir, output_dir)
     if family == "resolved-plan":
         matcher = re.compile(r"^resolved-runner-plan-([0-9]+)$")
         logical_group = None
@@ -995,7 +1020,9 @@ def select_retry_artifacts(
         )
     if output_dir.exists() and any(output_dir.iterdir()):
         raise RunnerPlanError("retry artifact output directory is not empty")
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    copies: list[tuple[Path, Path]] = []
+    targets: set[Path] = set()
     for logical in sorted(selected):
         _, artifact = selected[logical]
         for source in sorted(artifact.rglob("*")):
@@ -1003,11 +1030,24 @@ def select_retry_artifacts(
                 raise RunnerPlanError("artifact contains a symbolic link")
             if not source.is_file():
                 continue
-            target = output_dir / source.relative_to(artifact)
-            if target.exists():
-                raise RunnerPlanError(f"artifact file collision: {target.name}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            relative = source.relative_to(artifact)
+            if relative in targets:
+                raise RunnerPlanError(f"artifact file collision: {relative.name}")
+            targets.add(relative)
+            copies.append((source, relative))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if (
+        input_dir.is_symlink()
+        or input_dir.resolve(strict=True) != input_root
+        or output_dir.is_symlink()
+        or output_dir.resolve(strict=True) != output_root
+    ):
+        raise RunnerPlanError("retry artifact roots changed during selection")
+    for source, relative in copies:
+        target = output_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
     return {logical: selected[logical][0] for logical in sorted(selected)}
 
 

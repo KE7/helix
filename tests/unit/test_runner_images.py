@@ -21,6 +21,7 @@ from tools.runner_images import (
     change_plan,
     inspect_ghcr_tag,
     immutable_tag,
+    main as runner_images_main,
     parse_cursor_installer,
     parse_npm_metadata,
     promote_latest_tags,
@@ -715,6 +716,43 @@ def test_retry_artifact_selection_rejects_ambiguous_or_unsafe_inputs(
             current_attempt=1,
         )
 
+    real_input = tmp_path / "real-input"
+    real_artifact = real_input / "resolved-runner-plan-1"
+    real_artifact.mkdir(parents=True)
+    (real_artifact / "plan.json").write_text("immutable", encoding="utf-8")
+    linked_input = tmp_path / "linked-input"
+    linked_input.symlink_to(real_input, target_is_directory=True)
+    with pytest.raises(RunnerPlanError, match="symlinked input"):
+        select_retry_artifacts(
+            linked_input,
+            tmp_path / "linked-input-output",
+            family="resolved-plan",
+            current_attempt=1,
+        )
+    assert not (tmp_path / "linked-input-output").exists()
+
+    output_target = tmp_path / "output-target"
+    output_target.mkdir()
+    linked_output = tmp_path / "linked-output-root"
+    linked_output.symlink_to(output_target, target_is_directory=True)
+    with pytest.raises(RunnerPlanError, match="symlinked output"):
+        select_retry_artifacts(
+            real_input,
+            linked_output,
+            family="resolved-plan",
+            current_attempt=1,
+        )
+    assert not any(output_target.iterdir())
+
+    with pytest.raises(RunnerPlanError, match="overlap"):
+        select_retry_artifacts(
+            real_input,
+            real_artifact / "nested-output",
+            family="resolved-plan",
+            current_attempt=1,
+        )
+    assert not (real_artifact / "nested-output").exists()
+
     collision = tmp_path / "collision"
     for arch in ("amd64", "arm64"):
         directory = collision / f"digests-base-{arch}-1"
@@ -727,6 +765,121 @@ def test_retry_artifact_selection_rejects_ambiguous_or_unsafe_inputs(
             family="base-digests",
             current_attempt=1,
         )
+
+
+@pytest.mark.parametrize(
+    "layout",
+    (
+        "equal",
+        "nested-input",
+        "nested-artifact",
+        "ancestor",
+        "canonical-equal",
+        "canonical-nested",
+    ),
+)
+def test_retry_artifact_selection_rejects_overlapping_roots_before_mutation(
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    case = tmp_path / layout
+    if layout == "ancestor":
+        output = case / "output"
+        input_dir = output / "input"
+    else:
+        input_dir = case / "input"
+        output = case / "safe-placeholder"
+    artifact = input_dir / "resolved-runner-plan-1"
+    artifact.mkdir(parents=True)
+    source = artifact / "plan.json"
+    source.write_text("immutable", encoding="utf-8")
+
+    if layout == "equal":
+        output = input_dir
+    elif layout == "nested-input":
+        output = input_dir / "new-output"
+    elif layout == "nested-artifact":
+        output = artifact / "new-output"
+    elif layout == "canonical-equal":
+        alias = case / "alias"
+        alias.symlink_to(case, target_is_directory=True)
+        output = alias / "input"
+    elif layout == "canonical-nested":
+        alias = case / "alias"
+        alias.symlink_to(input_dir, target_is_directory=True)
+        output = alias / "new-output"
+
+    source_tree_before = sorted(
+        path.relative_to(input_dir) for path in input_dir.rglob("*")
+    )
+    with pytest.raises(RunnerPlanError, match="overlap"):
+        select_retry_artifacts(
+            input_dir,
+            output,
+            family="resolved-plan",
+            current_attempt=1,
+        )
+    assert source.read_text(encoding="utf-8") == "immutable"
+    assert sorted(path.relative_to(input_dir) for path in input_dir.rglob("*")) == (
+        source_tree_before
+    )
+
+
+def test_retry_artifact_selection_accepts_disjoint_sibling_roots(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    artifact = input_dir / "resolved-runner-plan-1"
+    artifact.mkdir(parents=True)
+    (artifact / "plan.json").write_text("immutable", encoding="utf-8")
+
+    nonexistent_output = tmp_path / "nonexistent-output"
+    assert select_retry_artifacts(
+        input_dir,
+        nonexistent_output,
+        family="resolved-plan",
+        current_attempt=1,
+    ) == {"plan": 1}
+    assert (nonexistent_output / "plan.json").read_text() == "immutable"
+
+    empty_output = tmp_path / "empty-output"
+    empty_output.mkdir()
+    assert select_retry_artifacts(
+        input_dir,
+        empty_output,
+        family="resolved-plan",
+        current_attempt=1,
+    ) == {"plan": 1}
+    assert (empty_output / "plan.json").read_text() == "immutable"
+
+
+def test_retry_artifact_selection_cli_rejects_symlinked_input_root(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_dir = tmp_path / "input"
+    artifact = input_dir / "resolved-runner-plan-1"
+    artifact.mkdir(parents=True)
+    (artifact / "plan.json").write_text("immutable", encoding="utf-8")
+    linked_input = tmp_path / "linked-input"
+    linked_input.symlink_to(input_dir, target_is_directory=True)
+    output = tmp_path / "output"
+
+    assert runner_images_main(
+        [
+            "select-retry-artifacts",
+            "--input-dir",
+            str(linked_input),
+            "--output-dir",
+            str(output),
+            "--family",
+            "resolved-plan",
+            "--current-attempt",
+            "1",
+        ]
+    ) == 2
+    assert "symlinked input" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def _promotion_record(backend: str, previous: str, promoted: str) -> dict:
