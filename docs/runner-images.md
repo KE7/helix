@@ -73,7 +73,9 @@ BuildKit SBOM, and signed provenance remain the byte-exact release identity.
    queries GHCR directly: only an authenticated HTTP 404 is treated as an
    absent tag; authorization, network, and registry errors fail closed.
    Collision validation and tag creation happen together after attestation,
-   followed by an exact digest re-read.
+   followed by an exact digest re-read. Every v4 workflow artifact name also
+   includes `run_attempt`, so “re-run all jobs” writes a new artifact family
+   instead of colliding with the prior attempt's immutable artifacts.
 6. Preflight all eligible convenience-tag targets together. Durable
    `rollback-before-<run>-<attempt>` tags are created before mutation, and the
    complete rollback plan is retained before any `latest` tag moves. A single
@@ -81,6 +83,19 @@ BuildKit SBOM, and signed provenance remain the byte-exact release identity.
    already-moved tag if a later move fails. If retaining the committed ledger
    fails after a move, the same compensation restores the previous tags; the
    pre-move evidence and durable rollback tags remain.
+
+The tag-move step replaces its shell with the transaction process so GitHub's
+cancel signals reach it directly. It treats ordinary command errors, `SIGINT`,
+and `SIGTERM` as compensated failures, restores attempted moves in reverse, and
+re-reads every restored digest. [GitHub's cancellation
+reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
+states that the runner first sends `SIGINT`, waits 7.5 seconds, then sends
+`SIGTERM`, waits 2.5 seconds, and may then kill the process tree; the server
+also has a five-minute forced-cancellation limit. A forced kill cannot be made
+transactionally recoverable by an in-process handler. The workflow therefore
+retains the complete plan and creates rollback tags before mutation, so that
+hard-cancellation recovery remains evidence-backed even when the process is not
+allowed to finish compensation.
 
 The daily job deliberately does **not** move `latest` when a CLI is newer than
 the checked-in HOME-layout measurement in `src/helix/backend_layout.py`, or

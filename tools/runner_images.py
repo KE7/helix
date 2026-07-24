@@ -14,11 +14,13 @@ import hashlib
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +57,14 @@ CURSOR_VERSION_RE = re.compile(r"2026\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+")
 
 class RunnerPlanError(ValueError):
     """A release input is ambiguous, malformed, or violates promotion policy."""
+
+
+class PromotionInterrupted(BaseException):
+    """A termination signal interrupted a convenience-tag transaction."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(f"promotion interrupted by signal {signum}")
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -778,6 +788,184 @@ def inspect_ghcr_tag(
     return digest
 
 
+CommandRunner = Callable[[list[str]], str]
+
+
+def _registry_command(argv: list[str]) -> str:
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RunnerPlanError("registry command could not start") from exc
+    try:
+        stdout, _stderr = process.communicate()
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.wait()
+        raise
+    if process.returncode != 0:
+        raise RunnerPlanError("registry command failed")
+    return stdout
+
+
+def _promotion_records(directory: Path) -> list[dict[str, Any]]:
+    records = [load_json(path) for path in sorted(directory.glob("*.json"))]
+    for record in records:
+        backend = record.get("backend")
+        if backend not in BACKENDS:
+            raise RunnerPlanError("promotion record has an invalid backend")
+        for field in ("previous_digest", "promoted_digest"):
+            if not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(record.get(field, ""))
+            ):
+                raise RunnerPlanError(f"{backend}: malformed {field}")
+    return records
+
+
+def _move_tag(
+    record: Mapping[str, Any],
+    digest_field: str,
+    *,
+    run_command: CommandRunner,
+) -> None:
+    backend = str(record["backend"])
+    digest = str(record[digest_field])
+    image = f"ghcr.io/ke7/helix-evo-runner-{backend}"
+    run_command(
+        [
+            "docker",
+            "buildx",
+            "imagetools",
+            "create",
+            "-t",
+            f"{image}:latest",
+            f"{image}@{digest}",
+        ]
+    )
+    payload = json.loads(
+        run_command(
+            [
+                "docker",
+                "buildx",
+                "imagetools",
+                "inspect",
+                f"{image}:latest",
+                "--format",
+                "{{json .Manifest}}",
+            ]
+        )
+    )
+    if not isinstance(payload, dict):
+        raise RunnerPlanError(f"{backend}: registry returned a malformed manifest")
+    if payload.get("digest") != digest:
+        raise RunnerPlanError(
+            f"{backend}: latest digest verification failed after tag move"
+        )
+
+
+def restore_latest_tags(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    run_command: CommandRunner = _registry_command,
+) -> None:
+    failures: list[str] = []
+    for record in reversed(records):
+        try:
+            _move_tag(record, "previous_digest", run_command=run_command)
+        except (OSError, json.JSONDecodeError, RunnerPlanError):
+            failures.append(str(record.get("backend", "unknown")))
+    if failures:
+        raise RunnerPlanError(
+            "compensating rollback failed for: " + ", ".join(failures)
+        )
+
+
+def promote_latest_tags(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    ledger_dir: Path,
+    moved_file: Path,
+    output_file: Path,
+    run_command: CommandRunner = _registry_command,
+    before_restore: Callable[[], None] | None = None,
+) -> None:
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    moved_file.write_text("", encoding="utf-8")
+    attempted: list[Mapping[str, Any]] = []
+    try:
+        for record in records:
+            backend = str(record["backend"])
+            attempted.append(record)
+            with moved_file.open("a", encoding="utf-8") as stream:
+                stream.write(f"{backend}\n")
+            _move_tag(record, "promoted_digest", run_command=run_command)
+            committed = dict(record)
+            committed["state"] = "committed"
+            write_json(ledger_dir / f"{backend}.json", committed)
+        with output_file.open("a", encoding="utf-8") as stream:
+            stream.write(f"promoted={'true' if records else 'false'}\n")
+    except BaseException as exc:
+        if before_restore is not None:
+            before_restore()
+        try:
+            restore_latest_tags(attempted, run_command=run_command)
+        except RunnerPlanError as restore_exc:
+            raise RunnerPlanError(
+                "promotion failed and compensation was incomplete"
+            ) from restore_exc
+        raise exc
+
+
+def _ignore_termination_signals() -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _run_promotion_cli(args: argparse.Namespace) -> int:
+    records = _promotion_records(args.input_dir)
+    previous_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+
+    def interrupt(signum: int, _frame: object) -> None:
+        _ignore_termination_signals()
+        raise PromotionInterrupted(signum)
+
+    for signum in previous_handlers:
+        signal.signal(signum, interrupt)
+    try:
+        promote_latest_tags(
+            records,
+            ledger_dir=args.ledger_dir,
+            moved_file=args.moved_file,
+            output_file=args.github_output,
+            before_restore=_ignore_termination_signals,
+        )
+    except PromotionInterrupted as exc:
+        print(
+            f"runner image gate failed: promotion interrupted by signal {exc.signum}",
+            file=sys.stderr,
+        )
+        return 128 + exc.signum
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return 0
+
+
 def verify_codex_catalog(payload: dict[str, Any]) -> None:
     models = payload.get("models")
     if not isinstance(models, list):
@@ -880,6 +1068,13 @@ def _parser() -> argparse.ArgumentParser:
     inspect_tag = subparsers.add_parser("inspect-ghcr-tag")
     inspect_tag.add_argument("--image", required=True)
     inspect_tag.add_argument("--tag", required=True)
+    promote = subparsers.add_parser("promote-latest")
+    promote.add_argument("--input-dir", type=Path, required=True)
+    promote.add_argument("--ledger-dir", type=Path, required=True)
+    promote.add_argument("--moved-file", type=Path, required=True)
+    promote.add_argument("--github-output", type=Path, required=True)
+    restore = subparsers.add_parser("restore-latest")
+    restore.add_argument("--input-dir", type=Path, required=True)
     tag = subparsers.add_parser("image-tag")
     tag.add_argument("--catalog", type=Path, required=True)
     tag.add_argument("--backend", choices=BACKENDS, required=True)
@@ -924,6 +1119,11 @@ def main(argv: list[str] | None = None) -> int:
                 token=os.environ.get("GH_TOKEN", ""),
             )
             print(digest or "absent")
+        elif args.command == "promote-latest":
+            return _run_promotion_cli(args)
+        elif args.command == "restore-latest":
+            _ignore_termination_signals()
+            restore_latest_tags(_promotion_records(args.input_dir))
         elif args.command == "image-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)

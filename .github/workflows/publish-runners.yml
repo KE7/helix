@@ -216,7 +216,7 @@ jobs:
       - name: Retain the exact resolved build plan
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: resolved-runner-plan
+          name: resolved-runner-plan-${{ github.run_attempt }}
           path: |
             /tmp/resolved-runner-versions.json
             /tmp/published.json
@@ -247,7 +247,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: resolved-runner-plan
+          name: resolved-runner-plan-${{ github.run_attempt }}
           path: /tmp/plan
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -298,7 +298,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: digests-base-${{ matrix.arch }}
+          name: digests-base-${{ matrix.arch }}-${{ github.run_attempt }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
@@ -320,7 +320,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/digests
-          pattern: digests-base-*
+          pattern: digests-base-*-${{ github.run_attempt }}
           merge-multiple: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -419,7 +419,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: resolved-runner-plan
+          name: resolved-runner-plan-${{ github.run_attempt }}
           path: /tmp/plan
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -530,7 +530,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: digests-${{ matrix.name }}-${{ matrix.arch }}
+          name: digests-${{ matrix.name }}-${{ matrix.arch }}-${{ github.run_attempt }}
           path: /tmp/smoke-evidence/
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
@@ -554,7 +554,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/downloads
-          pattern: digests-${{ matrix.name }}-*
+          pattern: digests-${{ matrix.name }}-*-${{ github.run_attempt }}
           merge-multiple: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -641,7 +641,7 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-${{ matrix.name }}
+          name: release-${{ matrix.name }}-${{ github.run_attempt }}
           path: /tmp/release/${{ matrix.name }}.json
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
@@ -667,7 +667,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: ${{ needs.resolve.outputs.changed != '[]' }}
         with:
-          pattern: release-*
+          pattern: release-*-${{ github.run_attempt }}
           path: /tmp/release
           merge-multiple: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -771,56 +771,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/rollback-ledger
-          : > /tmp/moved-backends
-          restore_moved_tags() {
-            status=$?
-            trap - ERR
-            set +e
-            if [[ -s /tmp/moved-backends ]]; then
-              mapfile -t moved < /tmp/moved-backends
-              restore_failed=0
-              for ((index=${#moved[@]} - 1; index >= 0; index--)); do
-                backend="${moved[$index]}"
-                previous="$(jq -r '.previous_digest' "/tmp/promotion/${backend}.json")"
-                docker buildx imagetools create \
-                  -t "${IMAGE_PREFIX}-${backend}:latest" \
-                  "${IMAGE_PREFIX}-${backend}@${previous}" || restore_failed=1
-              done
-              if [[ "$restore_failed" -ne 0 ]]; then
-                echo "Compensating rollback was incomplete; durable rollback tags remain." >&2
-              fi
-            fi
-            exit "$status"
-          }
-          trap restore_moved_tags ERR
-          for record in /tmp/promotion/*.json; do
-            [[ -e "$record" ]] || break
-            backend="$(jq -r '.backend' "$record")"
-            [[ "$backend" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
-            next="$(jq -r '.promoted_digest' "$record")"
-            image="${IMAGE_PREFIX}-${backend}"
-            # Record before mutation so an ambiguous registry failure is also
-            # compensated back to the known previous digest.
-            echo "$backend" >> /tmp/moved-backends
-            docker buildx imagetools create -t "${image}:latest" "${image}@${next}"
-            actual="$(docker buildx imagetools inspect "${image}:latest" \
-              --format '{{json .Manifest}}' | jq -r '.digest')"
-            [[ "$actual" == "$next" ]]
-            jq --arg run_id "$GITHUB_RUN_ID" \
-              '. + {run_id:$run_id}' "$record" \
-              > "/tmp/rollback-ledger/${backend}.json"
-          done
-          trap - ERR
-          if [[ ! -s /tmp/moved-backends ]]; then
-            echo "promoted=false" >> "$GITHUB_OUTPUT"
-            echo "No convenience tag was eligible for automatic promotion." \
-              >> "$GITHUB_STEP_SUMMARY"
-            echo "Immutable releases remain available; latest is unchanged." \
-              >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "promoted=true" >> "$GITHUB_OUTPUT"
-          fi
+          exec python tools/runner_images.py promote-latest \
+            --input-dir /tmp/promotion \
+            --ledger-dir /tmp/rollback-ledger \
+            --moved-file /tmp/moved-backends \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Retain committed promotion ledger
         id: committed_ledger
@@ -842,27 +797,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t moved < /tmp/moved-backends
-          restore_failed=0
-          for ((index=${#moved[@]} - 1; index >= 0; index--)); do
-            backend="${moved[$index]}"
-            image="${IMAGE_PREFIX}-${backend}"
-            previous="$(jq -r \
-              '.previous_digest' "/tmp/promotion/${backend}.json")"
-            if ! docker buildx imagetools create \
-              -t "${image}:latest" "${image}@${previous}"; then
-              restore_failed=1
-              continue
-            fi
-            actual="$(docker buildx imagetools inspect "${image}:latest" \
-              --format '{{json .Manifest}}' | jq -r '.digest')" \
-              || restore_failed=1
-            [[ "$actual" == "$previous" ]] || restore_failed=1
-          done
-          if [[ "$restore_failed" -ne 0 ]]; then
-            echo "Evidence upload failed and compensation was incomplete; durable rollback plan and tags remain." >&2
-            exit 1
-          fi
+          python tools/runner_images.py restore-latest \
+            --input-dir /tmp/promotion
           echo "Committed ledger retention failed; latest tags were restored." >&2
           exit 1
 
@@ -975,6 +911,7 @@ jobs:
             "${image}:${rollback_tag}" \
             --format '{{json .Manifest}}' | jq -r '.digest')"
           [[ "$actual_rollback" == "$previous" ]]
+          mkdir -p /tmp/manual-promotion
           jq -n \
             --arg backend "$BACKEND" \
             --arg previous_digest "$previous" \
@@ -983,7 +920,7 @@ jobs:
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
             '{operation:"rollback",state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
-            > /tmp/rollback-plan.json
+            > "/tmp/manual-promotion/${BACKEND}.json"
           echo "previous_digest=${previous}" >> "$GITHUB_OUTPUT"
           echo "target_digest=${target}" >> "$GITHUB_OUTPUT"
           echo "rollback_tag=${rollback_tag}" >> "$GITHUB_OUTPUT"
@@ -992,55 +929,20 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rollback-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/rollback-plan.json
+          path: /tmp/manual-promotion/
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
       - name: Move latest to the verified rollback digest
         id: rollback_move
-        env:
-          BACKEND: ${{ inputs.backend }}
-          TARGET_DIGEST: ${{ steps.rollback_preflight.outputs.target_digest }}
-          PREVIOUS_DIGEST: ${{ steps.rollback_preflight.outputs.previous_digest }}
-          ROLLBACK_TAG: ${{ steps.rollback_preflight.outputs.rollback_tag }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
-          [[ "$TARGET_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$ROLLBACK_TAG" =~ ^rollback-before-[0-9]+-[0-9]+$ ]]
-          image="${IMAGE_PREFIX}-${BACKEND}"
-          moved=false
-          restore_previous() {
-            status=$?
-            trap - ERR
-            set +e
-            if [[ "$moved" == true ]]; then
-              docker buildx imagetools create -t "${image}:latest" \
-                "${image}@${PREVIOUS_DIGEST}"
-            fi
-            exit "$status"
-          }
-          trap restore_previous ERR
-          # Set before mutation so an ambiguous registry failure is restored.
-          moved=true
-          docker buildx imagetools create \
-            -t "${image}:latest" "${image}@${TARGET_DIGEST}"
-          actual="$(docker buildx imagetools inspect "${image}:latest" \
-            --format '{{json .Manifest}}' | jq -r '.digest')"
-          [[ "$actual" == "$TARGET_DIGEST" ]]
-          jq -n \
-            --arg backend "$BACKEND" \
-            --arg previous_digest "$PREVIOUS_DIGEST" \
-            --arg promoted_digest "$TARGET_DIGEST" \
-            --arg rollback_tag "$ROLLBACK_TAG" \
-            --arg run_id "$GITHUB_RUN_ID" \
-            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{operation:"rollback",state:"committed",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
-            > /tmp/rollback-ledger.json
-          echo "promoted=true" >> "$GITHUB_OUTPUT"
-          trap - ERR
+          exec python tools/runner_images.py promote-latest \
+            --input-dir /tmp/manual-promotion \
+            --ledger-dir /tmp/manual-ledger \
+            --moved-file /tmp/manual-moved-backends \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Retain committed manual rollback ledger
         id: rollback_committed_ledger
@@ -1048,7 +950,7 @@ jobs:
         if: ${{ steps.rollback_move.outputs.promoted == 'true' }}
         with:
           name: rollback-ledger-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /tmp/rollback-ledger.json
+          path: /tmp/manual-ledger/
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
@@ -1059,20 +961,11 @@ jobs:
             steps.rollback_move.outputs.promoted == 'true' &&
             steps.rollback_committed_ledger.outcome == 'failure'
           }}
-        env:
-          BACKEND: ${{ inputs.backend }}
-          PREVIOUS_DIGEST: ${{ steps.rollback_preflight.outputs.previous_digest }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
-          [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          image="${IMAGE_PREFIX}-${BACKEND}"
-          docker buildx imagetools create \
-            -t "${image}:latest" "${image}@${PREVIOUS_DIGEST}"
-          actual="$(docker buildx imagetools inspect "${image}:latest" \
-            --format '{{json .Manifest}}' | jq -r '.digest')"
-          [[ "$actual" == "$PREVIOUS_DIGEST" ]]
+          python tools/runner_images.py restore-latest \
+            --input-dir /tmp/manual-promotion
           echo "Committed rollback ledger retention failed; latest was restored." >&2
           exit 1
 

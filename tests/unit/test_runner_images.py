@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+import signal
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tools.runner_images import (
+    PromotionInterrupted,
     RunnerPlanError,
     assert_immutable_collision,
     change_plan,
@@ -21,6 +23,8 @@ from tools.runner_images import (
     immutable_tag,
     parse_cursor_installer,
     parse_npm_metadata,
+    promote_latest_tags,
+    restore_latest_tags,
     validate_catalog,
     validate_catalog_files,
     verify_build_evidence,
@@ -526,3 +530,184 @@ def test_latest_moves_are_bracketed_by_retained_evidence_and_compensation() -> N
         < rollback_committed
         < rollback_compensated
     )
+    assert text.count("exec python tools/runner_images.py promote-latest") == 2
+    assert text.count("python tools/runner_images.py restore-latest") == 2
+
+
+def test_v4_artifact_names_are_unique_for_same_run_retries() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    attempt = "${{ github.run_attempt }}"
+    upload_blocks = text.split("uses: actions/upload-artifact@")[1:]
+    upload_names = [
+        re.search(r"\n\s+name:\s+([^\n]+)", block).group(1)
+        for block in upload_blocks
+    ]
+    assert upload_names
+    assert all(attempt in name for name in upload_names)
+    templates = {
+        f"resolved-runner-plan-{attempt}",
+        f"digests-base-${{{{ matrix.arch }}}}-{attempt}",
+        f"digests-${{{{ matrix.name }}}}-${{{{ matrix.arch }}}}-{attempt}",
+        f"release-${{{{ matrix.name }}}}-{attempt}",
+    }
+    assert all(f"name: {template}" in text for template in templates)
+    first_attempt = {template.replace(attempt, "1") for template in templates}
+    second_attempt = {template.replace(attempt, "2") for template in templates}
+    assert first_attempt.isdisjoint(second_attempt)
+    assert f"pattern: digests-base-*-{attempt}" in text
+    assert f"pattern: digests-${{{{ matrix.name }}}}-*-{attempt}" in text
+    assert f"pattern: release-*-{attempt}" in text
+
+
+def _promotion_record(backend: str, previous: str, promoted: str) -> dict:
+    return {
+        "state": "prepared",
+        "backend": backend,
+        "previous_digest": previous,
+        "promoted_digest": promoted,
+        "immutable_tag": f"cli-test-{backend}",
+        "rollback_tag": "rollback-before-1-1",
+        "run_id": "1",
+        "run_attempt": "1",
+    }
+
+
+class _FakeRegistry:
+    def __init__(
+        self,
+        state: dict[str, str],
+        *,
+        fail_digest: str | None = None,
+        interrupt_digest: str | None = None,
+        interrupt_signal: int = signal.SIGTERM,
+        mismatch_after_digest: str | None = None,
+    ) -> None:
+        self.state = state
+        self.fail_digest = fail_digest
+        self.interrupt_digest = interrupt_digest
+        self.interrupt_signal = interrupt_signal
+        self.mismatch_after_digest = mismatch_after_digest
+        self.last_digest: str | None = None
+        self.commands: list[list[str]] = []
+
+    @staticmethod
+    def _backend(reference: str) -> str:
+        return reference.split("helix-evo-runner-", 1)[1].split(":", 1)[0].split(
+            "@", 1
+        )[0]
+
+    def __call__(self, argv: list[str]) -> str:
+        self.commands.append(argv)
+        if "create" in argv:
+            reference = argv[-1]
+            backend = self._backend(reference)
+            digest = reference.rsplit("@", 1)[1]
+            self.last_digest = digest
+            if digest == self.interrupt_digest:
+                raise PromotionInterrupted(self.interrupt_signal)
+            if digest == self.fail_digest:
+                raise RunnerPlanError("simulated registry write failure")
+            self.state[backend] = digest
+            return ""
+        reference = argv[4]
+        backend = self._backend(reference)
+        digest = self.state[backend]
+        if self.last_digest == self.mismatch_after_digest:
+            digest = "sha256:" + "f" * 64
+        return json.dumps({"digest": digest})
+
+
+def test_promotion_transaction_compensates_error_and_signal_paths(
+    tmp_path: Path,
+) -> None:
+    previous = {
+        "codex": "sha256:" + "a" * 64,
+        "claude": "sha256:" + "b" * 64,
+    }
+    promoted = {
+        "codex": "sha256:" + "c" * 64,
+        "claude": "sha256:" + "d" * 64,
+    }
+    records = [
+        _promotion_record("codex", previous["codex"], promoted["codex"]),
+        _promotion_record("claude", previous["claude"], promoted["claude"]),
+    ]
+
+    failed = _FakeRegistry(previous.copy(), fail_digest=promoted["claude"])
+    with pytest.raises(RunnerPlanError, match="simulated"):
+        promote_latest_tags(
+            records,
+            ledger_dir=tmp_path / "failed-ledger",
+            moved_file=tmp_path / "failed-moved",
+            output_file=tmp_path / "failed-output",
+            run_command=failed,
+        )
+    assert failed.state == previous
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        before_restore: list[str] = []
+        interrupted = _FakeRegistry(
+            previous.copy(),
+            interrupt_digest=promoted["claude"],
+            interrupt_signal=signum,
+        )
+        with pytest.raises(PromotionInterrupted) as caught:
+            promote_latest_tags(
+                records,
+                ledger_dir=tmp_path / f"signal-ledger-{signum}",
+                moved_file=tmp_path / f"signal-moved-{signum}",
+                output_file=tmp_path / f"signal-output-{signum}",
+                run_command=interrupted,
+                before_restore=lambda: before_restore.append("called"),
+            )
+        assert caught.value.signum == signum
+        assert before_restore == ["called"]
+        assert interrupted.state == previous
+
+    bad_output = tmp_path / "bad-output"
+    bad_output.mkdir()
+    output_failed = _FakeRegistry(previous.copy())
+    with pytest.raises(OSError):
+        promote_latest_tags(
+            records,
+            ledger_dir=tmp_path / "output-failure-ledger",
+            moved_file=tmp_path / "output-failure-moved",
+            output_file=bad_output,
+            run_command=output_failed,
+        )
+    assert output_failed.state == previous
+
+
+def test_promotion_transaction_writes_ledgers_and_detects_bad_restore(
+    tmp_path: Path,
+) -> None:
+    previous = "sha256:" + "a" * 64
+    promoted = "sha256:" + "c" * 64
+    record = _promotion_record("codex", previous, promoted)
+    registry = _FakeRegistry({"codex": previous})
+    output = tmp_path / "github-output"
+    ledger = tmp_path / "ledger"
+    promote_latest_tags(
+        [record],
+        ledger_dir=ledger,
+        moved_file=tmp_path / "moved",
+        output_file=output,
+        run_command=registry,
+    )
+    assert registry.state["codex"] == promoted
+    assert output.read_text(encoding="utf-8") == "promoted=true\n"
+    assert json.loads((ledger / "codex.json").read_text())["state"] == "committed"
+
+    mismatched = _FakeRegistry(
+        {"codex": promoted},
+        mismatch_after_digest=previous,
+    )
+    with pytest.raises(RunnerPlanError, match="compensating rollback failed"):
+        restore_latest_tags([record], run_command=mismatched)
+
+    failed_restore = _FakeRegistry(
+        {"codex": promoted},
+        fail_digest=previous,
+    )
+    with pytest.raises(RunnerPlanError, match="compensating rollback failed"):
+        restore_latest_tags([record], run_command=failed_restore)
