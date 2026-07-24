@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -13,6 +17,7 @@ from tools.runner_images import (
     RunnerPlanError,
     assert_immutable_collision,
     change_plan,
+    inspect_ghcr_tag,
     immutable_tag,
     parse_cursor_installer,
     parse_npm_metadata,
@@ -173,6 +178,127 @@ def test_immutable_tag_collision_is_idempotent_or_fails_hard() -> None:
     assert_immutable_collision(digest, digest)
     with pytest.raises(RunnerPlanError, match="collision"):
         assert_immutable_collision("sha256:" + "b" * 64, digest)
+
+
+class _HTTPResponse:
+    def __init__(self, payload: bytes, headers: dict[str, str] | None = None) -> None:
+        self.payload = payload
+        self.headers = headers or {}
+
+    def __enter__(self) -> "_HTTPResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+def test_ghcr_tag_inspection_distinguishes_absence_from_registry_failure() -> None:
+    manifest = b'{"schemaVersion":2}'
+    digest = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
+
+    def present(
+        request: urllib.request.Request, timeout: float
+    ) -> _HTTPResponse:
+        assert timeout == 30.0
+        if request.full_url.startswith("https://ghcr.io/token?"):
+            return _HTTPResponse(b'{"token":"registry-token"}')
+        return _HTTPResponse(manifest, {"Docker-Content-Digest": digest})
+
+    assert (
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=present,
+        )
+        == digest
+    )
+
+    def mismatched(
+        request: urllib.request.Request, timeout: float
+    ) -> _HTTPResponse:
+        if request.full_url.startswith("https://ghcr.io/token?"):
+            return _HTTPResponse(b'{"token":"registry-token"}')
+        return _HTTPResponse(
+            manifest,
+            {"Docker-Content-Digest": "sha256:" + "b" * 64},
+        )
+
+    with pytest.raises(RunnerPlanError, match="does not match"):
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=mismatched,
+        )
+
+    def response_error(status: int) -> object:
+        def fail(
+            request: urllib.request.Request, timeout: float
+        ) -> _HTTPResponse:
+            if request.full_url.startswith("https://ghcr.io/token?"):
+                return _HTTPResponse(b'{"token":"registry-token"}')
+            raise urllib.error.HTTPError(
+                request.full_url,
+                status,
+                "registry error",
+                {},
+                io.BytesIO(),
+            )
+
+        return fail
+
+    assert (
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=response_error(404),
+        )
+        is None
+    )
+    with pytest.raises(RunnerPlanError, match="HTTP 401"):
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=response_error(401),
+        )
+    with pytest.raises(RunnerPlanError, match="HTTP 500"):
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=response_error(500),
+        )
+
+    def token_404(
+        request: urllib.request.Request, timeout: float
+    ) -> _HTTPResponse:
+        raise urllib.error.HTTPError(
+            request.full_url,
+            404,
+            "token endpoint missing",
+            {},
+            io.BytesIO(),
+        )
+
+    with pytest.raises(RunnerPlanError, match="token exchange failed"):
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=token_404,
+        )
 
 
 def test_immutable_version_tags_are_collision_resistant_and_base_bound() -> None:
@@ -341,3 +467,62 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert "CLI_AMD64_FALLBACK_SHA512" in text
     assert "TARGET_DIGEST: ${{ inputs.target_digest }}" in text
     assert "BACKEND: ${{ inputs.backend }}" in text
+
+
+def test_immutable_tag_collision_check_is_fail_closed_at_publish_time() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "EXISTING_DIGEST:" not in text
+    assert 'echo "existing=${existing}"' not in text
+    assert "if docker buildx imagetools inspect" not in text
+    for start, end in (
+        (
+            "- name: Publish immutable base tag only after attestation succeeds",
+            "  build-backends:",
+        ),
+        (
+            "- name: Publish immutable tag and release record after attestation",
+            "      - uses: actions/upload-artifact@",
+        ),
+    ):
+        segment = text[text.index(start) : text.index(end, text.index(start))]
+        inspect_at = segment.index("inspect-ghcr-tag")
+        collision_at = segment.index("check-collision")
+        publish_at = segment.index("docker buildx imagetools create")
+        verify_at = segment.rindex("docker buildx imagetools inspect")
+        assert inspect_at < collision_at < publish_at < verify_at
+        assert 'if [[ "$existing" == "absent" ]]' in segment
+
+
+def test_latest_moves_are_bracketed_by_retained_evidence_and_compensation() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    prepared = text.index(
+        "- name: Retain promotion rollback plan before moving latest tags"
+    )
+    moved = text.index(
+        "- name: Move latest tags with compensating rollback on any failure"
+    )
+    committed = text.index("- name: Retain committed promotion ledger")
+    compensated = text.index(
+        "- name: Restore latest tags if committed ledger retention fails"
+    )
+    assert prepared < moved < committed < compensated
+    assert (
+        "failure() && steps.move.outputs.promoted == 'true' && "
+        "steps.committed_ledger.outcome == 'failure'"
+    ) in normalized
+
+    rollback_prepared = text.index(
+        "- name: Retain manual rollback plan before moving latest"
+    )
+    rollback_moved = text.index("- name: Move latest to the verified rollback digest")
+    rollback_committed = text.index("- name: Retain committed manual rollback ledger")
+    rollback_compensated = text.index(
+        "- name: Restore latest if manual rollback ledger retention fails"
+    )
+    assert (
+        rollback_prepared
+        < rollback_moved
+        < rollback_committed
+        < rollback_compensated
+    )

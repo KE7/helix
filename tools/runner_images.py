@@ -12,8 +12,10 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
@@ -703,6 +705,79 @@ def assert_immutable_collision(existing: str | None, candidate: str) -> None:
         )
 
 
+def inspect_ghcr_tag(
+    image: str,
+    tag: str,
+    *,
+    actor: str,
+    token: str,
+    urlopen: Any | None = None,
+) -> str | None:
+    """Return a GHCR tag digest, treating only an authenticated 404 as absent."""
+    prefix = "ghcr.io/"
+    if not image.startswith(prefix):
+        raise RunnerPlanError("registry tag inspection only supports ghcr.io")
+    repository = image.removeprefix(prefix)
+    if not re.fullmatch(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*", repository):
+        raise RunnerPlanError("GHCR repository is malformed")
+    if not TAG_RE.fullmatch(tag):
+        raise RunnerPlanError("GHCR tag is malformed")
+    if not actor or not token:
+        raise RunnerPlanError("GHCR inspection credentials are missing")
+    opener = urlopen or urllib.request.urlopen
+    credentials = base64.b64encode(f"{actor}:{token}".encode()).decode()
+    scope = urllib.parse.quote(f"repository:{repository}:pull", safe="")
+    token_request = urllib.request.Request(
+        f"https://ghcr.io/token?service=ghcr.io&scope={scope}",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "User-Agent": "helix-runner-publish/1",
+        },
+    )
+    try:
+        with opener(token_request, timeout=30.0) as response:
+            token_payload = json.loads(response.read())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunnerPlanError("GHCR token exchange failed") from exc
+    if not isinstance(token_payload, dict):
+        raise RunnerPlanError("GHCR token exchange returned malformed JSON")
+    bearer = token_payload.get("token") or token_payload.get("access_token")
+    if not isinstance(bearer, str) or not bearer:
+        raise RunnerPlanError("GHCR token exchange returned no token")
+
+    manifest_request = urllib.request.Request(
+        f"https://ghcr.io/v2/{repository}/manifests/{tag}",
+        headers={
+            "Accept": (
+                "application/vnd.oci.image.index.v1+json,"
+                "application/vnd.docker.distribution.manifest.list.v2+json,"
+                "application/vnd.oci.image.manifest.v1+json,"
+                "application/vnd.docker.distribution.manifest.v2+json"
+            ),
+            "Authorization": f"Bearer {bearer}",
+            "User-Agent": "helix-runner-publish/1",
+        },
+    )
+    try:
+        with opener(manifest_request, timeout=30.0) as response:
+            manifest = response.read()
+            digest = response.headers.get("Docker-Content-Digest", "")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise RunnerPlanError(
+            f"GHCR manifest inspection failed with HTTP {exc.code}"
+        ) from exc
+    except OSError as exc:
+        raise RunnerPlanError("GHCR manifest inspection failed") from exc
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RunnerPlanError("GHCR returned a malformed manifest digest")
+    actual = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
+    if actual != digest:
+        raise RunnerPlanError("GHCR manifest body does not match its digest header")
+    return digest
+
+
 def verify_codex_catalog(payload: dict[str, Any]) -> None:
     models = payload.get("models")
     if not isinstance(models, list):
@@ -802,6 +877,9 @@ def _parser() -> argparse.ArgumentParser:
     collision = subparsers.add_parser("check-collision")
     collision.add_argument("--existing")
     collision.add_argument("--candidate", required=True)
+    inspect_tag = subparsers.add_parser("inspect-ghcr-tag")
+    inspect_tag.add_argument("--image", required=True)
+    inspect_tag.add_argument("--tag", required=True)
     tag = subparsers.add_parser("image-tag")
     tag.add_argument("--catalog", type=Path, required=True)
     tag.add_argument("--backend", choices=BACKENDS, required=True)
@@ -838,6 +916,14 @@ def main(argv: list[str] | None = None) -> int:
             verify_platforms(load_json(args.input))
         elif args.command == "check-collision":
             assert_immutable_collision(args.existing or None, args.candidate)
+        elif args.command == "inspect-ghcr-tag":
+            digest = inspect_ghcr_tag(
+                args.image,
+                args.tag,
+                actor=os.environ.get("GITHUB_ACTOR", ""),
+                token=os.environ.get("GH_TOKEN", ""),
+            )
+            print(digest or "absent")
         elif args.command == "image-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)

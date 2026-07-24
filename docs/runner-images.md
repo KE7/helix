@@ -68,12 +68,19 @@ BuildKit SBOM, and signed provenance remain the byte-exact release identity.
    `low, medium, high, xhigh, max`. This proves that `xhigh` is present and is
    second-highest in the image's shipped catalog.
 5. Merge only two architecture-qualified smoke records, verify exact runtime
-   platform parity, attach BuildKit SBOM/provenance and an OIDC-signed GitHub
-   build-provenance attestation, and only then create the immutable tag.
+   platform parity, and attach BuildKit SBOM/provenance plus an OIDC-signed
+   GitHub build-provenance attestation. The serialized publication step then
+   queries GHCR directly: only an authenticated HTTP 404 is treated as an
+   absent tag; authorization, network, and registry errors fail closed.
+   Collision validation and tag creation happen together after attestation,
+   followed by an exact digest re-read.
 6. Preflight all eligible convenience-tag targets together. Durable
-   `rollback-before-<run>-<attempt>` tags are created before mutation. A
-   single promotion job moves `latest` tags and compensates by restoring every
-   already-moved tag if a later move fails.
+   `rollback-before-<run>-<attempt>` tags are created before mutation, and the
+   complete rollback plan is retained before any `latest` tag moves. A single
+   promotion job moves `latest` tags and compensates by restoring every
+   already-moved tag if a later move fails. If retaining the committed ledger
+   fails after a move, the same compensation restores the previous tags; the
+   pre-move evidence and durable rollback tags remain.
 
 The daily job deliberately does **not** move `latest` when a CLI is newer than
 the checked-in HOME-layout measurement in `src/helix/backend_layout.py`, or
@@ -105,15 +112,18 @@ one repository issue.
 
 ## Rollback and retention
 
-Every successful convenience-tag promotion records the previous and new
-digests, immutable tag, durable rollback tag, and workflow run ID in a 90-day
-artifact. Immutable version and rollback tags are not deleted. A manual
-rollback accepts an explicit backend and `sha256:` manifest digest only through
-validated environment variables, runs the smoke (and Codex catalog assertion)
-on both native architectures, verifies the target's GitHub attestation and
-exact amd64/arm64 parity, creates another durable rollback tag, and only then
-moves `latest`. The workflow has no image-delete step and never removes runner
-images.
+Before every convenience-tag promotion, a 90-day rollback-plan artifact records
+the previous and new digests, immutable tag, durable rollback tag, workflow run
+ID, and attempt. A successful move additionally records a committed ledger. If
+that second upload fails, the workflow restores the prior `latest` digest and
+fails. Immutable version and rollback tags are not deleted. A manual rollback
+uses the same prepare-retain-move-retain-compensate transaction: it accepts an
+explicit backend and `sha256:` manifest digest only through validated
+environment variables, runs the smoke (and Codex catalog assertion) on both
+native architectures, verifies the target's GitHub attestation and exact
+amd64/arm64 parity, creates another durable rollback tag, and retains its plan
+before moving `latest`. The workflow has no image-delete step and never removes
+runner images.
 
 ## Local Codex proof
 

@@ -118,15 +118,19 @@ jobs:
         run: |
           set -euo pipefail
           base_tag="$(jq -r '.base.immutable_tag' /tmp/resolved-runner-versions.json)"
-          base_image="${IMAGE_PREFIX}-base:${base_tag}"
+          base_repository="${IMAGE_PREFIX}-base"
+          base_image="${base_repository}:${base_tag}"
           base_digest=""
-          if docker buildx imagetools inspect "$base_image" >/dev/null 2>&1; then
+          base_state="$(python tools/runner_images.py inspect-ghcr-tag \
+            --image "$base_repository" --tag "$base_tag")"
+          if [[ "$base_state" != "absent" ]]; then
             docker buildx imagetools inspect "$base_image" \
               --format '{{json .Manifest}}' > /tmp/base-manifest.json
             python tools/runner_images.py verify-platforms \
               --input /tmp/base-manifest.json
             base_digest="$(jq -r '.digest' /tmp/base-manifest.json)"
             [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$base_digest" == "$base_state" ]]
             gh attestation verify \
               "oci://${IMAGE_PREFIX}-base@${base_digest}" \
               --repo "$GITHUB_REPOSITORY" \
@@ -146,14 +150,18 @@ jobs:
             tag="$(python tools/runner_images.py image-tag \
               --catalog /tmp/resolved-runner-versions.json \
               --backend "$backend")"
-            image="${IMAGE_PREFIX}-${backend}:${tag}"
-            if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            repository="${IMAGE_PREFIX}-${backend}"
+            image="${repository}:${tag}"
+            state="$(python tools/runner_images.py inspect-ghcr-tag \
+              --image "$repository" --tag "$tag")"
+            if [[ "$state" != "absent" ]]; then
               docker buildx imagetools inspect "$image" \
                 --format '{{json .Manifest}}' > "/tmp/${backend}-manifest.json"
               python tools/runner_images.py verify-platforms \
                 --input "/tmp/${backend}-manifest.json"
               digest="$(jq -r '.digest' "/tmp/${backend}-manifest.json")"
               [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              [[ "$digest" == "$state" ]]
               gh attestation verify "oci://${IMAGE_PREFIX}-${backend}@${digest}" \
                 --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
@@ -164,27 +172,30 @@ jobs:
                 > /tmp/published.next.json
               mv /tmp/published.next.json /tmp/published.json
               if [[ -n "$promotion_guard_tag" ]] && \
-                [[ "$tag" == "$promotion_guard_tag" ]] && \
-                docker buildx imagetools inspect \
-                  "${IMAGE_PREFIX}-${backend}:latest" >/dev/null 2>&1; then
-                latest_digest="$(docker buildx imagetools inspect \
-                  "${IMAGE_PREFIX}-${backend}:latest" \
-                  --format '{{json .Manifest}}' | jq -r '.digest')"
-                [[ "$latest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-                if [[ "$latest_digest" != "$digest" ]]; then
-                  jq \
-                    --arg name "$backend" \
-                    --arg version "$version" \
-                    --arg immutable_tag "$tag" \
-                    --arg target_digest "$digest" \
-                    '. + [{
-                      name:$name,
-                      version:$version,
-                      immutable_tag:$immutable_tag,
-                      target_digest:$target_digest,
-                      promotion_approved:true
-                    }]' /tmp/promotions.json > /tmp/promotions.next.json
-                  mv /tmp/promotions.next.json /tmp/promotions.json
+                [[ "$tag" == "$promotion_guard_tag" ]]; then
+                latest_state="$(python tools/runner_images.py inspect-ghcr-tag \
+                  --image "$repository" --tag latest)"
+                if [[ "$latest_state" != "absent" ]]; then
+                  latest_digest="$(docker buildx imagetools inspect \
+                    "${repository}:latest" \
+                    --format '{{json .Manifest}}' | jq -r '.digest')"
+                  [[ "$latest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+                  [[ "$latest_digest" == "$latest_state" ]]
+                  if [[ "$latest_digest" != "$digest" ]]; then
+                    jq \
+                      --arg name "$backend" \
+                      --arg version "$version" \
+                      --arg immutable_tag "$tag" \
+                      --arg target_digest "$digest" \
+                      '. + [{
+                        name:$name,
+                        version:$version,
+                        immutable_tag:$immutable_tag,
+                        target_digest:$target_digest,
+                        promotion_approved:true
+                      }]' /tmp/promotions.json > /tmp/promotions.next.json
+                    mv /tmp/promotions.next.json /tmp/promotions.json
+                  fi
                 fi
               fi
             fi
@@ -318,7 +329,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create candidate, validate parity, and reserve immutable identity
+      - name: Create candidate and validate platform parity
         id: manifest
         working-directory: /tmp/digests
         shell: bash
@@ -338,15 +349,7 @@ jobs:
           candidate_digest="$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -r '.digest')"
           docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' > /tmp/base-manifest.json
           python "$GITHUB_WORKSPACE/tools/runner_images.py" verify-platforms --input /tmp/base-manifest.json
-          immutable="${IMAGE_PREFIX}-base:${{ needs.resolve.outputs.base_tag }}"
-          existing=""
-          if docker buildx imagetools inspect "$immutable" >/dev/null 2>&1; then
-            existing="$(docker buildx imagetools inspect "$immutable" --format '{{json .Manifest}}' | jq -r '.digest')"
-          fi
-          python "$GITHUB_WORKSPACE/tools/runner_images.py" check-collision \
-            ${existing:+--existing "$existing"} --candidate "$candidate_digest"
           echo "digest=${candidate_digest}" >> "$GITHUB_OUTPUT"
-          echo "existing=${existing}" >> "$GITHUB_OUTPUT"
 
       - name: Attach signed GitHub build provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
@@ -358,27 +361,36 @@ jobs:
       - name: Publish immutable base tag only after attestation succeeds
         env:
           CANDIDATE_DIGEST: ${{ steps.manifest.outputs.digest }}
-          EXISTING_DIGEST: ${{ steps.manifest.outputs.existing }}
           IMMUTABLE_TAG: ${{ needs.resolve.outputs.base_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-base"
           gh attestation verify \
-            "oci://${IMAGE_PREFIX}-base@${CANDIDATE_DIGEST}" \
+            "oci://${image}@${CANDIDATE_DIGEST}" \
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
             --source-ref "$ATTESTATION_SOURCE_REF" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
-          if [[ -z "$EXISTING_DIGEST" ]]; then
+          # Query immediately before publication. Only an authenticated GHCR
+          # 404 is treated as absent; auth, network, and server errors fail.
+          existing="$(python tools/runner_images.py inspect-ghcr-tag \
+            --image "$image" --tag "$IMMUTABLE_TAG")"
+          if [[ "$existing" == "absent" ]]; then
+            python tools/runner_images.py check-collision \
+              --candidate "$CANDIDATE_DIGEST"
             docker buildx imagetools create \
-              -t "${IMAGE_PREFIX}-base:${IMMUTABLE_TAG}" \
-              "${IMAGE_PREFIX}-base@${CANDIDATE_DIGEST}"
+              -t "${image}:${IMMUTABLE_TAG}" \
+              "${image}@${CANDIDATE_DIGEST}"
+          else
+            python tools/runner_images.py check-collision \
+              --existing "$existing" --candidate "$CANDIDATE_DIGEST"
           fi
           actual="$(docker buildx imagetools inspect \
-            "${IMAGE_PREFIX}-base:${IMMUTABLE_TAG}" \
+            "${image}:${IMMUTABLE_TAG}" \
             --format '{{json .Manifest}}' | jq -r '.digest')"
           [[ "$actual" == "$CANDIDATE_DIGEST" ]]
 
@@ -571,15 +583,7 @@ jobs:
           docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' > /tmp/manifest.json
           python tools/runner_images.py verify-platforms --input /tmp/manifest.json
           candidate_digest="$(jq -r '.digest' /tmp/manifest.json)"
-          immutable="${IMAGE_PREFIX}-${{ matrix.name }}:${{ matrix.immutable_tag }}"
-          existing=""
-          if docker buildx imagetools inspect "$immutable" >/dev/null 2>&1; then
-            existing="$(docker buildx imagetools inspect "$immutable" --format '{{json .Manifest}}' | jq -r '.digest')"
-          fi
-          python tools/runner_images.py check-collision \
-            ${existing:+--existing "$existing"} --candidate "$candidate_digest"
           echo "digest=${candidate_digest}" >> "$GITHUB_OUTPUT"
-          echo "existing=${existing}" >> "$GITHUB_OUTPUT"
 
       - name: Attach signed GitHub build provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
@@ -591,7 +595,6 @@ jobs:
       - name: Publish immutable tag and release record after attestation
         env:
           CANDIDATE_DIGEST: ${{ steps.manifest.outputs.digest }}
-          EXISTING_DIGEST: ${{ steps.manifest.outputs.existing }}
           BACKEND: ${{ matrix.name }}
           VERSION: ${{ matrix.version }}
           IMMUTABLE_TAG: ${{ matrix.immutable_tag }}
@@ -609,9 +612,18 @@ jobs:
             --source-ref "$ATTESTATION_SOURCE_REF" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
-          if [[ -z "$EXISTING_DIGEST" ]]; then
+          # Keep the collision decision and tag write in this serialized
+          # publication step; only an authenticated 404 means absent.
+          existing="$(python tools/runner_images.py inspect-ghcr-tag \
+            --image "$image" --tag "$IMMUTABLE_TAG")"
+          if [[ "$existing" == "absent" ]]; then
+            python tools/runner_images.py check-collision \
+              --candidate "$CANDIDATE_DIGEST"
             docker buildx imagetools create -t "${image}:${IMMUTABLE_TAG}" \
               "${image}@${CANDIDATE_DIGEST}"
+          else
+            python tools/runner_images.py check-collision \
+              --existing "$existing" --candidate "$CANDIDATE_DIGEST"
           fi
           actual="$(docker buildx imagetools inspect \
             "${image}:${IMMUTABLE_TAG}" \
@@ -666,6 +678,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Preflight every target and save durable rollback tags
+        id: preflight
         env:
           CHANGED_JSON: ${{ needs.resolve.outputs.changed }}
           PROMOTIONS_JSON: ${{ needs.resolve.outputs.promotions }}
@@ -712,28 +725,46 @@ jobs:
             previous="$(jq -r '.digest' "/tmp/${backend}-previous.json")"
             [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
             rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            existing=""
-            if docker buildx imagetools inspect \
-              "${image}:${rollback_tag}" >/dev/null 2>&1; then
-              existing="$(docker buildx imagetools inspect \
-                "${image}:${rollback_tag}" \
-                --format '{{json .Manifest}}' | jq -r '.digest')"
-            fi
-            python tools/runner_images.py check-collision \
-              ${existing:+--existing "$existing"} --candidate "$previous"
-            if [[ -z "$existing" ]]; then
+            existing="$(python tools/runner_images.py inspect-ghcr-tag \
+              --image "$image" --tag "$rollback_tag")"
+            if [[ "$existing" == "absent" ]]; then
+              python tools/runner_images.py check-collision \
+                --candidate "$previous"
               docker buildx imagetools create -t "${image}:${rollback_tag}" \
                 "${image}@${previous}"
+            else
+              python tools/runner_images.py check-collision \
+                --existing "$existing" --candidate "$previous"
             fi
+            actual_rollback="$(docker buildx imagetools inspect \
+              "${image}:${rollback_tag}" \
+              --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "$actual_rollback" == "$previous" ]]
             jq -n \
               --arg backend "$backend" \
               --arg previous_digest "$previous" \
               --arg promoted_digest "$next" \
               --arg immutable_tag "$immutable_tag" \
               --arg rollback_tag "$rollback_tag" \
-              '{backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag}' \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+              '{state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
               > "/tmp/promotion/${backend}.json"
           done < /tmp/approved.jsonl
+          if compgen -G '/tmp/promotion/*.json' >/dev/null; then
+            echo "prepared=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prepared=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retain promotion rollback plan before moving latest tags
+        if: ${{ steps.preflight.outputs.prepared == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: promotion-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/promotion/
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
       - name: Move latest tags with compensating rollback on any failure
         id: move
@@ -791,13 +822,49 @@ jobs:
             echo "promoted=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Retain committed promotion ledger
+        id: committed_ledger
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ steps.move.outputs.promoted == 'true' }}
         with:
           name: rollback-ledger-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/rollback-ledger/
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+
+      - name: Restore latest tags if committed ledger retention fails
+        if: >-
+          ${{
+            failure() &&
+            steps.move.outputs.promoted == 'true' &&
+            steps.committed_ledger.outcome == 'failure'
+          }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t moved < /tmp/moved-backends
+          restore_failed=0
+          for ((index=${#moved[@]} - 1; index >= 0; index--)); do
+            backend="${moved[$index]}"
+            image="${IMAGE_PREFIX}-${backend}"
+            previous="$(jq -r \
+              '.previous_digest' "/tmp/promotion/${backend}.json")"
+            if ! docker buildx imagetools create \
+              -t "${image}:latest" "${image}@${previous}"; then
+              restore_failed=1
+              continue
+            fi
+            actual="$(docker buildx imagetools inspect "${image}:latest" \
+              --format '{{json .Manifest}}' | jq -r '.digest')" \
+              || restore_failed=1
+            [[ "$actual" == "$previous" ]] || restore_failed=1
+          done
+          if [[ "$restore_failed" -ne 0 ]]; then
+            echo "Evidence upload failed and compensation was incomplete; durable rollback plan and tags remain." >&2
+            exit 1
+          fi
+          echo "Committed ledger retention failed; latest tags were restored." >&2
+          exit 1
 
   rollback-verify:
     name: Verify rollback target (${{ matrix.arch }})
@@ -870,7 +937,8 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate parity and move latest to the verified digest
+      - name: Prepare manual rollback transaction
+        id: rollback_preflight
         env:
           BACKEND: ${{ inputs.backend }}
           TARGET_DIGEST: ${{ inputs.target_digest }}
@@ -892,19 +960,57 @@ jobs:
           previous="$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -r '.digest')"
           [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
           rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          existing=""
-          if docker buildx imagetools inspect \
-            "${image}:${rollback_tag}" >/dev/null 2>&1; then
-            existing="$(docker buildx imagetools inspect \
-              "${image}:${rollback_tag}" \
-              --format '{{json .Manifest}}' | jq -r '.digest')"
-          fi
-          python tools/runner_images.py check-collision \
-            ${existing:+--existing "$existing"} --candidate "$previous"
-          if [[ -z "$existing" ]]; then
+          existing="$(python tools/runner_images.py inspect-ghcr-tag \
+            --image "$image" --tag "$rollback_tag")"
+          if [[ "$existing" == "absent" ]]; then
+            python tools/runner_images.py check-collision \
+              --candidate "$previous"
             docker buildx imagetools create -t "${image}:${rollback_tag}" \
               "${image}@${previous}"
+          else
+            python tools/runner_images.py check-collision \
+              --existing "$existing" --candidate "$previous"
           fi
+          actual_rollback="$(docker buildx imagetools inspect \
+            "${image}:${rollback_tag}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual_rollback" == "$previous" ]]
+          jq -n \
+            --arg backend "$BACKEND" \
+            --arg previous_digest "$previous" \
+            --arg promoted_digest "$target" \
+            --arg rollback_tag "$rollback_tag" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{operation:"rollback",state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
+            > /tmp/rollback-plan.json
+          echo "previous_digest=${previous}" >> "$GITHUB_OUTPUT"
+          echo "target_digest=${target}" >> "$GITHUB_OUTPUT"
+          echo "rollback_tag=${rollback_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Retain manual rollback plan before moving latest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rollback-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/rollback-plan.json
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+
+      - name: Move latest to the verified rollback digest
+        id: rollback_move
+        env:
+          BACKEND: ${{ inputs.backend }}
+          TARGET_DIGEST: ${{ steps.rollback_preflight.outputs.target_digest }}
+          PREVIOUS_DIGEST: ${{ steps.rollback_preflight.outputs.previous_digest }}
+          ROLLBACK_TAG: ${{ steps.rollback_preflight.outputs.rollback_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$TARGET_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$ROLLBACK_TAG" =~ ^rollback-before-[0-9]+-[0-9]+$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}"
           moved=false
           restore_previous() {
             status=$?
@@ -912,32 +1018,63 @@ jobs:
             set +e
             if [[ "$moved" == true ]]; then
               docker buildx imagetools create -t "${image}:latest" \
-                "${image}@${previous}"
+                "${image}@${PREVIOUS_DIGEST}"
             fi
             exit "$status"
           }
           trap restore_previous ERR
           # Set before mutation so an ambiguous registry failure is restored.
           moved=true
-          docker buildx imagetools create -t "${image}:latest" "${image}@${target}"
+          docker buildx imagetools create \
+            -t "${image}:latest" "${image}@${TARGET_DIGEST}"
           actual="$(docker buildx imagetools inspect "${image}:latest" \
             --format '{{json .Manifest}}' | jq -r '.digest')"
-          [[ "$actual" == "$target" ]]
+          [[ "$actual" == "$TARGET_DIGEST" ]]
           jq -n \
             --arg backend "$BACKEND" \
-            --arg previous_digest "$previous" \
-            --arg promoted_digest "$target" \
-            --arg rollback_tag "$rollback_tag" \
+            --arg previous_digest "$PREVIOUS_DIGEST" \
+            --arg promoted_digest "$TARGET_DIGEST" \
+            --arg rollback_tag "$ROLLBACK_TAG" \
             --arg run_id "$GITHUB_RUN_ID" \
-            '{operation:"rollback",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id}' \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            '{operation:"rollback",state:"committed",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
             > /tmp/rollback-ledger.json
+          echo "promoted=true" >> "$GITHUB_OUTPUT"
           trap - ERR
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+
+      - name: Retain committed manual rollback ledger
+        id: rollback_committed_ledger
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ steps.rollback_move.outputs.promoted == 'true' }}
         with:
-          name: rollback-ledger
+          name: rollback-ledger-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/rollback-ledger.json
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+
+      - name: Restore latest if manual rollback ledger retention fails
+        if: >-
+          ${{
+            failure() &&
+            steps.rollback_move.outputs.promoted == 'true' &&
+            steps.rollback_committed_ledger.outcome == 'failure'
+          }}
+        env:
+          BACKEND: ${{ inputs.backend }}
+          PREVIOUS_DIGEST: ${{ steps.rollback_preflight.outputs.previous_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}"
+          docker buildx imagetools create \
+            -t "${image}:latest" "${image}@${PREVIOUS_DIGEST}"
+          actual="$(docker buildx imagetools inspect "${image}:latest" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual" == "$PREVIOUS_DIGEST" ]]
+          echo "Committed rollback ledger retention failed; latest was restored." >&2
+          exit 1
 
   notify-failure:
     name: Notify maintainers on refresh failure
