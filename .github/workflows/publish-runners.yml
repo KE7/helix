@@ -40,7 +40,8 @@ env:
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
   CATALOG: docker/runner-versions.json
   EVIDENCE_RETENTION_DAYS: 90
-  ATTESTATION_SIGNER_WORKFLOW: https://github.com/KE7/helix/.github/workflows/publish-runners.yml
+  # gh expects [host/]owner/repo/path, not an https:// URL.
+  ATTESTATION_SIGNER_WORKFLOW: KE7/helix/.github/workflows/publish-runners.yml
   ATTESTATION_SOURCE_REF: refs/heads/main
 
 jobs:

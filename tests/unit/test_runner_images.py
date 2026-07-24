@@ -322,6 +322,11 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert "github.repository == 'KE7/helix'" in text
     assert "github.event.repository.default_branch == 'main'" in text
     assert "github.ref == 'refs/heads/main'" in text
+    assert (
+        "ATTESTATION_SIGNER_WORKFLOW: "
+        "KE7/helix/.github/workflows/publish-runners.yml"
+    ) in text
+    assert "ATTESTATION_SIGNER_WORKFLOW: http" not in text
     assert '--signer-workflow "$ATTESTATION_SIGNER_WORKFLOW"' in text
     assert '--source-ref "$ATTESTATION_SOURCE_REF"' in text
     assert "--deny-self-hosted-runners" in text
