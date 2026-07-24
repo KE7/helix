@@ -25,6 +25,7 @@ from tools.runner_images import (
     parse_npm_metadata,
     promote_latest_tags,
     restore_latest_tags,
+    select_retry_artifacts,
     validate_catalog,
     validate_catalog_files,
     verify_build_evidence,
@@ -554,9 +555,178 @@ def test_v4_artifact_names_are_unique_for_same_run_retries() -> None:
     first_attempt = {template.replace(attempt, "1") for template in templates}
     second_attempt = {template.replace(attempt, "2") for template in templates}
     assert first_attempt.isdisjoint(second_attempt)
-    assert f"pattern: digests-base-*-{attempt}" in text
-    assert f"pattern: digests-${{{{ matrix.name }}}}-*-{attempt}" in text
-    assert f"pattern: release-*-{attempt}" in text
+    assert "pattern: resolved-runner-plan-*" in text
+    assert "pattern: digests-base-*" in text
+    assert "pattern: digests-${{ matrix.name }}-*" in text
+    assert "pattern: release-*" in text
+    assert text.count("select-retry-artifacts") == 5
+    assert text.count("merge-multiple: false") == 5
+
+
+def test_selective_retry_uses_latest_available_producer_per_logical_input(
+    tmp_path: Path,
+) -> None:
+    def artifact(root: Path, name: str, filename: str, value: str) -> None:
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / filename).write_text(value, encoding="utf-8")
+
+    plan_input = tmp_path / "plan-input"
+    artifact(plan_input, "resolved-runner-plan-1", "plan.json", "attempt-1")
+    assert select_retry_artifacts(
+        plan_input,
+        tmp_path / "plan-output",
+        family="resolved-plan",
+        current_attempt=2,
+    ) == {"plan": 1}
+    assert (tmp_path / "plan-output" / "plan.json").read_text() == "attempt-1"
+
+    base_input = tmp_path / "base-input"
+    artifact(base_input, "digests-base-amd64-1", "amd64", "amd64-attempt-1")
+    artifact(base_input, "digests-base-arm64-1", "arm64-old", "old")
+    artifact(base_input, "digests-base-arm64-2", "arm64", "arm64-attempt-2")
+    assert select_retry_artifacts(
+        base_input,
+        tmp_path / "base-output",
+        family="base-digests",
+        current_attempt=2,
+    ) == {"amd64": 1, "arm64": 2}
+    assert (tmp_path / "base-output" / "amd64").read_text() == "amd64-attempt-1"
+    assert (tmp_path / "base-output" / "arm64").read_text() == "arm64-attempt-2"
+    assert not (tmp_path / "base-output" / "arm64-old").exists()
+
+    backend_input = tmp_path / "backend-input"
+    artifact(
+        backend_input,
+        "digests-codex-amd64-1",
+        "smoke-amd64.json",
+        "amd64-attempt-1",
+    )
+    artifact(
+        backend_input,
+        "digests-codex-arm64-2",
+        "smoke-arm64.json",
+        "arm64-attempt-2",
+    )
+    assert select_retry_artifacts(
+        backend_input,
+        tmp_path / "backend-output",
+        family="backend-digests",
+        backend="codex",
+        current_attempt=2,
+    ) == {"amd64": 1, "arm64": 2}
+
+    release_input = tmp_path / "release-input"
+    artifact(release_input, "release-codex-1", "codex.json", "codex-old")
+    artifact(release_input, "release-codex-2", "codex.json", "codex-new")
+    artifact(release_input, "release-claude-1", "claude.json", "claude-old")
+    assert select_retry_artifacts(
+        release_input,
+        tmp_path / "release-output",
+        family="releases",
+        current_attempt=2,
+        required=("codex", "claude"),
+    ) == {"claude": 1, "codex": 2}
+    assert (tmp_path / "release-output" / "codex.json").read_text() == "codex-new"
+    assert (
+        tmp_path / "release-output" / "claude.json"
+    ).read_text() == "claude-old"
+
+
+def test_rerun_all_replaces_every_logical_input_with_current_attempt(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "all-input"
+    for arch in ("amd64", "arm64"):
+        for attempt in (1, 2):
+            directory = source / f"digests-base-{arch}-{attempt}"
+            directory.mkdir(parents=True)
+            (directory / arch).write_text(
+                f"{arch}-attempt-{attempt}",
+                encoding="utf-8",
+            )
+    assert select_retry_artifacts(
+        source,
+        tmp_path / "all-output",
+        family="base-digests",
+        current_attempt=2,
+    ) == {"amd64": 2, "arm64": 2}
+    assert (tmp_path / "all-output" / "amd64").read_text() == "amd64-attempt-2"
+    assert (tmp_path / "all-output" / "arm64").read_text() == "arm64-attempt-2"
+
+
+def test_retry_artifact_selection_rejects_ambiguous_or_unsafe_inputs(
+    tmp_path: Path,
+) -> None:
+    future = tmp_path / "future"
+    (future / "resolved-runner-plan-3").mkdir(parents=True)
+    with pytest.raises(RunnerPlanError, match="future"):
+        select_retry_artifacts(
+            future,
+            tmp_path / "future-output",
+            family="resolved-plan",
+            current_attempt=2,
+        )
+
+    duplicate = tmp_path / "duplicate"
+    for suffix in ("1", "01"):
+        directory = duplicate / f"resolved-runner-plan-{suffix}"
+        directory.mkdir(parents=True)
+        (directory / suffix).write_text(suffix, encoding="utf-8")
+    with pytest.raises(RunnerPlanError, match="duplicate"):
+        select_retry_artifacts(
+            duplicate,
+            tmp_path / "duplicate-output",
+            family="resolved-plan",
+            current_attempt=2,
+        )
+
+    missing = tmp_path / "missing"
+    (missing / "digests-base-amd64-1").mkdir(parents=True)
+    with pytest.raises(RunnerPlanError, match="missing"):
+        select_retry_artifacts(
+            missing,
+            tmp_path / "missing-output",
+            family="base-digests",
+            current_attempt=1,
+        )
+
+    unexpected = tmp_path / "unexpected"
+    unexpected.mkdir()
+    (unexpected / "not-an-artifact").write_text("bad", encoding="utf-8")
+    with pytest.raises(RunnerPlanError, match="unexpected"):
+        select_retry_artifacts(
+            unexpected,
+            tmp_path / "unexpected-output",
+            family="resolved-plan",
+            current_attempt=1,
+        )
+
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    real = tmp_path / "symlink-target"
+    real.mkdir()
+    (linked / "resolved-runner-plan-1").symlink_to(real, target_is_directory=True)
+    with pytest.raises(RunnerPlanError, match="unexpected"):
+        select_retry_artifacts(
+            linked,
+            tmp_path / "linked-output",
+            family="resolved-plan",
+            current_attempt=1,
+        )
+
+    collision = tmp_path / "collision"
+    for arch in ("amd64", "arm64"):
+        directory = collision / f"digests-base-{arch}-1"
+        directory.mkdir(parents=True)
+        (directory / "same").write_text(arch, encoding="utf-8")
+    with pytest.raises(RunnerPlanError, match="collision"):
+        select_retry_artifacts(
+            collision,
+            tmp_path / "collision-output",
+            family="base-digests",
+            current_attempt=1,
+        )
 
 
 def _promotion_record(backend: str, previous: str, promoted: str) -> dict:

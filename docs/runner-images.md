@@ -75,7 +75,13 @@ BuildKit SBOM, and signed provenance remain the byte-exact release identity.
    Collision validation and tag creation happen together after attestation,
    followed by an exact digest re-read. Every v4 workflow artifact name also
    includes `run_attempt`, so “re-run all jobs” writes a new artifact family
-   instead of colliding with the prior attempt's immutable artifacts.
+   instead of colliding with the prior attempt's immutable artifacts. Consumers
+   download all attempt-qualified artifacts from the same workflow run and
+   select the newest producer at or before the current attempt independently
+   per architecture or backend. This lets a failed-job or specific-job rerun
+   reuse successful sibling artifacts from an earlier attempt while replacing
+   only producers that reran. Selection fails closed on future, duplicate,
+   missing, unexpected, symlinked, or file-colliding artifact inputs.
 6. Preflight all eligible convenience-tag targets together. Durable
    `rollback-before-<run>-<attempt>` tags are created before mutation, and the
    complete rollback plan is retained before any `latest` tag moves. A single

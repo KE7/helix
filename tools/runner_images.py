@@ -15,6 +15,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -928,6 +929,88 @@ def promote_latest_tags(
         raise exc
 
 
+def select_retry_artifacts(
+    input_dir: Path,
+    output_dir: Path,
+    *,
+    family: str,
+    current_attempt: int,
+    backend: str | None = None,
+    required: Sequence[str] = (),
+) -> dict[str, int]:
+    if current_attempt < 1:
+        raise RunnerPlanError("current workflow attempt must be positive")
+    if family == "resolved-plan":
+        matcher = re.compile(r"^resolved-runner-plan-([0-9]+)$")
+        logical_group = None
+        expected = {"plan"}
+    elif family == "base-digests":
+        matcher = re.compile(r"^digests-base-(amd64|arm64)-([0-9]+)$")
+        logical_group = 1
+        expected = set(PLATFORMS)
+    elif family == "backend-digests":
+        if backend not in BACKENDS:
+            raise RunnerPlanError("backend artifact selection needs a valid backend")
+        matcher = re.compile(
+            rf"^digests-{re.escape(backend)}-(amd64|arm64)-([0-9]+)$"
+        )
+        logical_group = 1
+        expected = set(PLATFORMS)
+    elif family == "releases":
+        matcher = re.compile(
+            r"^release-(claude|codex|cursor|gemini|opencode)-([0-9]+)$"
+        )
+        logical_group = 1
+        expected = set(required)
+        if not expected or not expected.issubset(BACKENDS):
+            raise RunnerPlanError("release selection needs valid required backends")
+    else:
+        raise RunnerPlanError(f"unknown retry artifact family: {family}")
+
+    selected: dict[str, tuple[int, Path]] = {}
+    for artifact in sorted(input_dir.iterdir()):
+        if not artifact.is_dir() or artifact.is_symlink():
+            raise RunnerPlanError(f"unexpected artifact entry: {artifact.name}")
+        match = matcher.fullmatch(artifact.name)
+        if match is None:
+            raise RunnerPlanError(
+                f"artifact name does not match {family}: {artifact.name}"
+            )
+        logical = "plan" if logical_group is None else match.group(logical_group)
+        attempt = int(match.group(match.lastindex or 1))
+        if attempt > current_attempt:
+            raise RunnerPlanError("artifact comes from a future workflow attempt")
+        previous = selected.get(logical)
+        if previous is None or attempt > previous[0]:
+            selected[logical] = (attempt, artifact)
+        elif attempt == previous[0]:
+            raise RunnerPlanError(
+                f"duplicate {logical} artifacts for attempt {attempt}"
+            )
+    if set(selected) != expected:
+        missing = sorted(expected - set(selected))
+        extra = sorted(set(selected) - expected)
+        raise RunnerPlanError(
+            f"incomplete {family} artifacts; missing={missing}, extra={extra}"
+        )
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise RunnerPlanError("retry artifact output directory is not empty")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for logical in sorted(selected):
+        _, artifact = selected[logical]
+        for source in sorted(artifact.rglob("*")):
+            if source.is_symlink():
+                raise RunnerPlanError("artifact contains a symbolic link")
+            if not source.is_file():
+                continue
+            target = output_dir / source.relative_to(artifact)
+            if target.exists():
+                raise RunnerPlanError(f"artifact file collision: {target.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    return {logical: selected[logical][0] for logical in sorted(selected)}
+
+
 def _ignore_termination_signals() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -1075,6 +1158,17 @@ def _parser() -> argparse.ArgumentParser:
     promote.add_argument("--github-output", type=Path, required=True)
     restore = subparsers.add_parser("restore-latest")
     restore.add_argument("--input-dir", type=Path, required=True)
+    select_artifacts = subparsers.add_parser("select-retry-artifacts")
+    select_artifacts.add_argument("--input-dir", type=Path, required=True)
+    select_artifacts.add_argument("--output-dir", type=Path, required=True)
+    select_artifacts.add_argument(
+        "--family",
+        choices=("resolved-plan", "base-digests", "backend-digests", "releases"),
+        required=True,
+    )
+    select_artifacts.add_argument("--current-attempt", type=int, required=True)
+    select_artifacts.add_argument("--backend", choices=BACKENDS)
+    select_artifacts.add_argument("--required-json", default="[]")
     tag = subparsers.add_parser("image-tag")
     tag.add_argument("--catalog", type=Path, required=True)
     tag.add_argument("--backend", choices=BACKENDS, required=True)
@@ -1124,6 +1218,25 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "restore-latest":
             _ignore_termination_signals()
             restore_latest_tags(_promotion_records(args.input_dir))
+        elif args.command == "select-retry-artifacts":
+            required = json.loads(args.required_json)
+            if not isinstance(required, list) or not all(
+                isinstance(item, str) for item in required
+            ):
+                raise RunnerPlanError("required artifact names must be a JSON array")
+            print(
+                json.dumps(
+                    select_retry_artifacts(
+                        args.input_dir,
+                        args.output_dir,
+                        family=args.family,
+                        current_attempt=args.current_attempt,
+                        backend=args.backend,
+                        required=required,
+                    ),
+                    sort_keys=True,
+                )
+            )
         elif args.command == "image-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)

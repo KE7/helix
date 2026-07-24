@@ -247,8 +247,18 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: resolved-runner-plan-${{ github.run_attempt }}
-          path: /tmp/plan
+          pattern: resolved-runner-plan-*
+          path: /tmp/plan-artifacts
+          merge-multiple: false
+      - name: Select the newest available resolved plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/runner_images.py select-retry-artifacts \
+            --input-dir /tmp/plan-artifacts \
+            --output-dir /tmp/plan \
+            --family resolved-plan \
+            --current-attempt "$GITHUB_RUN_ATTEMPT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -319,9 +329,18 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: /tmp/digests
-          pattern: digests-base-*-${{ github.run_attempt }}
-          merge-multiple: true
+          path: /tmp/base-digest-artifacts
+          pattern: digests-base-*
+          merge-multiple: false
+      - name: Select the newest available base digest per architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/runner_images.py select-retry-artifacts \
+            --input-dir /tmp/base-digest-artifacts \
+            --output-dir /tmp/digests \
+            --family base-digests \
+            --current-attempt "$GITHUB_RUN_ATTEMPT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -419,8 +438,18 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: resolved-runner-plan-${{ github.run_attempt }}
-          path: /tmp/plan
+          pattern: resolved-runner-plan-*
+          path: /tmp/plan-artifacts
+          merge-multiple: false
+      - name: Select the newest available resolved plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/runner_images.py select-retry-artifacts \
+            --input-dir /tmp/plan-artifacts \
+            --output-dir /tmp/plan \
+            --family resolved-plan \
+            --current-attempt "$GITHUB_RUN_ATTEMPT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -553,9 +582,19 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: /tmp/downloads
-          pattern: digests-${{ matrix.name }}-*-${{ github.run_attempt }}
-          merge-multiple: true
+          path: /tmp/backend-digest-artifacts
+          pattern: digests-${{ matrix.name }}-*
+          merge-multiple: false
+      - name: Select the newest backend digest per architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/runner_images.py select-retry-artifacts \
+            --input-dir /tmp/backend-digest-artifacts \
+            --output-dir /tmp/downloads \
+            --family backend-digests \
+            --backend "${{ matrix.name }}" \
+            --current-attempt "$GITHUB_RUN_ATTEMPT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -667,9 +706,23 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: ${{ needs.resolve.outputs.changed != '[]' }}
         with:
-          pattern: release-*-${{ github.run_attempt }}
-          path: /tmp/release
-          merge-multiple: true
+          pattern: release-*
+          path: /tmp/release-artifacts
+          merge-multiple: false
+      - name: Select the newest release record per changed backend
+        if: ${{ needs.resolve.outputs.changed != '[]' }}
+        env:
+          CHANGED_JSON: ${{ needs.resolve.outputs.changed }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          required="$(jq -c '[.[].name]' <<< "$CHANGED_JSON")"
+          python tools/runner_images.py select-retry-artifacts \
+            --input-dir /tmp/release-artifacts \
+            --output-dir /tmp/release \
+            --family releases \
+            --current-attempt "$GITHUB_RUN_ATTEMPT" \
+            --required-json "$required"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
