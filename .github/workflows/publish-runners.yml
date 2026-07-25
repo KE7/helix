@@ -29,7 +29,10 @@ on:
         type: string
 
 concurrency:
-  group: runner-image-refresh-${{ github.repository }}
+  # Refresh and rollback are serialized independently: an emergency rollback
+  # dispatch must not queue behind a long in-flight daily refresh. A scheduled
+  # event has no inputs, so it resolves to the refresh group.
+  group: runner-image-${{ github.event.inputs.operation || 'refresh' }}-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -39,7 +42,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
   CATALOG: docker/runner-versions.json
-  EVIDENCE_RETENTION_DAYS: 90
+  # Audit-critical evidence (resolved plan, promotion plan, rollback ledger,
+  # release records) is retained long. Per-arch build digest/smoke evidence is
+  # 5 backends x 2 arches every day, so it gets a shorter, cheaper window.
+  AUDIT_RETENTION_DAYS: 90
+  BUILD_EVIDENCE_RETENTION_DAYS: 30
   # gh expects [host/]owner/repo/path, not an https:// URL.
   ATTESTATION_SIGNER_WORKFLOW: KE7/helix/.github/workflows/publish-runners.yml
   ATTESTATION_SOURCE_REF: refs/heads/main
@@ -267,7 +274,7 @@ jobs:
             /tmp/promotions.json
             /tmp/promotion-stall.json
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}
 
   build-base:
     name: Build base (${{ matrix.arch }})
@@ -355,7 +362,7 @@ jobs:
           name: digests-base-${{ matrix.arch }}-${{ github.run_attempt }}
           path: /tmp/digests/*
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.BUILD_EVIDENCE_RETENTION_DAYS) }}
 
   merge-base:
     name: Validate and publish immutable base manifest
@@ -606,11 +613,19 @@ jobs:
           name: digests-${{ matrix.name }}-${{ matrix.arch }}-${{ github.run_attempt }}
           path: /tmp/smoke-evidence/
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.BUILD_EVIDENCE_RETENTION_DAYS) }}
 
   merge-backends:
     name: Validate and publish ${{ matrix.name }} immutable manifest
     needs: [guard, resolve, build-backends]
+    # Deliberate fail-closed trade-off: build-backends sets fail-fast: false so
+    # every leg reports, but this job has no always(), so a single failed leg
+    # (even an unrelated arm64 runner hiccup on one backend) makes the whole
+    # build-backends job 'failure' and skips publication for ALL backends.
+    # That is intended. Publishing the backends whose legs happened to pass
+    # would mean releasing from a run we could not fully validate, and a rerun
+    # of the failed job recovers the successful siblings' artifacts anyway via
+    # select-retry-artifacts. Do not add always() here.
     if: ${{ needs.resolve.outputs.changed != '[]' }}
     strategy:
       fail-fast: false
@@ -727,7 +742,7 @@ jobs:
           name: release-${{ matrix.name }}-${{ github.run_attempt }}
           path: /tmp/release/${{ matrix.name }}.json
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}
 
   promote:
     name: Promote validated convenience tags as one compensated transaction
@@ -880,7 +895,7 @@ jobs:
           name: promotion-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/promotion/
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}
 
       - name: Move latest tags with compensating rollback on any failure
         id: move
@@ -901,7 +916,7 @@ jobs:
           name: rollback-ledger-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/rollback-ledger/
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}
 
       - name: Restore latest tags if committed ledger retention fails
         if: >-
@@ -1067,7 +1082,7 @@ jobs:
           name: rollback-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/manual-promotion/
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}
 
       - name: Move latest to the verified rollback digest
         id: rollback_move
@@ -1088,7 +1103,7 @@ jobs:
           name: rollback-ledger-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/manual-ledger/
           if-no-files-found: error
-          retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
+          retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}
 
       - name: Restore latest if manual rollback ledger retention fails
         if: >-

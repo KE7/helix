@@ -32,7 +32,9 @@ re-download and re-hash. The installer hash is recorded as evidence but is
 deliberately *not* part of Cursor's immutable tag identity — the archive URLs
 and their digests already bind the shipped content, so a comment-only edit to
 Cursor's install script must not mint a new tag and force a two-architecture
-republish of byte-identical CLI content. No backend Dockerfile runs `npm install`. Claude, Codex, and OpenCode
+republish of byte-identical CLI content.
+
+No backend Dockerfile runs `npm install`. Claude, Codex, and OpenCode
 extract their verified launcher plus the exact Linux native package selected
 for each architecture. OpenCode's amd64 image includes both its AVX2 and
 baseline binaries and chooses at runtime. Gemini extracts its verified bundle
@@ -58,8 +60,11 @@ BuildKit SBOM, and signed provenance remain the byte-exact release identity.
 ## Daily publication sequence
 
 `.github/workflows/publish-runners.yml` runs daily and by
-`workflow_dispatch`. One repository-wide concurrency group is serialized with
-`cancel-in-progress: false`.
+`workflow_dispatch`. Refresh and rollback each get their own repository-wide
+concurrency group, both serialized with `cancel-in-progress: false`, so an
+emergency rollback dispatch is never queued behind a long in-flight daily
+refresh. A scheduled event carries no inputs and resolves to the refresh
+group.
 
 1. Resolve all five official upstreams and validate their checksums.
 2. Derive a collision-resistant `cli-<version>-r<recipe-hash>` tag bound to
@@ -173,9 +178,28 @@ read-only package access. Only attestation jobs receive `id-token: write` and
 `attestations: write`. Only the failure notifier receives `issues: write`.
 A build or merge failure prevents the single promotion job from starting. A
 promotion-time failure triggers compensating rollback and creates or updates
-one repository issue.
+one repository issue; so does a *cancelled* run, whose issue points at the
+retained rollback plan and the durable `rollback-before-*` tags.
+
+The per-backend build matrix uses `fail-fast: false` so every architecture
+reports its own result, but `merge-backends` intentionally has no `always()`.
+One failed leg therefore makes the whole `build-backends` job `failure` and
+skips publication for **all** backends, not just the one that failed. That is a
+deliberate fail-closed trade-off: publishing the backends whose legs happened
+to pass would mean releasing from a run that could not be fully validated. Cost
+of the trade-off is a one-day delay for unaffected backends; re-running the
+failed job recovers the successful siblings' artifacts from the earlier attempt
+instead of rebuilding them.
 
 ## Rollback and retention
+
+Evidence retention is split by what the artifact is for. Audit-critical
+artifacts — the resolved plan and stall report, the promotion plan, the
+rollback ledger and manual rollback plan, and the per-backend release records —
+are retained for `AUDIT_RETENTION_DAYS` (90). The high-volume per-architecture
+build digest and smoke evidence (five backends times two architectures, every
+day) is retained for `BUILD_EVIDENCE_RETENTION_DAYS` (30), which is still long
+enough to cover a selective rerun of the same workflow run.
 
 Before every convenience-tag promotion, a 90-day rollback-plan artifact records
 the previous and new digests, immutable tag, durable rollback tag, workflow run

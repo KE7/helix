@@ -743,6 +743,71 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert "BACKEND: ${{ inputs.backend }}" in text
 
 
+def test_rollback_dispatch_is_not_queued_behind_the_daily_refresh() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    concurrency = text[text.index("concurrency:") : text.index("permissions:")]
+    assert (
+        "group: runner-image-"
+        "${{ github.event.inputs.operation || 'refresh' }}-"
+        "${{ github.repository }}"
+    ) in concurrency
+    # Both operations stay serialized against themselves.
+    assert "cancel-in-progress: false" in concurrency
+    assert "group: runner-image-refresh-${{ github.repository }}" not in text
+
+
+def test_evidence_retention_is_split_by_audit_value() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "EVIDENCE_RETENTION_DAYS: 90\n" not in text
+    assert "AUDIT_RETENTION_DAYS: 90" in text
+    assert "BUILD_EVIDENCE_RETENTION_DAYS: 30" in text
+
+    audit = "retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}"
+    build = "retention-days: ${{ fromJSON(env.BUILD_EVIDENCE_RETENTION_DAYS) }}"
+    expected = {
+        "resolved-runner-plan-${{ github.run_attempt }}": audit,
+        "digests-base-${{ matrix.arch }}-${{ github.run_attempt }}": build,
+        (
+            "digests-${{ matrix.name }}-${{ matrix.arch }}-"
+            "${{ github.run_attempt }}"
+        ): build,
+        "release-${{ matrix.name }}-${{ github.run_attempt }}": audit,
+        "promotion-plan-${{ github.run_id }}-${{ github.run_attempt }}": audit,
+        "rollback-plan-${{ github.run_id }}-${{ github.run_attempt }}": audit,
+    }
+    for name, policy in expected.items():
+        start = text.index(f"name: {name}")
+        block = text[start : text.index("retention-days:", start) + len(policy)]
+        assert block.endswith(policy), name
+    # Both committed-ledger uploads are audit evidence.
+    assert text.count("name: rollback-ledger-") == 2
+    for start in (
+        text.index("name: rollback-ledger-"),
+        text.rindex("name: rollback-ledger-"),
+    ):
+        assert text[start:].split("retention-days: ", 1)[1].startswith(
+            "${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}"
+        )
+
+
+def test_one_failing_matrix_leg_still_blocks_every_backend_by_design() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    merge = text[
+        text.index("  merge-backends:") : text.index("  promote:")
+    ]
+    # This is the deliberate fail-closed trade-off, not an oversight: keep the
+    # missing always() and keep the comment that explains it.
+    header = [
+        line
+        for line in merge.split("steps:", 1)[0].splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert "    if: ${{ needs.resolve.outputs.changed != '[]' }}" in header
+    assert not any("always()" in line for line in header)
+    assert "Deliberate fail-closed trade-off" in merge
+    assert "Do not add always() here." in merge
+
+
 def test_failure_notifier_covers_cancellation_and_dedupes_beyond_one_page() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     notifier = text[text.index("  notify-failure:") :]
@@ -862,7 +927,7 @@ def test_v4_artifact_names_are_unique_for_same_run_retries() -> None:
     assert "pattern: digests-base-*" in text
     assert "pattern: digests-${{ matrix.name }}-*" in text
     assert "pattern: release-*" in text
-    assert text.count("select-retry-artifacts") == 5
+    assert text.count("runner_images.py select-retry-artifacts") == 5
     assert text.count("merge-multiple: false") == 5
 
 
