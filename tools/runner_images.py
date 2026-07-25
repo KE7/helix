@@ -18,12 +18,13 @@ import signal
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 
 BACKENDS = ("claude", "codex", "cursor", "gemini", "opencode")
@@ -58,6 +59,11 @@ SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 TAG_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}$")
 CURSOR_VERSION_RE = re.compile(r"2026\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+")
+
+T = TypeVar("T")
+Sleep = Callable[[float], None]
+NETWORK_RETRY_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 class RunnerPlanError(ValueError):
@@ -452,28 +458,80 @@ def parse_cursor_installer(payload: bytes) -> dict[str, str]:
     }
 
 
-def _fetch(url: str, timeout: float = 30.0) -> bytes:
+def _is_retryable(exc: OSError) -> bool:
+    """Report whether an idempotent GET may be safely repeated.
+
+    Only transient conditions qualify.  A 404 is a *meaningful answer* for
+    ``inspect_ghcr_tag`` (the tag is absent) and 401/403 mean the credential is
+    wrong; retrying either would turn a decisive result into a slower, noisier
+    one without ever changing it.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in RETRYABLE_HTTP_STATUS
+    return isinstance(exc, (urllib.error.URLError, TimeoutError))
+
+
+def _retry_get(
+    operation: Callable[[], T],
+    *,
+    description: str,
+    attempts: int = NETWORK_RETRY_ATTEMPTS,
+    sleep: Sleep = time.sleep,
+) -> T:
+    """Run one idempotent GET with bounded exponential backoff.
+
+    ``sleep`` is injected so unit tests observe the backoff schedule without
+    spending wall-clock time.  A non-retryable error, and the final attempt's
+    error, propagate unchanged so every existing fail-closed handler still
+    sees the original exception.
+    """
+    if attempts < 1:
+        raise RunnerPlanError(f"{description}: retry budget must be positive")
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except OSError as exc:
+            if attempt == attempts or not _is_retryable(exc):
+                raise
+            sleep(float(2 ** (attempt - 1)))
+    raise RunnerPlanError(  # pragma: no cover - loop always returns or raises
+        f"{description}: exhausted {attempts} attempts"
+    )
+
+
+def _fetch(url: str, timeout: float = 30.0, *, sleep: Sleep = time.sleep) -> bytes:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "helix-runner-version-audit/1"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = response.read()
+
+    def read() -> bytes:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload: bytes = response.read()
+        return payload
+
+    payload = _retry_get(read, description=f"fetch {url}", sleep=sleep)
     if not isinstance(payload, bytes):
         raise RunnerPlanError(f"upstream returned non-bytes payload for {url!r}")
     return payload
 
 
-def _fetch_sha256(url: str, timeout: float = 180.0) -> str:
+def _fetch_sha256(url: str, timeout: float = 180.0, *, sleep: Sleep = time.sleep) -> str:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "helix-runner-version-audit/1"},
     )
-    digest = hashlib.sha256()
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        while chunk := response.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+
+    def read() -> str:
+        # The digest is rebuilt per attempt: a stream that died halfway must
+        # never contribute its partial bytes to the recorded checksum.
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            while chunk := response.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    return _retry_get(read, description=f"hash {url}", sleep=sleep)
 
 
 def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, Any]:
@@ -727,6 +785,7 @@ def inspect_ghcr_tag(
     actor: str,
     token: str,
     urlopen: Any | None = None,
+    sleep: Sleep = time.sleep,
 ) -> str | None:
     """Return a GHCR tag digest, treating only an authenticated 404 as absent."""
     prefix = "ghcr.io/"
@@ -749,9 +808,14 @@ def inspect_ghcr_tag(
             "User-Agent": "helix-runner-publish/1",
         },
     )
-    try:
+    def exchange_token() -> Any:
         with opener(token_request, timeout=30.0) as response:
-            token_payload = json.loads(response.read())
+            return json.loads(response.read())
+
+    try:
+        token_payload = _retry_get(
+            exchange_token, description="GHCR token exchange", sleep=sleep
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise RunnerPlanError("GHCR token exchange failed") from exc
     if not isinstance(token_payload, dict):
@@ -773,11 +837,19 @@ def inspect_ghcr_tag(
             "User-Agent": "helix-runner-publish/1",
         },
     )
-    try:
+    def read_manifest() -> tuple[bytes, str]:
         with opener(manifest_request, timeout=30.0) as response:
-            manifest: bytes = response.read()
-            digest: str = response.headers.get("Docker-Content-Digest", "")
+            body: bytes = response.read()
+            header: str = response.headers.get("Docker-Content-Digest", "")
+        return body, header
+
+    try:
+        manifest, digest = _retry_get(
+            read_manifest, description="GHCR manifest inspection", sleep=sleep
+        )
     except urllib.error.HTTPError as exc:
+        # Never retried: an authenticated 404 is the answer "this tag does not
+        # exist", which the whole publication gate depends on being decisive.
         if exc.code == 404:
             return None
         raise RunnerPlanError(

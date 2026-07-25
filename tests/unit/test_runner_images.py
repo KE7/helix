@@ -10,6 +10,7 @@ import re
 import signal
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ import pytest
 from tools.runner_images import (
     PromotionInterrupted,
     RunnerPlanError,
+    _fetch,
+    _fetch_sha256,
     _promotion_records,
     assert_immutable_collision,
     change_plan,
@@ -285,6 +288,7 @@ def test_ghcr_tag_inspection_distinguishes_absence_from_registry_failure() -> No
             actor="ci",
             token="secret",
             urlopen=response_error(500),
+            sleep=lambda _seconds: None,
         )
 
     def token_404(
@@ -306,6 +310,148 @@ def test_ghcr_tag_inspection_distinguishes_absence_from_registry_failure() -> No
             token="secret",
             urlopen=token_404,
         )
+
+
+def _flaky_ghcr(
+    statuses: list[int],
+    manifest: bytes,
+    digest: str,
+) -> Callable[[urllib.request.Request, float], _HTTPResponse]:
+    """A GHCR opener whose manifest endpoint fails with ``statuses`` in order."""
+    remaining = list(statuses)
+
+    def opener(
+        request: urllib.request.Request, timeout: float
+    ) -> _HTTPResponse:
+        if request.full_url.startswith("https://ghcr.io/token?"):
+            return _HTTPResponse(b'{"token":"registry-token"}')
+        if remaining:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                remaining.pop(0),
+                "registry error",
+                {},  # type: ignore[arg-type]
+                io.BytesIO(),
+            )
+        return _HTTPResponse(manifest, {"Docker-Content-Digest": digest})
+
+    return opener
+
+
+def test_registry_reads_retry_only_transient_failures() -> None:
+    manifest = b'{"schemaVersion":2}'
+    digest = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
+
+    for statuses in ([503], [429, 500]):
+        delays: list[float] = []
+        assert (
+            inspect_ghcr_tag(
+                "ghcr.io/ke7/helix-evo-runner-codex",
+                "cli-0.145.0-rabc",
+                actor="ci",
+                token="secret",
+                urlopen=_flaky_ghcr(statuses, manifest, digest),
+                sleep=delays.append,
+            )
+            == digest
+        )
+        assert delays == [1.0, 2.0][: len(statuses)]
+
+    # Three consecutive transient failures exhaust the cap and fail closed.
+    delays = []
+    with pytest.raises(RunnerPlanError, match="HTTP 503"):
+        inspect_ghcr_tag(
+            "ghcr.io/ke7/helix-evo-runner-codex",
+            "cli-0.145.0-rabc",
+            actor="ci",
+            token="secret",
+            urlopen=_flaky_ghcr([503, 503, 503], manifest, digest),
+            sleep=delays.append,
+        )
+    assert delays == [1.0, 2.0]
+
+    # A 404 is the decisive "absent" answer and 401/403 are credential
+    # problems: neither is ever retried.
+    for status, expected in ((404, None), (401, "HTTP 401"), (403, "HTTP 403")):
+        delays = []
+        opener = _flaky_ghcr([status, status, status], manifest, digest)
+        if expected is None:
+            assert (
+                inspect_ghcr_tag(
+                    "ghcr.io/ke7/helix-evo-runner-codex",
+                    "cli-0.145.0-rabc",
+                    actor="ci",
+                    token="secret",
+                    urlopen=opener,
+                    sleep=delays.append,
+                )
+                is None
+            )
+        else:
+            with pytest.raises(RunnerPlanError, match=expected):
+                inspect_ghcr_tag(
+                    "ghcr.io/ke7/helix-evo-runner-codex",
+                    "cli-0.145.0-rabc",
+                    actor="ci",
+                    token="secret",
+                    urlopen=opener,
+                    sleep=delays.append,
+                )
+        assert delays == []
+
+
+def test_upstream_fetches_retry_and_rehash_the_whole_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"cursor-archive-bytes"
+    attempts: list[int] = []
+
+    class _Stream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = chunks
+
+        def __enter__(self) -> "_Stream":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, _size: int = -1) -> bytes:
+            if not self.chunks:
+                return b""
+            chunk = self.chunks.pop(0)
+            if chunk is None:  # pragma: no cover - defensive
+                raise AssertionError
+            return chunk
+
+    def urlopen(request: object, timeout: float = 0.0) -> _Stream:
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            # A truncated first attempt must not contribute partial bytes.
+            raise urllib.error.URLError("connection reset")
+        return _Stream([payload[:5], payload[5:]])
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    delays: list[float] = []
+    assert (
+        _fetch_sha256("https://downloads.cursor.com/a.tgz", sleep=delays.append)
+        == hashlib.sha256(payload).hexdigest()
+    )
+    assert delays == [1.0]
+    assert len(attempts) == 2
+
+    attempts.clear()
+    delays = []
+
+    def always_fails(request: object, timeout: float = 0.0) -> _Stream:
+        attempts.append(len(attempts))
+        raise urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(urllib.request, "urlopen", always_fails)
+    with pytest.raises(urllib.error.URLError):
+        _fetch("https://registry.npmjs.org/x", sleep=delays.append)
+    assert len(attempts) == 3
+    assert delays == [1.0, 2.0]
 
 
 def test_immutable_version_tags_are_collision_resistant_and_base_bound() -> None:
