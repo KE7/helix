@@ -22,7 +22,8 @@ from helix.population import FrontierType
 # had no schema version on ``state.json``; subsequent bumps mark explicit
 # JSON-native schema additions (the unversioned predecessor is treated as
 # v0; ``load_state`` migrates by default-filling missing fields).
-SCHEMA_VERSION: int = 4
+# v5 adds ``image_provenance`` (resolved container-image digests).
+SCHEMA_VERSION: int = 5
 
 
 @dataclass
@@ -468,6 +469,18 @@ class EvolutionState:
     # ``resume_semantics`` because it is evolving execution position, not a
     # compatibility knob.  Legacy states default to an empty mapping.
     scheduler_state: dict[str, Any] = field(default_factory=dict)
+    # Resolved container-image provenance, keyed by role ("runner",
+    # "sidecar_service", "sidecar_runner").  Each value is an
+    # ``ImageProvenance.to_dict()`` payload: the image reference HELIX
+    # resolved, the immutable ``repo@sha256:...`` digest it pointed at, and
+    # the local image ID -- or an explicit "unavailable" reason.
+    #
+    # HELIX runs images by TAG, and a tag is a mutable pointer, so without
+    # this a finished run cannot say which bytes produced it.  Populated by
+    # ``helix.image_provenance.record_image_provenance`` once per run.
+    # Empty on unsandboxed runs (no image is involved) and on states written
+    # before schema v5.
+    image_provenance: dict[str, Any] = field(default_factory=dict)
     # GEPA parity (audit-rng-state-persist D1): persisted schema version.
     # Mirrors GEPA core/state.py:182 / class-var :153.  Bumped when the
     # serialized schema changes; ``load_state`` migrates older payloads by
@@ -1144,6 +1157,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "resume_semantics": state.resume_semantics,
         "proposal_batches": [batch.to_dict() for batch in state.proposal_batches],
         "scheduler_state": _to_json_safe(state.scheduler_state),
+        "image_provenance": _to_json_safe(state.image_provenance),
     }
 
     # Atomic write: write to tmp file in same directory, then rename
@@ -1199,6 +1213,15 @@ def load_state(base_dir: Path) -> EvolutionState | None:
     normalized_scheduler_state = _to_json_safe(raw_scheduler_state)
     assert isinstance(normalized_scheduler_state, dict)
 
+    # Schema v5 addition.  Absent in every state.json written before it, so a
+    # missing key is the normal legacy case and defaults to empty -- never an
+    # error.  A non-mapping value means the file was hand-edited or corrupted;
+    # provenance is metadata, so drop it rather than refuse the resume.
+    raw_image_provenance = data.get("image_provenance", {})
+    image_provenance: dict[str, Any] = (
+        dict(raw_image_provenance) if isinstance(raw_image_provenance, Mapping) else {}
+    )
+
     # Migrate legacy frontier_type: default to "instance" (HELIX's
     # historical single-axis behaviour) for states written before the
     # field existed.  Narrow the str → FrontierType via a whitelist so
@@ -1228,6 +1251,7 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         resume_semantics=data.get("resume_semantics", {}),
         proposal_batches=proposal_batches,
         scheduler_state=normalized_scheduler_state,
+        image_provenance=image_provenance,
         schema_version=SCHEMA_VERSION,
     )
 

@@ -141,6 +141,17 @@ def _make_full_state() -> EvolutionState:
         active_frontier={"task_a": ["g2-m1"], "task_b": ["g2-m1"]},
         proposal_batches=[batch],
         scheduler_state=scheduler_state,
+        image_provenance={
+            "runner": {
+                "role": "runner",
+                "image": "ghcr.io/ke7/helix-evo-runner-codex:latest",
+                "digest": "ghcr.io/ke7/helix-evo-runner-codex@sha256:" + "a" * 64,
+                "image_id": "sha256:" + "b" * 64,
+                "source": "repo_digest",
+                "reason": None,
+                "reason_code": None,
+            }
+        },
     )
 
 
@@ -161,6 +172,7 @@ def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     assert loaded.active_frontier == state.active_frontier
     assert loaded.proposal_batches == state.proposal_batches
     assert loaded.scheduler_state == state.scheduler_state
+    assert loaded.image_provenance == state.image_provenance
     assert loaded.schema_version == SCHEMA_VERSION
 
 
@@ -219,6 +231,7 @@ def test_load_legacy_state_populates_defaults(tmp_path: Path) -> None:
     assert loaded.num_metric_calls_by_discovery == {}
     assert loaded.proposal_batches == []
     assert loaded.scheduler_state == {}
+    assert loaded.image_provenance == {}
     assert loaded.schema_version == SCHEMA_VERSION
     # Pre-existing fields still load correctly.
     assert loaded.generation == 1
@@ -228,6 +241,83 @@ def test_load_legacy_state_populates_defaults(tmp_path: Path) -> None:
     assert loaded.budget.cache_creation_input_tokens == 0
     assert loaded.budget.cache_read_input_tokens == 0
     assert loaded.budget.reasoning_tokens == 0
+
+
+def _write_v4_state_json(base_dir: Path) -> None:
+    """Write a complete v4 state.json — every key v4 wrote, and no more.
+
+    v4 is the schema immediately before ``image_provenance`` was added, so
+    this is the file an in-flight run has on disk at upgrade time.
+    """
+    helix_dir = base_dir / ".helix"
+    helix_dir.mkdir(parents=True, exist_ok=True)
+    v4 = {
+        "schema_version": 4,
+        "generation": 2,
+        "frontier": ["g0-s0", "g1-s1"],
+        "instance_scores": {"g0-s0": {"task_a": 0.5}},
+        "budget": {"evaluations": 7},
+        "config_hash": "v4-hash",
+        "mutation_counter": 1,
+        "merge_counter": 0,
+        "total_merge_invocations": 0,
+        "merge_attempted_pairs": [],
+        "merge_description_triplets": [],
+        "i": 2,
+        "num_metric_calls_by_discovery": {"g0-s0": 0},
+        "active_frontier": {"task_a": ["g1-s1"]},
+        "frontier_type": "instance",
+        "resume_semantics": {"objective": "test"},
+        "proposal_batches": [],
+        "scheduler_state": {},
+        # Deliberately no "image_provenance" — that is the v5 addition.
+    }
+    (helix_dir / "state.json").write_text(json.dumps(v4))
+
+
+def test_v4_state_file_loads_and_resumes(tmp_path: Path) -> None:
+    """Requirement: a run started on v4 must resume after the v5 upgrade.
+
+    THE COMPATIBILITY CASE THAT MATTERS: v4 is the immediate predecessor, so
+    this is a real in-flight run's state.json, not a synthetic legacy one.
+    Catches: making ``image_provenance`` a required key, or bumping
+    SCHEMA_VERSION without a default-fill on load — either would turn an
+    upgrade into a dead run directory.
+    """
+    _write_v4_state_json(tmp_path)
+
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert loaded.image_provenance == {}
+    # Everything v4 *did* carry must survive untouched.
+    assert loaded.generation == 2
+    assert loaded.frontier == ["g0-s0", "g1-s1"]
+    assert loaded.resume_semantics == {"objective": "test"}
+    assert loaded.schema_version == SCHEMA_VERSION
+
+    # And re-saving promotes the file to v5 with the new field present.
+    save_state(loaded, tmp_path)
+    raw = json.loads((tmp_path / ".helix" / "state.json").read_text())
+    assert raw["schema_version"] == SCHEMA_VERSION
+    assert raw["image_provenance"] == {}
+
+
+def test_corrupt_image_provenance_does_not_block_a_resume(tmp_path: Path) -> None:
+    """Provenance is metadata; a bad value costs the metadata, not the run.
+
+    Catches: a strict type check on the new field that refuses to load an
+    otherwise-fine state.json.
+    """
+    _write_v4_state_json(tmp_path)
+    path = tmp_path / ".helix" / "state.json"
+    data = json.loads(path.read_text())
+    data["image_provenance"] = "sha256:not-a-mapping"
+    path.write_text(json.dumps(data))
+
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert loaded.image_provenance == {}
+    assert loaded.generation == 2
 
 
 def test_load_state_rejects_newer_schema_version(tmp_path: Path) -> None:
@@ -442,6 +532,7 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "resume_semantics",
         "proposal_batches",
         "scheduler_state",
+        "image_provenance",
     }
     assert set(raw.keys()) == expected_keys, (
         f"state.json keys diverged from schema_version={SCHEMA_VERSION} "
