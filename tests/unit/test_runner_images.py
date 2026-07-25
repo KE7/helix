@@ -735,12 +735,75 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     uses = re.findall(r"uses:\s+([^@\s]+)@([^\s#]+)", text)
     assert uses
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, revision in uses)
-    assert "smoke-${{ matrix.arch }}.json" in text
+    assert "smoke-${ARCH}.json" in text
     assert "verify-build-evidence" in text
     assert "promotion_guard_immutable_tag" in text
     assert "CLI_AMD64_FALLBACK_SHA512" in text
     assert "TARGET_DIGEST: ${{ inputs.target_digest }}" in text
     assert "BACKEND: ${{ inputs.backend }}" in text
+
+
+def _run_bodies(text: str) -> list[tuple[int, str]]:
+    """Return (line number, body) for every ``run:`` step in the workflow."""
+    lines = text.splitlines()
+    bodies: list[tuple[int, str]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.lstrip()
+        if not stripped.startswith("run:"):
+            index += 1
+            continue
+        indent = len(line) - len(stripped)
+        body = [stripped.removeprefix("run:").strip()]
+        index += 1
+        while index < len(lines):
+            following = lines[index]
+            if following.strip() and (
+                len(following) - len(following.lstrip()) <= indent
+            ):
+                break
+            body.append(following)
+            index += 1
+        bodies.append((index, "\n".join(body)))
+    return bodies
+
+
+def test_no_workflow_expression_is_interpolated_into_a_shell_body() -> None:
+    """Every ``${{ }}`` value reaches a shell through a quoted env var.
+
+    ``change_plan`` constrains the matrix to five literal backend names, so
+    there is no live injection today, but interpolating an expression straight
+    into a ``run:`` body is exactly the pattern actionlint and zizmor flag and
+    the only thing standing between this workflow and a future template value
+    that is not constrained.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    bodies = _run_bodies(text)
+    assert len(bodies) >= 15
+    offenders = [line for line, body in bodies if "${{" in body]
+    assert offenders == [], f"expressions interpolated into run: at {offenders}"
+
+    # The matrix values the shells need are declared as step-level env, and
+    # every backend/arch value crossing that boundary is re-validated.
+    for declaration in (
+        "BACKEND: ${{ matrix.name }}",
+        "ARCH: ${{ matrix.arch }}",
+        "PLATFORM: ${{ matrix.platform }}",
+        "VERSION: ${{ matrix.version }}",
+        "BUILD_DIGEST: ${{ steps.build.outputs.digest }}",
+    ):
+        assert declaration in text
+    assert "smoke-${ARCH}.json" in text
+    assert 'docker pull --platform "$PLATFORM"' in text
+    assert (
+        len(re.findall(
+            r'\[\[ "\$(?:backend|BACKEND)" =~ '
+            r'\^\(claude\|codex\|cursor\|gemini\|opencode\)\$ \]\]',
+            text,
+        ))
+        == 7
+    )
 
 
 def test_rollback_dispatch_is_not_queued_behind_the_daily_refresh() -> None:

@@ -346,10 +346,13 @@ jobs:
           sbom: true
 
       - name: Smoke the exact base digest before tagging
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         shell: bash
         run: |
           set -euo pipefail
-          digest="${{ steps.build.outputs.digest }}"
+          digest="$BUILD_DIGEST"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           image="${IMAGE_PREFIX}-base@${digest}"
           docker pull "$image"
           command="$(jq -r '.base.smoke_command' /tmp/plan/resolved-runner-versions.json)"
@@ -510,14 +513,19 @@ jobs:
 
       - name: Materialize exact build arguments
         id: args
+        env:
+          BACKEND: ${{ matrix.name }}
+          MERGED_BASE_DIGEST: ${{ needs.merge-base.outputs.digest }}
+          PUBLISHED_BASE_DIGEST: ${{ needs.resolve.outputs.base_digest }}
         shell: bash
         run: |
           set -euo pipefail
-          backend="${{ matrix.name }}"
+          backend="$BACKEND"
+          [[ "$backend" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
           item="$(jq -c --arg backend "$backend" '.backends[$backend]' /tmp/plan/resolved-runner-versions.json)"
-          base_digest="${{ needs.merge-base.outputs.digest }}"
+          base_digest="$MERGED_BASE_DIGEST"
           if [[ -z "$base_digest" ]]; then
-            base_digest="${{ needs.resolve.outputs.base_digest }}"
+            base_digest="$PUBLISHED_BASE_DIGEST"
           fi
           [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
@@ -574,20 +582,31 @@ jobs:
           sbom: true
 
       - name: Smoke exact architecture digest before any tag exists
+        env:
+          BACKEND: ${{ matrix.name }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
         shell: bash
         run: |
           set -euo pipefail
-          digest="${{ steps.build.outputs.digest }}"
-          image="${IMAGE_PREFIX}-${{ matrix.name }}@${digest}"
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$ARCH" =~ ^(amd64|arm64)$ ]]
+          [[ "$PLATFORM" == "linux/${ARCH}" ]]
+          digest="$BUILD_DIGEST"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}@${digest}"
           docker pull "$image"
-          smoke="$(jq -r '.backends["${{ matrix.name }}"].smoke_command' /tmp/plan/resolved-runner-versions.json)"
+          smoke="$(jq -r --arg backend "$BACKEND" \
+            '.backends[$backend].smoke_command' /tmp/plan/resolved-runner-versions.json)"
           output="$(docker run --rm --network none --read-only \
             --tmpfs /tmp:rw,nosuid,nodev \
             --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
             --user 1000:1000 "$image" sh -lc "$smoke")"
-          version="$(jq -r '.backends["${{ matrix.name }}"].version' /tmp/plan/resolved-runner-versions.json)"
+          version="$(jq -r --arg backend "$BACKEND" \
+            '.backends[$backend].version' /tmp/plan/resolved-runner-versions.json)"
           grep -F "$version" <<< "$output"
-          if [[ "${{ matrix.name }}" == codex ]]; then
+          if [[ "$BACKEND" == codex ]]; then
             docker run --rm --network none --read-only \
               --tmpfs /tmp:rw,nosuid,nodev \
               --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
@@ -597,15 +616,15 @@ jobs:
           fi
           mkdir -p /tmp/smoke-evidence
           jq -n \
-            --arg backend "${{ matrix.name }}" \
-            --arg platform "${{ matrix.platform }}" \
+            --arg backend "$BACKEND" \
+            --arg platform "$PLATFORM" \
             --arg digest "$digest" \
             --arg version "$version" \
             '{backend:$backend,platform:$platform,digest:$digest,version:$version}' \
-            > "/tmp/smoke-evidence/smoke-${{ matrix.arch }}.json"
-          if [[ "${{ matrix.name }}" == codex ]]; then
+            > "/tmp/smoke-evidence/smoke-${ARCH}.json"
+          if [[ "$BACKEND" == codex ]]; then
             cp /tmp/codex-models.json \
-              "/tmp/smoke-evidence/codex-models-${{ matrix.arch }}.json"
+              "/tmp/smoke-evidence/codex-models-${ARCH}.json"
           fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -645,6 +664,8 @@ jobs:
           pattern: digests-${{ matrix.name }}-*
           merge-multiple: false
       - name: Select the newest backend digest per architecture
+        env:
+          BACKEND: ${{ matrix.name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -652,7 +673,7 @@ jobs:
             --input-dir /tmp/backend-digest-artifacts \
             --output-dir /tmp/downloads \
             --family backend-digests \
-            --backend "${{ matrix.name }}" \
+            --backend "$BACKEND" \
             --current-attempt "$GITHUB_RUN_ATTEMPT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -663,17 +684,21 @@ jobs:
 
       - name: Create candidate and enforce platform parity
         id: manifest
+        env:
+          BACKEND: ${{ matrix.name }}
+          VERSION: ${{ matrix.version }}
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
           python tools/runner_images.py verify-build-evidence \
             --input-dir /tmp/downloads \
-            --backend "${{ matrix.name }}" \
-            --version "${{ matrix.version }}" \
+            --backend "$BACKEND" \
+            --version "$VERSION" \
             --output /tmp/build-evidence.json
-          candidate="${IMAGE_PREFIX}-${{ matrix.name }}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          candidate="${IMAGE_PREFIX}-${BACKEND}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mapfile -t digest_refs < <(
-            jq -r --arg image "${IMAGE_PREFIX}-${{ matrix.name }}" \
+            jq -r --arg image "${IMAGE_PREFIX}-${BACKEND}" \
               '.digests[] | $image + "@" + .' /tmp/build-evidence.json
           )
           [[ "${#digest_refs[@]}" -eq 2 ]]
@@ -967,21 +992,23 @@ jobs:
         env:
           BACKEND: ${{ inputs.backend }}
           TARGET_DIGEST: ${{ inputs.target_digest }}
+          PLATFORM: ${{ matrix.platform }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
           [[ "$TARGET_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PLATFORM" =~ ^linux/(amd64|arm64)$ ]]
           image="${IMAGE_PREFIX}-${BACKEND}@${TARGET_DIGEST}"
-          docker pull --platform "${{ matrix.platform }}" "$image"
+          docker pull --platform "$PLATFORM" "$image"
           smoke="$(jq -r --arg backend "$BACKEND" \
             '.backends[$backend].smoke_command' "$CATALOG")"
-          docker run --rm --platform "${{ matrix.platform }}" --network none --read-only \
+          docker run --rm --platform "$PLATFORM" --network none --read-only \
             --tmpfs /tmp:rw,nosuid,nodev \
             --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
             --user 1000:1000 "$image" sh -lc "$smoke"
           if [[ "$BACKEND" == codex ]]; then
-            docker run --rm --platform "${{ matrix.platform }}" --network none --read-only \
+            docker run --rm --platform "$PLATFORM" --network none --read-only \
               --tmpfs /tmp:rw,nosuid,nodev \
               --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
               --user 1000:1000 "$image" codex debug models --bundled > /tmp/codex-models.json
