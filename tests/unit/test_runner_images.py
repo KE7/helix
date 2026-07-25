@@ -799,3 +799,22 @@ def test_discovery_resolves_every_build_argument_the_workflow_reads(
 
     # The resolved manifest is what the plan is computed from.
     assert change_plan(resolved, {name: True for name in BACKENDS}) == []
+
+
+def test_cursor_smoke_covers_both_entry_points_mutator_uses() -> None:
+    """`src/helix/mutator.py` invokes `cursor agent`, not `cursor-agent`.
+
+    Only the auth commands in `backends.py` call `cursor-agent` directly; every
+    mutation goes through the `/usr/local/bin/cursor` shim in
+    `docker/cursor.Dockerfile`. Deleting that shim would break every Cursor run
+    inside the sandbox, so the smoke has to exercise both entry points.
+    """
+    mutator = (ROOT / "src" / "helix" / "mutator.py").read_text(encoding="utf-8")
+    assert '"cursor",\n            "agent",' in mutator
+
+    dockerfile = (ROOT / "docker" / "cursor.Dockerfile").read_text(encoding="utf-8")
+    assert "/usr/local/bin/cursor-agent" in dockerfile
+    assert "> /usr/local/bin/cursor" in dockerfile
+
+    smoke = _catalog()["backends"]["cursor"]["smoke_command"]
+    assert smoke == "cursor-agent --version && cursor agent --version"

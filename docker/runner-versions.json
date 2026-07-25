@@ -60,7 +60,7 @@
           "tarball": "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/arm64/agent-cli-package.tar.gz"
         }
       },
-      "smoke_command": "cursor-agent --version",
+      "smoke_command": "cursor-agent --version && cursor agent --version",
       "version": "2026.07.20-8cc9c0b"
     },
     "gemini": {
