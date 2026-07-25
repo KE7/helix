@@ -29,6 +29,7 @@ from tools.runner_images import (
     parse_cursor_installer,
     parse_npm_metadata,
     promote_latest_tags,
+    resolve_cursor_checksums,
     restore_latest_tags,
     select_retry_artifacts,
     validate_catalog,
@@ -467,6 +468,90 @@ def test_immutable_version_tags_are_collision_resistant_and_base_bound() -> None
     item["sha512"] = "a" * 128
     assert first != immutable_tag(item, base)
     assert re.fullmatch(r"[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}", first)
+
+
+def test_cursor_immutable_tag_tracks_content_not_installer_noise() -> None:
+    """A comment-only edit to Cursor's install script must not force a rebuild.
+
+    The installer is never executed in an image; it is parsed for the version
+    and the official artifact URLs. The tarball URLs plus their SHA-256 digests
+    are what actually bind the shipped content, so those — and not the
+    installer hash — decide the immutable tag.
+    """
+    catalog = _catalog()
+    base = catalog["base"]["immutable_tag"]
+    item = copy.deepcopy(catalog["backends"]["cursor"])
+    original = immutable_tag(item, base)
+
+    item["installer_sha256"] = "f" * 64
+    assert immutable_tag(item, base) == original
+
+    item = copy.deepcopy(catalog["backends"]["cursor"])
+    item["platforms"]["arm64"]["sha256"] = "f" * 64
+    assert immutable_tag(item, base) != original
+
+    item = copy.deepcopy(catalog["backends"]["cursor"])
+    item["platforms"]["amd64"]["tarball"] = (
+        "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/x64/other.tar.gz"
+    )
+    assert immutable_tag(item, base) != original
+
+    item = copy.deepcopy(catalog["backends"]["cursor"])
+    item["version"] = "2026.07.21-deadbee"
+    assert immutable_tag(item, base) != original
+
+
+def test_cursor_archives_are_rehashed_only_when_their_identity_moves() -> None:
+    cursor = _catalog()["backends"]["cursor"]
+    tarballs = {
+        platform: cursor["platforms"][platform]["tarball"]
+        for platform in ("amd64", "arm64")
+    }
+    hashed: list[str] = []
+
+    def fetch(url: str) -> str:
+        hashed.append(url)
+        return "e" * 64
+
+    # Unchanged version and unchanged URLs: reuse the reviewed digests and
+    # download nothing.
+    assert resolve_cursor_checksums(
+        tarballs, cursor["version"], cursor, fetch_sha256=fetch
+    ) == {
+        platform: cursor["platforms"][platform]["sha256"]
+        for platform in ("amd64", "arm64")
+    }
+    assert hashed == []
+
+    # A new upstream version derives new URLs, so both archives are re-hashed.
+    moved = {
+        platform: url.replace(cursor["version"], "2026.07.21-deadbee")
+        for platform, url in tarballs.items()
+    }
+    assert resolve_cursor_checksums(
+        moved, "2026.07.21-deadbee", cursor, fetch_sha256=fetch
+    ) == {"amd64": "e" * 64, "arm64": "e" * 64}
+    assert sorted(hashed) == sorted(moved.values())
+
+    # Same version but a URL the catalog never recorded still re-hashes.
+    hashed.clear()
+    tampered = dict(tarballs)
+    tampered["arm64"] = "https://downloads.cursor.com/lab/x/linux/arm64/other.tgz"
+    resolved = resolve_cursor_checksums(
+        tampered, cursor["version"], cursor, fetch_sha256=fetch
+    )
+    assert hashed == [tampered["arm64"]]
+    assert resolved["amd64"] == cursor["platforms"]["amd64"]["sha256"]
+    assert resolved["arm64"] == "e" * 64
+
+    # A catalog whose recorded digest is malformed is never trusted.
+    hashed.clear()
+    broken = copy.deepcopy(cursor)
+    broken["platforms"]["amd64"]["sha256"] = "not-a-digest"
+    resolve_cursor_checksums(
+        tarballs, cursor["version"], broken, fetch_sha256=fetch
+    )
+    assert hashed == [tarballs["amd64"]]
 
 
 def test_checked_in_dockerfile_hashes_fail_closed_on_recipe_drift() -> None:

@@ -534,6 +534,39 @@ def _fetch_sha256(url: str, timeout: float = 180.0, *, sleep: Sleep = time.sleep
     return _retry_get(read, description=f"hash {url}", sleep=sleep)
 
 
+def resolve_cursor_checksums(
+    tarballs: Mapping[str, str],
+    version: str,
+    catalog_item: Mapping[str, Any],
+    *,
+    fetch_sha256: Callable[[str], str] = _fetch_sha256,
+) -> dict[str, str]:
+    """Return the SHA-256 of each discovered Cursor platform archive.
+
+    Cursor's release archives are addressed by version and are
+    content-immutable, so streaming both multi-hundred-megabyte tarballs
+    through a hash every single day proves nothing new once the version has
+    not moved.  A reviewed catalog digest is reused only when the discovered
+    version *and* the derived URL both still match it; any drift at all falls
+    back to a full re-download and re-hash.
+    """
+    recorded = catalog_item.get("platforms")
+    checksums: dict[str, str] = {}
+    for platform in PLATFORMS:
+        tarball = tarballs[platform]
+        cached = recorded.get(platform) if isinstance(recorded, dict) else None
+        if (
+            version == catalog_item.get("version")
+            and isinstance(cached, dict)
+            and cached.get("tarball") == tarball
+            and SHA256_RE.fullmatch(str(cached.get("sha256", "")))
+        ):
+            checksums[platform] = str(cached["sha256"])
+        else:
+            checksums[platform] = fetch_sha256(tarball)
+    return checksums
+
+
 def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, Any]:
     validate_catalog(catalog)
     resolved: dict[str, Any] = {
@@ -656,10 +689,16 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                 }
             )
             if cursor_checksums:
+                checksums = resolve_cursor_checksums(
+                    {
+                        platform: str(cursor["platforms"][platform]["tarball"])
+                        for platform in PLATFORMS
+                    },
+                    str(cursor["version"]),
+                    item,
+                )
                 for platform in PLATFORMS:
-                    cursor["platforms"][platform]["sha256"] = _fetch_sha256(
-                        cursor["platforms"][platform]["tarball"]
-                    )
+                    cursor["platforms"][platform]["sha256"] = checksums[platform]
             cursor.pop("amd64_tarball")
             cursor.pop("arm64_tarball")
             resolved["backends"][name] = cursor
@@ -685,10 +724,17 @@ def _backend_source_identity(item: Mapping[str, Any]) -> dict[str, Any]:
     elif item["kind"] == "npm":
         identity["artifacts"] = item["artifacts"]
     elif item["kind"] == "cursor":
+        # ``installer_sha256`` is deliberately absent.  The installer is
+        # fetched only to discover the version and the official artifact URLs;
+        # it is never executed in an image.  The per-platform tarball URLs and
+        # their SHA-256 digests already bind the exact shipped content, so
+        # including the installer hash would mint a new immutable tag — and a
+        # full two-architecture rebuild and republish of byte-identical CLI
+        # content — for a comment-only edit to Cursor's install script.  The
+        # hash is still recorded in the resolved manifest as evidence.
         identity.update(
             {
                 "installer": item["installer"],
-                "installer_sha256": item["installer_sha256"],
                 "platforms": item["platforms"],
             }
         )

@@ -22,9 +22,17 @@ ambiguous Cursor installer, a prerelease npm `latest`, malformed metadata, a
 timeout, or a host change fails closed.
 
 Cursor's installer is never executed in an image. The workflow hashes the
-installer, extracts its single embedded release version, downloads both
-official Linux architecture archives, and hashes those archives before a
-build. No backend Dockerfile runs `npm install`. Claude, Codex, and OpenCode
+installer, extracts its single embedded release version, and hashes both
+official Linux architecture archives before a build. Those archives are
+addressed by version and are content-immutable, so when the discovered version
+*and* the derived archive URL both still match `docker/runner-versions.json`,
+the reviewed SHA-256 in the catalog is reused instead of re-downloading
+hundreds of megabytes daily; any drift in either falls back to a full
+re-download and re-hash. The installer hash is recorded as evidence but is
+deliberately *not* part of Cursor's immutable tag identity — the archive URLs
+and their digests already bind the shipped content, so a comment-only edit to
+Cursor's install script must not mint a new tag and force a two-architecture
+republish of byte-identical CLI content. No backend Dockerfile runs `npm install`. Claude, Codex, and OpenCode
 extract their verified launcher plus the exact Linux native package selected
 for each architecture. OpenCode's amd64 image includes both its AVX2 and
 baseline binaries and chooses at runtime. Gemini extracts its verified bundle
