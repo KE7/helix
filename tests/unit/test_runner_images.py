@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+import tools.runner_images as runner_images
 from tools.runner_images import (
+    BACKENDS,
     RunnerPlanError,
     _fetch,
     _fetch_sha256,
@@ -304,14 +309,44 @@ def test_catalog_rejects_unknown_backend_kind() -> None:
         validate_catalog(catalog)
 
 
-def test_catalog_rejects_backend_source_or_luna_contract_drift() -> None:
+def test_catalog_rejects_untrusted_or_unmeasured_backend_sources() -> None:
+    """The security win: every download is host-pinned and digest-pinned."""
     catalog = _catalog()
     catalog["backends"]["claude"]["package"] = "lookalike-package"
     with pytest.raises(RunnerPlanError, match="npm package"):
         validate_catalog(catalog)
+
     catalog = _catalog()
-    catalog["backends"]["codex"]["required_reasoning_effort"] = "high"
-    with pytest.raises(RunnerPlanError, match="must be xhigh"):
+    catalog["backends"]["gemini"]["artifacts"]["amd64"][0]["tarball"] = (
+        "https://evil.invalid/node-pty.tgz"
+    )
+    with pytest.raises(RunnerPlanError, match="untrusted upstream URL"):
+        validate_catalog(catalog)
+
+    catalog = _catalog()
+    catalog["backends"]["cursor"]["platforms"]["arm64"]["sha256"] = "nope"
+    with pytest.raises(RunnerPlanError, match="cursor/arm64: invalid sha256"):
+        validate_catalog(catalog)
+
+    catalog = _catalog()
+    catalog["backends"]["opencode"]["artifacts"]["amd64"].pop()
+    with pytest.raises(RunnerPlanError, match="exact artifact packages"):
+        validate_catalog(catalog)
+
+    catalog = _catalog()
+    catalog["base"]["node_image"] = "node:22-bookworm-slim"
+    with pytest.raises(RunnerPlanError, match="digest-pinned"):
+        validate_catalog(catalog)
+
+    catalog = _catalog()
+    catalog["backends"]["codex"]["version"] = "0.144.0"
+    catalog["backends"]["codex"]["platforms"]["amd64"]["package_version"] = (
+        "0.144.0-linux-x64"
+    )
+    catalog["backends"]["codex"]["platforms"]["arm64"]["package_version"] = (
+        "0.144.0-linux-arm64"
+    )
+    with pytest.raises(RunnerPlanError, match="at least 0.145.0"):
         validate_catalog(catalog)
 
 
@@ -643,3 +678,124 @@ def test_workflow_version_smoke_is_boundary_aware() -> None:
     assert '(^|[^0-9A-Za-z.])v?${escaped}' in text
     assert "([^0-9A-Za-z.]|$)" in text
     assert "escaped=" in text
+
+
+def _fake_upstream(catalog: dict) -> Callable[..., bytes]:
+    """Serve npm/cursor responses from the checked-in pins, offline."""
+    releases: dict[str, dict] = {}
+    for name, item in catalog["backends"].items():
+        if item["kind"] in {"npm", "codex"}:
+            optional = {}
+            if item["kind"] == "npm":
+                for group, artifacts in item["artifacts"].items():
+                    for artifact in artifacts:
+                        version = artifact["tarball"].rsplit("-", 1)[1].removesuffix(
+                            ".tgz"
+                        )
+                        optional[artifact["package"]] = version
+                        releases[f"{artifact['package']}@{version}"] = {
+                            "version": version,
+                            "dist": {
+                                "tarball": artifact["tarball"],
+                                "integrity": "sha512-"
+                                + base64.b64encode(
+                                    bytes.fromhex(artifact["sha512"])
+                                ).decode(),
+                            },
+                            "optionalDependencies": (
+                                optional if group == "shared" else {}
+                            ),
+                        }
+            if item["kind"] == "codex":
+                for platform in ("amd64", "arm64"):
+                    source = item["platforms"][platform]
+                    optional[item["package"]] = item["version"]
+                    releases[
+                        f"{item['package']}@{source['package_version']}"
+                    ] = {
+                        "version": source["package_version"],
+                        "dist": {
+                            "tarball": source["tarball"],
+                            "integrity": "sha512-"
+                            + base64.b64encode(
+                                bytes.fromhex(source["sha512"])
+                            ).decode(),
+                        },
+                    }
+            releases[item["package"]] = {
+                "dist-tags": {"latest": item["version"]},
+                "versions": {
+                    item["version"]: {
+                        "dist": {
+                            "tarball": item["tarball"],
+                            "integrity": "sha512-"
+                            + base64.b64encode(
+                                bytes.fromhex(item["sha512"])
+                            ).decode(),
+                        },
+                        "optionalDependencies": optional,
+                    }
+                },
+            }
+
+    cursor = catalog["backends"]["cursor"]
+
+    def fetch(url: str, *args: object, **kwargs: object) -> bytes:
+        if url == "https://cursor.com/install":
+            return (
+                f"VERSION={cursor['version']}\n"
+                f"URL={cursor['platforms']['amd64']['tarball']}\n"
+            ).encode()
+        path = urllib.parse.unquote(url.removeprefix("https://registry.npmjs.org/"))
+        if "/" in path and not path.startswith("@"):
+            package, version = path.rsplit("/", 1)
+            return json.dumps(releases[f"{package}@{version}"]).encode()
+        if path.count("/") == 2:
+            scope, name, version = path.split("/")
+            return json.dumps(releases[f"{scope}/{name}@{version}"]).encode()
+        return json.dumps(releases[path]).encode()
+
+    return fetch
+
+
+def test_discovery_resolves_every_build_argument_the_workflow_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """discover() must emit exactly what the backend job feeds to buildx."""
+    catalog = _catalog()
+    monkeypatch.setattr(runner_images, "_fetch", _fake_upstream(catalog))
+    monkeypatch.setattr(
+        runner_images,
+        "_fetch_sha256",
+        lambda url, *a, **k: pytest.fail(f"unexpected re-hash of {url}"),
+    )
+    resolved = runner_images.discover(catalog, cursor_checksums=True)
+
+    assert sorted(resolved["backends"]) == sorted(BACKENDS)
+    for name in BACKENDS:
+        item = resolved["backends"][name]
+        assert item["version"] == catalog["backends"][name]["version"], name
+        assert item["dockerfile"] == f"docker/{name}.Dockerfile", name
+        assert item["smoke_command"], name
+        if item["kind"] == "npm":
+            for group in item["artifacts"].values():
+                for artifact in group:
+                    assert artifact["tarball"].startswith(
+                        "https://registry.npmjs.org/"
+                    )
+                    assert re.fullmatch(r"[0-9a-f]{128}", artifact["sha512"])
+        if item["kind"] in {"codex", "cursor"}:
+            assert sorted(item["platforms"]) == ["amd64", "arm64"], name
+
+    # Cursor keeps its installer hash as evidence and, because the version did
+    # not move, reuses the reviewed archive checksums instead of re-hashing.
+    cursor = resolved["backends"]["cursor"]
+    assert re.fullmatch(r"[0-9a-f]{64}", cursor["installer_sha256"])
+    for platform in ("amd64", "arm64"):
+        assert (
+            cursor["platforms"][platform]["sha256"]
+            == catalog["backends"]["cursor"]["platforms"][platform]["sha256"]
+        )
+
+    # The resolved manifest is what the plan is computed from.
+    assert change_plan(resolved, {name: True for name in BACKENDS}) == []

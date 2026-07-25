@@ -57,6 +57,8 @@ VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
 SMOKE_COMMAND_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z _.=/&|'\"-]{0,255}$")
 TAG_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}$")
 CURSOR_VERSION_RE = re.compile(r"2026\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+")
+# HELIX needs a Codex that ships gpt-5.6-luna with an xhigh reasoning level.
+CODEX_MINIMUM_VERSION = (0, 145, 0)
 
 T = TypeVar("T")
 Sleep = Callable[[float], None]
@@ -142,6 +144,21 @@ def _optional_dependencies(release: Mapping[str, Any], context: str) -> dict[str
     return dependencies
 
 
+def _require_source(
+    source: object,
+    host: str,
+    digest: re.Pattern[str],
+    digest_field: str,
+    context: str,
+) -> None:
+    """Require a download to be an HTTPS URL on ``host`` plus a content digest."""
+    if not isinstance(source, dict):
+        raise RunnerPlanError(f"{context}: expected an object")
+    _require_url(source.get("tarball") or source.get("url"), host)
+    if not digest.fullmatch(str(source.get(digest_field, ""))):
+        raise RunnerPlanError(f"{context}: invalid {digest_field}")
+
+
 def _require_smoke_command(value: object, context: str) -> str:
     if not isinstance(value, str) or not SMOKE_COMMAND_RE.fullmatch(value):
         raise RunnerPlanError(f"{context}: smoke command is missing or unsafe")
@@ -193,24 +210,27 @@ def base_tag(base: Mapping[str, Any], dockerfile: Path) -> str:
 
 
 def validate_catalog(catalog: dict[str, Any]) -> None:
-    if catalog.get("schema_version") != 1:
+    """Check the checked-in source pins a build actually depends on.
+
+    Scope is deliberately narrow: every value a Dockerfile consumes must be
+    present, come from the expected host over HTTPS, and carry a digest of the
+    right shape.  Anything a build does not read is not validated here.
+    """
+    if catalog.get("schema_version") != 2:
         raise RunnerPlanError("unsupported runner catalog schema")
-    if catalog.get("registry_prefix") not in {
-        None,
-        "ghcr.io/ke7/helix-evo-runner",
-    }:
+    if catalog.get("registry_prefix") != "ghcr.io/ke7/helix-evo-runner":
         raise RunnerPlanError("unexpected runner registry prefix")
     backends = catalog.get("backends")
     if not isinstance(backends, dict) or tuple(sorted(backends)) != tuple(
         sorted(BACKENDS)
     ):
         raise RunnerPlanError("runner catalog must contain exactly the five backends")
+
     base = catalog.get("base")
     if not isinstance(base, dict):
         raise RunnerPlanError("missing base configuration")
-    node_image = base.get("node_image")
-    if not isinstance(node_image, str) or not re.fullmatch(
-        r"node:[^@\s]+@sha256:[0-9a-f]{64}", node_image
+    if not re.fullmatch(
+        r"node:[^@\s]+@sha256:[0-9a-f]{64}", str(base.get("node_image", ""))
     ):
         raise RunnerPlanError("base node image must be digest-pinned")
     if base.get("dockerfile") != "docker/base.Dockerfile":
@@ -223,12 +243,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
     if not isinstance(uv_wheels, dict) or tuple(sorted(uv_wheels)) != PLATFORMS:
         raise RunnerPlanError("base requires exact amd64/arm64 uv wheels")
     for platform in PLATFORMS:
-        wheel = uv_wheels[platform]
-        if not isinstance(wheel, dict):
-            raise RunnerPlanError(f"base uv/{platform}: expected an object")
-        _require_url(wheel.get("url"), "files.pythonhosted.org")
-        if not SHA256_RE.fullmatch(str(wheel.get("sha256", ""))):
-            raise RunnerPlanError(f"base uv/{platform}: invalid sha256")
+        _require_source(uv_wheels[platform], "files.pythonhosted.org", SHA256_RE,
+                        "sha256", f"base uv/{platform}")
     _require_smoke_command(base.get("smoke_command"), "base")
 
     for name in BACKENDS:
@@ -238,17 +254,6 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         version = item.get("version")
         if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
             raise RunnerPlanError(f"{name}: invalid version")
-        promotion_guard = item.get("promotion_guard_version")
-        if not isinstance(promotion_guard, str) or not VERSION_RE.fullmatch(
-            promotion_guard
-        ):
-            raise RunnerPlanError(f"{name}: invalid promotion guard version")
-        promotion_guard_tag = item.get("promotion_guard_immutable_tag")
-        if promotion_guard_tag is not None and (
-            not isinstance(promotion_guard_tag, str)
-            or not TAG_RE.fullmatch(promotion_guard_tag)
-        ):
-            raise RunnerPlanError(f"{name}: invalid promotion guard immutable tag")
         _require_smoke_command(item.get("smoke_command"), name)
         if item.get("dockerfile") != f"docker/{name}.Dockerfile":
             raise RunnerPlanError(f"{name}: unexpected dockerfile")
@@ -260,18 +265,11 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             raise RunnerPlanError(
                 f"{name}: expected backend kind {expected_kind!r}, got {kind!r}"
             )
+
         if kind in {"npm", "codex"}:
             if item.get("package") != NPM_PACKAGES[name]:
                 raise RunnerPlanError(f"{name}: unexpected npm package")
-            _require_url(item.get("tarball"), "registry.npmjs.org")
-            if not SHA512_RE.fullmatch(str(item.get("sha512", ""))):
-                raise RunnerPlanError(f"{name}: invalid sha512")
-            optional_dependencies = item.get("optional_dependencies")
-            if not isinstance(optional_dependencies, dict):
-                raise RunnerPlanError(f"{name}: optional dependency map is required")
-            _optional_dependencies(
-                {"optionalDependencies": optional_dependencies}, f"{name} launcher"
-            )
+            _require_source(item, "registry.npmjs.org", SHA512_RE, "sha512", name)
         if kind == "npm":
             artifacts = item.get("artifacts")
             expected_groups = NPM_ARTIFACT_PACKAGES[name]
@@ -283,6 +281,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 )
             for group, expected_packages in expected_groups.items():
                 group_artifacts = artifacts[group]
+                # Pinning the exact package names is what stops a build from
+                # extracting a package nobody measured.
                 if not isinstance(group_artifacts, list) or tuple(
                     artifact.get("package")
                     for artifact in group_artifacts
@@ -292,70 +292,39 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                         f"{name}/{group}: exact artifact packages are required"
                     )
                 for artifact in group_artifacts:
-                    if not isinstance(artifact, dict):
-                        raise RunnerPlanError(
-                            f"{name}/{group}: artifact must be an object"
-                        )
-                    version_value = artifact.get("version")
-                    if not isinstance(version_value, str):
-                        raise RunnerPlanError(
-                            f"{name}/{group}: artifact version is required"
-                        )
-                    _semver_tuple(version_value)
-                    _require_url(artifact.get("tarball"), "registry.npmjs.org")
-                    if not SHA512_RE.fullmatch(str(artifact.get("sha512", ""))):
-                        raise RunnerPlanError(
-                            f"{name}/{group}: invalid artifact sha512"
-                        )
-                    artifact_optional = artifact.get("optional_dependencies")
-                    if not isinstance(artifact_optional, dict):
-                        raise RunnerPlanError(
-                            f"{name}/{group}: artifact dependency map is required"
-                        )
-                    _optional_dependencies(
-                        {"optionalDependencies": artifact_optional},
-                        f"{name}/{group}/{artifact['package']}",
+                    _require_source(
+                        artifact, "registry.npmjs.org", SHA512_RE, "sha512",
+                        f"{name}/{group}",
                     )
         if kind in {"codex", "cursor"}:
             platforms = item.get("platforms")
             if not isinstance(platforms, dict) or tuple(sorted(platforms)) != PLATFORMS:
                 raise RunnerPlanError(f"{name}: exact amd64/arm64 inputs required")
         if kind == "codex":
-            if _semver_tuple(version) < _semver_tuple(str(item["minimum_version"])):
-                raise RunnerPlanError("codex is below its declared minimum version")
-            if _semver_tuple(str(item["minimum_version"])) < (0, 145, 0):
-                raise RunnerPlanError("codex minimum must remain at least 0.145.0")
-            if item.get("model_catalog_command") != "codex debug models --bundled":
-                raise RunnerPlanError("codex model catalog command changed")
-            if item.get("required_model") != "gpt-5.6-luna":
-                raise RunnerPlanError("codex required model must be gpt-5.6-luna")
-            if item.get("required_reasoning_effort") != "xhigh":
-                raise RunnerPlanError("codex required reasoning effort must be xhigh")
+            # HELIX requires a Codex that ships gpt-5.6-luna with xhigh.
+            if _semver_tuple(version) < CODEX_MINIMUM_VERSION:
+                raise RunnerPlanError("codex must remain at least 0.145.0")
             for platform in PLATFORMS:
+                suffix = "linux-x64" if platform == "amd64" else "linux-arm64"
                 source = item["platforms"][platform]
                 if not isinstance(source, dict):
                     raise RunnerPlanError(f"codex/{platform}: expected an object")
-                suffix = "linux-x64" if platform == "amd64" else "linux-arm64"
                 if source.get("package_version") != f"{version}-{suffix}":
                     raise RunnerPlanError(
                         f"codex/{platform}: unexpected platform package version"
                     )
-                _require_url(source.get("tarball"), "registry.npmjs.org")
-                if not SHA512_RE.fullmatch(str(source.get("sha512", ""))):
-                    raise RunnerPlanError(f"codex/{platform}: invalid sha512")
-        elif kind == "cursor":
+                _require_source(
+                    source, "registry.npmjs.org", SHA512_RE, "sha512",
+                    f"codex/{platform}",
+                )
+        if kind == "cursor":
             if item.get("installer") != "https://cursor.com/install":
                 raise RunnerPlanError("cursor: unexpected installer")
-            _require_url(item.get("installer"), "cursor.com")
-            if not SHA256_RE.fullmatch(str(item.get("installer_sha256", ""))):
-                raise RunnerPlanError("cursor: invalid installer sha256")
             for platform in PLATFORMS:
-                source = item["platforms"][platform]
-                if not isinstance(source, dict):
-                    raise RunnerPlanError(f"cursor/{platform}: expected an object")
-                _require_url(source.get("tarball"), "downloads.cursor.com")
-                if not SHA256_RE.fullmatch(str(source.get("sha256", ""))):
-                    raise RunnerPlanError(f"cursor/{platform}: invalid sha256")
+                _require_source(
+                    item["platforms"][platform], "downloads.cursor.com", SHA256_RE,
+                    "sha256", f"cursor/{platform}",
+                )
 
 
 def parse_npm_metadata(package: str, payload: bytes) -> dict[str, Any]:
@@ -584,24 +553,11 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
             npm.update(
                 {
                     key: item[key]
-                    for key in (
-                        "kind",
-                        "dockerfile",
-                        "smoke_command",
-                        "minimum_version",
-                        "promotion_guard_version",
-                        "promotion_guard_immutable_tag",
-                        "model_catalog_command",
-                        "required_model",
-                        "required_reasoning_effort",
-                    )
-                    if key in item
+                    for key in ("kind", "dockerfile", "smoke_command")
                 }
             )
             if item["kind"] == "codex":
-                if _semver_tuple(npm["version"]) < _semver_tuple(
-                    str(item["minimum_version"])
-                ):
+                if _semver_tuple(npm["version"]) < CODEX_MINIMUM_VERSION:
                     raise RunnerPlanError("upstream codex is below required minimum")
                 npm["platforms"] = {}
                 for platform, suffix in (
@@ -669,10 +625,6 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                     "kind": "cursor",
                     "dockerfile": item["dockerfile"],
                     "installer": item["installer"],
-                    "promotion_guard_version": item["promotion_guard_version"],
-                    "promotion_guard_immutable_tag": item[
-                        "promotion_guard_immutable_tag"
-                    ],
                     "smoke_command": item["smoke_command"],
                     "platforms": {
                         platform: {
