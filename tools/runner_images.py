@@ -122,8 +122,10 @@ def _optional_dependencies(release: Mapping[str, Any], context: str) -> dict[str
         raise RunnerPlanError(f"{context}: optional dependencies must be an object")
     dependencies: dict[str, str] = {}
     for package, version in sorted(raw.items()):
-        if not isinstance(package, str) or not package or any(
-            ord(character) <= 0x20 for character in package
+        if (
+            not isinstance(package, str)
+            or not package
+            or any(ord(character) <= 0x20 for character in package)
         ):
             raise RunnerPlanError(f"{context}: invalid optional package name")
         if not isinstance(version, str):
@@ -243,8 +245,13 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
     if not isinstance(uv_wheels, dict) or tuple(sorted(uv_wheels)) != PLATFORMS:
         raise RunnerPlanError("base requires exact amd64/arm64 uv wheels")
     for platform in PLATFORMS:
-        _require_source(uv_wheels[platform], "files.pythonhosted.org", SHA256_RE,
-                        "sha256", f"base uv/{platform}")
+        _require_source(
+            uv_wheels[platform],
+            "files.pythonhosted.org",
+            SHA256_RE,
+            "sha256",
+            f"base uv/{platform}",
+        )
     _require_smoke_command(base.get("smoke_command"), "base")
 
     for name in BACKENDS:
@@ -283,17 +290,24 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 group_artifacts = artifacts[group]
                 # Pinning the exact package names is what stops a build from
                 # extracting a package nobody measured.
-                if not isinstance(group_artifacts, list) or tuple(
-                    artifact.get("package")
-                    for artifact in group_artifacts
-                    if isinstance(artifact, dict)
-                ) != expected_packages:
+                if (
+                    not isinstance(group_artifacts, list)
+                    or tuple(
+                        artifact.get("package")
+                        for artifact in group_artifacts
+                        if isinstance(artifact, dict)
+                    )
+                    != expected_packages
+                ):
                     raise RunnerPlanError(
                         f"{name}/{group}: exact artifact packages are required"
                     )
                 for artifact in group_artifacts:
                     _require_source(
-                        artifact, "registry.npmjs.org", SHA512_RE, "sha512",
+                        artifact,
+                        "registry.npmjs.org",
+                        SHA512_RE,
+                        "sha512",
                         f"{name}/{group}",
                     )
         if kind in {"codex", "cursor"}:
@@ -314,7 +328,10 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                         f"codex/{platform}: unexpected platform package version"
                     )
                 _require_source(
-                    source, "registry.npmjs.org", SHA512_RE, "sha512",
+                    source,
+                    "registry.npmjs.org",
+                    SHA512_RE,
+                    "sha512",
                     f"codex/{platform}",
                 )
         if kind == "cursor":
@@ -322,8 +339,11 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 raise RunnerPlanError("cursor: unexpected installer")
             for platform in PLATFORMS:
                 _require_source(
-                    item["platforms"][platform], "downloads.cursor.com", SHA256_RE,
-                    "sha256", f"cursor/{platform}",
+                    item["platforms"][platform],
+                    "downloads.cursor.com",
+                    SHA256_RE,
+                    "sha256",
+                    f"cursor/{platform}",
                 )
 
 
@@ -481,7 +501,9 @@ def _fetch(url: str, timeout: float = 30.0, *, sleep: Sleep = time.sleep) -> byt
     return payload
 
 
-def _fetch_sha256(url: str, timeout: float = 180.0, *, sleep: Sleep = time.sleep) -> str:
+def _fetch_sha256(
+    url: str, timeout: float = 180.0, *, sleep: Sleep = time.sleep
+) -> str:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "helix-runner-version-audit/1"},
@@ -551,10 +573,7 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                 )
             )
             npm.update(
-                {
-                    key: item[key]
-                    for key in ("kind", "dockerfile", "smoke_command")
-                }
+                {key: item[key] for key in ("kind", "dockerfile", "smoke_command")}
             )
             if item["kind"] == "codex":
                 if _semver_tuple(npm["version"]) < CODEX_MINIMUM_VERSION:
@@ -598,9 +617,7 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                                 f"{name}: upstream optional dependency closure "
                                 f"does not contain {artifact_package}"
                             )
-                        artifact_encoded = urllib.parse.quote(
-                            artifact_package, safe=""
-                        )
+                        artifact_encoded = urllib.parse.quote(artifact_package, safe="")
                         artifact_metadata = parse_npm_release(
                             artifact_package,
                             artifact_version,

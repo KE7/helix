@@ -241,9 +241,7 @@ def test_cursor_archives_are_rehashed_only_when_their_identity_moves() -> None:
     hashed.clear()
     broken = copy.deepcopy(cursor)
     broken["platforms"]["amd64"]["sha256"] = "not-a-digest"
-    resolve_cursor_checksums(
-        tarballs, cursor["version"], broken, fetch_sha256=fetch
-    )
+    resolve_cursor_checksums(tarballs, cursor["version"], broken, fetch_sha256=fetch)
     assert hashed == [tarballs["amd64"]]
 
 
@@ -443,7 +441,9 @@ def test_base_tag_binds_the_whole_base_recipe(tmp_path: Path) -> None:
     assert base_tag(base, dockerfile) == original
 
     for mutate in (
-        lambda b: b.__setitem__("node_image", "node:22-bookworm-slim@sha256:" + "a" * 64),
+        lambda b: b.__setitem__(
+            "node_image", "node:22-bookworm-slim@sha256:" + "a" * 64
+        ),
         lambda b: b["uv_wheels"]["arm64"].__setitem__("sha256", "b" * 64),
         lambda b: b.__setitem__("uv_version", "0.11.8"),
         lambda b: b.__setitem__("debian_snapshot", "20260721T000000Z"),
@@ -492,9 +492,7 @@ def test_forced_rebuild_never_overwrites_a_published_version_tag() -> None:
 
     # Forcing something that was never published just uses the plain version.
     fresh = change_plan(catalog, {}, force=True, run_id="90210")
-    assert [entry["tag"] for entry in fresh] == [
-        entry["version"] for entry in fresh
-    ]
+    assert [entry["tag"] for entry in fresh] == [entry["version"] for entry in fresh]
 
     # A replacement tag requires a usable run id rather than silently colliding.
     with pytest.raises(RunnerPlanError, match="numeric run id"):
@@ -603,7 +601,7 @@ def test_registry_absence_check_is_fail_closed() -> None:
     # Only a definitive "no such tag" is absence; everything else aborts.
     assert "grep -qiE 'not found|manifest unknown|no such manifest|404'" in text
     assert "registry inspection failed for" in text
-    helper = text[text.index("tag_exists() {") : text.index("base_tag=\"$(")]
+    helper = text[text.index("tag_exists() {") : text.index('base_tag="$(')]
     assert helper.count("exit 1") == 1
     assert "return 1" in helper
 
@@ -622,7 +620,7 @@ def test_rollback_dispatch_is_not_queued_behind_the_nightly_build() -> None:
     assert "inputs.operation == 'rollback'" in rollback
     assert "verify-platforms" in rollback
     assert "gh attestation verify" in rollback
-    assert 'for platform in linux/amd64 linux/arm64' in rollback
+    assert "for platform in linux/amd64 linux/arm64" in rollback
     assert '[[ "$actual" == "$TARGET_DIGEST" ]]' in rollback
 
 
@@ -663,10 +661,12 @@ def test_no_workflow_expression_is_interpolated_into_a_shell_body() -> None:
     ):
         assert declaration in text
     assert (
-        len(re.findall(
-            r'\[\[ "\$BACKEND" =~ \^\(claude\|codex\|cursor\|gemini\|opencode\)\$ \]\]',
-            text,
-        ))
+        len(
+            re.findall(
+                r'\[\[ "\$BACKEND" =~ \^\(claude\|codex\|cursor\|gemini\|opencode\)\$ \]\]',
+                text,
+            )
+        )
         == 4
     )
 
@@ -675,7 +675,7 @@ def test_workflow_version_smoke_is_boundary_aware() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     # A bare substring match would let a CLI reporting 1.10 satisfy 1.1.
     assert 'grep -F "$version"' not in text
-    assert '(^|[^0-9A-Za-z.])v?${escaped}' in text
+    assert "(^|[^0-9A-Za-z.])v?${escaped}" in text
     assert "([^0-9A-Za-z.]|$)" in text
     assert "escaped=" in text
 
@@ -689,8 +689,8 @@ def _fake_upstream(catalog: dict) -> Callable[..., bytes]:
             if item["kind"] == "npm":
                 for group, artifacts in item["artifacts"].items():
                     for artifact in artifacts:
-                        version = artifact["tarball"].rsplit("-", 1)[1].removesuffix(
-                            ".tgz"
+                        version = (
+                            artifact["tarball"].rsplit("-", 1)[1].removesuffix(".tgz")
                         )
                         optional[artifact["package"]] = version
                         releases[f"{artifact['package']}@{version}"] = {
@@ -710,9 +710,7 @@ def _fake_upstream(catalog: dict) -> Callable[..., bytes]:
                 for platform in ("amd64", "arm64"):
                     source = item["platforms"][platform]
                     optional[item["package"]] = item["version"]
-                    releases[
-                        f"{item['package']}@{source['package_version']}"
-                    ] = {
+                    releases[f"{item['package']}@{source['package_version']}"] = {
                         "version": source["package_version"],
                         "dist": {
                             "tarball": source["tarball"],
@@ -729,9 +727,7 @@ def _fake_upstream(catalog: dict) -> Callable[..., bytes]:
                         "dist": {
                             "tarball": item["tarball"],
                             "integrity": "sha512-"
-                            + base64.b64encode(
-                                bytes.fromhex(item["sha512"])
-                            ).decode(),
+                            + base64.b64encode(bytes.fromhex(item["sha512"])).decode(),
                         },
                         "optionalDependencies": optional,
                     }
@@ -780,9 +776,7 @@ def test_discovery_resolves_every_build_argument_the_workflow_reads(
         if item["kind"] == "npm":
             for group in item["artifacts"].values():
                 for artifact in group:
-                    assert artifact["tarball"].startswith(
-                        "https://registry.npmjs.org/"
-                    )
+                    assert artifact["tarball"].startswith("https://registry.npmjs.org/")
                     assert re.fullmatch(r"[0-9a-f]{128}", artifact["sha512"])
         if item["kind"] in {"codex", "cursor"}:
             assert sorted(item["platforms"]) == ["amd64", "arm64"], name
