@@ -1,261 +1,188 @@
 # Mutation-agent runner supply chain
 
-The five mutation-agent images are built from `docker/runner-versions.json`.
-That file is the reviewable source manifest; it records the exact upstream
-version, download URL, and digest used by a local build. The protected workflow
-also retains its freshly resolved manifest and change plan for 90 days.
+HELIX runs each mutation agent inside a per-backend container image. This
+document covers how those images are built, what is pinned, and how to change
+or roll back what they run.
 
-## Upstream sources
+## What is pinned, and why
 
-| Backend | Authoritative version/install source | Checked-in version |
-| --- | --- | --- |
-| Claude Code | [`@anthropic-ai/claude-code` on npm](https://www.npmjs.com/package/@anthropic-ai/claude-code) | 2.1.218 |
-| Codex | [`@openai/codex` on npm](https://www.npmjs.com/package/@openai/codex) and the matching OpenAI platform package | 0.145.0 |
-| Cursor Agent | [Cursor's official installer](https://cursor.com/install), parsed only for the version and official artifact URL | 2026.07.20-8cc9c0b |
-| Gemini CLI | [`@google/gemini-cli` on npm](https://www.npmjs.com/package/@google/gemini-cli) | 0.52.0 |
-| OpenCode | [`opencode-ai` on npm](https://www.npmjs.com/package/opencode-ai) | 1.18.4 |
+This is the point of the whole pipeline. No image ever runs
+`npm install -g <cli>@latest` or `curl https://cursor.com/install | bash`.
+Every byte that lands in an image is fetched from an expected host over HTTPS
+and verified against a checksum recorded in `docker/runner-versions.json`
+before it is unpacked:
 
-The resolver accepts npm tarballs only from `registry.npmjs.org`, Cursor
-artifacts only from `downloads.cursor.com`, HTTPS only, stable versions only,
-and SHA-512 (npm) or SHA-256 (Cursor) digests of the expected length. An
-ambiguous Cursor installer, a prerelease npm `latest`, malformed metadata, a
-timeout, or a host change fails closed.
-
-Cursor's installer is never executed in an image. The workflow hashes the
-installer, extracts its single embedded release version, and hashes both
-official Linux architecture archives before a build. Those archives are
-addressed by version and are content-immutable, so when the discovered version
-*and* the derived archive URL both still match `docker/runner-versions.json`,
-the reviewed SHA-256 in the catalog is reused instead of re-downloading
-hundreds of megabytes daily; any drift in either falls back to a full
-re-download and re-hash. The installer hash is recorded as evidence but is
-deliberately *not* part of Cursor's immutable tag identity — the archive URLs
-and their digests already bind the shipped content, so a comment-only edit to
-Cursor's install script must not mint a new tag and force a two-architecture
-republish of byte-identical CLI content.
-
-No backend Dockerfile runs `npm install`. Claude, Codex, and OpenCode
-extract their verified launcher plus the exact Linux native package selected
-for each architecture. OpenCode's amd64 image includes both its AVX2 and
-baseline binaries and chooses at runtime. Gemini extracts its verified bundle
-plus the exact `@lydell/node-pty` selector and architecture package; its
-documented child-process fallback remains available without the unneeded
-optional keychain and legacy PTY modules. The manifest records the launcher's
-full optional-dependency map and every extracted child package URL and SHA-512
-digest, so neither a build nor a same-version upstream republish can introduce
-an unmeasured package.
-
-The base is pinned to
-`node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`,
-Debian snapshot `20260720T000000Z`, and `uv==0.11.7`. The two `uv` wheels have
-architecture-specific `files.pythonhosted.org` URLs and SHA-256 digests.
-The CA-less slim base bootstraps from the snapshot's HTTP endpoint while APT
-still verifies Debian's signed release metadata; all later artifact downloads
-use HTTPS plus the recorded content digest.
-Changing any base recipe input requires a new base recipe tag; backend
-immutable tags are bound to that tag, the backend Dockerfile hash, and every
-backend artifact URL/checksum by a digest suffix. The resulting OCI digest,
-BuildKit SBOM, and signed provenance remain the byte-exact release identity.
-
-## Daily publication sequence
-
-`.github/workflows/publish-runners.yml` runs daily and by
-`workflow_dispatch`. Refresh and rollback each get their own repository-wide
-concurrency group, both serialized with `cancel-in-progress: false`, so an
-emergency rollback dispatch is never queued behind a long in-flight daily
-refresh. A scheduled event carries no inputs and resolves to the refresh
-group.
-
-1. Resolve all five official upstreams and validate their checksums.
-2. Derive a collision-resistant `cli-<version>-r<recipe-hash>` tag bound to
-   the exact base and backend recipes, including Dockerfile and upstream
-   source digests. An existing tag counts as published only after exact
-   two-platform manifest validation and GitHub attestation verification.
-   Otherwise the workflow fails closed. Build absent versions on native
-   amd64 (`ubuntu-latest`) and arm64 (`ubuntu-24.04-arm`) runners.
-3. Push each architecture by an otherwise untagged digest. Run the backend
-   version smoke on that exact digest, natively, with no network, a read-only
-   root filesystem, private tmpfs HOME, uid/gid 1000, and no credential mount.
-4. For Codex, additionally parse `codex debug models --bundled` and require the
-   exact model slug `gpt-5.6-luna` with ordered reasoning levels
-   `low, medium, high, xhigh, max`. This proves that `xhigh` is present and is
-   second-highest in the image's shipped catalog.
-5. Merge only two architecture-qualified smoke records, verify exact runtime
-   platform parity, and attach BuildKit SBOM/provenance plus an OIDC-signed
-   GitHub build-provenance attestation. The serialized publication step then
-   queries GHCR directly: only an authenticated HTTP 404 is treated as an
-   absent tag; authorization, network, and registry errors fail closed.
-   Collision validation and tag creation happen together after attestation,
-   followed by an exact digest re-read. Every v4 workflow artifact name also
-   includes `run_attempt`, so “re-run all jobs” writes a new artifact family
-   instead of colliding with the prior attempt's immutable artifacts. Consumers
-   download all attempt-qualified artifacts from the same workflow run and
-   select the newest producer at or before the current attempt independently
-   per architecture or backend. This lets a failed-job or specific-job rerun
-   reuse successful sibling artifacts from an earlier attempt while replacing
-   only producers that reran. Selection fails closed on future, duplicate,
-   missing, unexpected, symlinked, or file-colliding artifact inputs, and on
-   symlinked or canonically overlapping input/output roots before any copy.
-6. Preflight all eligible convenience-tag targets together. Durable
-   `rollback-before-<run>-<attempt>` tags are created before mutation, and the
-   complete rollback plan is retained before any `latest` tag moves. A single
-   promotion job moves `latest` tags and compensates by restoring every
-   already-moved tag if a later move fails. If retaining the committed ledger
-   fails after a move, the same compensation restores the previous tags; the
-   pre-move evidence and durable rollback tags remain.
-
-The tag-move step replaces its shell with the transaction process so GitHub's
-cancel signals reach it directly. It treats ordinary command errors, `SIGINT`,
-and `SIGTERM` as compensated failures, restores attempted moves in reverse, and
-re-reads every restored digest. [GitHub's cancellation
-reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
-states that the runner first sends `SIGINT`, waits 7.5 seconds, then sends
-`SIGTERM`, waits 2.5 seconds, and may then kill the process tree; the server
-also has a five-minute forced-cancellation limit. A forced kill cannot be made
-transactionally recoverable by an in-process handler. The workflow therefore
-retains the complete plan and creates rollback tags before mutation, so that
-hard-cancellation recovery remains evidence-backed even when the process is not
-allowed to finish compensation.
-
-## Promotion is a separate, maintainer-approved phase
-
-Publishing an immutable tag is automatic. Moving the mutable `latest` tag that
-`src/helix/backends.py` actually runs is not. Each backend in
-`docker/runner-versions.json` carries two maintainer-owned guard fields:
-
-| Field | Meaning |
+| Layer | Pin |
 | --- | --- |
-| `promotion_guard_version` | The upstream CLI version a maintainer has reviewed |
-| `promotion_guard_immutable_tag` | The exact `cli-<version>-r<recipe-hash>` tag that review covered, or `null` for "nothing approved" |
+| Base OS | `node:22-bookworm-slim` by `sha256:` digest |
+| Base packages | Debian snapshot `20260720T000000Z` — a frozen apt archive |
+| `uv` | version-pinned wheel URL + SHA-256, per architecture |
+| Backend CLI | npm tarball URL + SHA-512, or Cursor archive URL + SHA-256 |
+| Native subpackages | exact package name, tarball URL, and SHA-512 per architecture |
 
-`latest` moves only when the freshly built immutable tag equals
-`promotion_guard_immutable_tag` **and** the discovered version equals
-`promotion_guard_version`. Both comparisons are exact string equality, so a
-same-version content republish (a new launcher tarball, a changed Dockerfile,
-or a new base recipe) mints a different immutable tag and cannot inherit the
-previous approval. The immutable image is still published and retained;
-`latest` keeps pointing at the last approved image.
+`tools/runner_images.py validate` enforces that shape: npm downloads only from
+`registry.npmjs.org`, Cursor archives only from `downloads.cursor.com`, HTTPS
+only, stable versions only, digests of the correct length, and the exact set of
+native subpackages each backend is allowed to extract — so neither a build nor
+a same-version upstream republish can introduce an unmeasured package.
 
-Every backend currently ships `promotion_guard_immutable_tag: null` and a guard
-version behind its pinned version, so **no automatic promotion happens today**.
-That is deliberate. To keep it from rotting silently, the `resolve` job emits a
-`promotion_stalled` output, a `::warning::` annotation per stalled backend, and
-a step-summary table naming each backend, its built immutable tag, and its
-stale guard values; the same detail is retained in `promotion-stall.json`
-inside the `resolved-runner-plan-*` artifact.
+Cursor's installer is downloaded but never executed. It is parsed for its
+single embedded release version and the official archive URLs, which are then
+fetched and checksummed directly. Because those archives are version-addressed
+and immutable, an unchanged version reuses the reviewed checksum in the catalog
+instead of re-downloading hundreds of megabytes every night; any drift in the
+version or the URL falls back to a full re-download and re-hash.
 
-To approve a promotion, a maintainer:
+The base bootstraps apt over `http://snapshot.debian.org` because the slim base
+has no CA certificates yet — `ca-certificates` is installed *by* that same apt
+run. APT still verifies Debian's signed release metadata, and the residual risk
+of being served an older signed snapshot is bounded by the pinned timestamp.
+Every later download uses HTTPS plus a recorded content digest.
 
-1. Reads the stall table (or runs
-   `python tools/runner_images.py image-tag --catalog docker/runner-versions.json --backend <backend>`)
-   to get the built immutable tag.
-2. Verifies the built image — its digest, SBOM, provenance attestation, and
-   the smoke evidence retained by the run.
-3. Sets that backend's `promotion_guard_version` to the pinned `version` and
-   `promotion_guard_immutable_tag` to the built tag in
-   `docker/runner-versions.json`, and merges the change to `main` through
-   normal review.
+## When images get rebuilt
 
-The next scheduled run then sees an exact guard match and promotes that one
-backend inside the compensated transaction described above. Reverting the guard
-fields is enough to stop future promotions; it does not move `latest` back, for
-which the manual `rollback` dispatch exists.
+**Nightly is the check cadence, not the release cadence.** The scheduled run
+asks each upstream for its latest release and compares it against the registry:
 
-Pull requests cannot invoke this publishing workflow. Its discovery, change
-matrix, collision policy, platform parity, model-catalog contract, and static
-no-PR trigger are covered by offline unit tests in
-`tests/unit/test_runner_images.py`.
-
-Schedule and manual events are accepted only in `KE7/helix` on its reviewed
-`main` default branch. Every third-party action is pinned to a full commit SHA.
-Attestation verification requires this workflow path, `refs/heads/main`, and
-GitHub-hosted runners. Release builds do not consume shared GitHub Actions build
-caches, so a cache produced by another ref cannot bypass a download-integrity
-step.
-
-Only build jobs and promotion jobs receive `packages: write`; discovery has
-read-only package access. Only attestation jobs receive `id-token: write` and
-`attestations: write`. Only the failure notifier receives `issues: write`.
-A build or merge failure prevents the single promotion job from starting. A
-promotion-time failure triggers compensating rollback and creates or updates
-one repository issue; so does a *cancelled* run, whose issue points at the
-retained rollback plan and the durable `rollback-before-*` tags.
-
-The per-backend build matrix uses `fail-fast: false` so every architecture
-reports its own result, but `merge-backends` intentionally has no `always()`.
-One failed leg therefore makes the whole `build-backends` job `failure` and
-skips publication for **all** backends, not just the one that failed. That is a
-deliberate fail-closed trade-off: publishing the backends whose legs happened
-to pass would mean releasing from a run that could not be fully validated. Cost
-of the trade-off is a one-day delay for unaffected backends; re-running the
-failed job recovers the successful siblings' artifacts from the earlier attempt
-instead of rebuilding them.
-
-## Rollback and retention
-
-Evidence retention is split by what the artifact is for. Audit-critical
-artifacts — the resolved plan and stall report, the promotion plan, the
-rollback ledger and manual rollback plan, and the per-backend release records —
-are retained for `AUDIT_RETENTION_DAYS` (90). The high-volume per-architecture
-build digest and smoke evidence (five backends times two architectures, every
-day) is retained for `BUILD_EVIDENCE_RETENTION_DAYS` (30), which is still long
-enough to cover a selective rerun of the same workflow run.
-
-Before every convenience-tag promotion, a 90-day rollback-plan artifact records
-the previous and new digests, immutable tag, durable rollback tag, workflow run
-ID, and attempt. A successful move additionally records a committed ledger. If
-that second upload fails, the workflow restores the prior `latest` digest and
-fails. Immutable version and rollback tags are not deleted. A manual rollback
-uses the same prepare-retain-move-retain-compensate transaction: it accepts an
-explicit backend and `sha256:` manifest digest only through validated
-environment variables, runs the smoke (and Codex catalog assertion) on both
-native architectures, verifies the target's GitHub attestation and exact
-amd64/arm64 parity, creates another durable rollback tag, and retains its plan
-before moving `latest`. The workflow has no image-delete step and never removes
-runner images.
-
-## Local Codex proof
-
-Use new task-specific tags; do not reuse `latest` or any preserved tag. Build
-the exact base recipe first, record its local content ID, then pass its unique
-task tag to the backend build. (BuildKit does not portably accept a daemon
-image ID in `FROM`; the protected workflow instead uses the registry digest
-directly.)
-
-```sh
-docker build \
-  --file docker/base.Dockerfile \
-  --tag helix-runner-base:luna-proof \
-  .
-
-docker image inspect --format '{{.Id}}' \
-  helix-runner-base:luna-proof
-docker build \
-  --build-arg BASE_IMAGE=helix-runner-base:luna-proof \
-  --tag helix-runner-codex:0.145.0-luna-proof \
-  --file docker/codex.Dockerfile .
-
-docker run --rm --network none --read-only \
-  --tmpfs /tmp:rw,nosuid,nodev \
-  --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
-  --user 1000:1000 \
-  helix-runner-codex:0.145.0-luna-proof codex --version
-
-docker run --rm --network none --read-only \
-  --tmpfs /tmp:rw,nosuid,nodev \
-  --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
-  --user 1000:1000 \
-  helix-runner-codex:0.145.0-luna-proof \
-  codex debug models --bundled > /tmp/codex-models.json
-
-python tools/runner_images.py verify-codex-catalog \
-  --input /tmp/codex-models.json
+```
+resolved_version = discover upstream latest        (npm dist-tags / cursor installer)
+if <image>:<resolved_version> already exists  ->  skip
+else                                          ->  build and publish
 ```
 
-This proves the exact Dockerfiles and source pins on the host's native
-architecture. It is not the workflow's published multiarch artifact: only the
-registry index digest, its two child digests, and its attestations can establish
-that identity. The catalog proof is offline and does not claim that an
-authenticated service request succeeded. A service canary, if required, must
-use a dedicated disposable credential source and a metered request; it must
-never mount a shared `helix-auth-*` volume.
+If nothing shipped upstream, the run is a clean no-op. A backend is rebuilt
+because Codex released 0.146.0, not because a day passed.
+
+Tags published per backend:
+
+- `ghcr.io/ke7/helix-evo-runner-<backend>:<upstream-version>` — e.g. `codex:0.145.0`
+- `ghcr.io/ke7/helix-evo-runner-<backend>:latest` — moved on a successful publish
+
+and for the shared runtime:
+
+- `ghcr.io/ke7/helix-evo-runner-base:node22-uv<uv>-snapshot<date>-r<6hex>`
+- `ghcr.io/ke7/helix-evo-runner-base:latest`
+
+The base tag's six-hex suffix covers the whole base recipe — `base.Dockerfile`
+itself plus the node digest, snapshot, uv version, and wheel digests. Without
+it, editing `base.Dockerfile` would leave the tag unchanged, the "already
+published?" check would answer *yes*, and every backend would silently build
+`FROM` a stale base.
+
+## Publication sequence
+
+`.github/workflows/publish-runners.yml` is six jobs:
+
+1. **`guard`** — accept only `KE7/helix` on its `main` default branch, from a
+   schedule or a manual dispatch. Pull requests and forks cannot publish.
+2. **`resolve`** — discover upstream versions, ask the registry what already
+   exists, emit the build matrix. Absence is decided by `imagetools inspect`,
+   where *only* a definitive "no such tag" counts as absent; an auth, network,
+   rate-limit, or server error aborts rather than being mistaken for "nothing
+   published yet".
+3. **`base`** — build and publish the base runtime, only when its recipe tag is
+   absent (or `force` is set).
+4. **`backend`** — one job per changed backend. Each builds **both**
+   architectures in a single `--platform linux/amd64,linux/arm64` invocation
+   under QEMU. This is cheap because the Dockerfiles only download, verify, and
+   untar prebuilt binaries — nothing compiles.
+5. **`rollback`** — manual dispatch only.
+6. **`notify`** — file or update one labelled issue on failure *or*
+   cancellation.
+
+Jobs 3 and 4 both follow the same order, and the order is the point:
+
+```
+build and push BY DIGEST (no tag exists yet)
+  -> assert the index really has linux/amd64 and linux/arm64
+  -> smoke each architecture: --network none, --read-only, private tmpfs HOME,
+     uid/gid 1000, no credential mount, and an anchored version assertion
+  -> for Codex, also parse `codex debug models --bundled` and require the exact
+     slug gpt-5.6-luna with reasoning levels low, medium, high, xhigh, max
+  -> attach BuildKit SBOM + provenance and an OIDC-signed GitHub attestation
+  -> verify that attestation
+  -> only now create the :<version> and :latest tags, then read them back
+```
+
+**No tag ever names an image that has not passed both smokes.** A failed or
+cancelled run leaves every previously published tag exactly where it was.
+
+Because absence is decided by a tag's existence rather than by verifying its
+attestation, the discovery path trusts that only this workflow can write to
+these repositories — it holds the only `packages: write` grant. Attestation is
+still generated and verified on every publish and every rollback.
+
+The per-backend matrix uses `fail-fast: false`, so one backend failing does not
+block the others; each backend publishes independently.
+
+## Changing a recipe
+
+Editing a Dockerfile, bumping the Debian snapshot, or moving a uv wheel is not
+an upstream release, so the nightly check will not notice it. Ship it with a
+manual dispatch:
+
+```
+workflow_dispatch(operation: refresh, force: true)                   # everything
+workflow_dispatch(operation: refresh, force: true, backend: codex)   # one backend
+```
+
+A base recipe change is picked up automatically, because the base tag is bound
+to the recipe.
+
+If the upstream version has already been published, a forced rebuild does
+**not** overwrite that tag. It publishes `<version>-r<run_id>` and moves
+`latest` there, so `codex:0.145.0` always means the bytes it meant on the day
+it was first published. This matters because a version tag may already be
+pinned in someone's `sandbox.image` config.
+
+## Rolling back
+
+Immutable version tags and every prior digest are never deleted, so a rollback
+is a retag against something the registry already holds:
+
+```
+workflow_dispatch(operation: rollback, backend: codex, digest: sha256:...)
+```
+
+The job validates the backend against the five literals and the digest against
+`^sha256:[0-9a-f]{64}$`, asserts both platforms are present, verifies the
+target's GitHub attestation, runs the smoke on both architectures, moves
+`latest`, and reads it back. No ledger, no compensating transaction, no signal
+handling — there is nothing to compensate, because nothing is destroyed.
+
+Rollback has its own concurrency group, so an incident is never queued behind
+an in-flight nightly build.
+
+## Local proof
+
+Build the base first, then a backend against it:
+
+```sh
+docker build --file docker/base.Dockerfile --tag helix-runner-base:proof .
+
+docker build \
+  --build-arg BASE_IMAGE=helix-runner-base:proof \
+  --file docker/codex.Dockerfile \
+  --tag helix-runner-codex:proof .
+
+docker run --rm --network none --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev \
+  --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
+  --user 1000:1000 \
+  helix-runner-codex:proof codex debug models --bundled > /tmp/codex-models.json
+
+python tools/runner_images.py verify-codex-catalog --input /tmp/codex-models.json
+```
+
+Use a task-specific tag; do not reuse `latest`. This proves the Dockerfiles and
+source pins on your native architecture only — the published multi-arch index
+digest and its attestations are the real release identity.
+
+## Tests
+
+`tests/unit/test_runner_images.py` covers all of this offline: catalog
+validation, upstream discovery against captured fixtures, the change-detection
+policy, the forced-rebuild tag rule, the base-tag recipe binding, and static
+assertions on the workflow itself (no PR trigger, SHA-pinned actions, no
+workflow expression interpolated into a shell body, and no tag created before
+the smokes pass).
