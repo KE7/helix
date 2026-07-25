@@ -22,6 +22,7 @@ from tools.runner_images import (
     _fetch,
     _fetch_sha256,
     base_tag,
+    build_arguments,
     change_plan,
     main as runner_images_main,
     parse_cursor_installer,
@@ -812,3 +813,65 @@ def test_cursor_smoke_covers_both_entry_points_mutator_uses() -> None:
 
     smoke = _catalog()["backends"]["cursor"]["smoke_command"]
     assert smoke == "cursor-agent --version && cursor agent --version"
+
+
+def test_build_arguments_cover_every_arg_each_dockerfile_declares() -> None:
+    """Every ARG a Dockerfile reads must be supplied, and nothing else.
+
+    This logic used to be a jq case statement inside the workflow, where a
+    missing key silently produced an empty build argument and the image was
+    built from whatever the Dockerfile's default happened to be.
+    """
+    catalog = _catalog()
+    base_image = "ghcr.io/ke7/helix-evo-runner-base@sha256:" + "a" * 64
+    for name, item in catalog["backends"].items():
+        arguments = dict(
+            entry.split("=", 1) for entry in build_arguments(item, base_image)
+        )
+        dockerfile = (ROOT / "docker" / f"{name}.Dockerfile").read_text()
+        declared = set(re.findall(r"^ARG ([A-Z0-9_]+)", dockerfile, re.M))
+        declared -= {"TARGETARCH"}  # supplied by buildx, not by us
+        missing = declared - set(arguments)
+        assert not missing, f"{name}: unsupplied build args {sorted(missing)}"
+        assert arguments["BASE_IMAGE"] == base_image
+        assert arguments["CLI_VERSION"] == item["version"]
+        # Absent artifacts must be explicit empty strings, never omitted: the
+        # Dockerfile ARG defaults are stale pinned URLs, so an omitted key
+        # would silently build from the previous release.
+        if name == "opencode":
+            assert arguments["CLI_AMD64_FALLBACK_TARBALL"].endswith(".tgz")
+        elif name in {"claude", "gemini"}:
+            assert arguments["CLI_AMD64_FALLBACK_TARBALL"] == ""
+        # Only Gemini has a shared artifact.
+        if name == "gemini":
+            assert "node-pty" in arguments["CLI_SHARED_TARBALL"]
+        elif name in {"claude", "opencode"}:
+            assert arguments["CLI_SHARED_TARBALL"] == ""
+
+
+def test_build_arguments_fail_closed_on_a_floating_base_or_injected_value() -> None:
+    catalog = _catalog()
+    item = catalog["backends"]["codex"]
+    for unpinned in (
+        "ghcr.io/ke7/helix-evo-runner-base:latest",
+        "ghcr.io/ke7/helix-evo-runner-base",
+        "docker.io/ke7/helix-evo-runner-base@sha256:" + "a" * 64,
+        "ghcr.io/ke7/helix-evo-runner-base@sha256:nope",
+    ):
+        with pytest.raises(RunnerPlanError, match="digest-pinned"):
+            build_arguments(item, unpinned)
+
+    # A newline in any value would inject an extra build argument into the
+    # heredoc the workflow writes to $GITHUB_OUTPUT.
+    injected = copy.deepcopy(item)
+    injected["platforms"]["amd64"]["sha512"] = "a" * 128 + "\nCLI_SHA512=evil"
+    with pytest.raises(RunnerPlanError, match="control byte"):
+        build_arguments(
+            injected, "ghcr.io/ke7/helix-evo-runner-base@sha256:" + "a" * 64
+        )
+
+    with pytest.raises(RunnerPlanError, match="unknown backend kind"):
+        build_arguments(
+            {"kind": "rogue", "version": "1.0.0"},
+            "ghcr.io/ke7/helix-evo-runner-base@sha256:" + "a" * 64,
+        )

@@ -361,7 +361,6 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
-          item="$(jq -c --arg b "$BACKEND" '.backends[$b]' /tmp/plan/resolved.json)"
           # Pin the base by digest, resolved from its recipe-bound tag.
           base_digest="$(docker buildx imagetools inspect \
             "${IMAGE_PREFIX}-base:${BASE_TAG}" \
@@ -369,40 +368,10 @@ jobs:
           [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           {
             echo 'value<<HELIX_ARGS'
-            echo "BASE_IMAGE=${IMAGE_PREFIX}-base@${base_digest}"
-            echo "CLI_VERSION=$(jq -r '.version' <<< "$item")"
-            case "$(jq -r '.kind' <<< "$item")" in
-              npm)
-                echo "CLI_TARBALL=$(jq -r '.tarball' <<< "$item")"
-                echo "CLI_SHA512=$(jq -r '.sha512' <<< "$item")"
-                echo "CLI_SHARED_TARBALL=$(jq -r '.artifacts.shared[0].tarball // \"\"' <<< "$item")"
-                echo "CLI_SHARED_SHA512=$(jq -r '.artifacts.shared[0].sha512 // \"\"' <<< "$item")"
-                echo "CLI_AMD64_TARBALL=$(jq -r '.artifacts.amd64[0].tarball' <<< "$item")"
-                echo "CLI_AMD64_SHA512=$(jq -r '.artifacts.amd64[0].sha512' <<< "$item")"
-                echo "CLI_AMD64_FALLBACK_TARBALL=$(jq -r '.artifacts.amd64[1].tarball // \"\"' <<< "$item")"
-                echo "CLI_AMD64_FALLBACK_SHA512=$(jq -r '.artifacts.amd64[1].sha512 // \"\"' <<< "$item")"
-                echo "CLI_ARM64_TARBALL=$(jq -r '.artifacts.arm64[0].tarball' <<< "$item")"
-                echo "CLI_ARM64_SHA512=$(jq -r '.artifacts.arm64[0].sha512' <<< "$item")"
-                ;;
-              codex)
-                echo "CLI_TARBALL=$(jq -r '.tarball' <<< "$item")"
-                echo "CLI_SHA512=$(jq -r '.sha512' <<< "$item")"
-                echo "CLI_AMD64_TARBALL=$(jq -r '.platforms.amd64.tarball' <<< "$item")"
-                echo "CLI_AMD64_SHA512=$(jq -r '.platforms.amd64.sha512' <<< "$item")"
-                echo "CLI_ARM64_TARBALL=$(jq -r '.platforms.arm64.tarball' <<< "$item")"
-                echo "CLI_ARM64_SHA512=$(jq -r '.platforms.arm64.sha512' <<< "$item")"
-                ;;
-              cursor)
-                echo "CLI_AMD64_TARBALL=$(jq -r '.platforms.amd64.tarball' <<< "$item")"
-                echo "CLI_AMD64_SHA256=$(jq -r '.platforms.amd64.sha256' <<< "$item")"
-                echo "CLI_ARM64_TARBALL=$(jq -r '.platforms.arm64.tarball' <<< "$item")"
-                echo "CLI_ARM64_SHA256=$(jq -r '.platforms.arm64.sha256' <<< "$item")"
-                ;;
-              *)
-                echo "unknown backend kind" >&2
-                exit 2
-                ;;
-            esac
+            python tools/runner_images.py build-args \
+              --resolved /tmp/plan/resolved.json \
+              --backend "$BACKEND" \
+              --base-image "${IMAGE_PREFIX}-base@${base_digest}"
             echo HELIX_ARGS
           } >> "$GITHUB_OUTPUT"
 

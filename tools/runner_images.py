@@ -667,6 +667,65 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
     return resolved
 
 
+def build_arguments(item: Mapping[str, Any], base_image: str) -> list[str]:
+    """Return the exact ``KEY=VALUE`` build arguments for one backend.
+
+    This lived as a fifty-line ``jq`` case statement inside the workflow, where
+    it could not be tested and where a value containing a newline would have
+    injected an extra build argument into the heredoc. Every value is checked
+    here instead.
+    """
+    if not re.fullmatch(
+        r"ghcr\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}", base_image
+    ):
+        raise RunnerPlanError(f"base image must be digest-pinned: {base_image!r}")
+    kind = item.get("kind")
+    arguments = {
+        "BASE_IMAGE": base_image,
+        "CLI_VERSION": str(item["version"]),
+    }
+    if kind in {"npm", "codex"}:
+        arguments["CLI_TARBALL"] = str(item["tarball"])
+        arguments["CLI_SHA512"] = str(item["sha512"])
+    if kind == "npm":
+        # Absent artifacts are emitted as explicit empty strings rather than
+        # omitted. The Dockerfiles carry stale pinned URLs as ARG defaults, so
+        # an omitted key would silently build from last release's tarball
+        # instead of failing.
+        artifacts = item["artifacts"]
+        shared = artifacts.get("shared") or []
+        arguments["CLI_SHARED_TARBALL"] = str(shared[0]["tarball"]) if shared else ""
+        arguments["CLI_SHARED_SHA512"] = str(shared[0]["sha512"]) if shared else ""
+        for platform in PLATFORMS:
+            entries = artifacts[platform]
+            upper = platform.upper()
+            arguments[f"CLI_{upper}_TARBALL"] = str(entries[0]["tarball"])
+            arguments[f"CLI_{upper}_SHA512"] = str(entries[0]["sha512"])
+            if platform == "amd64":
+                # OpenCode ships an AVX2 build plus a baseline fallback.
+                fallback = entries[1] if len(entries) > 1 else None
+                arguments["CLI_AMD64_FALLBACK_TARBALL"] = (
+                    str(fallback["tarball"]) if fallback else ""
+                )
+                arguments["CLI_AMD64_FALLBACK_SHA512"] = (
+                    str(fallback["sha512"]) if fallback else ""
+                )
+    elif kind in {"codex", "cursor"}:
+        digest_field = "sha512" if kind == "codex" else "sha256"
+        for platform in PLATFORMS:
+            source = item["platforms"][platform]
+            upper = platform.upper()
+            arguments[f"CLI_{upper}_TARBALL"] = str(source["tarball"])
+            arguments[f"CLI_{upper}_{digest_field.upper()}"] = str(source[digest_field])
+    else:
+        raise RunnerPlanError(f"unknown backend kind {kind!r}")
+
+    for key, value in arguments.items():
+        if any(ord(character) < 0x20 for character in value):
+            raise RunnerPlanError(f"{key}: build argument contains a control byte")
+    return [f"{key}={value}" for key, value in arguments.items()]
+
+
 def change_plan(
     resolved: Mapping[str, Any],
     published: Mapping[str, Any],
@@ -776,6 +835,10 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--run-id", default="")
     base = subparsers.add_parser("base-tag")
     base.add_argument("--catalog", type=Path, required=True)
+    args_command = subparsers.add_parser("build-args")
+    args_command.add_argument("--resolved", type=Path, required=True)
+    args_command.add_argument("--backend", choices=BACKENDS, required=True)
+    args_command.add_argument("--base-image", required=True)
     catalog = subparsers.add_parser("verify-codex-catalog")
     catalog.add_argument("--input", type=Path, required=True)
     platforms = subparsers.add_parser("verify-platforms")
@@ -806,6 +869,12 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=args.run_id,
                 ),
             )
+        elif args.command == "build-args":
+            resolved = load_json(args.resolved)
+            for argument in build_arguments(
+                resolved["backends"][args.backend], args.base_image
+            ):
+                print(argument)
         elif args.command == "base-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)
@@ -824,6 +893,12 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=args.run_id,
                 ),
             )
+        elif args.command == "build-args":
+            resolved = load_json(args.resolved)
+            for argument in build_arguments(
+                resolved["backends"][args.backend], args.base_image
+            ):
+                print(argument)
         elif args.command == "base-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)
