@@ -60,6 +60,7 @@ from helix.executor import (
     run_evaluator,
     run_evaluator_batch,
 )
+from helix.image_provenance import record_image_provenance
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
@@ -2087,6 +2088,19 @@ def _run_evolution_impl(
                 candidates[cid] = cand
                 frontier.add(cand, result)
         _sync_frontier_state()
+
+    # ------------------------------------------------------------------
+    # Container-image provenance
+    # ------------------------------------------------------------------
+    # Resolve the runner / sidecar tags to their immutable digests ONCE, here:
+    # after ``preflight_auth`` and ``start_evaluator_sidecar`` (both of which
+    # ``docker run`` their image, so it is present locally by now) and before
+    # the first proposal.  ``mutator`` re-resolves the sandbox image on every
+    # proposal; shelling out to Docker there would be a subprocess per
+    # mutation.  Metadata only -- it cannot raise, and a failed lookup is
+    # recorded as an explicit reason rather than allowed to disturb the run.
+    if record_image_provenance(state.image_provenance, config):
+        _save_state(state)
 
     # ------------------------------------------------------------------
     # Seed evaluation
@@ -4183,6 +4197,15 @@ def _run_evolution_impl(
     # ------------------------------------------------------------------
     # Return best
     # ------------------------------------------------------------------
+    # Second and final provenance pass.  Roles that were still unresolved at
+    # run start because Docker had not pulled the image yet (``auth = "env"``
+    # never runs the preflight container, so nothing pulls the runner image
+    # before the first proposal) are resolved now that the run has used them.
+    # Roles already attributed are left alone; a tag that moved mid-run is
+    # recorded as drift rather than overwriting the digest the run began on.
+    if record_image_provenance(state.image_provenance, config):
+        _save_state(state)
+
     # Permanent summary after the live display disappears
     render_budget(state.budget, config.evolution)
     render_frontier_table(frontier, frontier._results)
