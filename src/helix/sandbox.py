@@ -887,6 +887,7 @@ def _run_docker(
     redaction_values: Sequence[str] = (),
     redaction_policy: _DiagnosticRedactionPolicy | None = None,
     diagnostic_output: bool = False,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return _run_docker_process(
         args,
@@ -894,6 +895,7 @@ def _run_docker(
         redaction_values=redaction_values,
         redaction_policy=redaction_policy,
         diagnostic_output=diagnostic_output,
+        timeout=timeout,
     )
 
 
