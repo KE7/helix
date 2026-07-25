@@ -772,8 +772,8 @@ def inspect_ghcr_tag(
     )
     try:
         with opener(manifest_request, timeout=30.0) as response:
-            manifest = response.read()
-            digest = response.headers.get("Docker-Content-Digest", "")
+            manifest: bytes = response.read()
+            digest: str = response.headers.get("Docker-Content-Digest", "")
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
