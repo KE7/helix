@@ -14,13 +14,12 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -970,135 +969,6 @@ def inspect_ghcr_tag(
     return digest
 
 
-def _retry_artifact_roots(
-    input_dir: Path,
-    output_dir: Path,
-) -> tuple[Path, Path]:
-    if input_dir.is_symlink():
-        raise RunnerPlanError("retry artifact has a symlinked input root")
-    if not input_dir.is_dir():
-        raise RunnerPlanError("retry artifact input root is not a directory")
-    if output_dir.is_symlink():
-        raise RunnerPlanError("retry artifact has a symlinked output root")
-    if output_dir.exists() and not output_dir.is_dir():
-        raise RunnerPlanError("retry artifact output root is not a directory")
-
-    input_root = input_dir.resolve(strict=True)
-    output_root = output_dir.resolve(strict=False)
-    if (
-        input_root == output_root
-        or input_root in output_root.parents
-        or output_root in input_root.parents
-    ):
-        raise RunnerPlanError("retry artifact input and output roots overlap")
-    return input_root, output_root
-
-
-def select_retry_artifacts(
-    input_dir: Path,
-    output_dir: Path,
-    *,
-    family: str,
-    current_attempt: int,
-    backend: str | None = None,
-    required: Sequence[str] = (),
-) -> dict[str, int]:
-    if current_attempt < 1:
-        raise RunnerPlanError("current workflow attempt must be positive")
-    input_root, output_root = _retry_artifact_roots(input_dir, output_dir)
-    # Every matcher names its groups: indexing by position (or worse, by
-    # ``match.lastindex``) silently picks the wrong group the moment a pattern
-    # gains an alternation or a grouping parenthesis.
-    if family == "resolved-plan":
-        matcher = re.compile(r"^resolved-runner-plan-(?P<attempt>[0-9]+)$")
-        has_logical = False
-        expected = {"plan"}
-    elif family == "base-digests":
-        matcher = re.compile(
-            r"^digests-base-(?P<logical>amd64|arm64)-(?P<attempt>[0-9]+)$"
-        )
-        has_logical = True
-        expected = set(PLATFORMS)
-    elif family == "backend-digests":
-        if backend not in BACKENDS:
-            raise RunnerPlanError("backend artifact selection needs a valid backend")
-        matcher = re.compile(
-            rf"^digests-{re.escape(backend)}-"
-            r"(?P<logical>amd64|arm64)-(?P<attempt>[0-9]+)$"
-        )
-        has_logical = True
-        expected = set(PLATFORMS)
-    elif family == "releases":
-        matcher = re.compile(
-            r"^release-(?P<logical>claude|codex|cursor|gemini|opencode)-"
-            r"(?P<attempt>[0-9]+)$"
-        )
-        has_logical = True
-        expected = set(required)
-        if not expected or not expected.issubset(BACKENDS):
-            raise RunnerPlanError("release selection needs valid required backends")
-    else:
-        raise RunnerPlanError(f"unknown retry artifact family: {family}")
-
-    selected: dict[str, tuple[int, Path]] = {}
-    for artifact in sorted(input_dir.iterdir()):
-        if not artifact.is_dir() or artifact.is_symlink():
-            raise RunnerPlanError(f"unexpected artifact entry: {artifact.name}")
-        match = matcher.fullmatch(artifact.name)
-        if match is None:
-            raise RunnerPlanError(
-                f"artifact name does not match {family}: {artifact.name}"
-            )
-        logical = match.group("logical") if has_logical else "plan"
-        attempt = int(match.group("attempt"))
-        if attempt > current_attempt:
-            raise RunnerPlanError("artifact comes from a future workflow attempt")
-        previous = selected.get(logical)
-        if previous is None or attempt > previous[0]:
-            selected[logical] = (attempt, artifact)
-        elif attempt == previous[0]:
-            raise RunnerPlanError(
-                f"duplicate {logical} artifacts for attempt {attempt}"
-            )
-    if set(selected) != expected:
-        missing = sorted(expected - set(selected))
-        extra = sorted(set(selected) - expected)
-        raise RunnerPlanError(
-            f"incomplete {family} artifacts; missing={missing}, extra={extra}"
-        )
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise RunnerPlanError("retry artifact output directory is not empty")
-
-    copies: list[tuple[Path, Path]] = []
-    targets: set[Path] = set()
-    for logical in sorted(selected):
-        _, artifact = selected[logical]
-        for source in sorted(artifact.rglob("*")):
-            if source.is_symlink():
-                raise RunnerPlanError("artifact contains a symbolic link")
-            if not source.is_file():
-                continue
-            relative = source.relative_to(artifact)
-            if relative in targets:
-                raise RunnerPlanError(f"artifact file collision: {relative.name}")
-            targets.add(relative)
-            copies.append((source, relative))
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if (
-        input_dir.is_symlink()
-        or input_dir.resolve(strict=True) != input_root
-        or output_dir.is_symlink()
-        or output_dir.resolve(strict=True) != output_root
-    ):
-        raise RunnerPlanError("retry artifact roots changed during selection")
-    for source, relative in copies:
-        target = output_dir / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-    return {logical: selected[logical][0] for logical in sorted(selected)}
-
-
 def verify_codex_catalog(payload: dict[str, Any]) -> None:
     models = payload.get("models")
     if not isinstance(models, list):
@@ -1142,47 +1012,6 @@ def verify_platforms(payload: dict[str, Any]) -> None:
         )
 
 
-def verify_build_evidence(
-    directory: Path,
-    *,
-    backend: str,
-    version: str,
-) -> list[str]:
-    """Validate the two native smoke records and return their digests.
-
-    Artifact filenames are architecture-qualified so downloading multiple
-    artifacts into one directory cannot overwrite evidence.  The merge job
-    trusts only the JSON fields after this exact-set validation; it never
-    derives a digest from an uploaded filename.
-    """
-    if backend not in BACKENDS:
-        raise RunnerPlanError(f"unknown backend {backend!r}")
-    records: dict[str, str] = {}
-    paths = sorted(directory.glob("smoke-*.json"))
-    if len(paths) != 2:
-        raise RunnerPlanError(
-            f"{backend}: expected exactly two smoke records, found {len(paths)}"
-        )
-    for path in paths:
-        record = load_json(path)
-        if record.get("backend") != backend or record.get("version") != version:
-            raise RunnerPlanError(f"{path}: backend/version mismatch")
-        platform = record.get("platform")
-        digest = record.get("digest")
-        if platform not in {"linux/amd64", "linux/arm64"}:
-            raise RunnerPlanError(f"{path}: invalid platform {platform!r}")
-        if not isinstance(digest, str) or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}", digest
-        ):
-            raise RunnerPlanError(f"{path}: invalid digest")
-        if platform in records:
-            raise RunnerPlanError(f"{backend}: duplicate evidence for {platform}")
-        records[platform] = digest
-    if set(records) != {"linux/amd64", "linux/arm64"}:
-        raise RunnerPlanError(f"{backend}: incomplete platform evidence")
-    return [records["linux/amd64"], records["linux/arm64"]]
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1210,25 +1039,9 @@ def _parser() -> argparse.ArgumentParser:
     inspect_tag = subparsers.add_parser("inspect-ghcr-tag")
     inspect_tag.add_argument("--image", required=True)
     inspect_tag.add_argument("--tag", required=True)
-    select_artifacts = subparsers.add_parser("select-retry-artifacts")
-    select_artifacts.add_argument("--input-dir", type=Path, required=True)
-    select_artifacts.add_argument("--output-dir", type=Path, required=True)
-    select_artifacts.add_argument(
-        "--family",
-        choices=("resolved-plan", "base-digests", "backend-digests", "releases"),
-        required=True,
-    )
-    select_artifacts.add_argument("--current-attempt", type=int, required=True)
-    select_artifacts.add_argument("--backend", choices=BACKENDS)
-    select_artifacts.add_argument("--required-json", default="[]")
     tag = subparsers.add_parser("image-tag")
     tag.add_argument("--catalog", type=Path, required=True)
     tag.add_argument("--backend", choices=BACKENDS, required=True)
-    evidence = subparsers.add_parser("verify-build-evidence")
-    evidence.add_argument("--input-dir", type=Path, required=True)
-    evidence.add_argument("--backend", required=True)
-    evidence.add_argument("--version", required=True)
-    evidence.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -1274,25 +1087,6 @@ def main(argv: list[str] | None = None) -> int:
                 token=os.environ.get("GH_TOKEN", ""),
             )
             print(digest or "absent")
-        elif args.command == "select-retry-artifacts":
-            required = json.loads(args.required_json)
-            if not isinstance(required, list) or not all(
-                isinstance(item, str) for item in required
-            ):
-                raise RunnerPlanError("required artifact names must be a JSON array")
-            print(
-                json.dumps(
-                    select_retry_artifacts(
-                        args.input_dir,
-                        args.output_dir,
-                        family=args.family,
-                        current_attempt=args.current_attempt,
-                        backend=args.backend,
-                        required=required,
-                    ),
-                    sort_keys=True,
-                )
-            )
         elif args.command == "image-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)
@@ -1301,19 +1095,6 @@ def main(argv: list[str] | None = None) -> int:
                     catalog["backends"][args.backend],
                     str(catalog["base"]["immutable_tag"]),
                 )
-            )
-        elif args.command == "verify-build-evidence":
-            write_json(
-                args.output,
-                {
-                    "backend": args.backend,
-                    "version": args.version,
-                    "digests": verify_build_evidence(
-                        args.input_dir,
-                        backend=args.backend,
-                        version=args.version,
-                    ),
-                },
             )
         else:  # pragma: no cover - argparse enforces the command set
             raise AssertionError(args.command)
