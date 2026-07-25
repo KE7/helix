@@ -370,6 +370,42 @@ def test_current_promotion_guard_approves_only_exact_content_identity() -> None:
     assert changed["promotion_approved"] is False
 
 
+def test_shipped_catalog_deliberately_approves_no_promotion() -> None:
+    """The current posture is intent, not accident.
+
+    Every backend ships an unset ``promotion_guard_immutable_tag`` and a guard
+    version behind the pinned version, so ``latest`` never moves automatically.
+    A maintainer approves a promotion by updating both guard fields.  This test
+    fails the moment that posture changes, forcing the change to be reviewed.
+    """
+    catalog = _catalog()
+    plan = change_plan(catalog, {})
+    assert [entry["name"] for entry in plan["changed"]] == sorted(
+        catalog["backends"]
+    )
+    assert all(entry["promotion_approved"] is False for entry in plan["changed"])
+    for name, item in catalog["backends"].items():
+        assert item["promotion_guard_immutable_tag"] is None, name
+        assert item["promotion_guard_version"] != item["version"], name
+
+
+def test_workflow_makes_a_stalled_promotion_gate_loud_and_machine_readable() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "promotion_stalled: ${{ steps.plan.outputs.promotion_stalled }}" in text
+    assert 'echo "promotion_stalled=${promotion_stalled}" >> "$GITHUB_OUTPUT"' in text
+    assert "::warning title=Runner promotion stalled::" in text
+    assert "### Convenience-tag promotion is stalled" in text
+    assert "/tmp/promotion-stall.json" in text
+    # The stall report must be retained with the rest of the plan evidence.
+    retained = text[
+        text.index("- name: Retain the exact resolved build plan") :
+    ].split("retention-days:", 1)[0]
+    assert "/tmp/promotion-stall.json" in retained
+    # Reporting must not weaken the gate: promotion still requires an exact
+    # guard match computed by the planner and re-checked in the promote job.
+    assert 'select(.promotion_approved == true)' in text
+
+
 def test_codex_catalog_requires_luna_and_exact_second_highest_xhigh() -> None:
     catalog = {
         "models": [

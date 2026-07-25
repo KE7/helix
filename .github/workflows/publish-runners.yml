@@ -90,6 +90,7 @@ jobs:
       changed: ${{ steps.plan.outputs.changed }}
       builds: ${{ steps.plan.outputs.builds }}
       promotions: ${{ steps.plan.outputs.promotions }}
+      promotion_stalled: ${{ steps.plan.outputs.promotion_stalled }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -213,6 +214,48 @@ jobs:
           jq . /tmp/runner-plan.json >> "$GITHUB_STEP_SUMMARY"
           jq . /tmp/promotions.json >> "$GITHUB_STEP_SUMMARY"
 
+          # A green run must not look identical whether the two-phase promotion
+          # gate is working or has silently rotted.  The gate itself is NOT
+          # relaxed here: this only reports, loudly and machine-readably, that
+          # new immutable images were published while `latest` stayed put.
+          jq --slurpfile resolved /tmp/resolved-runner-versions.json '
+            [ .changed[]
+              | select(.promotion_approved != true)
+              | .guard_version =
+                  $resolved[0].backends[.name].promotion_guard_version
+              | .guard_immutable_tag =
+                  $resolved[0].backends[.name].promotion_guard_immutable_tag
+            ]' /tmp/runner-plan.json > /tmp/promotion-stall.json
+          approved="$(jq '[.changed[] | select(.promotion_approved == true)] | length' \
+            /tmp/runner-plan.json)"
+          approved=$(( approved + $(jq 'length' /tmp/promotions.json) ))
+          stalled_count="$(jq 'length' /tmp/promotion-stall.json)"
+          promotion_stalled=false
+          if [[ "$approved" -eq 0 ]] && [[ "$stalled_count" -gt 0 ]]; then
+            promotion_stalled=true
+            {
+              echo '### Convenience-tag promotion is stalled'
+              echo
+              echo "${stalled_count} backend(s) published a new immutable tag, but none"
+              echo 'matched its maintainer-approved promotion guard, so no `latest` tag'
+              echo 'will move and HELIX keeps running the previously promoted images.'
+              echo
+              echo '| Backend | Built version | Built immutable tag | Guard version | Guard immutable tag |'
+              echo '| --- | --- | --- | --- | --- |'
+              jq -r '.[] | "| \(.name) | \(.version) | `\(.immutable_tag)` | \(.guard_version) | \(.guard_immutable_tag // "(unset)") |"' \
+                /tmp/promotion-stall.json
+              echo
+              echo 'To approve a promotion, set `promotion_guard_version` and'
+              echo '`promotion_guard_immutable_tag` for that backend in'
+              echo '`docker/runner-versions.json` to the built values above and merge.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r annotation; do
+              echo "::warning title=Runner promotion stalled::${annotation}"
+            done < <(jq -r '.[] | "\(.name): built \(.immutable_tag) for version \(.version), but the promotion guard still names version \(.guard_version) and immutable tag \(.guard_immutable_tag // "(unset)"); latest will not move until docker/runner-versions.json is updated"' \
+              /tmp/promotion-stall.json)
+          fi
+          echo "promotion_stalled=${promotion_stalled}" >> "$GITHUB_OUTPUT"
+
       - name: Retain the exact resolved build plan
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -222,6 +265,7 @@ jobs:
             /tmp/published.json
             /tmp/runner-plan.json
             /tmp/promotions.json
+            /tmp/promotion-stall.json
           if-no-files-found: error
           retention-days: ${{ fromJSON(env.EVIDENCE_RETENTION_DAYS) }}
 
