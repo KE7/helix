@@ -104,14 +104,49 @@ retains the complete plan and creates rollback tags before mutation, so that
 hard-cancellation recovery remains evidence-backed even when the process is not
 allowed to finish compensation.
 
-The daily job deliberately does **not** move `latest` when a CLI is newer than
-the checked-in HOME-layout measurement in `src/helix/backend_layout.py`, or
-when any launcher, native artifact, Dockerfile, or base-recipe input differs
-from that measurement. Promotion requires both the measured version and the
-exact measured immutable recipe tag. A same-version content republish therefore
-gets a different immutable tag and cannot inherit approval. The immutable image
-is retained, but `latest` remains the known rollback image until the layout is
-remeasured and both guard fields are updated.
+## Promotion is a separate, maintainer-approved phase
+
+Publishing an immutable tag is automatic. Moving the mutable `latest` tag that
+`src/helix/backends.py` actually runs is not. Each backend in
+`docker/runner-versions.json` carries two maintainer-owned guard fields:
+
+| Field | Meaning |
+| --- | --- |
+| `promotion_guard_version` | The upstream CLI version a maintainer has reviewed |
+| `promotion_guard_immutable_tag` | The exact `cli-<version>-r<recipe-hash>` tag that review covered, or `null` for "nothing approved" |
+
+`latest` moves only when the freshly built immutable tag equals
+`promotion_guard_immutable_tag` **and** the discovered version equals
+`promotion_guard_version`. Both comparisons are exact string equality, so a
+same-version content republish (a new launcher tarball, a changed Dockerfile,
+or a new base recipe) mints a different immutable tag and cannot inherit the
+previous approval. The immutable image is still published and retained;
+`latest` keeps pointing at the last approved image.
+
+Every backend currently ships `promotion_guard_immutable_tag: null` and a guard
+version behind its pinned version, so **no automatic promotion happens today**.
+That is deliberate. To keep it from rotting silently, the `resolve` job emits a
+`promotion_stalled` output, a `::warning::` annotation per stalled backend, and
+a step-summary table naming each backend, its built immutable tag, and its
+stale guard values; the same detail is retained in `promotion-stall.json`
+inside the `resolved-runner-plan-*` artifact.
+
+To approve a promotion, a maintainer:
+
+1. Reads the stall table (or runs
+   `python tools/runner_images.py image-tag --catalog docker/runner-versions.json --backend <backend>`)
+   to get the built immutable tag.
+2. Verifies the built image — its digest, SBOM, provenance attestation, and
+   the smoke evidence retained by the run.
+3. Sets that backend's `promotion_guard_version` to the pinned `version` and
+   `promotion_guard_immutable_tag` to the built tag in
+   `docker/runner-versions.json`, and merges the change to `main` through
+   normal review.
+
+The next scheduled run then sees an exact guard match and promotes that one
+backend inside the compensated transaction described above. Reverting the guard
+fields is enough to stop future promotions; it does not move `latest` back, for
+which the manual `rollback` dispatch exists.
 
 Pull requests cannot invoke this publishing workflow. Its discovery, change
 matrix, collision policy, platform parity, model-catalog contract, and static
