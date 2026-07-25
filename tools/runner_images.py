@@ -445,10 +445,11 @@ def parse_cursor_installer(payload: bytes) -> dict[str, str]:
 def _is_retryable(exc: OSError) -> bool:
     """Report whether an idempotent GET may be safely repeated.
 
-    Only transient conditions qualify.  A 404 is a *meaningful answer* for
-    ``inspect_ghcr_tag`` (the tag is absent) and 401/403 mean the credential is
-    wrong; retrying either would turn a decisive result into a slower, noisier
-    one without ever changing it.
+    Only transient conditions qualify.  These reads resolve upstream npm
+    metadata and Cursor archives, where a 404 means the package or release
+    genuinely is not there and 401/403 mean the request is malformed or
+    blocked; retrying either would turn a decisive answer into a slower,
+    noisier one without ever changing it.
     """
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code in RETRYABLE_HTTP_STATUS

@@ -395,32 +395,6 @@ def test_dockerfiles_do_not_install_a_floating_backend_cli() -> None:
             assert "TARGETARCH" in text
 
 
-def _run_bodies(text: str) -> list[tuple[int, str]]:
-    """Return (line number, body) for every ``run:`` step in the workflow."""
-    lines = text.splitlines()
-    bodies: list[tuple[int, str]] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.lstrip()
-        if not stripped.startswith("run:"):
-            index += 1
-            continue
-        indent = len(line) - len(stripped)
-        body = [stripped.removeprefix("run:").strip()]
-        index += 1
-        while index < len(lines):
-            following = lines[index]
-            if following.strip() and (
-                len(following) - len(following.lstrip()) <= indent
-            ):
-                break
-            body.append(following)
-            index += 1
-        bodies.append((index, "\n".join(body)))
-    return bodies
-
-
 def test_base_tag_binds_the_whole_base_recipe(tmp_path: Path) -> None:
     """Editing base.Dockerfile or any pinned input must change the tag.
 
