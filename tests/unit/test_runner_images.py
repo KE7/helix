@@ -17,6 +17,7 @@ import pytest
 from tools.runner_images import (
     PromotionInterrupted,
     RunnerPlanError,
+    _promotion_records,
     assert_immutable_collision,
     change_plan,
     inspect_ghcr_tag,
@@ -571,6 +572,14 @@ def test_latest_moves_are_bracketed_by_retained_evidence_and_compensation() -> N
     assert text.count("exec python tools/runner_images.py promote-latest") == 2
     assert text.count("python tools/runner_images.py restore-latest") == 2
 
+    # Both preflights must decide "no previous latest" from the authenticated
+    # 404-only probe, never from a failed `imagetools inspect`.
+    assert text.count('--image "$image" --tag latest') == 2
+    assert text.count('if [[ "$latest_state" == "absent" ]]; then') == 2
+    assert text.count("bootstrap=true") == 2
+    assert text.count("--argjson bootstrap") == 2
+    assert text.count('[[ "$previous" == "$latest_state" ]]') == 2
+
 
 def test_v4_artifact_names_are_unique_for_same_run_retries() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -918,14 +927,20 @@ def test_retry_artifact_selection_cli_rejects_symlinked_input_root(
     assert not output.exists()
 
 
-def _promotion_record(backend: str, previous: str, promoted: str) -> dict:
+def _promotion_record(
+    backend: str,
+    previous: str | None,
+    promoted: str,
+) -> dict:
+    bootstrap = previous is None
     return {
         "state": "prepared",
         "backend": backend,
         "previous_digest": previous,
         "promoted_digest": promoted,
         "immutable_tag": f"cli-test-{backend}",
-        "rollback_tag": "rollback-before-1-1",
+        "rollback_tag": None if bootstrap else "rollback-before-1-1",
+        "bootstrap": bootstrap,
         "run_id": "1",
         "run_attempt": "1",
     }
@@ -974,6 +989,96 @@ class _FakeRegistry:
         if self.last_digest == self.mismatch_after_digest:
             digest = "sha256:" + "f" * 64
         return json.dumps({"digest": digest})
+
+
+def _write_records(directory: Path, *records: dict) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    for record in records:
+        (directory / f"{record['backend']}.json").write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+    return directory
+
+
+def test_bootstrap_promotion_records_are_accepted_and_stay_fail_closed(
+    tmp_path: Path,
+) -> None:
+    promoted = "sha256:" + "c" * 64
+    previous = "sha256:" + "a" * 64
+
+    accepted = _write_records(
+        tmp_path / "bootstrap", _promotion_record("codex", None, promoted)
+    )
+    records = _promotion_records(accepted)
+    assert records[0]["previous_digest"] is None
+    assert records[0]["bootstrap"] is True
+
+    # A null previous digest without the explicit bootstrap marker is a
+    # malformed record, not an implicit first publication.
+    unmarked = _promotion_record("codex", None, promoted)
+    unmarked["bootstrap"] = False
+    with pytest.raises(RunnerPlanError, match="malformed previous_digest"):
+        _promotion_records(_write_records(tmp_path / "unmarked", unmarked))
+
+    # A bootstrap record that also names a previous digest is contradictory.
+    contradictory = _promotion_record("codex", previous, promoted)
+    contradictory["bootstrap"] = True
+    with pytest.raises(RunnerPlanError, match="null previous_digest"):
+        _promotion_records(
+            _write_records(tmp_path / "contradictory", contradictory)
+        )
+
+    # Bootstrap never relaxes the requirement on the digest being promoted.
+    malformed = _promotion_record("codex", None, "sha256:not-a-digest")
+    with pytest.raises(RunnerPlanError, match="malformed promoted_digest"):
+        _promotion_records(_write_records(tmp_path / "malformed", malformed))
+
+    non_boolean = _promotion_record("codex", None, promoted)
+    non_boolean["bootstrap"] = "true"
+    with pytest.raises(RunnerPlanError, match="bootstrap marker"):
+        _promotion_records(_write_records(tmp_path / "non-boolean", non_boolean))
+
+
+def test_restore_skips_bootstrap_records_without_counting_them_as_failures() -> None:
+    promoted = "sha256:" + "c" * 64
+    record = _promotion_record("codex", None, promoted)
+    registry = _FakeRegistry({"codex": promoted})
+    restore_latest_tags([record], run_command=registry)
+    assert registry.commands == []
+    assert registry.state == {"codex": promoted}
+
+
+def test_mixed_bootstrap_and_normal_batch_compensates_only_what_it_can(
+    tmp_path: Path,
+) -> None:
+    """One first publication plus one ordinary promotion in the same batch.
+
+    The ordinary backend must be restored to its previous digest; the
+    bootstrap backend has nothing to restore and must not turn the
+    compensation into a reported failure.
+    """
+    claude_previous = "sha256:" + "b" * 64
+    promoted = {"codex": "sha256:" + "c" * 64, "claude": "sha256:" + "d" * 64}
+    records = [
+        _promotion_record("codex", None, promoted["codex"]),
+        _promotion_record("claude", claude_previous, promoted["claude"]),
+    ]
+    registry = _FakeRegistry(
+        {"claude": claude_previous}, fail_digest=promoted["claude"]
+    )
+    with pytest.raises(RunnerPlanError, match="simulated"):
+        promote_latest_tags(
+            records,
+            ledger_dir=tmp_path / "ledger",
+            moved_file=tmp_path / "moved",
+            output_file=tmp_path / "output",
+            run_command=registry,
+        )
+    assert registry.state["claude"] == claude_previous
+    assert registry.state["codex"] == promoted["codex"]
+    created = [argv[-1] for argv in registry.commands if "create" in argv]
+    assert not any(reference.startswith("null") for reference in created)
+    assert sum("helix-evo-runner-codex@" in ref for ref in created) == 1
 
 
 def test_promotion_transaction_compensates_error_and_signal_paths(

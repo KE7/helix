@@ -814,38 +814,56 @@ jobs:
               --source-ref "$ATTESTATION_SOURCE_REF" \
               --deny-self-hosted-runners
 
-            # Automatic promotion requires a recoverable previous target.
-            docker buildx imagetools inspect "${image}:latest" \
-              --format '{{json .Manifest}}' > "/tmp/${backend}-previous.json"
-            python tools/runner_images.py verify-platforms \
-              --input "/tmp/${backend}-previous.json"
-            previous="$(jq -r '.digest' "/tmp/${backend}-previous.json")"
-            [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
-            rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            existing="$(python tools/runner_images.py inspect-ghcr-tag \
-              --image "$image" --tag "$rollback_tag")"
-            if [[ "$existing" == "absent" ]]; then
-              python tools/runner_images.py check-collision \
-                --candidate "$previous"
-              docker buildx imagetools create -t "${image}:${rollback_tag}" \
-                "${image}@${previous}"
+            # Automatic promotion normally requires a recoverable previous
+            # target.  A backend whose repository has no `latest` tag yet is a
+            # first publication: there is nothing to roll back to, so record
+            # the bootstrap explicitly instead of aborting the whole batch and
+            # every other backend in it.  Only an authenticated GHCR 404 counts
+            # as absent; auth, network, and server errors still fail closed.
+            latest_state="$(python tools/runner_images.py inspect-ghcr-tag \
+              --image "$image" --tag latest)"
+            if [[ "$latest_state" == "absent" ]]; then
+              bootstrap=true
+              previous_json=null
+              rollback_json=null
             else
-              python tools/runner_images.py check-collision \
-                --existing "$existing" --candidate "$previous"
+              bootstrap=false
+              docker buildx imagetools inspect "${image}:latest" \
+                --format '{{json .Manifest}}' > "/tmp/${backend}-previous.json"
+              python tools/runner_images.py verify-platforms \
+                --input "/tmp/${backend}-previous.json"
+              previous="$(jq -r '.digest' "/tmp/${backend}-previous.json")"
+              [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
+              [[ "$previous" == "$latest_state" ]]
+              rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              existing="$(python tools/runner_images.py inspect-ghcr-tag \
+                --image "$image" --tag "$rollback_tag")"
+              if [[ "$existing" == "absent" ]]; then
+                python tools/runner_images.py check-collision \
+                  --candidate "$previous"
+                docker buildx imagetools create -t "${image}:${rollback_tag}" \
+                  "${image}@${previous}"
+              else
+                python tools/runner_images.py check-collision \
+                  --existing "$existing" --candidate "$previous"
+              fi
+              actual_rollback="$(docker buildx imagetools inspect \
+                "${image}:${rollback_tag}" \
+                --format '{{json .Manifest}}' | jq -r '.digest')"
+              [[ "$actual_rollback" == "$previous" ]]
+              previous_json="$(jq -cn --arg value "$previous" '$value')"
+              rollback_json="$(jq -cn --arg value "$rollback_tag" '$value')"
             fi
-            actual_rollback="$(docker buildx imagetools inspect \
-              "${image}:${rollback_tag}" \
-              --format '{{json .Manifest}}' | jq -r '.digest')"
-            [[ "$actual_rollback" == "$previous" ]]
             jq -n \
               --arg backend "$backend" \
-              --arg previous_digest "$previous" \
+              --argjson previous_digest "$previous_json" \
               --arg promoted_digest "$next" \
               --arg immutable_tag "$immutable_tag" \
-              --arg rollback_tag "$rollback_tag" \
+              --argjson rollback_tag "$rollback_json" \
+              --argjson bootstrap "$bootstrap" \
               --arg run_id "$GITHUB_RUN_ID" \
               --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-              '{state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
+              '{state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag,bootstrap:$bootstrap,run_id:$run_id,run_attempt:$run_attempt}' \
               > "/tmp/promotion/${backend}.json"
           done < /tmp/approved.jsonl
           if compgen -G '/tmp/promotion/*.json' >/dev/null; then
@@ -990,33 +1008,52 @@ jobs:
             --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
             --source-ref "$ATTESTATION_SOURCE_REF" \
             --deny-self-hosted-runners
-          previous="$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -r '.digest')"
-          [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
-          rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          existing="$(python tools/runner_images.py inspect-ghcr-tag \
-            --image "$image" --tag "$rollback_tag")"
-          if [[ "$existing" == "absent" ]]; then
-            python tools/runner_images.py check-collision \
-              --candidate "$previous"
-            docker buildx imagetools create -t "${image}:${rollback_tag}" \
-              "${image}@${previous}"
+          # Same first-publication path as the automatic promote job: a backend
+          # with no `latest` yet has no recoverable previous target, so record
+          # the bootstrap rather than failing the dispatch.  Only an
+          # authenticated 404 is absent; every other registry answer aborts.
+          latest_state="$(python tools/runner_images.py inspect-ghcr-tag \
+            --image "$image" --tag latest)"
+          if [[ "$latest_state" == "absent" ]]; then
+            bootstrap=true
+            previous=""
+            rollback_tag=""
+            previous_json=null
+            rollback_json=null
           else
-            python tools/runner_images.py check-collision \
-              --existing "$existing" --candidate "$previous"
+            bootstrap=false
+            previous="$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "$previous" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$previous" == "$latest_state" ]]
+            rollback_tag="rollback-before-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            existing="$(python tools/runner_images.py inspect-ghcr-tag \
+              --image "$image" --tag "$rollback_tag")"
+            if [[ "$existing" == "absent" ]]; then
+              python tools/runner_images.py check-collision \
+                --candidate "$previous"
+              docker buildx imagetools create -t "${image}:${rollback_tag}" \
+                "${image}@${previous}"
+            else
+              python tools/runner_images.py check-collision \
+                --existing "$existing" --candidate "$previous"
+            fi
+            actual_rollback="$(docker buildx imagetools inspect \
+              "${image}:${rollback_tag}" \
+              --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "$actual_rollback" == "$previous" ]]
+            previous_json="$(jq -cn --arg value "$previous" '$value')"
+            rollback_json="$(jq -cn --arg value "$rollback_tag" '$value')"
           fi
-          actual_rollback="$(docker buildx imagetools inspect \
-            "${image}:${rollback_tag}" \
-            --format '{{json .Manifest}}' | jq -r '.digest')"
-          [[ "$actual_rollback" == "$previous" ]]
           mkdir -p /tmp/manual-promotion
           jq -n \
             --arg backend "$BACKEND" \
-            --arg previous_digest "$previous" \
+            --argjson previous_digest "$previous_json" \
             --arg promoted_digest "$target" \
-            --arg rollback_tag "$rollback_tag" \
+            --argjson rollback_tag "$rollback_json" \
+            --argjson bootstrap "$bootstrap" \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{operation:"rollback",state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,run_id:$run_id,run_attempt:$run_attempt}' \
+            '{operation:"rollback",state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,bootstrap:$bootstrap,run_id:$run_id,run_attempt:$run_attempt}' \
             > "/tmp/manual-promotion/${BACKEND}.json"
           echo "previous_digest=${previous}" >> "$GITHUB_OUTPUT"
           echo "target_digest=${target}" >> "$GITHUB_OUTPUT"

@@ -49,6 +49,7 @@ NPM_ARTIFACT_PACKAGES: dict[str, dict[str, tuple[str, ...]]] = {
         "arm64": ("opencode-linux-arm64",),
     },
 }
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
@@ -827,11 +828,24 @@ def _promotion_records(directory: Path) -> list[dict[str, Any]]:
         backend = record.get("backend")
         if backend not in BACKENDS:
             raise RunnerPlanError("promotion record has an invalid backend")
-        for field in ("previous_digest", "promoted_digest"):
-            if not re.fullmatch(
-                r"sha256:[0-9a-f]{64}", str(record.get(field, ""))
-            ):
-                raise RunnerPlanError(f"{backend}: malformed {field}")
+        if not DIGEST_RE.fullmatch(str(record.get("promoted_digest", ""))):
+            raise RunnerPlanError(f"{backend}: malformed promoted_digest")
+        bootstrap = record.get("bootstrap", False)
+        if not isinstance(bootstrap, bool):
+            raise RunnerPlanError(f"{backend}: bootstrap marker must be boolean")
+        previous = record.get("previous_digest", "")
+        if bootstrap:
+            # First publication: the repository has no ``latest`` tag yet, so
+            # there is no durable rollback target and nothing to restore.  The
+            # record must say that explicitly; a bootstrap record that also
+            # carries a previous digest is contradictory and fails closed.
+            if previous is not None:
+                raise RunnerPlanError(
+                    f"{backend}: bootstrap promotion must record a null "
+                    "previous_digest"
+                )
+        elif not DIGEST_RE.fullmatch(str(previous)):
+            raise RunnerPlanError(f"{backend}: malformed previous_digest")
     return records
 
 
@@ -883,6 +897,12 @@ def restore_latest_tags(
 ) -> None:
     failures: list[str] = []
     for record in reversed(records):
+        if record.get("previous_digest") is None:
+            # Bootstrap promotion: ``latest`` did not exist before this run, so
+            # there is no digest to restore.  Skipping is the correct
+            # compensation, not a failure.  (``_promotion_records`` has already
+            # proven that a null previous digest is paired with bootstrap.)
+            continue
         try:
             _move_tag(record, "previous_digest", run_command=run_command)
         except (OSError, json.JSONDecodeError, RunnerPlanError):
