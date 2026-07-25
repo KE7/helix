@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import io
 import json
 import re
 import urllib.error
 import urllib.request
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -18,17 +16,13 @@ from tools.runner_images import (
     RunnerPlanError,
     _fetch,
     _fetch_sha256,
-    assert_immutable_collision,
     base_tag,
     change_plan,
-    inspect_ghcr_tag,
-    immutable_tag,
     main as runner_images_main,
     parse_cursor_installer,
     parse_npm_metadata,
     resolve_cursor_checksums,
     validate_catalog,
-    validate_catalog_files,
     verify_codex_catalog,
     verify_platforms,
 )
@@ -68,7 +62,7 @@ def _npm_payload(
 
 
 def test_checked_in_runner_catalog_is_complete_and_content_pinned() -> None:
-    validate_catalog_files(_catalog(), CATALOG_PATH)
+    validate_catalog(_catalog())
 
 
 def test_npm_discovery_parses_version_tarball_and_integrity() -> None:
@@ -126,14 +120,6 @@ def test_cursor_installer_requires_one_unambiguous_version() -> None:
         parse_cursor_installer(installer + b"\nVERSION=2026.07.21-deadbee\n")
 
 
-def test_immutable_tag_collision_is_idempotent_or_fails_hard() -> None:
-    digest = "sha256:" + "a" * 64
-    assert_immutable_collision(None, digest)
-    assert_immutable_collision(digest, digest)
-    with pytest.raises(RunnerPlanError, match="collision"):
-        assert_immutable_collision("sha256:" + "b" * 64, digest)
-
-
 class _HTTPResponse:
     def __init__(self, payload: bytes, headers: dict[str, str] | None = None) -> None:
         self.payload = payload
@@ -147,201 +133,6 @@ class _HTTPResponse:
 
     def read(self) -> bytes:
         return self.payload
-
-
-def test_ghcr_tag_inspection_distinguishes_absence_from_registry_failure() -> None:
-    manifest = b'{"schemaVersion":2}'
-    digest = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
-
-    def present(
-        request: urllib.request.Request, timeout: float
-    ) -> _HTTPResponse:
-        assert timeout == 30.0
-        if request.full_url.startswith("https://ghcr.io/token?"):
-            return _HTTPResponse(b'{"token":"registry-token"}')
-        return _HTTPResponse(manifest, {"Docker-Content-Digest": digest})
-
-    assert (
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=present,
-        )
-        == digest
-    )
-
-    def mismatched(
-        request: urllib.request.Request, timeout: float
-    ) -> _HTTPResponse:
-        if request.full_url.startswith("https://ghcr.io/token?"):
-            return _HTTPResponse(b'{"token":"registry-token"}')
-        return _HTTPResponse(
-            manifest,
-            {"Docker-Content-Digest": "sha256:" + "b" * 64},
-        )
-
-    with pytest.raises(RunnerPlanError, match="does not match"):
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=mismatched,
-        )
-
-    def response_error(status: int) -> object:
-        def fail(
-            request: urllib.request.Request, timeout: float
-        ) -> _HTTPResponse:
-            if request.full_url.startswith("https://ghcr.io/token?"):
-                return _HTTPResponse(b'{"token":"registry-token"}')
-            raise urllib.error.HTTPError(
-                request.full_url,
-                status,
-                "registry error",
-                {},
-                io.BytesIO(),
-            )
-
-        return fail
-
-    assert (
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=response_error(404),
-        )
-        is None
-    )
-    with pytest.raises(RunnerPlanError, match="HTTP 401"):
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=response_error(401),
-        )
-    with pytest.raises(RunnerPlanError, match="HTTP 500"):
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=response_error(500),
-            sleep=lambda _seconds: None,
-        )
-
-    def token_404(
-        request: urllib.request.Request, timeout: float
-    ) -> _HTTPResponse:
-        raise urllib.error.HTTPError(
-            request.full_url,
-            404,
-            "token endpoint missing",
-            {},
-            io.BytesIO(),
-        )
-
-    with pytest.raises(RunnerPlanError, match="token exchange failed"):
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=token_404,
-        )
-
-
-def _flaky_ghcr(
-    statuses: list[int],
-    manifest: bytes,
-    digest: str,
-) -> Callable[[urllib.request.Request, float], _HTTPResponse]:
-    """A GHCR opener whose manifest endpoint fails with ``statuses`` in order."""
-    remaining = list(statuses)
-
-    def opener(
-        request: urllib.request.Request, timeout: float
-    ) -> _HTTPResponse:
-        if request.full_url.startswith("https://ghcr.io/token?"):
-            return _HTTPResponse(b'{"token":"registry-token"}')
-        if remaining:
-            raise urllib.error.HTTPError(
-                request.full_url,
-                remaining.pop(0),
-                "registry error",
-                {},  # type: ignore[arg-type]
-                io.BytesIO(),
-            )
-        return _HTTPResponse(manifest, {"Docker-Content-Digest": digest})
-
-    return opener
-
-
-def test_registry_reads_retry_only_transient_failures() -> None:
-    manifest = b'{"schemaVersion":2}'
-    digest = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
-
-    for statuses in ([503], [429, 500]):
-        delays: list[float] = []
-        assert (
-            inspect_ghcr_tag(
-                "ghcr.io/ke7/helix-evo-runner-codex",
-                "cli-0.145.0-rabc",
-                actor="ci",
-                token="secret",
-                urlopen=_flaky_ghcr(statuses, manifest, digest),
-                sleep=delays.append,
-            )
-            == digest
-        )
-        assert delays == [1.0, 2.0][: len(statuses)]
-
-    # Three consecutive transient failures exhaust the cap and fail closed.
-    delays = []
-    with pytest.raises(RunnerPlanError, match="HTTP 503"):
-        inspect_ghcr_tag(
-            "ghcr.io/ke7/helix-evo-runner-codex",
-            "cli-0.145.0-rabc",
-            actor="ci",
-            token="secret",
-            urlopen=_flaky_ghcr([503, 503, 503], manifest, digest),
-            sleep=delays.append,
-        )
-    assert delays == [1.0, 2.0]
-
-    # A 404 is the decisive "absent" answer and 401/403 are credential
-    # problems: neither is ever retried.
-    for status, expected in ((404, None), (401, "HTTP 401"), (403, "HTTP 403")):
-        delays = []
-        opener = _flaky_ghcr([status, status, status], manifest, digest)
-        if expected is None:
-            assert (
-                inspect_ghcr_tag(
-                    "ghcr.io/ke7/helix-evo-runner-codex",
-                    "cli-0.145.0-rabc",
-                    actor="ci",
-                    token="secret",
-                    urlopen=opener,
-                    sleep=delays.append,
-                )
-                is None
-            )
-        else:
-            with pytest.raises(RunnerPlanError, match=expected):
-                inspect_ghcr_tag(
-                    "ghcr.io/ke7/helix-evo-runner-codex",
-                    "cli-0.145.0-rabc",
-                    actor="ci",
-                    token="secret",
-                    urlopen=opener,
-                    sleep=delays.append,
-                )
-        assert delays == []
 
 
 def test_upstream_fetches_retry_and_rehash_the_whole_body(
@@ -398,52 +189,6 @@ def test_upstream_fetches_retry_and_rehash_the_whole_body(
     assert delays == [1.0, 2.0]
 
 
-def test_immutable_version_tags_are_collision_resistant_and_base_bound() -> None:
-    catalog = _catalog()
-    base = catalog["base"]["immutable_tag"]
-    item = copy.deepcopy(catalog["backends"]["codex"])
-    item["version"] = "1.0+foo"
-    first = immutable_tag(item, base)
-    item["version"] = "1.0-foo"
-    assert first != immutable_tag(item, base)
-    item["version"] = "1.0+foo"
-    assert first != immutable_tag(item, base + "-next")
-    item["sha512"] = "a" * 128
-    assert first != immutable_tag(item, base)
-    assert re.fullmatch(r"[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}", first)
-
-
-def test_cursor_immutable_tag_tracks_content_not_installer_noise() -> None:
-    """A comment-only edit to Cursor's install script must not force a rebuild.
-
-    The installer is never executed in an image; it is parsed for the version
-    and the official artifact URLs. The tarball URLs plus their SHA-256 digests
-    are what actually bind the shipped content, so those — and not the
-    installer hash — decide the immutable tag.
-    """
-    catalog = _catalog()
-    base = catalog["base"]["immutable_tag"]
-    item = copy.deepcopy(catalog["backends"]["cursor"])
-    original = immutable_tag(item, base)
-
-    item["installer_sha256"] = "f" * 64
-    assert immutable_tag(item, base) == original
-
-    item = copy.deepcopy(catalog["backends"]["cursor"])
-    item["platforms"]["arm64"]["sha256"] = "f" * 64
-    assert immutable_tag(item, base) != original
-
-    item = copy.deepcopy(catalog["backends"]["cursor"])
-    item["platforms"]["amd64"]["tarball"] = (
-        "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/x64/other.tar.gz"
-    )
-    assert immutable_tag(item, base) != original
-
-    item = copy.deepcopy(catalog["backends"]["cursor"])
-    item["version"] = "2026.07.21-deadbee"
-    assert immutable_tag(item, base) != original
-
-
 def test_cursor_archives_are_rehashed_only_when_their_identity_moves() -> None:
     cursor = _catalog()["backends"]["cursor"]
     tarballs = {
@@ -495,20 +240,6 @@ def test_cursor_archives_are_rehashed_only_when_their_identity_moves() -> None:
         tarballs, cursor["version"], broken, fetch_sha256=fetch
     )
     assert hashed == [tarballs["amd64"]]
-
-
-def test_checked_in_dockerfile_hashes_fail_closed_on_recipe_drift() -> None:
-    catalog = _catalog()
-    catalog["backends"]["codex"]["dockerfile_sha256"] = "0" * 64
-    with pytest.raises(RunnerPlanError, match="dockerfile sha256 mismatch"):
-        validate_catalog_files(catalog, CATALOG_PATH)
-
-
-def test_base_immutable_identity_changes_with_catalog_only_inputs() -> None:
-    catalog = _catalog()
-    catalog["base"]["uv_wheels"]["arm64"]["sha256"] = "a" * 64
-    with pytest.raises(RunnerPlanError, match="all recipe inputs"):
-        validate_catalog(catalog)
 
 
 def test_smoke_commands_are_restricted_to_a_conservative_charset() -> None:

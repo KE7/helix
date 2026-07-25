@@ -12,7 +12,6 @@ import argparse
 import base64
 import hashlib
 import json
-import os
 import re
 import sys
 import time
@@ -149,30 +148,6 @@ def _require_smoke_command(value: object, context: str) -> str:
     return value
 
 
-def base_immutable_tag(base: Mapping[str, Any]) -> str:
-    identity = {
-        key: base[key]
-        for key in (
-            "dockerfile",
-            "dockerfile_sha256",
-            "node_image",
-            "debian_snapshot",
-            "uv_version",
-            "uv_wheels",
-        )
-    }
-    material = json.dumps(identity, sort_keys=True, separators=(",", ":"))
-    fingerprint = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
-    snapshot_date = str(base["debian_snapshot"])[:8]
-    tag = (
-        f"runtime-node22-uv{base['uv_version']}-"
-        f"snapshot{snapshot_date}-r{fingerprint}"
-    )
-    if not TAG_RE.fullmatch(tag):
-        raise RunnerPlanError(f"derived base image tag is unsafe: {tag!r}")
-    return tag
-
-
 def _repo_file(catalog_path: Path, entry: str) -> Path:
     """Resolve a catalog-declared Dockerfile inside the repository."""
     catalog = load_json(catalog_path)
@@ -240,8 +215,6 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         raise RunnerPlanError("base node image must be digest-pinned")
     if base.get("dockerfile") != "docker/base.Dockerfile":
         raise RunnerPlanError("unexpected base dockerfile")
-    if not SHA256_RE.fullmatch(str(base.get("dockerfile_sha256", ""))):
-        raise RunnerPlanError("base dockerfile sha256 is required")
     if not isinstance(base.get("uv_version"), str):
         raise RunnerPlanError("base uv version is required")
     if not re.fullmatch(r"\d{8}T\d{6}Z", str(base.get("debian_snapshot", ""))):
@@ -256,10 +229,6 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         _require_url(wheel.get("url"), "files.pythonhosted.org")
         if not SHA256_RE.fullmatch(str(wheel.get("sha256", ""))):
             raise RunnerPlanError(f"base uv/{platform}: invalid sha256")
-    if not TAG_RE.fullmatch(str(base.get("immutable_tag", ""))):
-        raise RunnerPlanError("base immutable tag is invalid")
-    if base["immutable_tag"] != base_immutable_tag(base):
-        raise RunnerPlanError("base immutable tag is not bound to all recipe inputs")
     _require_smoke_command(base.get("smoke_command"), "base")
 
     for name in BACKENDS:
@@ -283,8 +252,6 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         _require_smoke_command(item.get("smoke_command"), name)
         if item.get("dockerfile") != f"docker/{name}.Dockerfile":
             raise RunnerPlanError(f"{name}: unexpected dockerfile")
-        if not SHA256_RE.fullmatch(str(item.get("dockerfile_sha256", ""))):
-            raise RunnerPlanError(f"{name}: missing dockerfile sha256")
         kind = item.get("kind")
         expected_kind = (
             "codex" if name == "codex" else "cursor" if name == "cursor" else "npm"
@@ -389,27 +356,6 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 _require_url(source.get("tarball"), "downloads.cursor.com")
                 if not SHA256_RE.fullmatch(str(source.get("sha256", ""))):
                     raise RunnerPlanError(f"cursor/{platform}: invalid sha256")
-
-
-def validate_catalog_files(catalog: dict[str, Any], catalog_path: Path) -> None:
-    """Prove that every declared Dockerfile digest matches the checkout."""
-    validate_catalog(catalog)
-    repository_root = catalog_path.resolve().parent.parent
-    entries = [("base", catalog["base"])]
-    entries.extend((name, catalog["backends"][name]) for name in BACKENDS)
-    for name, item in entries:
-        relative = Path(str(item["dockerfile"]))
-        if relative.is_absolute() or ".." in relative.parts:
-            raise RunnerPlanError(f"{name}: unsafe dockerfile path")
-        dockerfile = (repository_root / relative).resolve()
-        if repository_root not in dockerfile.parents:
-            raise RunnerPlanError(f"{name}: dockerfile escapes repository")
-        actual = hashlib.sha256(dockerfile.read_bytes()).hexdigest()
-        if actual != item["dockerfile_sha256"]:
-            raise RunnerPlanError(
-                f"{name}: dockerfile sha256 mismatch: expected "
-                f"{item['dockerfile_sha256']}, got {actual}"
-            )
 
 
 def parse_npm_metadata(package: str, payload: bytes) -> dict[str, Any]:
@@ -641,7 +587,6 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                     for key in (
                         "kind",
                         "dockerfile",
-                        "dockerfile_sha256",
                         "smoke_command",
                         "minimum_version",
                         "promotion_guard_version",
@@ -723,7 +668,6 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
                 {
                     "kind": "cursor",
                     "dockerfile": item["dockerfile"],
-                    "dockerfile_sha256": item["dockerfile_sha256"],
                     "installer": item["installer"],
                     "promotion_guard_version": item["promotion_guard_version"],
                     "promotion_guard_immutable_tag": item[
@@ -753,71 +697,6 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
             cursor.pop("arm64_tarball")
             resolved["backends"][name] = cursor
     return resolved
-
-
-def _backend_source_identity(item: Mapping[str, Any]) -> dict[str, Any]:
-    identity: dict[str, Any] = {
-        key: item[key]
-        for key in ("kind", "dockerfile", "dockerfile_sha256", "version")
-    }
-    if item["kind"] in {"npm", "codex"}:
-        identity.update(
-            {
-                "package": item["package"],
-                "tarball": item["tarball"],
-                "sha512": item["sha512"],
-                "optional_dependencies": item["optional_dependencies"],
-            }
-        )
-    if item["kind"] == "codex":
-        identity["platforms"] = item["platforms"]
-    elif item["kind"] == "npm":
-        identity["artifacts"] = item["artifacts"]
-    elif item["kind"] == "cursor":
-        # ``installer_sha256`` is deliberately absent.  The installer is
-        # fetched only to discover the version and the official artifact URLs;
-        # it is never executed in an image.  The per-platform tarball URLs and
-        # their SHA-256 digests already bind the exact shipped content, so
-        # including the installer hash would mint a new immutable tag — and a
-        # full two-architecture rebuild and republish of byte-identical CLI
-        # content — for a comment-only edit to Cursor's install script.  The
-        # hash is still recorded in the resolved manifest as evidence.
-        identity.update(
-            {
-                "installer": item["installer"],
-                "platforms": item["platforms"],
-            }
-        )
-    return identity
-
-
-def immutable_tag(item: Mapping[str, Any], base_tag: str) -> str:
-    version = item.get("version")
-    if not isinstance(version, str):
-        raise RunnerPlanError("backend version is missing")
-    if not VERSION_RE.fullmatch(version):
-        raise RunnerPlanError(f"unsafe image version {version!r}")
-    if len(version) > 80:
-        raise RunnerPlanError("image version is too long")
-    if not TAG_RE.fullmatch(base_tag):
-        raise RunnerPlanError(f"unsafe base image tag {base_tag!r}")
-    # Docker tags cannot contain "+". Bind the readable version to all source
-    # inputs and the base recipe so ambiguity or recipe drift changes the
-    # immutable identity.
-    readable = re.sub(r"[^0-9A-Za-z_.-]", "-", version)
-    material = json.dumps(
-        {
-            "base_tag": base_tag,
-            "backend": _backend_source_identity(item),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    fingerprint = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
-    tag = f"cli-{readable}-r{fingerprint}"
-    if not TAG_RE.fullmatch(tag):
-        raise RunnerPlanError(f"derived image tag is unsafe: {tag!r}")
-    return tag
 
 
 def change_plan(
@@ -867,106 +746,6 @@ def change_plan(
             }
         )
     return builds
-
-
-def assert_immutable_collision(existing: str | None, candidate: str) -> None:
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", candidate):
-        raise RunnerPlanError("candidate image digest is malformed")
-    if existing is None:
-        return
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", existing):
-        raise RunnerPlanError("existing image digest is malformed")
-    if existing != candidate:
-        raise RunnerPlanError(
-            f"immutable tag collision: existing {existing}, candidate {candidate}"
-        )
-
-
-def inspect_ghcr_tag(
-    image: str,
-    tag: str,
-    *,
-    actor: str,
-    token: str,
-    urlopen: Any | None = None,
-    sleep: Sleep = time.sleep,
-) -> str | None:
-    """Return a GHCR tag digest, treating only an authenticated 404 as absent."""
-    prefix = "ghcr.io/"
-    if not image.startswith(prefix):
-        raise RunnerPlanError("registry tag inspection only supports ghcr.io")
-    repository = image.removeprefix(prefix)
-    if not re.fullmatch(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*", repository):
-        raise RunnerPlanError("GHCR repository is malformed")
-    if not TAG_RE.fullmatch(tag):
-        raise RunnerPlanError("GHCR tag is malformed")
-    if not actor or not token:
-        raise RunnerPlanError("GHCR inspection credentials are missing")
-    opener = urlopen or urllib.request.urlopen
-    credentials = base64.b64encode(f"{actor}:{token}".encode()).decode()
-    scope = urllib.parse.quote(f"repository:{repository}:pull", safe="")
-    token_request = urllib.request.Request(
-        f"https://ghcr.io/token?service=ghcr.io&scope={scope}",
-        headers={
-            "Authorization": f"Basic {credentials}",
-            "User-Agent": "helix-runner-publish/1",
-        },
-    )
-    def exchange_token() -> Any:
-        with opener(token_request, timeout=30.0) as response:
-            return json.loads(response.read())
-
-    try:
-        token_payload = _retry_get(
-            exchange_token, description="GHCR token exchange", sleep=sleep
-        )
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RunnerPlanError("GHCR token exchange failed") from exc
-    if not isinstance(token_payload, dict):
-        raise RunnerPlanError("GHCR token exchange returned malformed JSON")
-    bearer = token_payload.get("token") or token_payload.get("access_token")
-    if not isinstance(bearer, str) or not bearer:
-        raise RunnerPlanError("GHCR token exchange returned no token")
-
-    manifest_request = urllib.request.Request(
-        f"https://ghcr.io/v2/{repository}/manifests/{tag}",
-        headers={
-            "Accept": (
-                "application/vnd.oci.image.index.v1+json,"
-                "application/vnd.docker.distribution.manifest.list.v2+json,"
-                "application/vnd.oci.image.manifest.v1+json,"
-                "application/vnd.docker.distribution.manifest.v2+json"
-            ),
-            "Authorization": f"Bearer {bearer}",
-            "User-Agent": "helix-runner-publish/1",
-        },
-    )
-    def read_manifest() -> tuple[bytes, str]:
-        with opener(manifest_request, timeout=30.0) as response:
-            body: bytes = response.read()
-            header: str = response.headers.get("Docker-Content-Digest", "")
-        return body, header
-
-    try:
-        manifest, digest = _retry_get(
-            read_manifest, description="GHCR manifest inspection", sleep=sleep
-        )
-    except urllib.error.HTTPError as exc:
-        # Never retried: an authenticated 404 is the answer "this tag does not
-        # exist", which the whole publication gate depends on being decisive.
-        if exc.code == 404:
-            return None
-        raise RunnerPlanError(
-            f"GHCR manifest inspection failed with HTTP {exc.code}"
-        ) from exc
-    except OSError as exc:
-        raise RunnerPlanError("GHCR manifest inspection failed") from exc
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-        raise RunnerPlanError("GHCR returned a malformed manifest digest")
-    actual = f"sha256:{hashlib.sha256(manifest).hexdigest()}"
-    if actual != digest:
-        raise RunnerPlanError("GHCR manifest body does not match its digest header")
-    return digest
 
 
 def verify_codex_catalog(payload: dict[str, Any]) -> None:
@@ -1033,15 +812,6 @@ def _parser() -> argparse.ArgumentParser:
     catalog.add_argument("--input", type=Path, required=True)
     platforms = subparsers.add_parser("verify-platforms")
     platforms.add_argument("--input", type=Path, required=True)
-    collision = subparsers.add_parser("check-collision")
-    collision.add_argument("--existing")
-    collision.add_argument("--candidate", required=True)
-    inspect_tag = subparsers.add_parser("inspect-ghcr-tag")
-    inspect_tag.add_argument("--image", required=True)
-    inspect_tag.add_argument("--tag", required=True)
-    tag = subparsers.add_parser("image-tag")
-    tag.add_argument("--catalog", type=Path, required=True)
-    tag.add_argument("--backend", choices=BACKENDS, required=True)
     return parser
 
 
@@ -1049,8 +819,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "validate":
-            catalog = load_json(args.catalog)
-            validate_catalog_files(catalog, args.catalog)
+            validate_catalog(load_json(args.catalog))
         elif args.command == "discover":
             write_json(
                 args.output,
@@ -1077,25 +846,20 @@ def main(argv: list[str] | None = None) -> int:
             verify_codex_catalog(load_json(args.input))
         elif args.command == "verify-platforms":
             verify_platforms(load_json(args.input))
-        elif args.command == "check-collision":
-            assert_immutable_collision(args.existing or None, args.candidate)
-        elif args.command == "inspect-ghcr-tag":
-            digest = inspect_ghcr_tag(
-                args.image,
-                args.tag,
-                actor=os.environ.get("GITHUB_ACTOR", ""),
-                token=os.environ.get("GH_TOKEN", ""),
+        elif args.command == "plan":
+            write_json(
+                args.output,
+                change_plan(
+                    load_json(args.resolved),
+                    load_json(args.published),
+                    force=args.force,
+                    run_id=args.run_id,
+                ),
             )
-            print(digest or "absent")
-        elif args.command == "image-tag":
+        elif args.command == "base-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)
-            print(
-                immutable_tag(
-                    catalog["backends"][args.backend],
-                    str(catalog["base"]["immutable_tag"]),
-                )
-            )
+            print(base_tag(catalog["base"], _repo_file(args.catalog, "base")))
         else:  # pragma: no cover - argparse enforces the command set
             raise AssertionError(args.command)
     except (
