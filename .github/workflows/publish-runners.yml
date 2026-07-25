@@ -856,6 +856,7 @@ jobs:
             fi
             jq -n \
               --arg backend "$backend" \
+              --arg image "$image" \
               --argjson previous_digest "$previous_json" \
               --arg promoted_digest "$next" \
               --arg immutable_tag "$immutable_tag" \
@@ -863,7 +864,7 @@ jobs:
               --argjson bootstrap "$bootstrap" \
               --arg run_id "$GITHUB_RUN_ID" \
               --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-              '{state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag,bootstrap:$bootstrap,run_id:$run_id,run_attempt:$run_attempt}' \
+              '{state:"prepared",backend:$backend,image:$image,previous_digest:$previous_digest,promoted_digest:$promoted_digest,immutable_tag:$immutable_tag,rollback_tag:$rollback_tag,bootstrap:$bootstrap,run_id:$run_id,run_attempt:$run_attempt}' \
               > "/tmp/promotion/${backend}.json"
           done < /tmp/approved.jsonl
           if compgen -G '/tmp/promotion/*.json' >/dev/null; then
@@ -1047,13 +1048,14 @@ jobs:
           mkdir -p /tmp/manual-promotion
           jq -n \
             --arg backend "$BACKEND" \
+            --arg image "$image" \
             --argjson previous_digest "$previous_json" \
             --arg promoted_digest "$target" \
             --argjson rollback_tag "$rollback_json" \
             --argjson bootstrap "$bootstrap" \
             --arg run_id "$GITHUB_RUN_ID" \
             --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
-            '{operation:"rollback",state:"prepared",backend:$backend,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,bootstrap:$bootstrap,run_id:$run_id,run_attempt:$run_attempt}' \
+            '{operation:"rollback",state:"prepared",backend:$backend,image:$image,previous_digest:$previous_digest,promoted_digest:$promoted_digest,rollback_tag:$rollback_tag,bootstrap:$bootstrap,run_id:$run_id,run_attempt:$run_attempt}' \
             > "/tmp/manual-promotion/${BACKEND}.json"
           echo "previous_digest=${previous}" >> "$GITHUB_OUTPUT"
           echo "target_digest=${target}" >> "$GITHUB_OUTPUT"

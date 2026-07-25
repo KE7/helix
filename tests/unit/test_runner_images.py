@@ -597,6 +597,15 @@ def test_latest_moves_are_bracketed_by_retained_evidence_and_compensation() -> N
     assert text.count("--argjson bootstrap") == 2
     assert text.count('[[ "$previous" == "$latest_state" ]]') == 2
 
+    # The registry prefix has exactly one source of truth: promotion records
+    # carry the image they target, so a prefix change cannot make the
+    # compensating rollback address a different repository.
+    assert text.count('--arg image "$image"') == 2
+    assert text.count("backend:$backend,image:$image,") == 2
+    assert 'f"ghcr.io/ke7/helix-evo-runner-{backend}"' not in (
+        (ROOT / "tools" / "runner_images.py").read_text(encoding="utf-8")
+    )
+
 
 def test_v4_artifact_names_are_unique_for_same_run_retries() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -953,6 +962,7 @@ def _promotion_record(
     return {
         "state": "prepared",
         "backend": backend,
+        "image": f"ghcr.io/ke7/helix-evo-runner-{backend}",
         "previous_digest": previous,
         "promoted_digest": promoted,
         "immutable_tag": f"cli-test-{backend}",
@@ -983,9 +993,8 @@ class _FakeRegistry:
 
     @staticmethod
     def _backend(reference: str) -> str:
-        return reference.split("helix-evo-runner-", 1)[1].split(":", 1)[0].split(
-            "@", 1
-        )[0]
+        repository = reference.split("@", 1)[0].split(":", 1)[0]
+        return repository.rsplit("/", 1)[1].rsplit("-", 1)[1]
 
     def __call__(self, argv: list[str]) -> str:
         self.commands.append(argv)
@@ -1015,6 +1024,48 @@ def _write_records(directory: Path, *records: dict) -> Path:
             json.dumps(record), encoding="utf-8"
         )
     return directory
+
+
+def test_tag_moves_target_the_repository_named_in_the_promotion_record(
+    tmp_path: Path,
+) -> None:
+    """The registry prefix must have exactly one source of truth.
+
+    A prefix change previously left ``_move_tag`` pointing at the old
+    repository while the workflow published to the new one, so promotion and
+    its compensating rollback would disagree mid-transaction.
+    """
+    previous = "sha256:" + "a" * 64
+    promoted = "sha256:" + "c" * 64
+
+    relocated = _promotion_record("codex", previous, promoted)
+    relocated["image"] = "ghcr.io/ke7/helix-next-runner-codex"
+    registry = _FakeRegistry({"codex": previous})
+    registry.state = {"codex": previous}
+    promote_latest_tags(
+        [relocated],
+        ledger_dir=tmp_path / "ledger",
+        moved_file=tmp_path / "moved",
+        output_file=tmp_path / "output",
+        run_command=registry,
+    )
+    created = [argv[-1] for argv in registry.commands if "create" in argv]
+    assert created == [f"ghcr.io/ke7/helix-next-runner-codex@{promoted}"]
+
+    for bad in (
+        None,
+        "helix-evo-runner-codex",
+        "docker.io/ke7/helix-evo-runner-codex",
+        "ghcr.io/ke7/helix-evo-runner-claude",
+        "ghcr.io/ke7/helix-evo-runner-codex:latest",
+        "ghcr.io/ke7/helix-evo-runner-codex@sha256:" + "a" * 64,
+        "ghcr.io/helix-evo-runner-codex",
+    ):
+        record = _promotion_record("codex", previous, promoted)
+        record["image"] = bad
+        directory = tmp_path / f"bad-{abs(hash(str(bad)))}"
+        with pytest.raises(RunnerPlanError, match="promotion image"):
+            _promotion_records(_write_records(directory, record))
 
 
 def test_bootstrap_promotion_records_are_accepted_and_stay_fail_closed(

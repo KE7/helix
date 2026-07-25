@@ -50,6 +50,9 @@ NPM_ARTIFACT_PACKAGES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+GHCR_REPOSITORY_RE = re.compile(
+    r"^ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
@@ -822,12 +825,30 @@ def _registry_command(argv: list[str]) -> str:
     return stdout
 
 
+def _promotion_image(record: Mapping[str, Any], backend: str) -> str:
+    """Return the registry repository a promotion record targets.
+
+    The image reference travels in the record itself instead of being rebuilt
+    from a hardcoded prefix, so promotion and its compensating rollback can
+    never disagree about which repository they are mutating.
+    """
+    image = record.get("image")
+    if not isinstance(image, str) or not GHCR_REPOSITORY_RE.fullmatch(image):
+        raise RunnerPlanError(f"{backend}: malformed promotion image reference")
+    if not image.rsplit("/", 1)[1].endswith(f"-{backend}"):
+        raise RunnerPlanError(
+            f"{backend}: promotion image {image!r} does not target this backend"
+        )
+    return image
+
+
 def _promotion_records(directory: Path) -> list[dict[str, Any]]:
     records = [load_json(path) for path in sorted(directory.glob("*.json"))]
     for record in records:
         backend = record.get("backend")
         if backend not in BACKENDS:
             raise RunnerPlanError("promotion record has an invalid backend")
+        _promotion_image(record, str(backend))
         if not DIGEST_RE.fullmatch(str(record.get("promoted_digest", ""))):
             raise RunnerPlanError(f"{backend}: malformed promoted_digest")
         bootstrap = record.get("bootstrap", False)
@@ -856,8 +877,12 @@ def _move_tag(
     run_command: CommandRunner,
 ) -> None:
     backend = str(record["backend"])
+    if backend not in BACKENDS:
+        raise RunnerPlanError("promotion record has an invalid backend")
+    image = _promotion_image(record, backend)
     digest = str(record[digest_field])
-    image = f"ghcr.io/ke7/helix-evo-runner-{backend}"
+    if not DIGEST_RE.fullmatch(digest):
+        raise RunnerPlanError(f"{backend}: malformed {digest_field}")
     run_command(
         [
             "docker",
