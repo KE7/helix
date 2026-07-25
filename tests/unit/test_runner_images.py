@@ -512,6 +512,23 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert "BACKEND: ${{ inputs.backend }}" in text
 
 
+def test_failure_notifier_covers_cancellation_and_dedupes_beyond_one_page() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    notifier = text[text.index("  notify-failure:") :]
+    # A cancelled run is exactly the hard-kill-mid-transaction case.
+    assert "(failure() || cancelled())" in notifier
+    assert "RUN_OUTCOME: ${{ cancelled() && 'cancelled' || 'failed' }}" in notifier
+    assert "was cancelled" in notifier
+    assert "rollback-before-" in notifier
+    # Dedupe must not silently stop at the first page of open issues.
+    assert "per_page: 100" in notifier
+    assert "listForRepo({" not in notifier
+    assert "github.paginate(github.rest.issues.listForRepo" in notifier
+    assert 'const label = "runner-image-refresh";' in notifier
+    assert "labels: label" in notifier
+    assert "labels: [label]" in notifier
+
+
 def test_immutable_tag_collision_check_is_fail_closed_at_publish_time() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "EXISTING_DIGEST:" not in text

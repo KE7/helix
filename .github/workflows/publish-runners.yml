@@ -1104,8 +1104,17 @@ jobs:
           exit 1
 
   notify-failure:
-    name: Notify maintainers on refresh failure
-    if: ${{ always() && needs.guard.result == 'success' && failure() }}
+    name: Notify maintainers on refresh failure or cancellation
+    # `failure()` is false for a cancelled run, which is exactly the
+    # hard-kill-mid-transaction case the rollback evidence exists for. Without
+    # `cancelled()` the one scenario most likely to leave `latest` half-moved
+    # was also the one scenario that never notified anyone.
+    if: >-
+      ${{
+        always() &&
+        needs.guard.result == 'success' &&
+        (failure() || cancelled())
+      }}
     needs:
       - guard
       - resolve
@@ -1122,22 +1131,45 @@ jobs:
       issues: write
     steps:
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RUN_OUTCOME: ${{ cancelled() && 'cancelled' || 'failed' }}
         with:
           script: |
-            const title = "Automated runner image refresh failed";
+            const cancelled = process.env.RUN_OUTCOME === "cancelled";
+            // A dedicated label lets the dedupe query filter server-side and
+            // paginate, instead of only seeing the first 100 open issues and
+            // then filing a fresh duplicate every single day.
+            const label = "runner-image-refresh";
+            const title = cancelled
+              ? "Automated runner image refresh was cancelled"
+              : "Automated runner image refresh failed";
+            const detail = cancelled
+              ? [
+                  "The run was **cancelled**, possibly mid-transaction.",
+                  "A forced cancellation cannot be compensated in-process, so before re-running:",
+                  "- inspect the retained `promotion-plan-*` / `rollback-plan-*` artifact for this run,",
+                  "- compare each backend's current `latest` digest against that plan,",
+                  "- and restore from the durable `rollback-before-<run_id>-<run_attempt>` tags if `latest` moved.",
+                  "Records marked `\"bootstrap\": true` had no previous `latest` and have nothing to restore."
+                ].join("\n")
+              : "No mutable tag is promoted until its digest and both architectures pass validation.";
             const body = [
               `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               `Event: ${context.eventName}`,
-              "No mutable tag is promoted until its digest and both architectures pass validation."
+              `Outcome: ${cancelled ? "cancelled" : "failed"}`,
+              "",
+              detail
             ].join("\n");
-            const {data: issues} = await github.rest.issues.listForRepo({
-              ...context.repo, state: "open", per_page: 100
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, state: "open", labels: label, per_page: 100
             });
-            const issue = issues.find(item => item.title === title && !item.pull_request);
+            const issue = open.find(item => item.title === title && !item.pull_request);
             if (issue) {
               await github.rest.issues.createComment({
                 ...context.repo, issue_number: issue.number, body
               });
             } else {
-              await github.rest.issues.create({...context.repo, title, body});
+              await github.rest.issues.create({
+                ...context.repo, title, body, labels: [label]
+              });
             }
