@@ -57,6 +57,11 @@ GHCR_REPOSITORY_RE = re.compile(
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
+# ``smoke_command`` reaches ``sh -lc`` inside the build container.  The catalog
+# is an in-repo trust boundary, so this is defense in depth rather than an
+# exploitable path, but the charset deliberately excludes ``;``, backticks,
+# ``$``, ``(``, ``)``, ``<``, ``>``, backslash, and newlines.
+SMOKE_COMMAND_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z _.=/&|'\"-]{0,255}$")
 TAG_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}$")
 CURSOR_VERSION_RE = re.compile(r"2026\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+")
 
@@ -152,6 +157,12 @@ def _optional_dependencies(release: Mapping[str, Any], context: str) -> dict[str
     return dependencies
 
 
+def _require_smoke_command(value: object, context: str) -> str:
+    if not isinstance(value, str) or not SMOKE_COMMAND_RE.fullmatch(value):
+        raise RunnerPlanError(f"{context}: smoke command is missing or unsafe")
+    return value
+
+
 def base_immutable_tag(base: Mapping[str, Any]) -> str:
     identity = {
         key: base[key]
@@ -184,7 +195,10 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         "ghcr.io/ke7/helix-evo-runner",
     }:
         raise RunnerPlanError("unexpected runner registry prefix")
-    if tuple(sorted(catalog.get("backends", {}))) != tuple(sorted(BACKENDS)):
+    backends = catalog.get("backends")
+    if not isinstance(backends, dict) or tuple(sorted(backends)) != tuple(
+        sorted(BACKENDS)
+    ):
         raise RunnerPlanError("runner catalog must contain exactly the five backends")
     base = catalog.get("base")
     if not isinstance(base, dict):
@@ -207,6 +221,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         raise RunnerPlanError("base requires exact amd64/arm64 uv wheels")
     for platform in PLATFORMS:
         wheel = uv_wheels[platform]
+        if not isinstance(wheel, dict):
+            raise RunnerPlanError(f"base uv/{platform}: expected an object")
         _require_url(wheel.get("url"), "files.pythonhosted.org")
         if not SHA256_RE.fullmatch(str(wheel.get("sha256", ""))):
             raise RunnerPlanError(f"base uv/{platform}: invalid sha256")
@@ -214,11 +230,12 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         raise RunnerPlanError("base immutable tag is invalid")
     if base["immutable_tag"] != base_immutable_tag(base):
         raise RunnerPlanError("base immutable tag is not bound to all recipe inputs")
-    if not isinstance(base.get("smoke_command"), str):
-        raise RunnerPlanError("base smoke command is required")
+    _require_smoke_command(base.get("smoke_command"), "base")
 
     for name in BACKENDS:
-        item = catalog["backends"][name]
+        item = backends[name]
+        if not isinstance(item, dict):
+            raise RunnerPlanError(f"{name}: expected a backend object")
         version = item.get("version")
         if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
             raise RunnerPlanError(f"{name}: invalid version")
@@ -233,8 +250,7 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
             or not TAG_RE.fullmatch(promotion_guard_tag)
         ):
             raise RunnerPlanError(f"{name}: invalid promotion guard immutable tag")
-        if not isinstance(item.get("smoke_command"), str):
-            raise RunnerPlanError(f"{name}: missing smoke command")
+        _require_smoke_command(item.get("smoke_command"), name)
         if item.get("dockerfile") != f"docker/{name}.Dockerfile":
             raise RunnerPlanError(f"{name}: unexpected dockerfile")
         if not SHA256_RE.fullmatch(str(item.get("dockerfile_sha256", ""))):
@@ -320,6 +336,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 raise RunnerPlanError("codex required reasoning effort must be xhigh")
             for platform in PLATFORMS:
                 source = item["platforms"][platform]
+                if not isinstance(source, dict):
+                    raise RunnerPlanError(f"codex/{platform}: expected an object")
                 suffix = "linux-x64" if platform == "amd64" else "linux-arm64"
                 if source.get("package_version") != f"{version}-{suffix}":
                     raise RunnerPlanError(
@@ -336,6 +354,8 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
                 raise RunnerPlanError("cursor: invalid installer sha256")
             for platform in PLATFORMS:
                 source = item["platforms"][platform]
+                if not isinstance(source, dict):
+                    raise RunnerPlanError(f"cursor/{platform}: expected an object")
                 _require_url(source.get("tarball"), "downloads.cursor.com")
                 if not SHA256_RE.fullmatch(str(source.get("sha256", ""))):
                     raise RunnerPlanError(f"cursor/{platform}: invalid sha256")
@@ -1128,27 +1148,34 @@ def select_retry_artifacts(
     if current_attempt < 1:
         raise RunnerPlanError("current workflow attempt must be positive")
     input_root, output_root = _retry_artifact_roots(input_dir, output_dir)
+    # Every matcher names its groups: indexing by position (or worse, by
+    # ``match.lastindex``) silently picks the wrong group the moment a pattern
+    # gains an alternation or a grouping parenthesis.
     if family == "resolved-plan":
-        matcher = re.compile(r"^resolved-runner-plan-([0-9]+)$")
-        logical_group = None
+        matcher = re.compile(r"^resolved-runner-plan-(?P<attempt>[0-9]+)$")
+        has_logical = False
         expected = {"plan"}
     elif family == "base-digests":
-        matcher = re.compile(r"^digests-base-(amd64|arm64)-([0-9]+)$")
-        logical_group = 1
+        matcher = re.compile(
+            r"^digests-base-(?P<logical>amd64|arm64)-(?P<attempt>[0-9]+)$"
+        )
+        has_logical = True
         expected = set(PLATFORMS)
     elif family == "backend-digests":
         if backend not in BACKENDS:
             raise RunnerPlanError("backend artifact selection needs a valid backend")
         matcher = re.compile(
-            rf"^digests-{re.escape(backend)}-(amd64|arm64)-([0-9]+)$"
+            rf"^digests-{re.escape(backend)}-"
+            r"(?P<logical>amd64|arm64)-(?P<attempt>[0-9]+)$"
         )
-        logical_group = 1
+        has_logical = True
         expected = set(PLATFORMS)
     elif family == "releases":
         matcher = re.compile(
-            r"^release-(claude|codex|cursor|gemini|opencode)-([0-9]+)$"
+            r"^release-(?P<logical>claude|codex|cursor|gemini|opencode)-"
+            r"(?P<attempt>[0-9]+)$"
         )
-        logical_group = 1
+        has_logical = True
         expected = set(required)
         if not expected or not expected.issubset(BACKENDS):
             raise RunnerPlanError("release selection needs valid required backends")
@@ -1164,8 +1191,8 @@ def select_retry_artifacts(
             raise RunnerPlanError(
                 f"artifact name does not match {family}: {artifact.name}"
             )
-        logical = "plan" if logical_group is None else match.group(logical_group)
-        attempt = int(match.group(match.lastindex or 1))
+        logical = match.group("logical") if has_logical else "plan"
+        attempt = int(match.group("attempt"))
         if attempt > current_attempt:
             raise RunnerPlanError("artifact comes from a future workflow attempt")
         previous = selected.get(logical)
@@ -1276,13 +1303,18 @@ def verify_platforms(payload: dict[str, Any]) -> None:
     manifests = payload.get("manifests")
     if not isinstance(manifests, list):
         raise RunnerPlanError("manifest list has no manifests")
+    platforms: list[dict[str, Any]] = []
+    for manifest in manifests:
+        if not isinstance(manifest, dict):
+            raise RunnerPlanError("manifest list entry is not an object")
+        platform = manifest.get("platform", {})
+        if not isinstance(platform, dict):
+            raise RunnerPlanError("manifest platform is not an object")
+        platforms.append(platform)
     runtime_platforms = sorted(
-        (
-            manifest.get("platform", {}).get("os"),
-            manifest.get("platform", {}).get("architecture"),
-        )
-        for manifest in manifests
-        if manifest.get("platform", {}).get("os") != "unknown"
+        (platform.get("os"), platform.get("architecture"))
+        for platform in platforms
+        if platform.get("os") != "unknown"
     )
     if runtime_platforms != [("linux", "amd64"), ("linux", "arm64")]:
         raise RunnerPlanError(
@@ -1464,7 +1496,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:  # pragma: no cover - argparse enforces the command set
             raise AssertionError(args.command)
-    except (OSError, json.JSONDecodeError, RunnerPlanError) as exc:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        RunnerPlanError,
+        # A catalog that is well-formed JSON but structurally wrong (a list
+        # where an object belongs, a null where a string belongs) must still
+        # exit 2 with the standard message rather than a raw traceback.
+        AttributeError,
+        TypeError,
+    ) as exc:
         print(f"runner image gate failed: {exc}", file=sys.stderr)
         return 2
     return 0

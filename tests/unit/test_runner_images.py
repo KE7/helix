@@ -568,6 +568,70 @@ def test_base_immutable_identity_changes_with_catalog_only_inputs() -> None:
         validate_catalog(catalog)
 
 
+def test_smoke_commands_are_restricted_to_a_conservative_charset() -> None:
+    catalog = _catalog()
+    # Every shipped command must still validate.
+    validate_catalog(catalog)
+    assert catalog["base"]["smoke_command"].count("&&") == 3
+
+    for injected in (
+        "claude --version; rm -rf /",
+        "claude --version `id`",
+        "claude --version $(id)",
+        "claude --version > /etc/passwd",
+        "claude --version\nid",
+        "$(id)",
+        "",
+    ):
+        catalog = _catalog()
+        catalog["backends"]["claude"]["smoke_command"] = injected
+        with pytest.raises(RunnerPlanError, match="smoke command"):
+            validate_catalog(catalog)
+
+    catalog = _catalog()
+    catalog["base"]["smoke_command"] = "python --version; id"
+    with pytest.raises(RunnerPlanError, match="base: smoke command"):
+        validate_catalog(catalog)
+
+
+def test_malformed_catalog_structures_exit_cleanly_instead_of_tracebacking(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Well-formed JSON with the wrong shapes must still exit 2."""
+    for mutate in (
+        lambda c: c["base"]["uv_wheels"].__setitem__("amd64", ["not", "a", "map"]),
+        lambda c: c["backends"].__setitem__("cursor", "not-an-object"),
+        lambda c: c["backends"]["codex"]["platforms"].__setitem__("amd64", 7),
+        lambda c: c["backends"]["cursor"]["platforms"].__setitem__("arm64", None),
+    ):
+        catalog = _catalog()
+        mutate(catalog)
+        path = tmp_path / "runner-versions.json"
+        path.write_text(json.dumps(catalog), encoding="utf-8")
+        assert runner_images_main(["validate", "--catalog", str(path)]) == 2
+        assert "runner image gate failed" in capsys.readouterr().err
+
+    malformed_manifest = tmp_path / "manifest.json"
+    malformed_manifest.write_text(
+        json.dumps({"manifests": [{"platform": "linux/amd64"}]}), encoding="utf-8"
+    )
+    assert (
+        runner_images_main(["verify-platforms", "--input", str(malformed_manifest)])
+        == 2
+    )
+    assert "runner image gate failed" in capsys.readouterr().err
+
+
+def test_workflow_version_smoke_is_boundary_aware() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    # A bare substring match would let a CLI reporting 1.10 satisfy 1.1.
+    assert 'grep -F "$version"' not in text
+    assert '(^|[^0-9A-Za-z.])v?${escaped_version}' in text
+    assert "([^0-9A-Za-z.]|$)" in text
+    assert "escaped_version=" in text
+
+
 def test_catalog_rejects_unknown_backend_kind() -> None:
     catalog = _catalog()
     catalog["backends"]["claude"]["kind"] = "unexpected"
@@ -1195,6 +1259,45 @@ def test_retry_artifact_selection_rejects_ambiguous_or_unsafe_inputs(
             family="base-digests",
             current_attempt=1,
         )
+
+
+def test_retry_artifact_families_index_their_groups_by_name(
+    tmp_path: Path,
+) -> None:
+    """Attempt and logical group come from named regex groups.
+
+    Positional indexing (or ``match.lastindex``) silently picks the wrong group
+    the moment a pattern gains an alternation, and the release families differ
+    in how many groups they have.
+    """
+    releases = tmp_path / "releases"
+    for backend, attempt in (("cursor", 3), ("opencode", 11)):
+        directory = releases / f"release-{backend}-{attempt}"
+        directory.mkdir(parents=True)
+        (directory / f"{backend}.json").write_text(backend, encoding="utf-8")
+    assert select_retry_artifacts(
+        releases,
+        tmp_path / "releases-out",
+        family="releases",
+        current_attempt=11,
+        required=("cursor", "opencode"),
+    ) == {"cursor": 3, "opencode": 11}
+
+    # The single-group family still reports the attempt, not the whole name.
+    plan = tmp_path / "plan"
+    (plan / "resolved-runner-plan-42").mkdir(parents=True)
+    (plan / "resolved-runner-plan-42" / "plan.json").write_text("x")
+    assert select_retry_artifacts(
+        plan,
+        tmp_path / "plan-out",
+        family="resolved-plan",
+        current_attempt=42,
+    ) == {"plan": 42}
+
+    source = (ROOT / "tools" / "runner_images.py").read_text(encoding="utf-8")
+    assert "int(match.group(match.lastindex" not in source
+    assert source.count("(?P<attempt>[0-9]+)") == 4
+    assert source.count("(?P<logical>") == 3
 
 
 @pytest.mark.parametrize(

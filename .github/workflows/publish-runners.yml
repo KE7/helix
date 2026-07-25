@@ -605,7 +605,16 @@ jobs:
             --user 1000:1000 "$image" sh -lc "$smoke")"
           version="$(jq -r --arg backend "$BACKEND" \
             '.backends[$backend].version' /tmp/plan/resolved-runner-versions.json)"
-          grep -F "$version" <<< "$output"
+          # Anchor the version assertion. A plain substring match would let a
+          # CLI reporting 1.10 satisfy a claim about 1.1. Escape ERE
+          # metacharacters first: Cursor versions contain both `.` and `-`.
+          escaped_version="$(printf '%s' "$version" | sed 's/[][\\.*^$(){}?+|]/\\&/g')"
+          if ! grep -Eq "(^|[^0-9A-Za-z.])v?${escaped_version}"'([^0-9A-Za-z.]|$)' \
+            <<< "$output"; then
+            echo "smoke output does not report version ${version}:" >&2
+            printf '%s\n' "$output" >&2
+            exit 1
+          fi
           if [[ "$BACKEND" == codex ]]; then
             docker run --rm --network none --read-only \
               --tmpfs /tmp:rw,nosuid,nodev \
