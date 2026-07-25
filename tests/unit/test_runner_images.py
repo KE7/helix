@@ -22,6 +22,7 @@ from tools.runner_images import (
     _fetch_sha256,
     _promotion_records,
     assert_immutable_collision,
+    base_tag,
     change_plan,
     inspect_ghcr_tag,
     immutable_tag,
@@ -130,57 +131,6 @@ def test_cursor_installer_requires_one_unambiguous_version() -> None:
     assert len(resolved["installer_sha256"]) == 64
     with pytest.raises(RunnerPlanError, match="exactly one"):
         parse_cursor_installer(installer + b"\nVERSION=2026.07.21-deadbee\n")
-
-
-def test_change_plan_builds_only_changed_backends_on_both_native_arches() -> None:
-    catalog = _catalog()
-    published = {
-        name: immutable_tag(item, catalog["base"]["immutable_tag"])
-        for name, item in catalog["backends"].items()
-    }
-    published["codex"] = "cli-0.130.0-rold"
-    plan = change_plan(catalog, published)
-    assert plan["changed"] == [
-        {
-            "name": "codex",
-            "dockerfile": "docker/codex.Dockerfile",
-            "version": "0.145.0",
-            "immutable_tag": immutable_tag(
-                catalog["backends"]["codex"], catalog["base"]["immutable_tag"]
-            ),
-            "promotion_approved": False,
-        }
-    ]
-    assert [(item["arch"], item["runner"]) for item in plan["builds"]] == [
-        ("amd64", "ubuntu-latest"),
-        ("arm64", "ubuntu-24.04-arm"),
-    ]
-
-
-def test_change_plan_is_empty_when_every_published_version_matches() -> None:
-    catalog = _catalog()
-    published = {
-        name: immutable_tag(item, catalog["base"]["immutable_tag"])
-        for name, item in catalog["backends"].items()
-    }
-    assert change_plan(catalog, published) == {"changed": [], "builds": []}
-
-
-def test_same_version_content_drift_rebuilds_and_cannot_promote() -> None:
-    catalog = _catalog()
-    item = catalog["backends"]["gemini"]
-    old_tag = immutable_tag(item, catalog["base"]["immutable_tag"])
-    item["promotion_guard_version"] = item["version"]
-    item["promotion_guard_immutable_tag"] = old_tag
-    published = {
-        name: immutable_tag(backend, catalog["base"]["immutable_tag"])
-        for name, backend in catalog["backends"].items()
-    }
-    item["sha512"] = "a" * 128
-    plan = change_plan(catalog, published)
-    changed = next(entry for entry in plan["changed"] if entry["name"] == "gemini")
-    assert changed["immutable_tag"] != old_tag
-    assert changed["promotion_approved"] is False
 
 
 def test_immutable_tag_collision_is_idempotent_or_fails_hard() -> None:
@@ -623,15 +573,6 @@ def test_malformed_catalog_structures_exit_cleanly_instead_of_tracebacking(
     assert "runner image gate failed" in capsys.readouterr().err
 
 
-def test_workflow_version_smoke_is_boundary_aware() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    # A bare substring match would let a CLI reporting 1.10 satisfy 1.1.
-    assert 'grep -F "$version"' not in text
-    assert '(^|[^0-9A-Za-z.])v?${escaped_version}' in text
-    assert "([^0-9A-Za-z.]|$)" in text
-    assert "escaped_version=" in text
-
-
 def test_catalog_rejects_unknown_backend_kind() -> None:
     catalog = _catalog()
     catalog["backends"]["claude"]["kind"] = "unexpected"
@@ -648,58 +589,6 @@ def test_catalog_rejects_backend_source_or_luna_contract_drift() -> None:
     catalog["backends"]["codex"]["required_reasoning_effort"] = "high"
     with pytest.raises(RunnerPlanError, match="must be xhigh"):
         validate_catalog(catalog)
-
-
-def test_current_promotion_guard_approves_only_exact_content_identity() -> None:
-    catalog = _catalog()
-    item = catalog["backends"]["claude"]
-    item["promotion_guard_version"] = item["version"]
-    item["promotion_guard_immutable_tag"] = immutable_tag(
-        item, catalog["base"]["immutable_tag"]
-    )
-    plan = change_plan(catalog, {})
-    changed = next(entry for entry in plan["changed"] if entry["name"] == "claude")
-    assert changed["promotion_approved"] is True
-    item["sha512"] = "a" * 128
-    plan = change_plan(catalog, {})
-    changed = next(entry for entry in plan["changed"] if entry["name"] == "claude")
-    assert changed["promotion_approved"] is False
-
-
-def test_shipped_catalog_deliberately_approves_no_promotion() -> None:
-    """The current posture is intent, not accident.
-
-    Every backend ships an unset ``promotion_guard_immutable_tag`` and a guard
-    version behind the pinned version, so ``latest`` never moves automatically.
-    A maintainer approves a promotion by updating both guard fields.  This test
-    fails the moment that posture changes, forcing the change to be reviewed.
-    """
-    catalog = _catalog()
-    plan = change_plan(catalog, {})
-    assert [entry["name"] for entry in plan["changed"]] == sorted(
-        catalog["backends"]
-    )
-    assert all(entry["promotion_approved"] is False for entry in plan["changed"])
-    for name, item in catalog["backends"].items():
-        assert item["promotion_guard_immutable_tag"] is None, name
-        assert item["promotion_guard_version"] != item["version"], name
-
-
-def test_workflow_makes_a_stalled_promotion_gate_loud_and_machine_readable() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    assert "promotion_stalled: ${{ steps.plan.outputs.promotion_stalled }}" in text
-    assert 'echo "promotion_stalled=${promotion_stalled}" >> "$GITHUB_OUTPUT"' in text
-    assert "::warning title=Runner promotion stalled::" in text
-    assert "### Convenience-tag promotion is stalled" in text
-    assert "/tmp/promotion-stall.json" in text
-    # The stall report must be retained with the rest of the plan evidence.
-    retained = text[
-        text.index("- name: Retain the exact resolved build plan") :
-    ].split("retention-days:", 1)[0]
-    assert "/tmp/promotion-stall.json" in retained
-    # Reporting must not weaken the gate: promotion still requires an exact
-    # guard match computed by the planner and re-checked in the promote job.
-    assert 'select(.promotion_approved == true)' in text
 
 
 def test_codex_catalog_requires_luna_and_exact_second_highest_xhigh() -> None:
@@ -772,41 +661,6 @@ def test_dockerfiles_do_not_install_a_floating_backend_cli() -> None:
             assert "TARGETARCH" in text
 
 
-def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    trigger_block = text.split("env:", 1)[0]
-    assert "pull_request:" not in trigger_block
-    assert "schedule:" in trigger_block
-    assert "workflow_dispatch:" in trigger_block
-    assert "cancel-in-progress: false" in text
-    assert "packages: write" in text
-    assert "verify-codex-catalog" in text
-    assert "check-collision" in text
-    assert "attest-build-provenance" in text
-    assert "github.repository == 'KE7/helix'" in text
-    assert "github.event.repository.default_branch == 'main'" in text
-    assert "github.ref == 'refs/heads/main'" in text
-    assert (
-        "ATTESTATION_SIGNER_WORKFLOW: "
-        "KE7/helix/.github/workflows/publish-runners.yml"
-    ) in text
-    assert "ATTESTATION_SIGNER_WORKFLOW: http" not in text
-    assert '--signer-workflow "$ATTESTATION_SIGNER_WORKFLOW"' in text
-    assert '--source-ref "$ATTESTATION_SOURCE_REF"' in text
-    assert "--deny-self-hosted-runners" in text
-    assert "cache-from:" not in text
-    assert "cache-to:" not in text
-    uses = re.findall(r"uses:\s+([^@\s]+)@([^\s#]+)", text)
-    assert uses
-    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, revision in uses)
-    assert "smoke-${ARCH}.json" in text
-    assert "verify-build-evidence" in text
-    assert "promotion_guard_immutable_tag" in text
-    assert "CLI_AMD64_FALLBACK_SHA512" in text
-    assert "TARGET_DIGEST: ${{ inputs.target_digest }}" in text
-    assert "BACKEND: ${{ inputs.backend }}" in text
-
-
 def _run_bodies(text: str) -> list[tuple[int, str]]:
     """Return (line number, body) for every ``run:`` step in the workflow."""
     lines = text.splitlines()
@@ -831,231 +685,6 @@ def _run_bodies(text: str) -> list[tuple[int, str]]:
             index += 1
         bodies.append((index, "\n".join(body)))
     return bodies
-
-
-def test_no_workflow_expression_is_interpolated_into_a_shell_body() -> None:
-    """Every ``${{ }}`` value reaches a shell through a quoted env var.
-
-    ``change_plan`` constrains the matrix to five literal backend names, so
-    there is no live injection today, but interpolating an expression straight
-    into a ``run:`` body is exactly the pattern actionlint and zizmor flag and
-    the only thing standing between this workflow and a future template value
-    that is not constrained.
-    """
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    bodies = _run_bodies(text)
-    assert len(bodies) >= 15
-    offenders = [line for line, body in bodies if "${{" in body]
-    assert offenders == [], f"expressions interpolated into run: at {offenders}"
-
-    # The matrix values the shells need are declared as step-level env, and
-    # every backend/arch value crossing that boundary is re-validated.
-    for declaration in (
-        "BACKEND: ${{ matrix.name }}",
-        "ARCH: ${{ matrix.arch }}",
-        "PLATFORM: ${{ matrix.platform }}",
-        "VERSION: ${{ matrix.version }}",
-        "BUILD_DIGEST: ${{ steps.build.outputs.digest }}",
-    ):
-        assert declaration in text
-    assert "smoke-${ARCH}.json" in text
-    assert 'docker pull --platform "$PLATFORM"' in text
-    assert (
-        len(re.findall(
-            r'\[\[ "\$(?:backend|BACKEND)" =~ '
-            r'\^\(claude\|codex\|cursor\|gemini\|opencode\)\$ \]\]',
-            text,
-        ))
-        == 7
-    )
-
-
-def test_rollback_dispatch_is_not_queued_behind_the_daily_refresh() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    concurrency = text[text.index("concurrency:") : text.index("permissions:")]
-    assert (
-        "group: runner-image-"
-        "${{ github.event.inputs.operation || 'refresh' }}-"
-        "${{ github.repository }}"
-    ) in concurrency
-    # Both operations stay serialized against themselves.
-    assert "cancel-in-progress: false" in concurrency
-    assert "group: runner-image-refresh-${{ github.repository }}" not in text
-
-
-def test_evidence_retention_is_split_by_audit_value() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    assert "EVIDENCE_RETENTION_DAYS: 90\n" not in text
-    assert "AUDIT_RETENTION_DAYS: 90" in text
-    assert "BUILD_EVIDENCE_RETENTION_DAYS: 30" in text
-
-    audit = "retention-days: ${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}"
-    build = "retention-days: ${{ fromJSON(env.BUILD_EVIDENCE_RETENTION_DAYS) }}"
-    expected = {
-        "resolved-runner-plan-${{ github.run_attempt }}": audit,
-        "digests-base-${{ matrix.arch }}-${{ github.run_attempt }}": build,
-        (
-            "digests-${{ matrix.name }}-${{ matrix.arch }}-"
-            "${{ github.run_attempt }}"
-        ): build,
-        "release-${{ matrix.name }}-${{ github.run_attempt }}": audit,
-        "promotion-plan-${{ github.run_id }}-${{ github.run_attempt }}": audit,
-        "rollback-plan-${{ github.run_id }}-${{ github.run_attempt }}": audit,
-    }
-    for name, policy in expected.items():
-        start = text.index(f"name: {name}")
-        block = text[start : text.index("retention-days:", start) + len(policy)]
-        assert block.endswith(policy), name
-    # Both committed-ledger uploads are audit evidence.
-    assert text.count("name: rollback-ledger-") == 2
-    for start in (
-        text.index("name: rollback-ledger-"),
-        text.rindex("name: rollback-ledger-"),
-    ):
-        assert text[start:].split("retention-days: ", 1)[1].startswith(
-            "${{ fromJSON(env.AUDIT_RETENTION_DAYS) }}"
-        )
-
-
-def test_one_failing_matrix_leg_still_blocks_every_backend_by_design() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    merge = text[
-        text.index("  merge-backends:") : text.index("  promote:")
-    ]
-    # This is the deliberate fail-closed trade-off, not an oversight: keep the
-    # missing always() and keep the comment that explains it.
-    header = [
-        line
-        for line in merge.split("steps:", 1)[0].splitlines()
-        if not line.lstrip().startswith("#")
-    ]
-    assert "    if: ${{ needs.resolve.outputs.changed != '[]' }}" in header
-    assert not any("always()" in line for line in header)
-    assert "Deliberate fail-closed trade-off" in merge
-    assert "Do not add always() here." in merge
-
-
-def test_failure_notifier_covers_cancellation_and_dedupes_beyond_one_page() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    notifier = text[text.index("  notify-failure:") :]
-    # A cancelled run is exactly the hard-kill-mid-transaction case.
-    assert "(failure() || cancelled())" in notifier
-    assert "RUN_OUTCOME: ${{ cancelled() && 'cancelled' || 'failed' }}" in notifier
-    assert "was cancelled" in notifier
-    assert "rollback-before-" in notifier
-    # Dedupe must not silently stop at the first page of open issues.
-    assert "per_page: 100" in notifier
-    assert "listForRepo({" not in notifier
-    assert "github.paginate(github.rest.issues.listForRepo" in notifier
-    assert 'const label = "runner-image-refresh";' in notifier
-    assert "labels: label" in notifier
-    assert "labels: [label]" in notifier
-
-
-def test_immutable_tag_collision_check_is_fail_closed_at_publish_time() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    assert "EXISTING_DIGEST:" not in text
-    assert 'echo "existing=${existing}"' not in text
-    assert "if docker buildx imagetools inspect" not in text
-    for start, end in (
-        (
-            "- name: Publish immutable base tag only after attestation succeeds",
-            "  build-backends:",
-        ),
-        (
-            "- name: Publish immutable tag and release record after attestation",
-            "      - uses: actions/upload-artifact@",
-        ),
-    ):
-        segment = text[text.index(start) : text.index(end, text.index(start))]
-        inspect_at = segment.index("inspect-ghcr-tag")
-        collision_at = segment.index("check-collision")
-        publish_at = segment.index("docker buildx imagetools create")
-        verify_at = segment.rindex("docker buildx imagetools inspect")
-        assert inspect_at < collision_at < publish_at < verify_at
-        assert 'if [[ "$existing" == "absent" ]]' in segment
-
-
-def test_latest_moves_are_bracketed_by_retained_evidence_and_compensation() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    normalized = " ".join(text.split())
-    prepared = text.index(
-        "- name: Retain promotion rollback plan before moving latest tags"
-    )
-    moved = text.index(
-        "- name: Move latest tags with compensating rollback on any failure"
-    )
-    committed = text.index("- name: Retain committed promotion ledger")
-    compensated = text.index(
-        "- name: Restore latest tags if committed ledger retention fails"
-    )
-    assert prepared < moved < committed < compensated
-    assert (
-        "failure() && steps.move.outputs.promoted == 'true' && "
-        "steps.committed_ledger.outcome == 'failure'"
-    ) in normalized
-
-    rollback_prepared = text.index(
-        "- name: Retain manual rollback plan before moving latest"
-    )
-    rollback_moved = text.index("- name: Move latest to the verified rollback digest")
-    rollback_committed = text.index("- name: Retain committed manual rollback ledger")
-    rollback_compensated = text.index(
-        "- name: Restore latest if manual rollback ledger retention fails"
-    )
-    assert (
-        rollback_prepared
-        < rollback_moved
-        < rollback_committed
-        < rollback_compensated
-    )
-    assert text.count("exec python tools/runner_images.py promote-latest") == 2
-    assert text.count("python tools/runner_images.py restore-latest") == 2
-
-    # Both preflights must decide "no previous latest" from the authenticated
-    # 404-only probe, never from a failed `imagetools inspect`.
-    assert text.count('--image "$image" --tag latest') == 2
-    assert text.count('if [[ "$latest_state" == "absent" ]]; then') == 2
-    assert text.count("bootstrap=true") == 2
-    assert text.count("--argjson bootstrap") == 2
-    assert text.count('[[ "$previous" == "$latest_state" ]]') == 2
-
-    # The registry prefix has exactly one source of truth: promotion records
-    # carry the image they target, so a prefix change cannot make the
-    # compensating rollback address a different repository.
-    assert text.count('--arg image "$image"') == 2
-    assert text.count("backend:$backend,image:$image,") == 2
-    assert 'f"ghcr.io/ke7/helix-evo-runner-{backend}"' not in (
-        (ROOT / "tools" / "runner_images.py").read_text(encoding="utf-8")
-    )
-
-
-def test_v4_artifact_names_are_unique_for_same_run_retries() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    attempt = "${{ github.run_attempt }}"
-    upload_blocks = text.split("uses: actions/upload-artifact@")[1:]
-    upload_names = [
-        re.search(r"\n\s+name:\s+([^\n]+)", block).group(1)
-        for block in upload_blocks
-    ]
-    assert upload_names
-    assert all(attempt in name for name in upload_names)
-    templates = {
-        f"resolved-runner-plan-{attempt}",
-        f"digests-base-${{{{ matrix.arch }}}}-{attempt}",
-        f"digests-${{{{ matrix.name }}}}-${{{{ matrix.arch }}}}-{attempt}",
-        f"release-${{{{ matrix.name }}}}-{attempt}",
-    }
-    assert all(f"name: {template}" in text for template in templates)
-    first_attempt = {template.replace(attempt, "1") for template in templates}
-    second_attempt = {template.replace(attempt, "2") for template in templates}
-    assert first_attempt.isdisjoint(second_attempt)
-    assert "pattern: resolved-runner-plan-*" in text
-    assert "pattern: digests-base-*" in text
-    assert "pattern: digests-${{ matrix.name }}-*" in text
-    assert "pattern: release-*" in text
-    assert text.count("runner_images.py select-retry-artifacts") == 5
-    assert text.count("merge-multiple: false") == 5
 
 
 def test_selective_retry_uses_latest_available_producer_per_logical_input(
@@ -1705,3 +1334,261 @@ def test_promotion_transaction_writes_ledgers_and_detects_bad_restore(
     )
     with pytest.raises(RunnerPlanError, match="compensating rollback failed"):
         restore_latest_tags([record], run_command=failed_restore)
+
+
+def test_base_tag_binds_the_whole_base_recipe(tmp_path: Path) -> None:
+    """Editing base.Dockerfile or any pinned input must change the tag.
+
+    Without this the "does the tag already exist?" check answers *yes* for a
+    recipe that no longer matches the checkout, the base build is skipped, and
+    every backend silently builds FROM a stale base.
+    """
+    base = _catalog()["base"]
+    dockerfile = tmp_path / "base.Dockerfile"
+    dockerfile.write_text("FROM node:22\n", encoding="utf-8")
+    original = base_tag(base, dockerfile)
+    assert original.startswith("node22-uv0.11.7-snapshot20260720-r")
+    assert re.fullmatch(r"[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}", original)
+
+    dockerfile.write_text("FROM node:22\n# a comment\n", encoding="utf-8")
+    assert base_tag(base, dockerfile) != original
+
+    dockerfile.write_text("FROM node:22\n", encoding="utf-8")
+    assert base_tag(base, dockerfile) == original
+
+    for mutate in (
+        lambda b: b.__setitem__("node_image", "node:22-bookworm-slim@sha256:" + "a" * 64),
+        lambda b: b["uv_wheels"]["arm64"].__setitem__("sha256", "b" * 64),
+        lambda b: b.__setitem__("uv_version", "0.11.8"),
+        lambda b: b.__setitem__("debian_snapshot", "20260721T000000Z"),
+    ):
+        drifted = copy.deepcopy(base)
+        mutate(drifted)
+        assert base_tag(drifted, dockerfile) != original
+
+
+def test_plan_builds_only_versions_the_registry_does_not_have() -> None:
+    """Nightly is the check cadence; an upstream release is the publish trigger."""
+    catalog = _catalog()
+    everything_published = {name: True for name in catalog["backends"]}
+    assert change_plan(catalog, everything_published) == []
+
+    codex_released = dict(everything_published, codex=False)
+    assert change_plan(catalog, codex_released) == [
+        {
+            "name": "codex",
+            "dockerfile": "docker/codex.Dockerfile",
+            "version": "0.145.0",
+            "tag": "0.145.0",
+        }
+    ]
+
+    # A registry with nothing in it builds all five.
+    assert [entry["name"] for entry in change_plan(catalog, {})] == sorted(
+        catalog["backends"]
+    )
+
+
+def test_forced_rebuild_never_overwrites_a_published_version_tag() -> None:
+    """A tag someone pinned must not silently change meaning.
+
+    Forcing a rebuild of a version that already shipped publishes
+    ``<version>-r<run_id>`` and moves ``latest`` there; the original version
+    tag keeps its original bytes.
+    """
+    catalog = _catalog()
+    published = {name: True for name in catalog["backends"]}
+    forced = change_plan(catalog, published, force=True, run_id="90210")
+    assert [entry["tag"] for entry in forced] == [
+        f"{catalog['backends'][entry['name']]['version']}-r90210" for entry in forced
+    ]
+    assert all(entry["version"] != entry["tag"] for entry in forced)
+
+    # Forcing something that was never published just uses the plain version.
+    fresh = change_plan(catalog, {}, force=True, run_id="90210")
+    assert [entry["tag"] for entry in fresh] == [
+        entry["version"] for entry in fresh
+    ]
+
+    # A replacement tag requires a usable run id rather than silently colliding.
+    with pytest.raises(RunnerPlanError, match="numeric run id"):
+        change_plan(catalog, published, force=True)
+    with pytest.raises(RunnerPlanError, match="numeric run id"):
+        change_plan(catalog, published, force=True, run_id="../evil")
+
+
+def test_plan_rejects_an_unsafe_upstream_version() -> None:
+    catalog = _catalog()
+    catalog["backends"]["codex"]["version"] = "0.145.0 --build-arg=evil"
+    with pytest.raises(RunnerPlanError, match="unsafe image version"):
+        change_plan(catalog, {})
+
+
+def _run_bodies(text: str) -> list[tuple[int, str]]:
+    """Return (line number, body) for every ``run:`` step in the workflow."""
+    lines = text.splitlines()
+    bodies: list[tuple[int, str]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.lstrip()
+        if not stripped.startswith("run:"):
+            index += 1
+            continue
+        indent = len(line) - len(stripped)
+        body = [stripped.removeprefix("run:").strip()]
+        index += 1
+        while index < len(lines):
+            following = lines[index]
+            if following.strip() and (
+                len(following) - len(following.lstrip()) <= indent
+            ):
+                break
+            body.append(following)
+            index += 1
+        bodies.append((index, "\n".join(body)))
+    return bodies
+
+
+def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    trigger_block = text.split("env:", 1)[0]
+    assert "pull_request:" not in trigger_block
+    assert "push:" not in trigger_block
+    assert "schedule:" in trigger_block
+    assert "workflow_dispatch:" in trigger_block
+    assert "github.repository == 'KE7/helix'" in text
+    assert "github.event.repository.default_branch == 'main'" in text
+    assert "github.ref == 'refs/heads/main'" in text
+    assert (
+        "ATTESTATION_SIGNER_WORKFLOW: KE7/helix/.github/workflows/publish-runners.yml"
+    ) in text
+    assert "ATTESTATION_SIGNER_WORKFLOW: http" not in text
+    assert '--signer-workflow "$ATTESTATION_SIGNER_WORKFLOW"' in text
+    assert '--source-ref "$ATTESTATION_SOURCE_REF"' in text
+    assert "--deny-self-hosted-runners" in text
+    assert "cache-from:" not in text
+    assert "cache-to:" not in text
+    uses = re.findall(r"uses:\s+([^@\s]+)@([^\s#]+)", text)
+    assert uses
+    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, revision in uses)
+
+
+def test_workflow_is_five_jobs_with_one_multiarch_build_per_backend() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    jobs = re.findall(r"^  ([a-z][a-z-]*):$", text[text.index("\njobs:\n") :], re.M)
+    assert jobs == ["guard", "resolve", "base", "backend", "rollback", "notify"]
+
+    # Both arches in one job: no per-architecture matrix, no digest handoff.
+    assert text.count("platforms: linux/amd64,linux/arm64") == 2
+    assert "ubuntu-24.04-arm" not in text
+    assert "matrix.arch" not in text
+    assert "select-retry-artifacts" not in text
+    assert "verify-build-evidence" not in text
+    # Emulation is what makes that possible.
+    assert text.count("docker/setup-qemu-action@") == 3
+
+
+def test_no_tag_is_created_before_the_image_passes_both_smokes() -> None:
+    """The PR's best property: a tag never names an unvalidated image."""
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for job, subject in (("base", "base"), ("backend", "backend")):
+        start = text.index(f"\n  {job}:\n")
+        end = len(text)
+        for candidate in ("\n  backend:\n", "\n  rollback:\n", "\n  notify:\n"):
+            position = text.find(candidate, start + 1)
+            if position != -1:
+                end = min(end, position)
+        segment = text[start:end]
+        assert "push-by-digest=true" in segment, subject
+        build_at = segment.index("push-by-digest=true")
+        smoke_at = segment.index("Smoke both architectures before any tag exists")
+        attest_at = segment.index("actions/attest-build-provenance@")
+        tag_at = segment.index("docker buildx imagetools create -t")
+        assert build_at < smoke_at < attest_at < tag_at, subject
+        # Both architectures really are exercised.
+        assert "for platform in linux/amd64 linux/arm64" in segment, subject
+        assert "verify-platforms" in segment, subject
+
+
+def test_registry_absence_check_is_fail_closed() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    assert "tag_exists() {" in text
+    # Only a definitive "no such tag" is absence; everything else aborts.
+    assert "grep -qiE 'not found|manifest unknown|no such manifest|404'" in text
+    assert "registry inspection failed for" in text
+    helper = text[text.index("tag_exists() {") : text.index("base_tag=\"$(")]
+    assert helper.count("exit 1") == 1
+    assert "return 1" in helper
+
+
+def test_rollback_dispatch_is_not_queued_behind_the_nightly_build() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    concurrency = text[text.index("concurrency:") : text.index("permissions:")]
+    assert (
+        "group: runner-image-"
+        "${{ github.event.inputs.operation || 'refresh' }}-"
+        "${{ github.repository }}"
+    ) in concurrency
+    assert "cancel-in-progress: false" in concurrency
+    # Rollback is dispatch-only and still verifies before it retags.
+    rollback = text[text.index("\n  rollback:\n") : text.index("\n  notify:\n")]
+    assert "inputs.operation == 'rollback'" in rollback
+    assert "verify-platforms" in rollback
+    assert "gh attestation verify" in rollback
+    assert 'for platform in linux/amd64 linux/arm64' in rollback
+    assert '[[ "$actual" == "$TARGET_DIGEST" ]]' in rollback
+
+
+def test_failure_notifier_covers_cancellation_and_dedupes_beyond_one_page() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    notifier = text[text.index("\n  notify:\n") :]
+    assert "(failure() || cancelled())" in notifier
+    # `cancelled()` is only legal in a job/step `if:`, so the notifier
+    # classifies the run from the upstream job results.
+    assert "JOB_RESULTS: ${{ toJSON(needs) }}" in notifier
+    assert 'job.result === "cancelled"' in notifier
+    assert "was cancelled" in notifier
+    assert "github.paginate(github.rest.issues.listForRepo" in notifier
+    assert 'const label = "runner-image-refresh";' in notifier
+    assert "labels: label" in notifier
+    assert "labels: [label]" in notifier
+
+
+def test_no_workflow_expression_is_interpolated_into_a_shell_body() -> None:
+    """Every ``${{ }}`` value reaches a shell through a quoted env var.
+
+    ``change_plan`` constrains the matrix to five literal backend names, so
+    there is no live injection today, but interpolating an expression straight
+    into a ``run:`` body is what actionlint and zizmor flag, and it is the only
+    thing standing between this workflow and a future unconstrained value.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    bodies = _run_bodies(text)
+    assert len(bodies) >= 8
+    offenders = [line for line, body in bodies if "${{" in body]
+    assert offenders == [], f"expressions interpolated into run: at {offenders}"
+    for declaration in (
+        "BACKEND: ${{ matrix.name }}",
+        "VERSION: ${{ matrix.version }}",
+        "IMAGE_TAG: ${{ matrix.tag }}",
+        "BUILD_DIGEST: ${{ steps.build.outputs.digest }}",
+        "BASE_TAG: ${{ needs.resolve.outputs.base_tag }}",
+    ):
+        assert declaration in text
+    assert (
+        len(re.findall(
+            r'\[\[ "\$BACKEND" =~ \^\(claude\|codex\|cursor\|gemini\|opencode\)\$ \]\]',
+            text,
+        ))
+        == 4
+    )
+
+
+def test_workflow_version_smoke_is_boundary_aware() -> None:
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    # A bare substring match would let a CLI reporting 1.10 satisfy 1.1.
+    assert 'grep -F "$version"' not in text
+    assert '(^|[^0-9A-Za-z.])v?${escaped}' in text
+    assert "([^0-9A-Za-z.]|$)" in text
+    assert "escaped=" in text

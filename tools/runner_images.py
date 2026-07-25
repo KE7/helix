@@ -187,6 +187,50 @@ def base_immutable_tag(base: Mapping[str, Any]) -> str:
     return tag
 
 
+def _repo_file(catalog_path: Path, entry: str) -> Path:
+    """Resolve a catalog-declared Dockerfile inside the repository."""
+    catalog = load_json(catalog_path)
+    item = catalog["base"] if entry == "base" else catalog["backends"][entry]
+    relative = Path(str(item["dockerfile"]))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RunnerPlanError(f"{entry}: unsafe dockerfile path")
+    root = catalog_path.resolve().parent.parent
+    path = (root / relative).resolve()
+    if root not in path.parents:
+        raise RunnerPlanError(f"{entry}: dockerfile escapes the repository")
+    return path
+
+
+def base_tag(base: Mapping[str, Any], dockerfile: Path) -> str:
+    """Derive the base image tag from the whole base recipe.
+
+    The readable part names what a human cares about.  The six-hex suffix binds
+    every input that can change the built bytes -- the Dockerfile itself plus
+    each pinned catalog value -- so editing ``docker/base.Dockerfile`` or
+    bumping the node digest cannot silently reuse an already-published, stale
+    base.  Without it, "does this tag exist?" would answer *yes* for a recipe
+    that no longer matches the checkout, and every backend would build FROM a
+    stale base with nothing reporting a problem.
+    """
+    material = json.dumps(
+        {
+            "dockerfile": hashlib.sha256(dockerfile.read_bytes()).hexdigest(),
+            "node_image": base["node_image"],
+            "debian_snapshot": base["debian_snapshot"],
+            "uv_version": base["uv_version"],
+            "uv_wheels": base["uv_wheels"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    fingerprint = hashlib.sha256(material.encode("utf-8")).hexdigest()[:6]
+    snapshot = str(base["debian_snapshot"])[:8]
+    tag = f"node22-uv{base['uv_version']}-snapshot{snapshot}-r{fingerprint}"
+    if not TAG_RE.fullmatch(tag):
+        raise RunnerPlanError(f"derived base image tag is unsafe: {tag!r}")
+    return tag
+
+
 def validate_catalog(catalog: dict[str, Any]) -> None:
     if catalog.get("schema_version") != 1:
         raise RunnerPlanError("unsupported runner catalog schema")
@@ -791,44 +835,52 @@ def immutable_tag(item: Mapping[str, Any], base_tag: str) -> str:
 
 
 def change_plan(
-    resolved: dict[str, Any], published_tags: dict[str, str]
-) -> dict[str, Any]:
-    validate_catalog(resolved)
-    changed: list[dict[str, Any]] = []
+    resolved: Mapping[str, Any],
+    published: Mapping[str, Any],
+    *,
+    force: bool = False,
+    run_id: str = "",
+) -> list[dict[str, str]]:
+    """Decide which backends to build, and under which tag.
+
+    The whole policy: an upstream release that is not in the registry yet gets
+    built; anything already published is skipped.  Nightly is therefore the
+    *check* cadence and an upstream release is the *publish* trigger, so a
+    quiet night is a clean no-op.
+
+    ``force`` rebuilds regardless -- the escape hatch for a recipe change that
+    upstream did not trigger.  When the version tag already exists, a forced
+    rebuild publishes ``<version>-r<run_id>`` instead of overwriting it: a tag
+    someone has pinned must never silently change meaning.
+    """
     builds: list[dict[str, str]] = []
     for name in BACKENDS:
         item = resolved["backends"][name]
-        version = item["version"]
-        tag = immutable_tag(item, str(resolved["base"]["immutable_tag"]))
-        if published_tags.get(name) == tag:
+        version = str(item["version"])
+        if not VERSION_RE.fullmatch(version) or len(version) > 80:
+            raise RunnerPlanError(f"{name}: unsafe image version {version!r}")
+        exists = bool(published.get(name, False))
+        if exists and not force:
             continue
-        changed.append(
+        tag = version
+        if exists:
+            if not re.fullmatch(r"[0-9]+", run_id):
+                raise RunnerPlanError(
+                    f"{name}: forcing a rebuild of a published version needs "
+                    "a numeric run id for the replacement tag"
+                )
+            tag = f"{version}-r{run_id}"
+        if not TAG_RE.fullmatch(tag):
+            raise RunnerPlanError(f"{name}: derived image tag is unsafe: {tag!r}")
+        builds.append(
             {
                 "name": name,
-                "dockerfile": item["dockerfile"],
+                "dockerfile": str(item["dockerfile"]),
                 "version": version,
-                "immutable_tag": tag,
-                "promotion_approved": (
-                    version == item["promotion_guard_version"]
-                    and tag == item["promotion_guard_immutable_tag"]
-                ),
+                "tag": tag,
             }
         )
-        for platform, runner in (
-            ("amd64", "ubuntu-latest"),
-            ("arm64", "ubuntu-24.04-arm"),
-        ):
-            builds.append(
-                {
-                    "name": name,
-                    "dockerfile": item["dockerfile"],
-                    "version": version,
-                    "platform": f"linux/{platform}",
-                    "arch": platform,
-                    "runner": runner,
-                }
-            )
-    return {"changed": changed, "builds": builds}
+    return builds
 
 
 def assert_immutable_collision(existing: str | None, candidate: str) -> None:
@@ -1376,6 +1428,10 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--resolved", type=Path, required=True)
     plan.add_argument("--published", type=Path, required=True)
     plan.add_argument("--output", type=Path, required=True)
+    plan.add_argument("--force", action="store_true")
+    plan.add_argument("--run-id", default="")
+    base = subparsers.add_parser("base-tag")
+    base.add_argument("--catalog", type=Path, required=True)
     catalog = subparsers.add_parser("verify-codex-catalog")
     catalog.add_argument("--input", type=Path, required=True)
     platforms = subparsers.add_parser("verify-platforms")
@@ -1432,8 +1488,17 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "plan":
             write_json(
                 args.output,
-                change_plan(load_json(args.resolved), load_json(args.published)),
+                change_plan(
+                    load_json(args.resolved),
+                    load_json(args.published),
+                    force=args.force,
+                    run_id=args.run_id,
+                ),
             )
+        elif args.command == "base-tag":
+            catalog = load_json(args.catalog)
+            validate_catalog(catalog)
+            print(base_tag(catalog["base"], _repo_file(args.catalog, "base")))
         elif args.command == "verify-codex-catalog":
             verify_codex_catalog(load_json(args.input))
         elif args.command == "verify-platforms":
