@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import helix.sandbox as sandbox_module
+
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
     EvaluatorSidecarRuntime,
@@ -961,3 +963,121 @@ def test_sandbox_auth_opencode_login_uses_full_setup_tui():
 
     assert "helix-auth-opencode:/home/node:rw" in args
     assert args[-1:] == ["opencode"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Docker env values never appear in rendered diagnostics
+# ---------------------------------------------------------------------------
+
+
+class TestDockerEnvRedaction:
+    """`-e KEY=VALUE` carries API keys; a failing docker call must not echo them.
+
+    `subprocess.CalledProcessError` keeps the full argv on both `.cmd` and
+    `.args`, so an unredacted failure puts the key into logs, tracebacks and
+    any crash reporter that renders the exception.
+    """
+
+    SECRET = "sk-live-SUPERSECRET-abc123"
+
+    def _args(self) -> list[str]:
+        return [
+            "docker", "run", "--rm",
+            "-e", f"ANTHROPIC_API_KEY={self.SECRET}",
+            "-e", "HOME=/home/node",
+            "helix-test-image:local", "true",
+        ]
+
+    def test_argv_redaction_keeps_keys_and_drops_values(self) -> None:
+        redacted = sandbox_module._redact_docker_argv(self._args())
+
+        assert self.SECRET not in " ".join(redacted)
+        assert "ANTHROPIC_API_KEY=<redacted>" in redacted, (
+            "the key must survive so a rendered command stays diagnosable"
+        )
+        assert redacted[0:3] == ["docker", "run", "--rm"]
+        assert redacted[-2:] == ["helix-test-image:local", "true"]
+
+    @pytest.mark.parametrize(
+        "form",
+        [
+            ["-e", "K=SEKRET"],
+            ["--env", "K=SEKRET"],
+            ["-eK=SEKRET"],
+            ["--env=K=SEKRET"],
+        ],
+    )
+    def test_every_docker_env_spelling_is_redacted(self, form: list[str]) -> None:
+        redacted = sandbox_module._redact_docker_argv(["docker", "run", *form, "img"])
+        assert "SEKRET" not in " ".join(redacted)
+        assert "K=<redacted>" in " ".join(redacted)
+
+    def test_called_process_error_is_redacted_on_both_cmd_and_args(
+        self, mocker
+    ) -> None:
+        args = self._args()
+        mocker.patch(
+            "helix.sandbox.subprocess.run",
+            side_effect=subprocess.CalledProcessError(
+                returncode=125, cmd=args, output="", stderr="no such image"
+            ),
+        )
+
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            sandbox_module._run_docker(args, check=True)
+
+        exc = excinfo.value
+        assert self.SECRET not in repr(exc)
+        assert self.SECRET not in str(exc.cmd)
+        assert self.SECRET not in str(exc.args)
+        assert exc.returncode == 125
+        assert exc.stderr == "no such image"
+
+    def test_timeout_expired_is_redacted(self, mocker) -> None:
+        args = self._args()
+        mocker.patch(
+            "helix.sandbox.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=args, timeout=1.5),
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+            sandbox_module._run_docker(args, check=False)
+
+        exc = excinfo.value
+        assert self.SECRET not in repr(exc)
+        assert self.SECRET not in str(exc.cmd)
+        assert exc.timeout == 1.5
+
+    def test_completed_process_args_are_redacted(self, mocker) -> None:
+        args = self._args()
+        mocker.patch(
+            "helix.sandbox.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=args, returncode=0, stdout="ok", stderr=""
+            ),
+        )
+
+        result = sandbox_module._run_docker(args, check=False)
+
+        assert self.SECRET not in str(result.args)
+
+    def test_captured_output_is_left_verbatim(self, mocker) -> None:
+        """Container output is not scrubbed — deliberately.
+
+        Substring-matching output against every env value would also rewrite
+        the non-secret variables HELIX injects (``HOME=/home/node``), turning
+        container tracebacks into `<redacted>` soup and corrupting output that
+        callers still parse on a non-zero exit.
+        """
+        args = self._args()
+        traceback_text = 'File "/home/node/app/run.py", line 3\n'
+        mocker.patch(
+            "helix.sandbox.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=args, returncode=1, stdout="", stderr=traceback_text
+            ),
+        )
+
+        result = sandbox_module._run_docker(args, check=False)
+
+        assert result.stderr == traceback_text
