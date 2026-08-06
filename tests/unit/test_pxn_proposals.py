@@ -28,7 +28,7 @@ from helix.config import (
     WorktreeConfig,
 )
 from helix.evolution import run_evolution
-from helix.population import Candidate, EvalResult
+from helix.population import Candidate, EvalResult, ParetoFrontier
 from helix.proposals import (
     AcceptanceJudgement,
     AcceptanceMemo,
@@ -870,3 +870,215 @@ class TestDroppedProposalsAreRecorded:
         }
         assert by_reason["g1-s1"] == "minibatch_gate"
         assert by_reason["g1-s3"] == "proposal_selection"
+
+
+# ---------------------------------------------------------------------------
+# 7. Cost model and budget accounting under P×N
+# ---------------------------------------------------------------------------
+
+
+def _eval_log(all_mocks: dict[str, Any], seed_id: str, child_scores: dict[str, float]) -> list[tuple[str, str, int]]:
+    """Wire scored children and return a log of (candidate_id, split, n_examples)."""
+    calls: list[tuple[str, str, int]] = []
+    all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
+
+    def run_eval(
+        candidate: Candidate,
+        config: HelixConfig,
+        split: str = "val",
+        instance_ids: list[str] | None = None,
+        **kwargs: Any,
+    ) -> EvalResult:
+        calls.append((candidate.id, split, 0 if instance_ids is None else len(instance_ids)))
+        if instance_ids is None:
+            return _make_result(candidate.id, {"v1": 0.5})
+        if split == "train":
+            score = 0.3 if candidate.id == seed_id else child_scores[candidate.id]
+            return _make_result(candidate.id, {i: score for i in instance_ids})
+        return _make_result(candidate.id, {i: 0.7 for i in instance_ids})
+
+    all_mocks["run_evaluator"].side_effect = run_eval
+    return calls
+
+
+class TestCostModel:
+    def test_selection_saves_validation_not_gate_work(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Every proposal is still evaluated on its minibatch.
+
+        ``best_improvement`` is a validation-cost knob, not a gate-cost knob:
+        all P*N children are still mutated and gated, and only the winner is
+        promoted to full validation.  A reader sizing a run needs this to be
+        explicit — picking ``best_improvement`` does not make N cheap.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        calls = _eval_log(
+            all_mocks, seed.id, {"g1-s1": 0.4, "g1-s2": 0.9, "g1-s3": 0.6}
+        )
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=3,
+            proposal_selection="best_improvement",
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        child_gate = [c for c in calls if c[0] != seed.id and c[1] == "train"]
+        child_val = [c for c in calls if c[0] != seed.id and c[1] == "val"]
+        assert len(child_gate) == 3, "all N children must still be gated"
+        assert len(child_val) == 1, "only the selected child reaches full val"
+        assert all_mocks["mutate"].call_count == 3, "all N mutations still run"
+
+    def test_parent_draws_equal_p_not_p_times_n(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """P=3, N=2 draws 3 parents, not 6 — N is 'more tries at this parent'."""
+        train_path = _write_train_jsonl(tmp_path, n=20)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _eval_log(all_mocks, seed.id, {f"g1-s{i}": 0.9 for i in range(1, 7)})
+
+        spy = mocker.spy(ParetoFrontier, "select_parent")
+
+        config = _make_config(
+            train_path, num_parallel_proposals=3, mutations_per_parent=2
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert spy.call_count == 3, (
+            f"Expected P=3 parent draws for a 3x2 batch; got {spy.call_count}"
+        )
+
+    def test_budget_ledger_matches_examples_actually_evaluated(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The ledger equals independently counted evaluator work (caching off)."""
+        train_path = _write_train_jsonl(tmp_path, n=20)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        calls = _eval_log(all_mocks, seed.id, {f"g1-s{i}": 0.9 for i in range(1, 5)})
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=2,
+            mutations_per_parent=2,
+            cache_evaluation=False,
+            max_evaluations=100_000,
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert result.budget.evaluations == sum(n for _, _, n in calls), (
+            f"budget ledger {result.budget.evaluations} != "
+            f"{sum(n for _, _, n in calls)} examples actually evaluated"
+        )
+
+    def test_budget_is_monotonic_across_a_pxn_batch(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Charges are sequential, so the ledger never decreases mid-batch."""
+        train_path = _write_train_jsonl(tmp_path, n=20)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _eval_log(all_mocks, seed.id, {f"g1-s{i}": 0.9 for i in range(1, 5)})
+
+        snapshots: list[int] = []
+        all_mocks["save_state"].side_effect = lambda state, _p: snapshots.append(
+            state.budget.evaluations
+        )
+
+        config = _make_config(
+            train_path, num_parallel_proposals=2, mutations_per_parent=2
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert snapshots
+        assert snapshots == sorted(snapshots), f"ledger went backwards: {snapshots}"
+
+    def test_budget_overshoot_is_bounded_by_the_batch_size(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The documented overshoot bound, enforced.
+
+        ``max_evaluations`` is checked between slots, so a batch already
+        dispatched runs to completion.  The engine documents the resulting
+        overshoot as at most P*N parent-minibatch evals plus P*N child evals;
+        this pins that bound rather than leaving it as prose.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=20)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _eval_log(all_mocks, seed.id, {f"g1-s{i}": 0.9 for i in range(1, 30)})
+
+        p, n, mb = 2, 2, 2
+        cap = 30
+        config = _make_config(
+            train_path,
+            minibatch_size=mb,
+            num_parallel_proposals=p,
+            mutations_per_parent=n,
+            max_generations=20,
+            max_evaluations=cap,
+            cache_evaluation=False,
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        bound = cap + 2 * p * n * mb
+        assert result.budget.evaluations <= bound, (
+            f"overshoot {result.budget.evaluations - cap} exceeds the documented "
+            f"bound of 2*P*N*minibatch_size = {2 * p * n * mb}"
+        )
+
+
+class TestDeterminism:
+    def test_identical_config_produces_an_identical_run(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """Same seed, same batch — completion timing must not leak in."""
+
+        def _one_run(run_idx: int) -> list[str]:
+            mocks = {
+                k: mocker.patch(f"helix.evolution.{k}")
+                for k in (
+                    "create_seed_worktree", "run_evaluator", "mutate", "remove_worktree",
+                    "save_state", "init_base_dir", "_save_evaluation", "record_entry",
+                    "snapshot_candidate", "set_phase", "print_info", "print_success",
+                    "print_warning", "print_error", "render_budget", "render_generation",
+                    "_check_evaluator_script_exists",
+                )
+            }
+            mocks["merge"] = mocker.patch("helix.evolution.merge", return_value=None)
+            mocks["load_state"] = mocker.patch(
+                "helix.evolution.load_state", return_value=None
+            )
+            mocks["_load_evaluation"] = mocker.patch(
+                "helix.evolution._load_evaluation", return_value=None
+            )
+            mocks["load_lineage"] = mocker.patch(
+                "helix.evolution.load_lineage", return_value={}
+            )
+            mocks["find_merge_triplet"] = mocker.patch(
+                "helix.evolution.find_merge_triplet", return_value=None
+            )
+            run_dir = tmp_path / f"run{run_idx}"
+            run_dir.mkdir()
+            train_path = _write_train_jsonl(run_dir, n=12)
+            seed = _make_candidate("g0-s0")
+            mocks["create_seed_worktree"].return_value = seed
+            trace = _install_trace(mocks, seed.id)
+            mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
+
+            config = _make_config(
+                train_path,
+                num_parallel_proposals=2,
+                mutations_per_parent=2,
+                proposal_selection="top_k",
+                proposal_top_k=2,
+            )
+            run_evolution(config, run_dir, run_dir / ".helix")
+            return _apply_phase(trace) + _worker_evals(trace)
+
+        assert _one_run(1) == _one_run(2)
