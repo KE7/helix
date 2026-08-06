@@ -324,6 +324,41 @@ class EvolutionConfig(BaseModel):
             "matching GEPA's optimize_anything._resolve_num_parallel_proposals."
         ),
     )
+    mutations_per_parent: int = Field(
+        default=1,
+        description=(
+            "Number of children proposed per selected parent (N). Combined "
+            "with num_parallel_proposals (P), one iteration proposes P*N "
+            "children: P parents sampled with replacement, N mutations each. "
+            "Each of the P*N tasks draws its own minibatch. Default 1 keeps "
+            "the historical one-child-per-parent behaviour. Note that "
+            "max_evaluations is checked between slots, so raising P*N raises "
+            "how far a single iteration can overshoot the cap."
+        ),
+    )
+    proposal_selection: Literal[
+        "all_improvements", "best_improvement", "top_k"
+    ] = Field(
+        default="all_improvements",
+        description=(
+            "Which of the proposals that clear the acceptance gate are "
+            "promoted to full validation and the frontier. "
+            "'all_improvements' (default): every proposal that improves on "
+            "its parent. 'best_improvement': only the single largest "
+            "improvement. 'top_k': the proposal_top_k largest improvements. "
+            "Ties resolve to the earlier proposal in sampled order, so "
+            "worker completion timing can never change the outcome."
+        ),
+    )
+    proposal_top_k: int | None = Field(
+        default=None,
+        description=(
+            "Number of proposals to promote under proposal_selection='top_k'. "
+            "Required for that strategy and bounded by "
+            "num_parallel_proposals * mutations_per_parent; rejected for the "
+            "other strategies, where it would have no effect."
+        ),
+    )
     minibatch_size: int = Field(
         default=3,
         description=(
@@ -435,13 +470,56 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
+        # ``max_workers`` is validated before the "auto" resolution below
+        # consumes it: ``max(1, 0 // k)`` would silently launder a zero or
+        # negative worker count into a P of 1 instead of rejecting it.
+        if self.max_workers < 1:
+            raise ValueError(
+                f"evolution.max_workers must be >= 1 (got {self.max_workers})"
+            )
         # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
         # ``max(1, max_workers // minibatch_size)`` once at construction
         # time so every downstream consumer sees a plain int.  Mirrors
         # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
-        if self.num_parallel_proposals == "auto":
-            self.num_parallel_proposals = max(
-                1, self.max_workers // max(1, self.minibatch_size)
+        _p_raw = self.num_parallel_proposals
+        if isinstance(_p_raw, str):
+            num_proposals = max(1, self.max_workers // max(1, self.minibatch_size))
+            self.num_parallel_proposals = num_proposals
+        else:
+            num_proposals = _p_raw
+        # A zero or negative P was accepted before P×N landed: it produced an
+        # empty proposal batch every iteration, so the run burned through
+        # max_generations without ever proposing a candidate.
+        if num_proposals < 1:
+            raise ValueError(
+                f"evolution.num_parallel_proposals must be >= 1 (got {num_proposals})"
+            )
+        if self.mutations_per_parent < 1:
+            raise ValueError(
+                "evolution.mutations_per_parent must be >= 1 "
+                f"(got {self.mutations_per_parent})"
+            )
+        # ``proposal_top_k`` is meaningful only for the strategy that reads
+        # it; accepting it elsewhere would let a config claim a bound that
+        # silently does nothing.
+        _batch_size = num_proposals * self.mutations_per_parent
+        if self.proposal_selection == "top_k":
+            if self.proposal_top_k is None:
+                raise ValueError(
+                    "evolution.proposal_top_k is required when "
+                    "evolution.proposal_selection='top_k'"
+                )
+            if not 1 <= self.proposal_top_k <= _batch_size:
+                raise ValueError(
+                    "evolution.proposal_top_k must be between 1 and "
+                    "num_parallel_proposals * mutations_per_parent "
+                    f"({_batch_size}) (got {self.proposal_top_k})"
+                )
+        elif self.proposal_top_k is not None:
+            raise ValueError(
+                "evolution.proposal_top_k is only valid when "
+                "evolution.proposal_selection='top_k' (got "
+                f"proposal_selection={self.proposal_selection!r})"
             )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(

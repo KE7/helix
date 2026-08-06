@@ -58,12 +58,16 @@ from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.proposals import (
+    AcceptanceMemo,
     EvaluatedProposal,
+    GatedProposal,
     MutationFailedProposal,
     ProposalContext,
     ProposalResult,
+    ScoreVectors,
     SkippedProposal,
     TamperedProposal,
+    select_proposals,
 )
 from helix.population import (
     Candidate,
@@ -1244,13 +1248,25 @@ def _plan_proposals(
     use_minibatch_gate: bool,
     gen: int,
     n_proposals: int,
+    mutations_per_parent: int = 1,
 ) -> tuple[list[ProposalContext], bool]:
-    """Sample the iteration's proposal slots sequentially.
+    """Sample the iteration's ``P*N`` proposal slots sequentially.
 
     Parent selection, the ``state.i`` bump and minibatch sampling all happen
     here, in order, before any concurrent work starts — so the slots a run
     attempts are a function of the seed and not of completion timing.
     Returns the sampled contexts and whether the budget cut sampling short.
+
+    The loop is parent-major: ``P`` parents are selected with replacement and
+    each gets ``N`` consecutive slots.  A parent is drawn once and reused
+    across its ``N`` slots, which is what makes N a "more tries at this
+    parent" knob rather than a second, differently-shaped P.  Each slot still
+    draws its own minibatch, so siblings are gated on different examples and
+    an accepted sibling is not merely the one that drew the easy batch.
+
+    At ``N == 1`` this walks exactly the same call sequence as the flat loop
+    it replaces: one budget check, one counter advance and one parent draw
+    per slot, in that order.
     """
 
     # ---- Step 1a: Build pre-sample contexts (SEQUENTIAL) ----
@@ -1270,56 +1286,75 @@ def _plan_proposals(
     ] = []
     _budget_break = False
 
+    _slot_idx = 0
+
     for _p_idx in range(n_proposals):
-        if budget_api.budget_exhausted(state, config):
-            _budget_break = True
+        # Drawn lazily, on this parent's first surviving slot, so that the
+        # budget check and counter advance below keep running first — the
+        # order the flat loop had.
+        parent: Candidate | None = None
+        parent_frontier_result: EvalResult | None = None
+
+        for _n_idx in range(mutations_per_parent):
+            if budget_api.budget_exhausted(state, config):
+                _budget_break = True
+                break
+
+            # GEPA parity (engine.py:405-410): the FIRST proposal reuses
+            # the iteration slot already created at the top of the outer
+            # loop (state.i bumped at evolution.py loop head).  For each
+            # ADDITIONAL parallel proposal, GEPA bumps state.i again so
+            # the per-proposal counter advances independently of the
+            # outer loop.  The bump is unconditional (no minibatch gate).
+            # Under P×N the counter advances per *slot*, not per parent:
+            # every slot draws its own minibatch and the sampler keys off
+            # this counter, so sharing it across N siblings would hand
+            # them all the same batch.
+            if _slot_idx > 0:
+                budget_api.advance_proposal_counter(
+                    state, source="parallel_proposal"
+                )
+
+            if parent is None:
+                parent = frontier.select_parent()
+                parent_frontier_result = frontier._results.get(parent.id)
+
+            # --- Minibatch gate pre-sampling (GEPA §5.1) --------------
+            # Sample subsample ids.  ``state.i`` is now advanced at the
+            # top of the run loop (GEPA engine.py:649) — and again per
+            # extra parallel proposal above (engine.py:408) — so the
+            # sampler always sees the right counter.  The parent-on-
+            # minibatch eval is deferred to §1b so that N parent evals
+            # overlap under ``num_parallel_proposals > 1``
+            # (audit-mutation §C4 MODERATE E).
+            subsample_ids: list[str] | None = None
+            if (
+                use_minibatch_gate
+                and train_loader is not None
+                and batch_sampler is not None
+            ):
+                subsample_ids = batch_sampler.next_minibatch_ids(
+                    train_loader, state
+                )
+                TRACE.emit(
+                    EventType.SAMPLE_MINIBATCH,
+                    candidate_id=parent.id,
+                    example_ids=list(subsample_ids),
+                    split="train",
+                )
+
+            # g (gen) and s (mutation_counter) advance together under
+            # n_proposals=1 / mutations_per_parent=1 / merge_disabled
+            # defaults. They diverge when P*N > 1 (multiple s-slots per gen)
+            # or when merge fires (gen advances without incrementing s).
+            new_id = budget_api.next_mutation_id(state, gen)
+            presample_contexts.append(
+                (parent, parent_frontier_result, subsample_ids, new_id)
+            )
+            _slot_idx += 1
+
+        if _budget_break:
             break
-
-        # GEPA parity (engine.py:405-410): the FIRST proposal reuses
-        # the iteration slot already created at the top of the outer
-        # loop (state.i bumped at evolution.py loop head).  For each
-        # ADDITIONAL parallel proposal, GEPA bumps state.i again so
-        # the per-proposal counter advances independently of the
-        # outer loop.  The bump is unconditional (no minibatch gate).
-        if _p_idx > 0:
-            budget_api.advance_proposal_counter(
-                state, source="parallel_proposal"
-            )
-
-        parent = frontier.select_parent()
-        parent_frontier_result = frontier._results.get(parent.id)
-
-        # --- Minibatch gate pre-sampling (GEPA §5.1) --------------
-        # Sample subsample ids.  ``state.i`` is now advanced at the
-        # top of the run loop (GEPA engine.py:649) — and again per
-        # extra parallel proposal above (engine.py:408) — so the
-        # sampler always sees the right counter.  The parent-on-
-        # minibatch eval is deferred to §1b so that N parent evals
-        # overlap under ``num_parallel_proposals > 1``
-        # (audit-mutation §C4 MODERATE E).
-        subsample_ids: list[str] | None = None
-        if (
-            use_minibatch_gate
-            and train_loader is not None
-            and batch_sampler is not None
-        ):
-            subsample_ids = batch_sampler.next_minibatch_ids(
-                train_loader, state
-            )
-            TRACE.emit(
-                EventType.SAMPLE_MINIBATCH,
-                candidate_id=parent.id,
-                example_ids=list(subsample_ids),
-                split="train",
-            )
-
-        # g (gen) and s (mutation_counter) advance together under n_proposals=1
-        # / merge_disabled defaults. They diverge when n_proposals > 1 (multiple
-        # s-slots per gen) or when merge fires (gen advances without incrementing s).
-        new_id = budget_api.next_mutation_id(state, gen)
-        presample_contexts.append(
-            (parent, parent_frontier_result, subsample_ids, new_id)
-        )
 
     return presample_contexts, _budget_break
 
@@ -1723,6 +1758,31 @@ def _run_evolution_impl(
             batch_sampler = EpochShuffledBatchSampler[str](
                 minibatch_size=config.evolution.minibatch_size,
                 rng=rng,
+            )
+
+    # One iteration draws P*N minibatches back to back.  The train set only
+    # holds ``len(trainset) // minibatch_size`` disjoint ones, so past that
+    # the sampler wraps into a new epoch and slots *within a single batch*
+    # start gating on examples an earlier sibling already used.  The run is
+    # still correct — it just stops being a comparison across distinct
+    # evidence, which is the thing that makes selecting among siblings
+    # meaningful.
+    if use_minibatch_gate and train_loader is not None:
+        _p_cfg = config.evolution.num_parallel_proposals
+        _batch_slots = (
+            _p_cfg if isinstance(_p_cfg, int) else 1
+        ) * config.evolution.mutations_per_parent
+        _distinct_minibatches = len(train_loader) // max(
+            1, config.evolution.minibatch_size
+        )
+        if _batch_slots > _distinct_minibatches:
+            print_warning(
+                f"num_parallel_proposals * mutations_per_parent = "
+                f"{_batch_slots} exceeds the {_distinct_minibatches} disjoint "
+                f"minibatches available from {len(train_loader)} train "
+                f"examples at minibatch_size="
+                f"{config.evolution.minibatch_size}; minibatches will repeat "
+                f"within an iteration."
             )
 
     # GEPA-parity per-(candidate_hash, example_id) eval cache.  Kept
@@ -2472,6 +2532,17 @@ def _run_evolution_impl(
             #   3. Process acceptances SEQUENTIALLY
             # When num_parallel_proposals == 1, behaviour is identical to
             # the original single-mutation path.
+            #
+            # BUDGET OVERSHOOT.  ``max_evaluations`` is a stop condition, not
+            # a reservation: it is checked between slots, and a slot that
+            # starts under the cap runs to completion.  One iteration can
+            # therefore overspend the cap by up to P*N parent-minibatch evals
+            # plus P*N child-minibatch evals — the batch's work is already
+            # dispatched and paid for by the time the apply phase charges it.
+            # This is documented rather than accounted for: pre-dispatch
+            # reservation would have to predict cache hits and skip-perfect
+            # outcomes, and guessing low would idle workers on every
+            # iteration to protect a bound that is already approximate.
             # =============================================================
 
             # GEPA parity: ``num_parallel_proposals="auto"`` is resolved to an int
@@ -2491,6 +2562,7 @@ def _run_evolution_impl(
                 use_minibatch_gate=use_minibatch_gate,
                 gen=gen,
                 n_proposals=n_proposals,
+                mutations_per_parent=config.evolution.mutations_per_parent,
             )
 
             if _budget_break and not presample_contexts:
@@ -2519,15 +2591,39 @@ def _run_evolution_impl(
             # Read worker results in pre-sampling order.  Budget mutations, lineage
             # writes, and frontier updates are all sequential here
             # (GEPA apply_proposal_output parity, engine.py:449-452).
+            #
+            # The step is split in two halves.  ``_gate_proposal`` charges the
+            # proposal's budget, records lineage and runs the acceptance gate;
+            # ``_apply_proposal`` runs the val stages and inserts into the
+            # frontier.  ``best_improvement`` and ``top_k`` cannot decide
+            # anything until every proposal in the batch has been gated, so
+            # they need the halves to be separable.  ``all_improvements``
+            # still runs them interleaved per proposal — see the driver below.
 
             _last_eval_result: "EvalResult | None" = None
             _gen_skip_records: "list[dict[str, Any]]" = []
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
+            _acceptance_memo = AcceptanceMemo(acceptance)
 
-            for _p_idx, wr in enumerate(worker_results):
+            def _gate_proposal(
+                _p_idx: int, wr: "ProposalResult | None"
+            ) -> GatedProposal | None:
+                """Charge, record and gate one proposal slot.
+
+                Returns the gated proposal when it cleared its acceptance
+                gate, or None when the slot produced nothing to promote
+                (empty slot, skip-perfect, mutation failure, tamper, or a
+                gate rejection).  Sets ``_budget_break`` in the enclosing
+                scope when the budget ran out mid-slot; callers must check
+                it before using the return value.
+                """
+                nonlocal _last_eval_result, _budget_break
+                nonlocal semantic_skip_count, retryable_semantic_skip_count
+                nonlocal mutations_attempted
+
                 if wr is None:
-                    continue
+                    return None
 
                 _parent, _parent_frontier_result, _subsample_ids, _new_id = wr.presample_ctx
 
@@ -2545,7 +2641,7 @@ def _run_evolution_impl(
                             source="parent_minibatch",
                         )
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
-                    continue
+                    return None
 
                 if isinstance(wr, SkippedProposal):
                     # Charge parent eval budget (both paths)
@@ -2581,7 +2677,7 @@ def _run_evolution_impl(
                     semantic_skip_count += 1
                     if _subsample_ids is not None:
                         retryable_semantic_skip_count += 1
-                    continue
+                    return None
 
                 if isinstance(wr, TamperedProposal):
                     # Charge parent eval budget
@@ -2605,7 +2701,7 @@ def _run_evolution_impl(
                         f"({', '.join(wr.tampered_paths)}) -- rejecting."
                     )
                     _safe_remove_worktree(wr.child, label="tamper-rejected mutation candidate")
-                    continue
+                    return None
 
                 # wr is EvaluatedProposal at this point (mypy narrows via isinstance exhaustion)
                 child = wr.child
@@ -2635,7 +2731,7 @@ def _run_evolution_impl(
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
-                    break
+                    return None
 
                 # Charge LLM usage
                 if wr.child_usage:
@@ -2692,7 +2788,7 @@ def _run_evolution_impl(
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
-                        break
+                        return None
 
                     # Apply the configured acceptance criterion on the
                     # per-instance score vectors (GEPA §5.1).
@@ -2701,8 +2797,6 @@ def _run_evolution_impl(
                     # parent or child minibatch result is an evaluator bug, not a
                     # benign zero.  Both vectors must cover every id in
                     # ``_subsample_ids`` so the acceptance criterion compares like-for-like.
-                    from types import SimpleNamespace as _SN  # noqa: PLC0415
-
                     assert set(_subsample_ids).issubset(
                         wr.parent_eval_result.instance_scores
                     ), (
@@ -2723,11 +2817,8 @@ def _run_evolution_impl(
                         float(gating_result.instance_scores[str(eid)])
                         for eid in _subsample_ids
                     ]
-                    _proposal = _SN(
-                        subsample_scores_before=_before,
-                        subsample_scores_after=_after,
-                    )
-                    if not acceptance.should_accept(_proposal):
+                    _judgement = _acceptance_memo.judge(_p_idx, _before, _after)
+                    if not _judgement.accepted:
                         _save_attempt_result(
                             base_dir, gating_result,
                             status="rejected", reason="minibatch_gate",
@@ -2747,7 +2838,7 @@ def _run_evolution_impl(
                             child, label="minibatch-gate-rejected candidate"
                         )
                         del candidates[child.id]
-                        continue
+                        return None
                     else:
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -2777,17 +2868,14 @@ def _run_evolution_impl(
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
-                        break
-
-                    from types import SimpleNamespace as _SN  # noqa: PLC0415
+                        return None
 
                     _legacy_before = list(parent_acceptance_result.instance_scores.values())
                     _legacy_after = list(gating_result.instance_scores.values())
-                    _legacy_proposal = _SN(
-                        subsample_scores_before=_legacy_before,
-                        subsample_scores_after=_legacy_after,
+                    _judgement = _acceptance_memo.judge(
+                        _p_idx, _legacy_before, _legacy_after
                     )
-                    if not acceptance.should_accept(_legacy_proposal):
+                    if not _judgement.accepted:
                         parent_sum = sum(_legacy_before)
                         child_sum = sum(_legacy_after)
                         _save_attempt_result(
@@ -2802,7 +2890,28 @@ def _run_evolution_impl(
                         )
                         _safe_remove_worktree(child, label="train-gate-rejected candidate")
                         del candidates[child.id]
-                        continue
+                        return None
+
+                return GatedProposal(
+                    order=_p_idx,
+                    proposal=wr,
+                    judgement=_judgement,
+                    gating_result=gating_result,
+                    subsample_ids=_subsample_ids,
+                )
+
+            def _apply_proposal(gated: GatedProposal) -> None:
+                """Promote one gated proposal to full validation and the frontier.
+
+                Sets ``_budget_break`` in the enclosing scope when the budget
+                ran out mid-slot; callers must check it before continuing.
+                """
+                nonlocal _last_eval_result, _budget_break
+                nonlocal merges_due, last_iter_found_new_program, mutations_accepted
+
+                wr = gated.proposal
+                child = gated.child
+                _parent, _parent_frontier_result, _subsample_ids, _new_id = wr.presample_ctx
 
                 # --- Staged val gate ------------------------------------------
                 # UNCHANGED from previous architecture — runs sequentially after gating.
@@ -2825,9 +2934,7 @@ def _run_evolution_impl(
                         print_warning("Budget exhausted mid-generation -- stopping.")
                         _save_state(state)
                         _budget_break = True
-                        break
-
-                    from types import SimpleNamespace as _SN  # noqa: PLC0415
+                        return
 
                     _stage_before = _scores_for_example_ids(
                         _parent_frontier_result
@@ -2837,11 +2944,14 @@ def _run_evolution_impl(
                         stage_val_example_ids,
                     )
                     _stage_after = _scores_for_example_ids(stage_result, stage_val_example_ids)
-                    _proposal = _SN(
+                    # Not routed through the acceptance memo: this is the val
+                    # stage's own comparison, a different pair of vectors from
+                    # the proposal gate's, and it runs at most once per child.
+                    _stage_proposal = ScoreVectors(
                         subsample_scores_before=_stage_before,
                         subsample_scores_after=_stage_after,
                     )
-                    if not acceptance.should_accept(_proposal):
+                    if not acceptance.should_accept(_stage_proposal):
                         _save_attempt_result(
                             base_dir, stage_result,
                             status="rejected", reason="val_stage",
@@ -2861,7 +2971,7 @@ def _run_evolution_impl(
                         )
                         _safe_remove_worktree(child, label="val-stage-rejected candidate")
                         del candidates[child.id]
-                        continue
+                        return
 
                     TRACE.emit(
                         EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -2894,7 +3004,7 @@ def _run_evolution_impl(
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
-                    break
+                    return
 
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
@@ -2925,6 +3035,114 @@ def _run_evolution_impl(
                     mutations_attempted=mutations_attempted,
                     mutations_accepted=mutations_accepted,
                 )
+
+            def _discard_gated_child(gated: GatedProposal, *, label: str) -> None:
+                """Undo a gated child that will not be applied after all."""
+                _safe_remove_worktree(gated.child, label=label)
+                candidates.pop(gated.child.id, None)
+
+            # Content key -> the child id that first claimed it this batch.
+            _seen_child_keys: dict[str, str] = {}
+            # With a single slot per iteration there is no sibling for a child
+            # to be identical to, so the default configuration pays nothing
+            # for the content keys (two git invocations each).
+            _dedupe_batch = len(worker_results) > 1
+
+            def _drop_duplicate_child(gated: GatedProposal) -> bool:
+                """Drop a child byte-identical to one already promoted this batch.
+
+                Two slots can land on the same tree — most easily two of the
+                N siblings of one parent, which start from the same worktree
+                and the same reflection.  Applying both would put two
+                frontier entries on one point, spend a second full validation
+                on a score already known, and weight parent selection toward
+                whatever that point happens to be.
+
+                ``_candidate_content_key`` falls back to the candidate id
+                when it cannot resolve a clean tree, so an unresolvable child
+                is treated as unique: this collapses children it can prove
+                identical and never guesses.
+                """
+                if not _dedupe_batch:
+                    return False
+                key = _candidate_content_key(gated.child)
+                first_claim = _seen_child_keys.get(key)
+                if first_claim is not None:
+                    print_warning(
+                        f"Duplicate proposal: {gated.child.id} is byte-identical "
+                        f"to {first_claim} -- removing."
+                    )
+                    _discard_gated_child(gated, label="duplicate proposal candidate")
+                    return True
+                _seen_child_keys[key] = gated.child.id
+                return False
+
+            # ---- Step 3 driver -------------------------------------------
+            # ``all_improvements`` promotes every proposal that clears the
+            # gate, so it never needs to see the batch as a whole and keeps
+            # gating and applying each proposal before moving to the next —
+            # the exact interleaving, and therefore the exact budget-break
+            # points, this loop had before selection existed.
+            #
+            # The other two strategies rank proposals against each other, so
+            # they must gate the whole batch first and only then apply the
+            # winners.  That reordering is the reason for the split, and it
+            # is confined to the configurations that opted into it.
+            #
+            # If the budget runs out mid-gate the batch is abandoned without
+            # applying anything: proposals already gated keep their worktree
+            # and lineage entry, and resume reconciles them through the same
+            # incomplete-attempt path that already handles a budget break in
+            # the middle of the interleaved loop.
+            _selection = config.evolution.proposal_selection
+            if _selection == "all_improvements":
+                for _p_idx, wr in enumerate(worker_results):
+                    _gated = _gate_proposal(_p_idx, wr)
+                    if _budget_break:
+                        break
+                    if _gated is None:
+                        continue
+                    if _drop_duplicate_child(_gated):
+                        continue
+                    _apply_proposal(_gated)
+                    if _budget_break:
+                        break
+            else:
+                _gated_batch: list[GatedProposal] = []
+                for _p_idx, wr in enumerate(worker_results):
+                    _gated = _gate_proposal(_p_idx, wr)
+                    if _budget_break:
+                        break
+                    if _gated is not None:
+                        _gated_batch.append(_gated)
+
+                if not _budget_break:
+                    _selected = select_proposals(
+                        _gated_batch,
+                        strategy=_selection,
+                        top_k=config.evolution.proposal_top_k,
+                    )
+                    _selected_orders = {g.order for g in _selected}
+                    # Everything gated but not selected is discarded here, in
+                    # sampled order, before any of the winners are applied —
+                    # so the frontier never briefly contains a child that
+                    # selection already ruled out.
+                    for _g in _gated_batch:
+                        if _g.order not in _selected_orders:
+                            print_info(
+                                f"Selection ({_selection}): {_g.child.id} cleared "
+                                f"the gate (improvement {_g.improvement:+.4f}) but "
+                                f"was not selected -- removing."
+                            )
+                            _discard_gated_child(
+                                _g, label="unselected proposal candidate"
+                            )
+                    for _g in _selected:
+                        if _drop_duplicate_child(_g):
+                            continue
+                        _apply_proposal(_g)
+                        if _budget_break:
+                            break
 
             # Write skip records for this generation (GEPA parity — single JSON list)
             if _gen_skip_records:
