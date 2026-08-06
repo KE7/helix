@@ -218,13 +218,13 @@ def select_best_improvement(gated: list[GatedProposal]) -> list[GatedProposal]:
 def select_top_k(gated: list[GatedProposal], k: int) -> list[GatedProposal]:
     """Promote the ``k`` largest improvements, earliest-sampled winning ties.
 
-    The rank sort is stable over a list already in sampled order, so equal
-    improvements resolve to the earlier slot.  The survivors are then put
-    back into sampled order: ranking decides *which* proposals apply, never
-    the order they apply in.
+    The sort is stable over a list already in sampled order, so equal
+    improvements resolve to the earlier slot.  Survivors stay in *ranked*
+    order rather than being restored to sampled order: the apply phase can
+    still stop early on budget exhaustion, and applying best-first means
+    what survives a truncated batch is what the ranking preferred.
     """
-    ranked = sorted(gated, key=lambda g: -g.improvement)[:k]
-    return sorted(ranked, key=lambda g: g.order)
+    return sorted(gated, key=lambda g: -g.improvement)[:k]
 
 
 def select_proposals(

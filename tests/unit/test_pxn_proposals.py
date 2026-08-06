@@ -360,11 +360,10 @@ class TestSelectionFunctions:
         batch = [_gated(0, 0.5), _gated(1, 0.9), _gated(2, 0.1), _gated(3, 0.7)]
         assert [g.order for g in select_top_k(batch, 2)] == [1, 3]
 
-    def test_top_k_returns_survivors_in_sampled_order(self) -> None:
-        """Ranking decides *which* proposals apply, never the order they apply in."""
-        batch = [_gated(0, 0.1), _gated(1, 0.9), _gated(2, 0.5)]
-        # Ranked 1 (0.9), 2 (0.5), 0 (0.1) — applied 1 then 2.
-        assert [g.order for g in select_top_k(batch, 2)] == [1, 2]
+    def test_top_k_applies_best_first(self) -> None:
+        """Survivors stay ranked, so a truncated batch keeps the best work."""
+        batch = [_gated(0, 0.5), _gated(1, 0.9)]
+        assert [g.order for g in select_top_k(batch, 2)] == [1, 0]
 
     def test_top_k_breaks_ties_toward_earliest_sampled(self) -> None:
         batch = [_gated(0, 0.9), _gated(1, 0.9), _gated(2, 0.9)]
@@ -372,7 +371,7 @@ class TestSelectionFunctions:
 
     def test_top_k_larger_than_batch_returns_everything(self) -> None:
         batch = [_gated(0, 0.5), _gated(1, 0.9)]
-        assert [g.order for g in select_top_k(batch, 10)] == [0, 1]
+        assert sorted(g.order for g in select_top_k(batch, 10)) == [0, 1]
 
     def test_negative_improvements_still_rank(self) -> None:
         """A gated proposal always improved on *its own* parent; ranking is relative."""
@@ -770,3 +769,104 @@ class TestMinibatchRepeatWarning:
 
         warnings = [str(c.args[0]) for c in all_mocks["print_warning"].call_args_list]
         assert not any("minibatches will repeat" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# 6. Dropped proposals stay accountable
+# ---------------------------------------------------------------------------
+
+
+class TestDroppedProposalsAreRecorded:
+    """A dropped child already has a lineage entry; it must not point at nothing.
+
+    A proposal that clears the gate gets its lineage entry written before
+    selection runs.  If selection or dedupe then drops it, the drop has to
+    land in ``attempts/`` like a gate rejection does — otherwise reading a
+    run back shows a mutation that was attempted, charged, and then simply
+    vanished.
+    """
+
+    def test_selection_drop_lands_in_the_attempts_ledger(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        save_attempt = mocker.patch("helix.evolution._save_attempt_result")
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _scored_children(
+            all_mocks, seed.id, {"g1-s1": 0.4, "g1-s2": 0.9, "g1-s3": 0.6}
+        )
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=3,
+            proposal_selection="best_improvement",
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        dropped = [
+            c
+            for c in save_attempt.call_args_list
+            if c.kwargs.get("reason") == "proposal_selection"
+        ]
+        assert len(dropped) == 2, (
+            "Both gate-passing losers must be recorded, not silently removed"
+        )
+        assert {c.args[1].candidate_id for c in dropped} == {"g1-s1", "g1-s3"}
+        assert all(c.kwargs["status"] == "rejected" for c in dropped)
+
+    def test_duplicate_drop_lands_in_the_attempts_ledger(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        save_attempt = mocker.patch("helix.evolution._save_attempt_result")
+        mocker.patch(
+            "helix.evolution._candidate_content_key", side_effect=lambda c: "same"
+        )
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _scored_children(all_mocks, seed.id, {"g1-s1": 0.9, "g1-s2": 0.9})
+
+        config = _make_config(
+            train_path, num_parallel_proposals=1, mutations_per_parent=2
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        dropped = [
+            c
+            for c in save_attempt.call_args_list
+            if c.kwargs.get("reason") == "duplicate_child"
+        ]
+        assert [c.args[1].candidate_id for c in dropped] == ["g1-s2"]
+
+    def test_drop_reasons_are_distinguishable_from_gate_rejections(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """s1 loses on the criterion; s3 loses on selection. Different reasons."""
+        save_attempt = mocker.patch("helix.evolution._save_attempt_result")
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        # s1 scores below the parent's 0.3 → criterion rejection.
+        _scored_children(
+            all_mocks, seed.id, {"g1-s1": 0.1, "g1-s2": 0.9, "g1-s3": 0.6}
+        )
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=3,
+            proposal_selection="best_improvement",
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        by_reason = {
+            c.args[1].candidate_id: c.kwargs.get("reason")
+            for c in save_attempt.call_args_list
+        }
+        assert by_reason["g1-s1"] == "minibatch_gate"
+        assert by_reason["g1-s3"] == "proposal_selection"

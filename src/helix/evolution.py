@@ -3036,8 +3036,37 @@ def _run_evolution_impl(
                     mutations_accepted=mutations_accepted,
                 )
 
-            def _discard_gated_child(gated: GatedProposal, *, label: str) -> None:
-                """Undo a gated child that will not be applied after all."""
+            def _discard_gated_child(
+                gated: GatedProposal, *, label: str, reason: str, decision: str
+            ) -> None:
+                """Undo a gated child that will not be applied after all.
+
+                The child cleared its acceptance gate, so the gate already
+                wrote it a lineage entry.  Recording the drop under
+                ``attempts/`` keeps that entry from pointing at nothing — the
+                contract a gate rejection already honours — and keeps a
+                proposal dropped by selection or by dedupe distinguishable
+                from one the criterion rejected when a run is read back.
+                """
+                _discard_parent = gated.proposal.presample_ctx[0]
+                _discard_ids = gated.subsample_ids
+                _save_attempt_result(
+                    base_dir,
+                    gated.gating_result,
+                    status="rejected",
+                    reason=reason,
+                    parent_id=_discard_parent.id,
+                    generation=gen,
+                    stage="train_minibatch" if _discard_ids is not None else "train",
+                    example_ids=list(_discard_ids) if _discard_ids else None,
+                )
+                TRACE.emit(
+                    EventType.ACCEPT_DECISION,
+                    candidate_id=gated.child.id,
+                    decision=decision,
+                    example_ids=list(_discard_ids) if _discard_ids else None,
+                    score=float(sum(gated.judgement.after)),
+                )
                 _safe_remove_worktree(gated.child, label=label)
                 candidates.pop(gated.child.id, None)
 
@@ -3072,7 +3101,12 @@ def _run_evolution_impl(
                         f"Duplicate proposal: {gated.child.id} is byte-identical "
                         f"to {first_claim} -- removing."
                     )
-                    _discard_gated_child(gated, label="duplicate proposal candidate")
+                    _discard_gated_child(
+                        gated,
+                        label="duplicate proposal candidate",
+                        reason="duplicate_child",
+                        decision="reject_duplicate",
+                    )
                     return True
                 _seen_child_keys[key] = gated.child.id
                 return False
@@ -3135,7 +3169,10 @@ def _run_evolution_impl(
                                 f"was not selected -- removing."
                             )
                             _discard_gated_child(
-                                _g, label="unselected proposal candidate"
+                                _g,
+                                label="unselected proposal candidate",
+                                reason="proposal_selection",
+                                decision="reject_selection",
                             )
                     for _g in _selected:
                         if _drop_duplicate_child(_g):
