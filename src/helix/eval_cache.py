@@ -99,6 +99,13 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         objective_scores_list: list[dict[str, float]] | None = None,
         side_info_list: list[dict[str, Any]] | None = None,
     ) -> None:
+        # Validate every positional list BEFORE taking the lock and mutating
+        # the cache.  A mismatched batch must be rejected whole: writing the
+        # prefix and then raising leaves the cache holding entries from a
+        # batch the caller believes it never stored.
+        _validate_batch_cardinality(
+            example_ids, outputs, scores, objective_scores_list, side_info_list
+        )
         h = _candidate_hash(candidate)
         with self._lock:
             for i, eid in enumerate(example_ids):
@@ -157,6 +164,12 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         if uncached_ids:
             batch = fetcher(uncached_ids)
             outputs, scores, obj_scores, side_infos = evaluator(batch, candidate)
+            # Validate before the projection loop below: an evaluator that
+            # returns the wrong number of results would otherwise raise a bare
+            # IndexError partway through, or silently drop trailing results.
+            _validate_batch_cardinality(
+                uncached_ids, outputs, scores, obj_scores, side_infos
+            )
             for idx, eid in enumerate(uncached_ids):
                 outputs_by_id[eid] = outputs[idx]
                 scores_by_id[eid] = scores[idx]
@@ -177,3 +190,33 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
                 side_infos,
             )
         return outputs_by_id, scores_by_id, objective_by_id, side_info_by_id, len(uncached_ids)
+
+
+def _validate_batch_cardinality(
+    example_ids: list[DataId],
+    outputs: list[RolloutOutput],
+    scores: list[float],
+    objective_scores_list: list[dict[str, float]] | None,
+    side_info_list: list[dict[str, Any]] | None,
+) -> None:
+    """Reject a batch whose evaluator results do not match its example ids.
+
+    Every list here is positional to ``example_ids``.  A short list used to
+    surface as a bare ``IndexError`` partway through a write (leaving the cache
+    holding a prefix of a rejected batch); a long one was silently truncated,
+    discarding results the evaluator actually produced.  Both are evaluator
+    contract violations and are reported as such, before any mutation.
+    """
+    expected = len(example_ids)
+    lengths = {"outputs": len(outputs), "scores": len(scores)}
+    if objective_scores_list is not None:
+        lengths["objective_scores"] = len(objective_scores_list)
+    if side_info_list is not None:
+        lengths["side_info"] = len(side_info_list)
+    mismatched = {name: size for name, size in lengths.items() if size != expected}
+    if mismatched:
+        rendered = ", ".join(f"{name}={size}" for name, size in mismatched.items())
+        raise ValueError(
+            "Evaluator batch cardinality mismatch: expected "
+            f"{expected} result(s) for {expected} example id(s); {rendered}."
+        )
