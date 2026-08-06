@@ -793,7 +793,32 @@ stderr as fallback debug context.
 --backend BACKEND   Override the mutation backend [claude|codex|cursor|gemini|opencode]
 --model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
+--trace PATH        Write a JSONL event trace of the run to PATH (off by default)
 ```
+
+#### Tracing a run
+
+`--trace` streams every internal HELIX event to a JSON Lines file, one object
+per line, flushed as it is emitted — so a run that is interrupted still leaves
+a usable trace behind. Each line carries `wall_time` (Unix epoch seconds, for
+lining events up against external logs), `monotonic` (for computing durations —
+unlike wall time it cannot jump backwards), and `thread_id`.
+
+The main thing this buys you is a breakdown of where the wall clock actually
+went. `MUTATE_START` / `MUTATE_END` bracket the agent-backend invocation and
+`EVAL_START` / `EVAL_END` bracket the evaluator subprocess, so subtracting the
+`monotonic` values of a matched pair gives the cost of each phase:
+
+```console
+$ helix evolve --trace .helix/trace.jsonl
+$ jq -r 'select(.type|test("MUTATE|EVAL")) | [.type,.candidate_id,.thread_id,.monotonic] | @tsv' \
+    .helix/trace.jsonl
+```
+
+When several proposals run in parallel the file is in *completion* order, not
+logical order, and one worker's events are interleaved with its siblings'.
+Match a `START` to its `END` on `(thread_id, candidate_id)` rather than on
+adjacency, or the durations you compute will belong to the wrong worker.
 
 ---
 

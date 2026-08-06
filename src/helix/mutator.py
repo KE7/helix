@@ -22,6 +22,7 @@ from helix.exceptions import (
 )
 from helix.executor import _scrub_environment
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
+from helix.trace import TRACE, EventType
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -1811,6 +1812,16 @@ def mutate(
     # prior prompt file as part of the codebase.
     prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
+    # MUTATE_START/MUTATE_END bracket the agent-backend call, which is the
+    # other half of the run's wall clock from the evaluator subprocess that
+    # EVAL_START/EVAL_END already bracket in executor.py.  The pair sits here
+    # rather than inside ``invoke_claude_code`` because this is the only scope
+    # that knows the candidate id, and without it a mutation cannot be lined up
+    # against the evaluations of the candidate it produced.  The END emit is in
+    # a ``finally`` so a failed or rate-limited mutation still closes its own
+    # interval instead of leaving a dangling START that inflates the total.
+    outcome = "error"
+    TRACE.emit(EventType.MUTATE_START, candidate_id=new_id)
     try:
         _, usage = invoke_claude_code(
             child.worktree_path,
@@ -1822,7 +1833,9 @@ def mutate(
             prompt_artifact_name=prompt_artifact_name,
         )
         child.usage = usage
+        outcome = "ok"
     except MutationError as exc:
+        outcome = "mutation_error"
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
         try:
@@ -1834,11 +1847,14 @@ def mutate(
         # Rate limit — clean up orphaned worktree, then re-raise so the parallel
         # futures handler in evolution.py can log it and continue with a smaller
         # proposal set.
+        outcome = "rate_limit"
         try:
             remove_worktree(child)
         except Exception:
             pass
         raise
+    finally:
+        TRACE.emit(EventType.MUTATE_END, candidate_id=new_id, reason=outcome)
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.
     # The caller (evolution.py) is responsible for calling save_state()

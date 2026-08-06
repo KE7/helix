@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -30,6 +31,7 @@ from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_heli
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
+from helix.trace import TRACE
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
@@ -603,6 +605,20 @@ def sandbox_logout(
         "that does not support it)."
     ),
 )
+@click.option(
+    "--trace",
+    "trace_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help=(
+        "Write a JSON Lines trace of the run to this path (one event per "
+        "line, flushed as it is emitted). Every event carries a wall-clock "
+        "timestamp, a monotonic timestamp, and the id of the thread that "
+        "emitted it, so MUTATE_START/MUTATE_END and EVAL_START/EVAL_END pairs "
+        "can be matched per worker to see how much of the run was spent in "
+        "the agent versus in the evaluator. Off by default."
+    ),
+)
 def evolve(
     config_path: str,
     project_dir: Path | None,
@@ -613,6 +629,7 @@ def evolve(
     backend: str | None,
     model: str | None,
     effort: str | None,
+    trace_path: Path | None,
 ) -> None:
     from helix.evolution import run_evolution
 
@@ -676,7 +693,14 @@ def evolve(
     base_dir = _helix_dir(project_root)
     setup_file_logging(base_dir)
     try:
-        run_evolution(config, project_root, base_dir)
+        with ExitStack() as stack:
+            if trace_path is not None:
+                # Enabling the bus for the whole run is the only thing that
+                # turns the existing instrumentation into an audit trail;
+                # without --trace it stays off and emit() short-circuits.
+                target = stack.enter_context(TRACE.write_jsonl(trace_path))
+                logger.info("Tracing enabled — writing JSONL events to %s", target)
+            run_evolution(config, project_root, base_dir)
     except ResumeIncompatibleError as exc:
         # The current config would reinterpret persisted state.  Show the
         # full Rich panel (with operation/phase/suggestion) instead of
