@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
-from helix.display import UsageStats
+from helix.display import UsageStats, print_warning
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
@@ -1573,7 +1573,7 @@ def invoke_claude_code(
     _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
-    if backend == "opencode" and (sandbox is None or not sandbox.enabled):
+    if backend == "opencode":
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
         # OpenCode stores its session database at:
@@ -1587,16 +1587,23 @@ def invoke_claude_code(
         #   "Failed to run the query 'PRAGMA journal_mode = WAL'"
         # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while g1-s2 succeeded).
         #
-        # Fix: set XDG_DATA_HOME to a per-candidate directory.  OpenCode respects
-        # XDG_DATA_HOME and will create an isolated database at:
-        #   <worktree>/.helix_opencode_state/opencode/opencode.db
-        # Each parallel worker gets its own fresh database; no contention.
+        # Fix: point XDG_DATA_HOME at storage owned by this candidate.  OpenCode
+        # respects XDG_DATA_HOME and creates its database below ``opencode/``.
         #
-        # The sandbox branch is excluded: container isolation already provides
-        # per-candidate filesystem separation, so XDG_DATA_HOME would be redundant.
-        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
-        opencode_state_dir.mkdir(parents=True, exist_ok=True)
-        backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
+        # This applies to sandboxed runs too.  Containers do NOT isolate the
+        # backend's home directory: ``sandbox._docker_args`` mounts the single
+        # named auth volume ``helix-auth-<backend>`` at ``/home/node:rw`` and sets
+        # ``HOME=/home/node``, so every concurrent candidate container shares one
+        # writable ``~/.local/share``.  Without XDG_DATA_HOME they all open the
+        # same opencode.db and hit the identical WAL contention, one layer down.
+        # Redirect to the per-candidate ``/workspace`` mount instead; direct
+        # subprocesses use the equivalent directory in their real worktree.
+        if sandbox is not None and sandbox.enabled:
+            backend_env["XDG_DATA_HOME"] = "/workspace/.helix_opencode_state"
+        else:
+            opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
+            opencode_state_dir.mkdir(parents=True, exist_ok=True)
+            backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
         result = run_sandboxed_command(
@@ -1728,6 +1735,26 @@ def invoke_claude_code(
 # ---------------------------------------------------------------------------
 
 
+def _remove_failed_mutation_worktree(
+    child: Candidate,
+    new_id: str,
+    cause: BaseException,
+) -> None:
+    """Drop a failed mutation's worktree, surfacing any cleanup failure.
+
+    Swallowing the cleanup error would make a leaked worktree indistinguishable
+    from one that was never created, and would leave a stale ``helix/<id>``
+    branch behind that the next run's stale-branch guard aborts on.
+    """
+    try:
+        remove_worktree(child)
+    except Exception as cleanup_exc:
+        print_warning(
+            f"Could not remove failed mutation worktree {new_id} after "
+            f"{type(cause).__name__}: {cleanup_exc}"
+        )
+
+
 def mutate(
     parent: Candidate,
     eval_result: EvalResult,
@@ -1762,28 +1789,35 @@ def mutate(
     Candidate | None
         The new candidate on success, or ``None`` if mutation failed.
     """
+    # ``clone_candidate`` has already created a live worktree and branch, so
+    # every subsequent step runs under the cleanup handlers below.  Worktree
+    # preparation and prompt-artifact writing touch the filesystem and can fail
+    # on their own; before this was guarded, any failure between the clone and
+    # the backend call leaked the worktree and its ``helix/<id>`` branch.
     child = clone_candidate(parent, new_id, base_dir)
-    child.operation = "mutate"
-    if prepare_worktree is not None:
-        prepare_worktree(child)
-
-    prompt = build_mutation_prompt(
-        config.objective,
-        eval_result,
-        background,
-        config.agent.max_turns,
-    )
-
-    # Persist the rendered prompt to the worktree for post-hoc inspection:
-    # what did the mutator actually see on this generation?  Sits next to
-    # ``helix_batch.json`` in the worktree root.  The leading dot and the
-    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
-    # keep it out of the candidate git tree — otherwise it'd leak into
-    # every subsequent mutation's diff and the mutator would see its own
-    # prior prompt file as part of the codebase.
-    prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
-
     try:
+        child.operation = "mutate"
+        if prepare_worktree is not None:
+            prepare_worktree(child)
+
+        prompt = build_mutation_prompt(
+            config.objective,
+            eval_result,
+            background,
+            config.agent.max_turns,
+        )
+
+        # Persist the rendered prompt to the worktree for post-hoc inspection:
+        # what did the mutator actually see on this generation?  Sits next to
+        # ``helix_batch.json`` in the worktree root.  The leading dot and the
+        # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
+        # keep it out of the candidate git tree — otherwise it'd leak into
+        # every subsequent mutation's diff and the mutator would see its own
+        # prior prompt file as part of the codebase.
+        prompt_artifact_name = _write_mutation_prompt_artifact(
+            child.worktree_path, prompt
+        )
+
         _, usage = invoke_claude_code(
             child.worktree_path,
             prompt,
@@ -1797,19 +1831,16 @@ def mutate(
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+        _remove_failed_mutation_worktree(child, new_id, exc)
         return None
-    except RateLimitError:
-        # Rate limit — clean up orphaned worktree, then re-raise so the parallel
-        # futures handler in evolution.py can log it and continue with a smaller
-        # proposal set.
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+    except Exception as exc:
+        # Rate limits and any other failure (git, filesystem, evaluator-manifest
+        # refresh, an unexpected backend error) propagate to the caller so it can
+        # decide whether the run continues — but never leave this worktree
+        # orphaned first.  Previously only RateLimitError was cleaned up, so an
+        # unexpected exception leaked the worktree and left a stale
+        # ``helix/<id>`` branch that trips the next run's stale-branch guard.
+        _remove_failed_mutation_worktree(child, new_id, exc)
         raise
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.

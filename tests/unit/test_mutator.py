@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -1944,4 +1945,141 @@ class TestOpenCodeSubprocessIsolation:
         gitignore_text = gitignore_path.read_text()
         assert ".helix_opencode_state/" in gitignore_text, (
             ".helix_opencode_state/ must be gitignored to keep it out of candidate history"
+        )
+
+
+class TestOpenCodeSandboxedIsolation:
+    """Sandboxed opencode runs need XDG_DATA_HOME too.
+
+    Containers do not isolate the backend home directory: ``_docker_args``
+    mounts the single named auth volume ``helix-auth-<backend>`` at
+    ``/home/node:rw`` and sets ``HOME=/home/node``, so every concurrent
+    candidate container shares one writable ``~/.local/share``.
+    """
+
+    def test_sandboxed_opencode_gets_workspace_scoped_xdg_data_home(
+        self, tmp_path: Path, mocker
+    ):
+        run_sandboxed = mocker.patch("helix.mutator.run_sandboxed_command")
+        run_sandboxed.return_value = MagicMock(
+            stdout='{"type":"result","sessionID":"ses_abc"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(
+            str(tmp_path),
+            "prompt",
+            AgentConfig(backend="opencode"),
+            sandbox=SandboxConfig(enabled=True),
+        )
+
+        env = run_sandboxed.call_args[1]["env"]
+        assert env.get("XDG_DATA_HOME") == "/workspace/.helix_opencode_state", (
+            "sandboxed opencode must get a candidate-scoped XDG_DATA_HOME; the "
+            "auth volume mounted at /home/node is shared across containers"
+        )
+
+
+class TestMutateWorktreeCleanup:
+    """``mutate`` must never leave a live worktree behind on failure.
+
+    ``clone_candidate`` creates a worktree and a ``helix/<id>`` branch before
+    anything can fail.  A leaked pair survives the run and trips the next
+    run's stale-branch guard.
+    """
+
+    @staticmethod
+    def _seed(tmp_path: Path) -> tuple[Candidate, Path]:
+        repo = tmp_path / "repo"
+        base = tmp_path / "worktrees"
+        repo.mkdir()
+        base.mkdir()
+        for args in (
+            ["git", "init", "-q", "-b", "main"],
+            ["git", "config", "user.email", "helix@test.local"],
+            ["git", "config", "user.name", "HELIX Test"],
+        ):
+            subprocess.run(args, cwd=repo, check=True, capture_output=True)
+        (repo / "f.txt").write_text("seed\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "seed"], cwd=repo, check=True, capture_output=True
+        )
+        parent = Candidate(
+            id="g0-s0",
+            worktree_path=str(repo),
+            branch_name="main",
+            generation=0,
+            parent_id=None,
+            parent_ids=[],
+            operation="seed",
+        )
+        return parent, base
+
+    @staticmethod
+    def _config() -> HelixConfig:
+        return HelixConfig(objective="obj", evaluator={"command": "true"})
+
+    @staticmethod
+    def _eval_result() -> EvalResult:
+        return EvalResult(
+            candidate_id="g0-s0", scores={}, asi={}, instance_scores={}
+        )
+
+    def test_unexpected_backend_error_removes_worktree_and_branch(
+        self, tmp_path: Path, mocker
+    ):
+        parent, base = self._seed(tmp_path)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=RuntimeError("backend crashed"),
+        )
+
+        with pytest.raises(RuntimeError):
+            mutate(
+                parent=parent,
+                eval_result=self._eval_result(),
+                new_id="g1-s1",
+                config=self._config(),
+                base_dir=base,
+                background=None,
+            )
+
+        assert not (base / "g1-s1").exists(), (
+            "mutate() leaked a worktree after an exception that is neither "
+            "MutationError nor RateLimitError"
+        )
+        branches = subprocess.run(
+            ["git", "branch", "--list", "helix/g1-s1"],
+            cwd=parent.worktree_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert branches.strip() == "", "mutate() leaked the helix/g1-s1 branch"
+
+    def test_prepare_worktree_failure_removes_worktree(
+        self, tmp_path: Path, mocker
+    ):
+        """Failures between the clone and the backend call must clean up too."""
+        parent, base = self._seed(tmp_path)
+        mocker.patch("helix.mutator.invoke_claude_code")
+
+        def explode(_candidate):
+            raise OSError("evaluator manifest refresh failed")
+
+        with pytest.raises(OSError):
+            mutate(
+                parent=parent,
+                eval_result=self._eval_result(),
+                new_id="g1-s2",
+                config=self._config(),
+                base_dir=base,
+                background=None,
+                prepare_worktree=explode,
+            )
+
+        assert not (base / "g1-s2").exists(), (
+            "mutate() leaked a worktree when prepare_worktree raised"
         )
