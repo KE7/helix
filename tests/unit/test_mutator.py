@@ -358,6 +358,55 @@ class TestPerExampleDiagnostics:
         assert "top-down" in prompt
         assert "centered" in prompt
 
+    def test_redacts_filesystem_paths_recursively_without_losing_feedback(self):
+        """Prompt rendering must not disclose evaluator-local paths.
+
+        The evaluator/cache path deliberately retains the raw side-info for
+        parsing and resume fidelity.  Only the mutation-prompt boundary is
+        sanitised, recursively, so useful keys and non-sensitive feedback
+        still reach the mutator.
+        """
+        er = self._make(
+            per_example_side_info=[
+                {
+                    "video_path": "/private/evaluator/videos/run-1.mp4",
+                    "evaluation_diagnostics": {
+                        "evaluator_error": (
+                            "decoder failed at /private/evaluator/logs/run-1.txt"
+                        ),
+                        "judge_metrics": {"quality": 0.75},
+                        "auth_message": "token=credential-value-12345",
+                    },
+                }
+            ],
+            instance_scores={"ex_0": 0.0},
+        )
+
+        prompt = build_mutation_prompt(
+            "goal", er, secret_values=["credential-value-12345"]
+        )
+
+        assert "/private/evaluator/videos/run-1.mp4" not in prompt
+        assert "/private/evaluator/logs/run-1.txt" not in prompt
+        # Key names and useful non-sensitive feedback survive redaction.
+        assert "video_path" in prompt
+        assert "evaluator_error" in prompt
+        assert "decoder failed at" in prompt
+        assert "judge_metrics" in prompt
+        assert "0.75" in prompt
+        # The shared value-aware redactor keeps the diagnostic key and
+        # surrounding message while masking only the configured value.
+        assert "auth_message" in prompt
+        assert "token=<redacted>" in prompt
+        assert "credential-value-12345" not in prompt
+        # Rendering must not mutate the raw evaluator result that cache and
+        # parser paths use for resume fidelity.
+        assert er.per_example_side_info is not None
+        assert (
+            er.per_example_side_info[0]["video_path"]
+            == "/private/evaluator/videos/run-1.mp4"
+        )
+
     def test_list_values_render_as_item_headers(self):
         """GEPA ``render_value`` parity: a list value renders each
         element under ``##### Item N`` sub-headers (h5 under the h4

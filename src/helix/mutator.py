@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
 from helix.display import UsageStats
@@ -21,6 +23,7 @@ from helix.exceptions import (
     print_helix_error,
 )
 from helix.executor import _scrub_environment
+from helix.redaction import redact_diagnostics
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
@@ -335,6 +338,35 @@ def _render_side_info_value(value: Any, level: int) -> str:
     return str(value).strip() + "\n\n"
 
 
+# Keep paths out of prompts even when they are embedded in otherwise useful
+# evaluator feedback.  This is deliberately independent from the shared
+# value-aware redactor: an internal filesystem path is sensitive provenance,
+# not necessarily a configured secret value.
+_ABSOLUTE_FILESYSTEM_PATH = re.compile(
+    r"(?<![A-Za-z0-9_:])/(?:[^\s/]+/)*[^\s/]+"
+)
+_REDACTED_FILESYSTEM_PATH = "<filesystem-path>"
+
+
+def _redact_filesystem_paths(value: Any) -> Any:
+    """Recursively remove absolute filesystem paths from diagnostic values.
+
+    Dictionary keys deliberately remain unchanged: they name the diagnostic
+    signal, while only values can carry evaluator-local provenance.  This
+    function is called only while rendering prompts, after parsers and cache
+    handling have consumed the original evaluator result.
+    """
+    if isinstance(value, str):
+        return _ABSOLUTE_FILESYSTEM_PATH.sub(_REDACTED_FILESYSTEM_PATH, value)
+    if isinstance(value, dict):
+        return {key: _redact_filesystem_paths(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_filesystem_paths(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_filesystem_paths(item) for item in value)
+    return value
+
+
 def _render_per_example_diagnostics(
     example_ids: list[str],
     per_example_side_info: list[dict[str, Any]],
@@ -380,7 +412,8 @@ def _render_per_example_diagnostics(
     nested_level = min(key_header_level + 1, _MAX_MARKDOWN_HEADER_LEVEL)
 
     lines: list[str] = ["## Diagnostics"]
-    for eid, side_info in zip(example_ids, per_example_side_info):
+    for eid, raw_side_info in zip(example_ids, per_example_side_info):
+        side_info = cast(dict[str, Any], _redact_filesystem_paths(raw_side_info))
         lines.append("")
         lines.append(f"{example_hashes} Example {eid}")
         if not side_info:
@@ -406,6 +439,7 @@ def build_mutation_prompt(
     eval_result: EvalResult,
     background: str | None = None,
     max_turns: int | None = None,
+    secret_values: Iterable[object] = (),
 ) -> str:
     """Construct the mutation prompt for Claude Code."""
     scores_text = "\n".join(
@@ -458,14 +492,15 @@ def build_mutation_prompt(
             key_header_level=4,
         )
     elif eval_result.side_info is not None:
+        side_info = cast(dict[str, Any], _redact_filesystem_paths(eval_result.side_info))
         diag_lines = "\n".join(
-            f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
+            f"  {k}: {v}" for k, v in sorted(side_info.items())
         )
         diagnostics_section = f"## Diagnostics\n{diag_lines}\n\n"
 
     bg = background or "(no additional background provided)"
 
-    return MUTATION_PROMPT_TEMPLATE.format(
+    prompt = MUTATION_PROMPT_TEMPLATE.format(
         system_prompt=AUTONOMOUS_SYSTEM_PROMPT,
         objective=objective,
         scores=scores_text,
@@ -475,6 +510,13 @@ def build_mutation_prompt(
         diagnostics_section=diagnostics_section,
         background=bg,
         turn_budget=_turn_budget_section(max_turns),
+    )
+    # The final prompt is the trust boundary.  Run both redactors here so
+    # evaluator values remain raw for parsing and cache parity, while every
+    # rendered diagnostic surface masks configured values and local paths.
+    return cast(
+        str,
+        redact_diagnostics(_redact_filesystem_paths(prompt), secret_values),
     )
 
 
@@ -1718,6 +1760,10 @@ def mutate(
         eval_result,
         background,
         config.agent.max_turns,
+        secret_values=_scrub_environment(
+            passthrough_env=config.passthrough_env,
+            fixed_env=config.env,
+        ).values(),
     )
 
     # Persist the rendered prompt to the worktree for post-hoc inspection:
