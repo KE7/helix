@@ -90,7 +90,7 @@ class TestBuildMutationPrompt:
         er = make_eval_result(
             asi={
                 "stdout": (
-                    "HELIX_RESULT=[[1.0, {\"task_completed\": true}]]\n"
+                    'HELIX_RESULT=[[1.0, {"task_completed": true}]]\n'
                     "human fallback line\n"
                 ),
                 "stderr": "",
@@ -1499,7 +1499,8 @@ class TestCountCodexStdoutToolEvents:
 
         stdout = tmp_path / "stdout.jsonl"
         stdout.write_text(
-            json.dumps({"type": "thread.started", "thread_id": "abc"}) + "\n"
+            json.dumps({"type": "thread.started", "thread_id": "abc"})
+            + "\n"
             + json.dumps(
                 {
                     "type": "item.completed",
@@ -1537,8 +1538,10 @@ class TestCountCodexStdoutToolEvents:
 
         stdout = tmp_path / "stdout.jsonl"
         stdout.write_text(
-            json.dumps({"type": "thread.started"}) + "\n"
-            + json.dumps({"type": "turn.completed"}) + "\n"
+            json.dumps({"type": "thread.started"})
+            + "\n"
+            + json.dumps({"type": "turn.completed"})
+            + "\n"
         )
 
         count, names = _count_codex_stdout_tool_events(stdout)
@@ -1558,9 +1561,7 @@ class TestCountCodexStdoutToolEvents:
 class TestCountCursorStdoutToolEvents:
     """Tests for ``_count_cursor_stdout_tool_events``."""
 
-    def test_counts_only_started_events_not_completed(
-        self, tmp_path: Path
-    ) -> None:
+    def test_counts_only_started_events_not_completed(self, tmp_path: Path) -> None:
         from helix.mutator import _count_cursor_stdout_tool_events
 
         stdout = tmp_path / "stdout.jsonl"
@@ -1715,9 +1716,7 @@ class TestCountTranscriptToolEventsDispatcher:
         assert count == 0
         assert names == []
 
-    def test_missing_file_returns_zero_for_known_backend(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_file_returns_zero_for_known_backend(self, tmp_path: Path) -> None:
         from helix.mutator import _count_transcript_tool_events
 
         count, names = _count_transcript_tool_events(
@@ -1753,9 +1752,7 @@ class TestCountTranscriptToolEventsDispatcher:
         from helix.mutator import _count_transcript_tool_events
 
         stdout = tmp_path / "stdout.jsonl"
-        stdout.write_text(
-            json.dumps({"type": "tool_use", "tool_name": "grep"}) + "\n"
-        )
+        stdout.write_text(json.dumps({"type": "tool_use", "tool_name": "grep"}) + "\n")
 
         count, names = _count_transcript_tool_events(stdout, "gemini")
 
@@ -1776,7 +1773,9 @@ class TestTranscriptToolPatchesUsageInArtifact:
         )
 
         # Set up a fake transcript with 3 tool_use events
-        transcript_root = tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        transcript_root = (
+            tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"
+        )
         transcript_root.mkdir(parents=True)
         (transcript_root / "sess_tool.jsonl").write_text(
             json.dumps(
@@ -1860,6 +1859,71 @@ class TestOpenCodeSubprocessIsolation:
             f"XDG_DATA_HOME={xdg!r} should be under the candidate worktree {tmp_path}"
         )
 
+    def test_opencode_credentials_survive_isolation(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        """Isolating XDG_DATA_HOME must not hide opencode's credentials.
+
+        The credential files live in the same directory as the session
+        database, so a bare redirect leaves the CLI unauthenticated and every
+        mutation fails with an opaque provider error.
+        """
+        source = tmp_path / "real-xdg" / "opencode"
+        source.mkdir(parents=True)
+        (source / "auth.json").write_text('{"openrouter": {"type": "api"}}')
+        (source / "account.json").write_text("{}")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "real-xdg"))
+
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","sessionID":"ses_abc"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(
+            str(worktree), "fix the bug", AgentConfig(backend="opencode")
+        )
+
+        isolated = Path(mock_run.call_args[1]["env"]["XDG_DATA_HOME"]) / "opencode"
+        auth = isolated / "auth.json"
+        assert auth.exists(), "credentials must be reachable from the isolated dir"
+        assert json.loads(auth.read_text())["openrouter"]["type"] == "api"
+        # Linked, not copied: no credential bytes are written into the worktree.
+        assert auth.is_symlink()
+        # The database itself is still per-candidate, which is the whole point.
+        assert not (isolated / "opencode.db").exists()
+
+    def test_opencode_credential_linking_tolerates_missing_source(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        """A machine with no stored credentials must still dispatch.
+
+        opencode may be authenticated by environment variable instead, and a
+        real auth failure reports itself far better than a guess here would.
+        """
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-xdg"))
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","sessionID":"ses_abc"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(
+            str(worktree), "fix the bug", AgentConfig(backend="opencode")
+        )
+
+        isolated = Path(mock_run.call_args[1]["env"]["XDG_DATA_HOME"]) / "opencode"
+        assert isolated.is_dir()
+        assert not (isolated / "auth.json").exists()
+
     def test_opencode_subprocess_isolation_unique_per_candidate(
         self, tmp_path: Path, mocker
     ):
@@ -1897,13 +1961,16 @@ class TestOpenCodeSubprocessIsolation:
         )
 
         invoke_claude_code(
-            str(tmp_path), "prompt", AgentConfig(backend="opencode"),
+            str(tmp_path),
+            "prompt",
+            AgentConfig(backend="opencode"),
             passthrough_env=["PATH", "HOME"],
         )
 
         env = mock_run.call_args[1]["env"]
         # PATH and HOME are passed through from the parent process environment
         import os
+
         if "PATH" in os.environ:
             assert "PATH" in env, "PATH must survive the env scrub for opencode"
         if "HOME" in os.environ:
@@ -1919,9 +1986,7 @@ class TestOpenCodeSubprocessIsolation:
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
 
         for backend in ("claude", "codex", "cursor", "gemini"):
-            invoke_claude_code(
-                str(tmp_path), "prompt", AgentConfig(backend=backend)
-            )
+            invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend=backend))
             env = mock_run.call_args[1]["env"]
             assert "XDG_DATA_HOME" not in env, (
                 f"XDG_DATA_HOME must not be injected for {backend} backend"
@@ -1936,9 +2001,7 @@ class TestOpenCodeSubprocessIsolation:
             returncode=0,
         )
 
-        invoke_claude_code(
-            str(tmp_path), "prompt", AgentConfig(backend="opencode")
-        )
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="opencode"))
 
         gitignore_path = tmp_path / ".gitignore"
         assert gitignore_path.exists(), ".gitignore must be created in the worktree"

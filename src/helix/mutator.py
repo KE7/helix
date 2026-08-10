@@ -719,6 +719,42 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# OpenCode credential files, which sit beside the session database inside the
+# opencode data directory.  These must survive per-candidate XDG_DATA_HOME
+# isolation; the database deliberately must not.
+OPENCODE_CREDENTIAL_FILES = ("auth.json", "account.json")
+
+
+def opencode_source_data_dir() -> Path:
+    """Return the user's real opencode data directory."""
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "opencode"
+
+
+def _link_opencode_credentials(target_dir: Path) -> None:
+    """Make the user's opencode credentials visible inside *target_dir*.
+
+    Symlinks rather than copies, so no credential bytes are written into the
+    candidate worktree.  Missing credentials are not an error here: opencode
+    may be authenticated by environment variable instead, and a genuine auth
+    failure surfaces from the CLI with a far better message than anything this
+    helper could invent.
+    """
+    source_dir = opencode_source_data_dir()
+    for name in OPENCODE_CREDENTIAL_FILES:
+        source = source_dir / name
+        destination = target_dir / name
+        if not source.exists() or destination.exists():
+            continue
+        try:
+            destination.symlink_to(source)
+        except OSError:
+            # Filesystems without symlink support (or a race with a sibling
+            # worker) must not abort the mutation.
+            continue
+
+
 def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
     """Pass official headless auth env vars without requiring TOML config."""
     for key in BACKEND_AUTH_ENV.get(backend, ()):
@@ -769,9 +805,7 @@ def _build_backend_args(
             # is valid TOML basic-string syntax for all printable ASCII — safe
             # for any realistic effort value.  See ``codex exec --help`` for
             # the full ``-c`` interface.
-            args.extend(
-                ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
-            )
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(config.effort)}"])
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
@@ -1602,11 +1636,24 @@ def invoke_claude_code(
         # same opencode.db and hit the identical WAL contention, one layer down.
         # Redirect to the per-candidate ``/workspace`` mount instead; direct
         # subprocesses use the equivalent directory in their real worktree.
+        #
+        # Redirecting XDG_DATA_HOME also moves opencode's *credential* files,
+        # which live in the same directory as the database.  An isolated state
+        # dir therefore starts unauthenticated, and the CLI then fails with an
+        # opaque provider-side error rather than an auth error.  Link the
+        # credentials back in so only the database is per-candidate.
         if sandbox is not None and sandbox.enabled:
             backend_env["XDG_DATA_HOME"] = "/workspace/.helix_opencode_state"
+            # NOTE: the container path is not linked here.  Its credentials live
+            # in the auth volume at ``/home/node/.local/share/opencode`` and are
+            # only reachable from inside the container, so the equivalent link
+            # has to be made there.  This is untested: it needs a running Docker
+            # daemon, which was unavailable when this was written.
         else:
             opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
-            opencode_state_dir.mkdir(parents=True, exist_ok=True)
+            opencode_data_dir = opencode_state_dir / "opencode"
+            opencode_data_dir.mkdir(parents=True, exist_ok=True)
+            _link_opencode_credentials(opencode_data_dir)
             backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
