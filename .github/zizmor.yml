@@ -1,0 +1,12 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Everything else must be pinned to a full commit SHA.
+        "*": hash-pin
+        # PyPA explicitly publishes `release/v1` as the ref Trusted Publishing
+        # users should track, and ships security fixes to that branch. Pinning
+        # it to a hash would opt this repository out of those fixes, and the
+        # PyPI release path cannot be rehearsed on a pull request. Tracked as a
+        # deliberate exception rather than a silent global suppression.
+        "pypa/gh-action-pypi-publish": ref-pin

@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -11,8 +13,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
@@ -21,3 +25,20 @@ jobs:
       # type-checked or linted the runner-image tool, which is how twenty lines
       # of duplicated dead code in its main() reached the branch unnoticed.
       - run: uv run mypy --strict src/helix/ tools/
+
+  # Real workflow linters, replacing hand-rolled source-text grep tests that
+  # asserted on the literal characters of publish-runners.yml. actionlint
+  # checks workflow structure, expression types, and the shell inside `run:`;
+  # zizmor checks the security properties (template injection, unpinned
+  # actions, credential persistence, permission scope).
+  lint-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      - run: uvx --from actionlint-py==1.7.7.23 actionlint -color
+      - run: uvx zizmor==1.16.3 --persona=regular .github/workflows/
+        env:
+          GH_TOKEN: ${{ github.token }}

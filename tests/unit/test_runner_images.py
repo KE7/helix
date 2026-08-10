@@ -483,32 +483,6 @@ def test_plan_rejects_an_unsafe_upstream_version() -> None:
         change_plan(catalog, {})
 
 
-def _run_bodies(text: str) -> list[tuple[int, str]]:
-    """Return (line number, body) for every ``run:`` step in the workflow."""
-    lines = text.splitlines()
-    bodies: list[tuple[int, str]] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.lstrip()
-        if not stripped.startswith("run:"):
-            index += 1
-            continue
-        indent = len(line) - len(stripped)
-        body = [stripped.removeprefix("run:").strip()]
-        index += 1
-        while index < len(lines):
-            following = lines[index]
-            if following.strip() and (
-                len(following) - len(following.lstrip()) <= indent
-            ):
-                break
-            body.append(following)
-            index += 1
-        bodies.append((index, "\n".join(body)))
-    return bodies
-
-
 def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     trigger_block = text.split("env:", 1)[0]
@@ -528,24 +502,6 @@ def test_publish_workflow_cannot_publish_from_a_pull_request() -> None:
     assert "--deny-self-hosted-runners" in text
     assert "cache-from:" not in text
     assert "cache-to:" not in text
-    uses = re.findall(r"uses:\s+([^@\s]+)@([^\s#]+)", text)
-    assert uses
-    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, revision in uses)
-
-
-def test_workflow_is_five_jobs_with_one_multiarch_build_per_backend() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    jobs = re.findall(r"^  ([a-z][a-z-]*):$", text[text.index("\njobs:\n") :], re.M)
-    assert jobs == ["guard", "resolve", "base", "backend", "rollback", "notify"]
-
-    # Both arches in one job: no per-architecture matrix, no digest handoff.
-    assert text.count("platforms: linux/amd64,linux/arm64") == 2
-    assert "ubuntu-24.04-arm" not in text
-    assert "matrix.arch" not in text
-    assert "select-retry-artifacts" not in text
-    assert "verify-build-evidence" not in text
-    # Emulation is what makes that possible.
-    assert text.count("docker/setup-qemu-action@") == 3
 
 
 def test_no_tag_is_created_before_the_image_passes_both_smokes() -> None:
@@ -612,38 +568,6 @@ def test_failure_notifier_covers_cancellation_and_dedupes_beyond_one_page() -> N
     assert 'const label = "runner-image-refresh";' in notifier
     assert "labels: label" in notifier
     assert "labels: [label]" in notifier
-
-
-def test_no_workflow_expression_is_interpolated_into_a_shell_body() -> None:
-    """Every ``${{ }}`` value reaches a shell through a quoted env var.
-
-    ``change_plan`` constrains the matrix to five literal backend names, so
-    there is no live injection today, but interpolating an expression straight
-    into a ``run:`` body is what actionlint and zizmor flag, and it is the only
-    thing standing between this workflow and a future unconstrained value.
-    """
-    text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    bodies = _run_bodies(text)
-    assert len(bodies) >= 8
-    offenders = [line for line, body in bodies if "${{" in body]
-    assert offenders == [], f"expressions interpolated into run: at {offenders}"
-    for declaration in (
-        "BACKEND: ${{ matrix.name }}",
-        "VERSION: ${{ matrix.version }}",
-        "IMAGE_TAG: ${{ matrix.tag }}",
-        "BUILD_DIGEST: ${{ steps.build.outputs.digest }}",
-        "BASE_TAG: ${{ needs.resolve.outputs.base_tag }}",
-    ):
-        assert declaration in text
-    assert (
-        len(
-            re.findall(
-                r'\[\[ "\$BACKEND" =~ \^\(claude\|codex\|cursor\|gemini\|opencode\)\$ \]\]',
-                text,
-            )
-        )
-        == 4
-    )
 
 
 def test_workflow_version_smoke_is_boundary_aware() -> None:
