@@ -13,6 +13,10 @@ call and the evaluator are both replaced with local fakes that sleep.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -23,7 +27,17 @@ from click.testing import CliRunner
 from helix.cli import cli
 from helix.config import EvaluatorConfig, HelixConfig
 from helix.population import Candidate, EvalResult
-from helix.trace import TRACE, Event, EventType
+from helix.trace import (
+    HEADER_RECORD,
+    RUN_COMPLETE_RECORD,
+    TIME_UNIT,
+    TRACE,
+    TRACE_SCHEMA_VERSION,
+    Event,
+    EventType,
+    TraceIncompleteError,
+    load_jsonl_trace,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +89,25 @@ def _current_line() -> int:
 
 
 def _read_jsonl(path: Path) -> list[dict]:
-    """Parse *path* as JSONL, failing loudly on any malformed line."""
+    """Return the *event* records of a complete trace at *path*.
+
+    Goes through the shipped reader on purpose: every test that reads a trace
+    then also asserts, implicitly, that the file passed the header/footer
+    completeness check a real consumer applies.
+    """
+    try:
+        _header, events = load_jsonl_trace(path)
+    except TraceIncompleteError as exc:  # pragma: no cover - failure path
+        pytest.fail(f"{path} did not read back as a complete trace: {exc}")
+    return events
+
+
+def _read_raw_lines(path: Path) -> list[dict]:
+    """Parse every line of *path*, framing included, failing on malformed JSON."""
     records = []
     for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
         try:
             records.append(json.loads(line))
         except json.JSONDecodeError as exc:  # pragma: no cover - failure path
@@ -156,7 +186,8 @@ class TestTraceFlag:
             assert before <= rec["wall_time"] <= after
             assert isinstance(rec["monotonic"], float)
             assert rec["thread_id"] == threading.get_ident()
-            assert ":" in rec["source"]
+            assert rec["source"].startswith("tests/unit/")
+            assert not Path(rec["source"].rsplit(":", 1)[0]).is_absolute()
 
     def test_bus_stays_disabled_without_the_flag(self, tmp_path, mocker):
         project = _make_project(tmp_path / "proj")
@@ -199,18 +230,48 @@ class TestTraceFlag:
             assert TRACE.events == []
         assert len(_read_jsonl(trace_file)) == 50
 
-    def test_trace_survives_a_crashing_run(self, tmp_path):
-        """Events emitted before an exception are already on disk."""
+    def test_run_that_raises_still_drains_and_stamps_the_trace_complete(
+        self, tmp_path
+    ):
+        """An exception inside the ``with`` still runs the orderly drain.
+
+        This is emphatically NOT an abrupt-exit test: raising inside the
+        context manager runs its ``finally``, so the writer drains and the
+        footer is written, and the trace is legitimately complete.  The
+        abrupt-exit case — where no cleanup runs at all — is
+        ``TestAbruptExit`` below, which SIGKILLs a real child process.
+        """
         trace_file = tmp_path / "run.jsonl"
         with pytest.raises(RuntimeError):
             with TRACE.write_jsonl(trace_file):
                 TRACE.emit(EventType.OPT_START)
                 TRACE.emit(EventType.ITER_START, decision="0")
-                raise RuntimeError("killed mid-run")
+                raise RuntimeError("run failed mid-generation")
         assert [r["type"] for r in _read_jsonl(trace_file)] == [
             "OPT_START",
             "ITER_START",
         ]
+        assert _read_raw_lines(trace_file)[-1]["record"] == RUN_COMPLETE_RECORD
+
+    def test_unwritable_trace_destination_is_a_clear_cli_error(self, tmp_path):
+        project = _make_project(tmp_path / "proj")
+        not_a_directory = tmp_path / "not-a-directory"
+        not_a_directory.write_text("blocker")
+
+        result = CliRunner().invoke(
+            cli,
+            [
+                "evolve",
+                "--dir",
+                str(project),
+                "--trace",
+                str(not_a_directory / "run.jsonl"),
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert "Cannot write trace" in result.output
+        assert "FileExistsError" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +301,30 @@ class TestTimingSplit:
         start = next(e for e in events if e.type is EventType.EVAL_START)
         end = next(e for e in events if e.type is EventType.EVAL_END)
         assert end.monotonic - start.monotonic >= _SLEEP
-        assert end.wall_time >= start.wall_time
+        # ``wall_time`` is present for correlation only.  It is deliberately
+        # NOT asserted to be ordered: NTP slew can move it backwards, which is
+        # the whole reason durations come from ``monotonic``.
+        assert isinstance(end.wall_time, float)
+
+    def test_failed_evaluator_still_closes_its_interval(self, mocker):
+        from helix import executor
+
+        def raising_evaluator(candidate, split, instance_ids):
+            raise TimeoutError("simulated evaluator timeout")
+
+        mocker.patch.object(executor, "_EVALUATOR_OVERRIDE", raising_evaluator)
+
+        with TRACE.record() as events, pytest.raises(TimeoutError):
+            executor.run_evaluator(_make_candidate(), _make_config(), split="val")
+
+        assert [event.type for event in events] == [
+            EventType.EVAL_START,
+            EventType.EVAL_END,
+        ]
+        end = events[-1]
+        assert end.outcome == "error"
+        assert end.error_type == "TimeoutError"
+        assert end.score is None
 
     def test_mutate_start_end_pair_yields_a_positive_duration(self, tmp_path, mocker):
         from helix.mutator import mutate
@@ -315,6 +399,22 @@ class TestTimingSplit:
 
 
 class TestConcurrentEmits:
+    def test_serial_spans_never_overlap_in_the_rendered_trace(self, tmp_path):
+        """Timing evidence must not invent concurrency in a serial phase."""
+        trace_file = tmp_path / "serial.jsonl"
+        with TRACE.write_jsonl(trace_file):
+            TRACE.emit(EventType.EVAL_START, candidate_id="g1-s0")
+            time.sleep(0.002)
+            TRACE.emit(EventType.EVAL_END, candidate_id="g1-s0", outcome="ok")
+            TRACE.emit(EventType.EVAL_START, candidate_id="g1-s1")
+            time.sleep(0.002)
+            TRACE.emit(EventType.EVAL_END, candidate_id="g1-s1", outcome="ok")
+
+        records = _read_jsonl(trace_file)
+        first_end = next(record for record in records if record["candidate_id"] == "g1-s0" and record["type"] == "EVAL_END")
+        second_start = next(record for record in records if record["candidate_id"] == "g1-s1" and record["type"] == "EVAL_START")
+        assert first_end["monotonic"] <= second_start["monotonic"]
+
     def test_concurrent_emits_produce_wellformed_jsonl(self, tmp_path):
         """Real threads, no mocks: no interleaved or truncated lines."""
         trace_file = tmp_path / "run.jsonl"
@@ -403,8 +503,24 @@ class TestEmitSource:
         source = events[0].source
         assert source is not None
         filename, _, lineno = source.rpartition(":")
-        assert Path(filename).name == Path(__file__).name
+        assert filename == "tests/unit/test_trace_jsonl.py"
+        assert not Path(filename).is_absolute()
         assert int(lineno) == expected_line
+
+    def test_source_outside_the_repository_is_omitted(self, tmp_path):
+        external_module = tmp_path / "external_emitter.py"
+        external_module.write_text(
+            "from helix.trace import TRACE, EventType\n"
+            "def emit():\n"
+            "    TRACE.emit(EventType.CACHE_GET)\n"
+        )
+        namespace: dict[str, object] = {}
+        exec(compile(external_module.read_text(), str(external_module), "exec"), namespace)
+
+        with TRACE.record() as events:
+            namespace["emit"]()
+
+        assert events[0].source is None
 
     def test_record_still_yields_the_in_memory_event_list(self):
         with TRACE.record() as events:
@@ -412,3 +528,220 @@ class TestEmitSource:
             assert len(events) == 1
             assert isinstance(events[0], Event)
         assert TRACE.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Framing: a trace is only evidence if it says so at both ends
+# ---------------------------------------------------------------------------
+
+
+class TestFraming:
+    def test_a_complete_trace_is_bracketed_by_a_header_and_a_footer(self, tmp_path):
+        trace_file = tmp_path / "run.jsonl"
+        with TRACE.write_jsonl(trace_file):
+            TRACE.emit(EventType.OPT_START)
+            TRACE.emit(EventType.OPT_END)
+
+        raw = _read_raw_lines(trace_file)
+        header, footer = raw[0], raw[-1]
+        assert header["record"] == HEADER_RECORD
+        assert header["schema_version"] == TRACE_SCHEMA_VERSION
+        assert header["time_unit"] == TIME_UNIT
+        assert header["pid"] == os.getpid()
+        assert isinstance(header["run_id"], str) and header["run_id"]
+        assert isinstance(header["helix_version"], str)
+
+        assert footer["record"] == RUN_COMPLETE_RECORD
+        assert footer["run_id"] == header["run_id"]
+        assert footer["event_count"] == 2
+        assert len(raw) == 2 + footer["event_count"]
+
+        loaded_header, events = load_jsonl_trace(trace_file)
+        assert loaded_header == header
+        assert [e["type"] for e in events] == ["OPT_START", "OPT_END"]
+
+    def test_two_runs_get_distinct_run_ids(self, tmp_path):
+        ids = []
+        for name in ("a.jsonl", "b.jsonl"):
+            path = tmp_path / name
+            with TRACE.write_jsonl(path):
+                TRACE.emit(EventType.OPT_START)
+            ids.append(_read_raw_lines(path)[0]["run_id"])
+        assert ids[0] != ids[1]
+
+    def test_a_trace_missing_its_footer_is_rejected(self, tmp_path):
+        trace_file = tmp_path / "run.jsonl"
+        with TRACE.write_jsonl(trace_file):
+            TRACE.emit(EventType.OPT_START)
+        lines = trace_file.read_text(encoding="utf-8").splitlines()
+        trace_file.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+        with pytest.raises(TraceIncompleteError) as excinfo:
+            load_jsonl_trace(trace_file)
+        assert RUN_COMPLETE_RECORD in str(excinfo.value)
+
+    def test_a_trace_with_a_torn_final_line_is_rejected(self, tmp_path):
+        trace_file = tmp_path / "run.jsonl"
+        with TRACE.write_jsonl(trace_file):
+            TRACE.emit(EventType.OPT_START)
+        text = trace_file.read_text(encoding="utf-8")
+        trace_file.write_text(text[: len(text) - 20], encoding="utf-8")
+
+        with pytest.raises(TraceIncompleteError):
+            load_jsonl_trace(trace_file)
+
+    def test_a_trace_without_a_header_is_rejected(self, tmp_path):
+        trace_file = tmp_path / "run.jsonl"
+        trace_file.write_text('{"type": "OPT_START"}\n', encoding="utf-8")
+        with pytest.raises(TraceIncompleteError) as excinfo:
+            load_jsonl_trace(trace_file)
+        assert HEADER_RECORD in str(excinfo.value)
+
+    def test_an_empty_trace_is_rejected(self, tmp_path):
+        trace_file = tmp_path / "run.jsonl"
+        trace_file.write_text("", encoding="utf-8")
+        with pytest.raises(TraceIncompleteError):
+            load_jsonl_trace(trace_file)
+
+    def test_a_future_schema_version_is_rejected(self, tmp_path):
+        trace_file = tmp_path / "run.jsonl"
+        with TRACE.write_jsonl(trace_file):
+            TRACE.emit(EventType.OPT_START)
+        lines = trace_file.read_text(encoding="utf-8").splitlines()
+        header = json.loads(lines[0])
+        header["schema_version"] = TRACE_SCHEMA_VERSION + 1
+        lines[0] = json.dumps(header)
+        trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        with pytest.raises(TraceIncompleteError) as excinfo:
+            load_jsonl_trace(trace_file)
+        assert "schema_version" in str(excinfo.value)
+
+    def test_a_dropped_event_withholds_the_footer(self, tmp_path):
+        """A queue overflow loses records, so the run may not be stamped complete."""
+        trace_file = tmp_path / "run.jsonl"
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 - asserted below
+            with TRACE.write_jsonl(trace_file):
+                TRACE.emit(EventType.OPT_START)
+                # Simulate the writer falling irrecoverably behind.
+                TRACE._record_error("Trace queue overflowed; simulated in test.")
+        assert "overflowed" in str(excinfo.value)
+        assert all(
+            rec.get("record") != RUN_COMPLETE_RECORD
+            for rec in _read_raw_lines(trace_file)
+        )
+        with pytest.raises(TraceIncompleteError):
+            load_jsonl_trace(trace_file)
+
+    def test_a_bad_emit_never_kills_a_traced_run(self, tmp_path):
+        """Instrumentation must not be able to end a run it is only observing."""
+        trace_file = tmp_path / "run.jsonl"
+        reached_the_end = []
+        with pytest.raises(Exception) as excinfo:  # noqa: PT011 - asserted below
+            with TRACE.write_jsonl(trace_file):
+                TRACE.emit(EventType.OPT_START)
+                TRACE.emit(EventType.ITER_START, no_such_field="boom")
+                reached_the_end.append(True)
+        # The run carried on past the bad emit ...
+        assert reached_the_end == [True]
+        # ... and the trace was refused rather than quietly shortened.
+        assert "no_such_field" in str(excinfo.value)
+        with pytest.raises(TraceIncompleteError):
+            load_jsonl_trace(trace_file)
+
+    def test_a_bad_emit_still_raises_on_the_in_memory_path(self):
+        """``record()`` has no file to reject, so the mistake must surface."""
+        with pytest.raises(TypeError):
+            with TRACE.record():
+                TRACE.emit(EventType.ITER_START, no_such_field="boom")
+
+
+# ---------------------------------------------------------------------------
+# Abrupt exit: SIGKILL a real child mid-run
+# ---------------------------------------------------------------------------
+
+
+#: The child emits ``_KILL_CHILD_EVENTS`` events, waits for the writer to catch
+#: up, announces that on stdout, and then keeps emitting forever so the SIGKILL
+#: genuinely lands while the writer is working.  It installs no signal handler
+#: and no ``atexit`` hook: SIGKILL runs none of them anyway, which is the point.
+_KILL_CHILD_EVENTS = 200
+
+_KILL_CHILD = """
+import sys, time
+from helix.trace import TRACE, EventType
+
+path, n = sys.argv[1], int(sys.argv[2])
+with TRACE.write_jsonl(path):
+    for i in range(n):
+        TRACE.emit(EventType.EVAL_START, candidate_id="g0-s%d" % i)
+    TRACE.drain()
+    sys.stdout.write("drained\\n")
+    sys.stdout.flush()
+    i = n
+    while True:
+        TRACE.emit(EventType.EVAL_START, candidate_id="g0-s%d" % i)
+        i += 1
+"""
+
+
+class TestAbruptExit:
+    def test_sigkilled_run_leaves_a_trace_that_is_unmistakably_rejectable(
+        self, tmp_path
+    ):
+        """SIGKILL a real child; the trace it leaves must not read as complete.
+
+        SIGKILL cannot be caught, so no ``finally``, no ``atexit`` and no
+        context-manager exit runs in the child — exactly the case the orderly
+        drain does not cover. What must survive is the *framing*: a header, a
+        prefix of whole event lines, and no ``RUN_COMPLETE``.
+        """
+        trace_file = tmp_path / "killed.jsonl"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _KILL_CHILD, str(trace_file), str(_KILL_CHILD_EVENTS)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.stdout is not None
+            # Blocks until the child says its first ``_KILL_CHILD_EVENTS``
+            # events have reached the file.  Everything it wrote up to that
+            # point must therefore still be there after the kill — that is the
+            # per-record flush being tested, not just the missing footer.
+            handshake = proc.stdout.readline()
+            assert handshake == "drained\n", (
+                f"child never drained (stdout {handshake!r}, "
+                f"stderr {proc.stderr.read() if proc.stderr else ''!r})"
+            )
+            proc.kill()
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:  # pragma: no cover - cleanup path
+                proc.kill()
+                proc.wait(timeout=30)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+        assert proc.returncode == -signal.SIGKILL, (
+            f"child was not SIGKILLed (returncode {proc.returncode})"
+        )
+
+        raw = _read_raw_lines(trace_file)  # every line whole: no torn record
+        assert raw[0]["record"] == HEADER_RECORD
+        assert all(rec.get("record") != RUN_COMPLETE_RECORD for rec in raw), (
+            "a killed run must never be stamped complete"
+        )
+        # Nothing acknowledged before the kill was lost in a write buffer: the
+        # ids the child emitted before its handshake are all on disk.
+        ids = [rec.get("candidate_id") for rec in raw if rec.get("type") == "EVAL_START"]
+        assert ids[:_KILL_CHILD_EVENTS] == [
+            f"g0-s{i}" for i in range(_KILL_CHILD_EVENTS)
+        ]
+
+        with pytest.raises(TraceIncompleteError) as excinfo:
+            load_jsonl_trace(trace_file)
+        assert RUN_COMPLETE_RECORD in str(excinfo.value)
+        assert "killed" in str(excinfo.value)

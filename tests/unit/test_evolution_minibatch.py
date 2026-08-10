@@ -31,6 +31,7 @@ from helix.evolution import (
 )
 from helix.population import Candidate, EvalResult, ParetoFrontier
 from helix.state import BudgetState, EvolutionState
+from helix.trace import EventType, TRACE
 
 
 # ---------------------------------------------------------------------------
@@ -2613,6 +2614,126 @@ class TestAtomicProposalWorker:
         assert len(child_eval_threads) >= 1, (
             f"Expected >= 1 child eval thread id; got {child_eval_threads}"
         )
+
+    def test_trace_binds_worker_spans_to_the_actual_proposal_batch(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The trace names every submitted slot without relying on file order."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        mut_ids = iter(["g1-s1", "g1-s2"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            ids = instance_ids or ["v1"]
+            return _make_result(candidate.id, {item: 0.5 for item in ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=2,
+        )
+
+        with TRACE.record() as events:
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        starts = [event for event in events if event.type is EventType.PROPOSAL_START]
+        ends = [event for event in events if event.type is EventType.PROPOSAL_END]
+        assert [event.type for event in events if event.type in {
+            EventType.PROPOSAL_BATCH_START,
+            EventType.PROPOSAL_BATCH_END,
+        }] == [EventType.PROPOSAL_BATCH_START, EventType.PROPOSAL_BATCH_END]
+        assert len(starts) == len(ends) == 2
+        assert {(event.generation, event.proposal_index, event.n_proposals) for event in starts} == {
+            (1, 0, 2),
+            (1, 1, 2),
+        }
+        assert {event.candidate_id for event in starts} == {"g1-s1", "g1-s2"}
+        assert all(event.outcome == "complete" for event in ends)
+
+    def test_full_validation_is_timed_separately_from_proposal_work(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The sequential full-val stage has its own bracketed wall clock.
+
+        This is the measurement the flag exists for: deciding whether to
+        parallelise full validation needs full validation's own wall clock,
+        not the apply phase's total.  ``VALIDATE_START``/``VALIDATE_END`` are
+        the boundary, and every full-val span must fall wholly outside the
+        ``PROPOSAL_BATCH_START``/``PROPOSAL_BATCH_END`` window so the two
+        totals cannot double-count the same seconds.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        mut_ids = iter(["g1-s1", "g1-s2"])
+        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(next(mut_ids))
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            ids = instance_ids or ["v1"]
+            # A child scores strictly better than the seed so the gate accepts
+            # and the run actually reaches the full-val stage.
+            score = 0.9 if candidate.id != "g0-s0" else 0.1
+            return _make_result(candidate.id, {item: score for item in ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=2,
+        )
+
+        with TRACE.record() as events:
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        validate_starts = [e for e in events if e.type is EventType.VALIDATE_START]
+        validate_ends = [e for e in events if e.type is EventType.VALIDATE_END]
+        # The seed's own full val plus at least one accepted child's.
+        assert len(validate_starts) == len(validate_ends) >= 2
+        assert all(e.outcome == "ok" for e in validate_ends)
+        assert all(e.split == "val" for e in validate_starts)
+        # ``reason`` keeps the seed, merge and mutation call sites apart.
+        assert {e.reason for e in validate_starts} >= {
+            "seed_val_batch",
+            "mutation_full_val_batch",
+        }
+
+        # Durations come from the monotonic clock and are non-negative.
+        by_index = {}
+        for start, end in zip(validate_starts, validate_ends, strict=True):
+            assert start.candidate_id == end.candidate_id
+            by_index[start.candidate_id] = end.monotonic - start.monotonic
+        assert all(duration >= 0.0 for duration in by_index.values())
+
+        batch_start = next(
+            e for e in events if e.type is EventType.PROPOSAL_BATCH_START
+        )
+        batch_end = next(e for e in events if e.type is EventType.PROPOSAL_BATCH_END)
+        # No VALIDATE span overlaps the concurrent proposal window, so the two
+        # phase totals partition the generation instead of double-counting it.
+        for start, end in zip(validate_starts, validate_ends, strict=True):
+            assert (
+                end.monotonic <= batch_start.monotonic
+                or start.monotonic >= batch_end.monotonic
+            ), "full validation overlapped the proposal batch window"
 
     def test_worker_skipped_result_returns_without_llm_call(
         self, tmp_path: Path, all_mocks: dict[str, Any]

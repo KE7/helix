@@ -23,7 +23,7 @@ from helix.sandbox import (
     current_evaluator_sidecar_runtime,
     run_sandboxed_commands,
 )
-from helix.trace import TRACE, EventType
+from helix.trace import TRACE, EventType, score_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +188,48 @@ def run_evaluator(
     split: str = "val",
     instance_ids: list[str] | None = None,
 ) -> EvalResult:
+    """Run one evaluator and always close its trace interval.
+
+    The implementation is deliberately wrapped rather than relying on its
+    individual return paths: command validation, sandbox setup, subprocess
+    execution, parsing, timeouts, and test overrides can all fail.
+    """
+    TRACE.emit(
+        EventType.EVAL_START,
+        candidate_id=candidate.id,
+        split=split,
+        example_ids=list(instance_ids) if instance_ids is not None else None,
+    )
+    result: EvalResult | None = None
+    outcome = "error"
+    error_type: str | None = None
+    try:
+        result = _run_evaluator(candidate, config, split, instance_ids)
+        outcome = "ok"
+        return result
+    except BaseException as exc:
+        # Record only the exception class.  Exception text can include an
+        # evaluator command, path, or diagnostic payload and is not trace data.
+        error_type = type(exc).__name__
+        raise
+    finally:
+        TRACE.emit(
+            EventType.EVAL_END,
+            candidate_id=candidate.id,
+            split=split,
+            example_ids=list(instance_ids) if instance_ids is not None else None,
+            score=score_or_none(result),
+            outcome=outcome,
+            error_type=error_type,
+        )
+
+
+def _run_evaluator(
+    candidate: Candidate,
+    config: HelixConfig,
+    split: str = "val",
+    instance_ids: list[str] | None = None,
+) -> EvalResult:
     """Run the evaluator for a single candidate.
 
     Args:
@@ -208,27 +250,11 @@ def run_evaluator(
         (never truncated) including the command, full stdout/stderr,
         exit code, and the candidate being evaluated.
     """
-    TRACE.emit(
-        EventType.EVAL_START,
-        candidate_id=candidate.id,
-        split=split,
-        example_ids=list(instance_ids) if instance_ids is not None else None,
-    )
-
     # Differential-testing short-circuit: when an override callable is
     # installed (see ``_EVALUATOR_OVERRIDE`` at module top), skip subprocess
     # and run the override directly.  Production code paths never set this.
     if _EVALUATOR_OVERRIDE is not None:
         _override_result = _EVALUATOR_OVERRIDE(candidate, split, instance_ids)
-        TRACE.emit(
-            EventType.EVAL_END,
-            candidate_id=candidate.id,
-            split=split,
-            example_ids=list(instance_ids) if instance_ids is not None else None,
-            score=_override_result.aggregate_score()
-            if hasattr(_override_result, "aggregate_score")
-            else None,
-        )
         return _override_result
 
     evaluator = config.evaluator
@@ -407,12 +433,5 @@ def run_evaluator(
         # ``config.evolution.frontier_type`` is ``"objective"``,
         # ``"hybrid"``, or ``"cartesian"``.
         objective_scores=objective_scores,
-    )
-    TRACE.emit(
-        EventType.EVAL_END,
-        candidate_id=candidate.id,
-        split=split,
-        example_ids=list(instance_ids) if instance_ids is not None else None,
-        score=_result.aggregate_score(),
     )
     return _result

@@ -31,7 +31,7 @@ from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_heli
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
-from helix.trace import TRACE
+from helix.trace import TRACE, TraceWriteError
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
@@ -612,11 +612,16 @@ def sandbox_logout(
     type=click.Path(dir_okay=False, path_type=Path),
     help=(
         "Write a JSON Lines trace of the run to this path (one event per "
-        "line, flushed as it is emitted). Every event carries a wall-clock "
-        "timestamp, a monotonic timestamp, and the id of the thread that "
-        "emitted it, so MUTATE_START/MUTATE_END and EVAL_START/EVAL_END pairs "
-        "can be matched per worker to see how much of the run was spent in "
-        "the agent versus in the evaluator. Off by default."
+        "line, all timestamps in seconds). A bounded background writer keeps "
+        "disk I/O off measured operations and flushes every record, so a "
+        "killed run leaves whole lines behind. The file opens with a header "
+        "record and ends with a run_complete record written only on a clean "
+        "drain; a trace missing that footer must be discarded rather than "
+        "trimmed. Every event carries a wall-clock timestamp, a monotonic "
+        "timestamp, and the id of the emitting thread, so MUTATE_START/"
+        "MUTATE_END, EVAL_START/EVAL_END, PROPOSAL_START/PROPOSAL_END and "
+        "VALIDATE_START/VALIDATE_END pairs can be matched per worker. Off by "
+        "default."
     ),
 )
 def evolve(
@@ -701,6 +706,13 @@ def evolve(
                 target = stack.enter_context(TRACE.write_jsonl(trace_path))
                 logger.info("Tracing enabled — writing JSONL events to %s", target)
             run_evolution(config, project_root, base_dir)
+    except TraceWriteError as exc:
+        # A partial trace must never be presented as timing evidence.  This
+        # covers an invalid destination before evolution starts and an
+        # asynchronous writer failure discovered while closing the stream.
+        logger.error("Trace unavailable: %s", exc)
+        print_error(str(exc))
+        raise SystemExit(2)
     except ResumeIncompatibleError as exc:
         # The current config would reinterpret persisted state.  Show the
         # full Rich panel (with operation/phase/suggestion) instead of
