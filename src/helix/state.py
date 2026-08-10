@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from helix.change_summary import MAX_HISTORY_PER_PARENT, normalize_failure_history
 from helix.population import FrontierType
 
 
@@ -22,7 +23,8 @@ from helix.population import FrontierType
 # ``state.json``; subsequent bumps mark explicit JSON-native schema
 # additions (the unversioned predecessor is treated as v0; ``load_state``
 # migrates by default-filling missing fields).
-SCHEMA_VERSION: int = 2
+# v3 adds ``failed_attempt_history``.
+SCHEMA_VERSION: int = 3
 
 
 @dataclass
@@ -128,6 +130,11 @@ class EvolutionState:
     # a GEPA-style single pickled artifact: HELIX still persists worktrees,
     # evaluations, lineage, and state as separate artifacts.
     resume_semantics: dict[str, Any] = field(default_factory=dict)
+    # Rejected child reports keyed by their direct parent.  Entries are validated
+    # on both write and load before they can return to a mutation prompt.
+    failed_attempt_history: dict[str, list[dict[str, Any]]] = field(
+        default_factory=dict
+    )
     # GEPA parity (rng-state-persist audit D1): persisted schema version.
     # Mirrors GEPA's ``validation_schema_version`` field, stamped from the
     # ``GEPAState._VALIDATION_SCHEMA_VERSION`` class-var (``core/state.py``).
@@ -161,6 +168,9 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
     target = _state_path(base_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    state.failed_attempt_history = normalize_failure_history(
+        state.failed_attempt_history, limit=MAX_HISTORY_PER_PARENT
+    )
     data = {
         # GEPA parity (rng-state-persist audit D1): schema_version is written
         # FIRST so a stripped/legacy state.json without it loads as v0 and
@@ -181,6 +191,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "active_frontier": state.active_frontier,
         "frontier_type": state.frontier_type,
         "resume_semantics": state.resume_semantics,
+        "failed_attempt_history": state.failed_attempt_history,
     }
 
     # Atomic write: write to tmp file in same directory, then rename
@@ -257,6 +268,9 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         active_frontier=data.get("active_frontier", {}),
         frontier_type=frontier_type,
         resume_semantics=data.get("resume_semantics", {}),
+        failed_attempt_history=normalize_failure_history(
+            data.get("failed_attempt_history", {}), limit=MAX_HISTORY_PER_PARENT
+        ),
         schema_version=SCHEMA_VERSION,
     )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -20,6 +21,7 @@ from helix.mutator import (
     invoke_claude_code,
     mutate,
 )
+from helix.change_summary import CHANGE_SUMMARY_ARTIFACT_NAME
 
 
 # ---------------------------------------------------------------------------
@@ -662,6 +664,38 @@ class TestMutationPromptArtifact:
         assert not (wt / ".gitignore").exists()
         mutate(parent, er, "g1-s0", config, tmp_path)
         assert (wt / ".gitignore").exists()
+
+    def test_change_summary_is_captured_and_never_enters_candidate_tree(
+        self, tmp_path: Path, mocker
+    ):
+        parent, er, config, wt = self._build(tmp_path, mocker)
+
+        def fake_invoke(*_args, **_kwargs):
+            (wt / CHANGE_SUMMARY_ARTIFACT_NAME).write_text(
+                json.dumps(
+                    {
+                        "intent": "repair the parser",
+                        "approach": "fix the final boundary",
+                        "expected_effect": "accept a final token",
+                    }
+                )
+            )
+            return {"result": "ok"}, {}
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        child = mutate(parent, er, "g1-s0", config, tmp_path)
+
+        assert child is not None
+        assert child.change_summary is not None
+        assert child.change_summary["intent"] == "repair the parser"
+        subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", CHANGE_SUMMARY_ARTIFACT_NAME],
+            cwd=wt,
+            capture_output=True,
+        )
+        assert tracked.returncode != 0
 
 
 # ---------------------------------------------------------------------------

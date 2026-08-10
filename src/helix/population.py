@@ -54,6 +54,9 @@ class Candidate:
     parent_ids: list[str]
     operation: str
     usage: UsageStats = field(default_factory=UsageStats)
+    # A validated, untracked self-report captured after the mutation backend exits.
+    # It is deliberately not part of the candidate's git snapshot.
+    change_summary: dict[str, str] | None = None
 
 
 @dataclass
