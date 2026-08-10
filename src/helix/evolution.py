@@ -1769,7 +1769,7 @@ def _run_evolution_impl(
                 # ``triplet is None`` — both paths now fall through to
                 # reflective mutation (GEPA engine.py:741-742).
                 #
-                # GEPA parity (merge-pairing audit D1, /tmp/audit_audit-merge-pairing.md:49-50):
+                # GEPA parity (merge-pairing audit D1):
                 # mirror GEPA ``merge.py:130-131`` — you need two siblings plus
                 # one ancestor, so fewer than 3 total candidates can never
                 # yield a valid triplet.  Kept as an explicit guard for
@@ -1781,8 +1781,7 @@ def _run_evolution_impl(
                 if len(lineage) < 3:
                     triplet = None
                 else:
-                    # GEPA parity (merge-pairing audit B1/B2,
-                    # /tmp/audit_audit-merge-pairing.md:10-22): push the
+                    # GEPA parity (merge-pairing audit B1/B2): push the
                     # "already-attempted pair" and "val-support overlap"
                     # filters INTO ``find_merge_triplet``'s retry loop so a
                     # blocked sample triggers resampling rather than bailing
@@ -1926,8 +1925,7 @@ def _run_evolution_impl(
                             # crashes (e.g. empty-commit), state is already
                             # persisted and resume can skip re-doing this merge.
                             _save_state(state)
-                            # GEPA parity (merge-pairing audit C1,
-                            # /tmp/audit_audit-merge-pairing.md:28-31): the
+                            # GEPA parity (merge-pairing audit C1): the
                             # HEAD SHA of the snapshotted worktree is HELIX's
                             # port of GEPA's ``new_prog_desc`` (merge.py:195-203);
                             # content-addressed so two different triplets that
@@ -2044,8 +2042,7 @@ def _run_evolution_impl(
                             )
 
                             if merge_score >= required_score:
-                                # GEPA parity (merge-gate audit M3,
-                                # /tmp/audit_audit-merge-gate.md:10-32): after
+                                # GEPA parity (merge-gate audit M3): after
                                 # the subsample gate passes, run a FULL-valset
                                 # eval on the merged candidate and pass THAT
                                 # result (not the 5-id subsample) to

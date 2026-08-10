@@ -87,7 +87,7 @@ class EvolutionState:
     # filter in ``lineage.find_merge_triplet`` reads this set to short-
     # circuit already-seen pairs (merge-pairing audit B2).
     merge_attempted_pairs: list[list[str]] = field(default_factory=list)
-    # GEPA parity (merge-pairing audit C1, /tmp/audit_audit-merge-pairing.md:28-31):
+    # GEPA parity (merge-pairing audit C1):
     # mirrors GEPA ``merges_performed[1]`` at gepa/proposer/merge.py:195-203.
     # Each entry is [cid_i, cid_j, desc_hash] with cid_i <= cid_j
     # lexicographically and desc_hash = post-snapshot git SHA of the

@@ -1,6 +1,6 @@
 """Unit tests for GEPA-aligned state persistence.
 
-Covers the additions called out in /tmp/audit_audit-rng-state-persist.md
+Covers the additions called out in the RNG/state-persistence audit
 (MODERATE_DIVERGENCE — schema thin vs GEPA):
 
 * C1 — per-(candidate, example) eval cache survives save → load round-trip
@@ -80,7 +80,7 @@ def _make_full_state() -> EvolutionState:
 def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     """save_state → load_state must deep-equal the original on every field.
 
-    Audit ref: /tmp/audit_audit-rng-state-persist.md C/§3 + D1.
+    Audit ref: RNG/state-persistence audit C/§3 + D1.
     """
     state = _make_full_state()
     save_state(state, tmp_path)

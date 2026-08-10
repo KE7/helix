@@ -1,7 +1,7 @@
 """HELIX evaluation cache — GEPA parity.
 
-Line-for-line port of the cache layer described in
-/tmp/gepa_eval_spec.md §3 (originally at gepa/core/state.py:27-130).
+Line-for-line port of the GEPA cache layer at
+``gepa/core/state.py:27-130``.
 """
 from __future__ import annotations
 

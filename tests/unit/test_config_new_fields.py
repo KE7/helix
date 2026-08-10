@@ -182,8 +182,8 @@ class TestEvolutionConfigNewFields:
         """GEPA parity: ``num_parallel_proposals="auto"`` resolves to
         ``max(1, max_workers // minibatch_size)`` in model_post_init.
 
-        Mirrors GEPA ``_resolve_num_parallel_proposals``
-        (/tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116).
+        Mirrors GEPA ``optimize_anything._resolve_num_parallel_proposals``
+        (src/gepa/optimize_anything.py:1108-1116).
         """
         cfg = EvolutionConfig(
             num_parallel_proposals="auto",
