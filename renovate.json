@@ -1,0 +1,54 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits"
+  ],
+  "timezone": "America/Los_Angeles",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Runner CLI pins. The npm manager rewrites docker/package-lock.json in npm's own format, so the resolved URL and the sha512 integrity move together with the version. That is the whole reason the pins live in a lockfile: Renovate cannot recompute a digest sitting next to a version in a bespoke JSON file, so a hand-rolled catalog would get version-only PRs with stale hashes.",
+      "matchFileNames": ["docker/package.json"],
+      "rangeStrategy": "pin",
+      "separateMinorPatch": true,
+      "commitMessageTopic": "runner CLI {{depName}}",
+      "addLabels": ["runner-images"],
+      "groupName": null
+    },
+    {
+      "description": "The base image FROM must stay digest-pinned, never a floating tag.",
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true,
+      "addLabels": ["runner-images"]
+    },
+    {
+      "description": "Workflow actions are hash-pinned; zizmor's unpinned-uses rule fails CI otherwise. pypa/gh-action-pypi-publish is exempt by policy (see .github/zizmor.yml) and must stay on release/v1.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["!pypa/gh-action-pypi-publish"],
+      "pinDigests": true
+    },
+    {
+      "description": "Codex must keep shipping gpt-5.6-luna with an xhigh reasoning level; tools/runner_images.py fails closed below 0.145.0, and the backend job asserts the model catalog after the image is built.",
+      "matchPackageNames": ["@openai/codex"],
+      "addLabels": ["needs-codex-model-check"]
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "uv is copied into the base image from a digest-pinned wheel pair, so its version is tracked here rather than by a package manager.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^docker/runner-versions\\.json$/"],
+      "matchStrings": ["\"uv_version\":\\s*\"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "uv",
+      "datasourceTemplate": "pypi"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  }
+}
