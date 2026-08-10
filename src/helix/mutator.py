@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -577,32 +579,36 @@ def build_mutation_prompt(
 # Rate-limit detection
 # ---------------------------------------------------------------------------
 
-_RATE_LIMIT_KEYWORDS = [
-    "rate limit",
-    "rate-limit",
-    "ratelimit",
-    "overloaded",
-    "529",
-    "usage limit",
-    "extra usage",
-    "quota",
+_RATE_LIMIT_PATTERNS = (
+    re.compile(r"\brate(?:[ -]?limit)\b", re.IGNORECASE),
+    re.compile(r"\boverloaded\b", re.IGNORECASE),
+    re.compile(r"\b529\b"),
+    re.compile(r"\busage limit\b", re.IGNORECASE),
+    re.compile(r"\bextra usage\b", re.IGNORECASE),
+    # A bare ``quota`` appears in unrelated configuration errors (for example,
+    # "quota field missing").  Require language that actually says the quota
+    # has been consumed before classifying it as a retryable rate limit.
+    re.compile(
+        r"\bquota(?:\s+has)?(?:\s+been)?\s+"
+        r"(?:exceeded|exhausted|reached|depleted|limit(?:ed)?)\b",
+        re.IGNORECASE,
+    ),
     # 429 is the canonical rate-limit status and several CLIs report only the
     # numeric code, with no prose an operator could match on.
-    "429",
-    "too many requests",
-]
+    re.compile(r"\b429\b"),
+    re.compile(r"\btoo many requests\b", re.IGNORECASE),
+)
 
 
 def _looks_like_rate_limit(text: str) -> bool:
     """Return True if *text* contains a rate-limit / overload signal.
 
-    Detection stays keyword-based and additive: an unrecognised backend error
-    must fall through to the generic unknown-failure path with its own message
+    Detection stays deliberately narrow: an unrecognised backend error must
+    fall through to the generic unknown-failure path with its own message
     preserved, rather than being reported as a quota problem the operator
     cannot act on.
     """
-    lower = text.lower()
-    return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
+    return any(pattern.search(text) for pattern in _RATE_LIMIT_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +750,7 @@ OPENCODE_PERMISSION_FLAGS = ("--auto", "--dangerously-skip-permissions")
 OPENCODE_PERMISSION_FLAG_FALLBACK = "--auto"
 
 _opencode_permission_flag_cache: str | None = None
+_opencode_permission_flag_lock = threading.Lock()
 
 
 def opencode_permission_flag(*, refresh: bool = False) -> str:
@@ -758,33 +765,43 @@ def opencode_permission_flag(*, refresh: bool = False) -> str:
     if _opencode_permission_flag_cache is not None and not refresh:
         return _opencode_permission_flag_cache
 
-    help_text = ""
-    try:
-        completed = subprocess.run(
-            ["opencode", "run", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        help_text = f"{completed.stdout}\n{completed.stderr}"
-    except (OSError, subprocess.SubprocessError):
+    # Proposal workers are threads.  Check again while holding the lock so
+    # simultaneous first mutations share one capability probe instead of each
+    # starting its own subprocess.
+    with _opencode_permission_flag_lock:
+        if _opencode_permission_flag_cache is not None and not refresh:
+            return _opencode_permission_flag_cache
+
         help_text = ""
-
-    chosen = OPENCODE_PERMISSION_FLAG_FALLBACK
-    for flag in OPENCODE_PERMISSION_FLAGS:
-        if flag in help_text:
-            chosen = flag
-            break
-    else:
-        if help_text:
-            logger.warning(
-                "opencode run --help advertised no known permission flag; "
-                "falling back to %s",
-                chosen,
+        try:
+            completed = subprocess.run(
+                ["opencode", "run", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
+            help_text = f"{completed.stdout}\n{completed.stderr}"
+        except (OSError, subprocess.SubprocessError):
+            help_text = ""
 
-    _opencode_permission_flag_cache = chosen
-    return chosen
+        chosen = OPENCODE_PERMISSION_FLAG_FALLBACK
+        for flag in OPENCODE_PERMISSION_FLAGS:
+            # Avoid accepting lookalikes such as ``--auto-continue`` as the
+            # permission flag.  Help output need only advertise the exact CLI
+            # option, not merely contain the flag's spelling as a substring.
+            if re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text):
+                chosen = flag
+                break
+        else:
+            if help_text:
+                logger.warning(
+                    "opencode run --help advertised no known permission flag; "
+                    "falling back to %s",
+                    chosen,
+                )
+
+        _opencode_permission_flag_cache = chosen
+        return chosen
 
 
 # OpenCode credential files, which sit beside the session database inside the

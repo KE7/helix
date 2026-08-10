@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -47,6 +49,33 @@ class TestPermissionFlagProbe:
         for _ in range(5):
             mutator.opencode_permission_flag()
         assert run.call_count == 1, "a P×N batch must not re-probe per mutation"
+
+    def test_probe_is_cached_across_parallel_workers(self, mocker):
+        """Concurrent first mutations still pay for exactly one probe."""
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def delayed_help(*_args, **_kwargs):
+            probe_started.set()
+            assert release_probe.wait(timeout=2)
+            return _help("--auto")
+
+        run = mocker.patch("helix.mutator.subprocess.run", side_effect=delayed_help)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(mutator.opencode_permission_flag)
+            assert probe_started.wait(timeout=2)
+            second = executor.submit(mutator.opencode_permission_flag)
+            release_probe.set()
+            assert first.result(timeout=2) == "--auto"
+            assert second.result(timeout=2) == "--auto"
+        assert run.call_count == 1
+
+    def test_lookalike_flag_does_not_mask_legacy_flag(self, mocker):
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=_help("--auto-continue\n--dangerously-skip-permissions"),
+        )
+        assert mutator.opencode_permission_flag() == "--dangerously-skip-permissions"
 
     def test_probe_failure_falls_back(self, mocker):
         mocker.patch(
@@ -149,6 +178,8 @@ class TestRateLimitClassification:
             "UnknownError: Unexpected server error. Check server logs for details.",
             "ENOENT: no such file or directory",
             "model not found",
+            "Configuration error: quota field is missing",
+            "The quota identifier is invalid",
             "",
         ],
     )
@@ -159,3 +190,44 @@ class TestRateLimitClassification:
         strictly worse than saying the error is unrecognised.
         """
         assert mutator._looks_like_rate_limit(text) is False
+
+    def test_http_429_raises_rate_limit_error(self, tmp_path, mocker):
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _help("--auto"),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=1,
+                    stdout="",
+                    stderr="HTTP 429 Too Many Requests",
+                ),
+            ],
+        )
+        from helix.config import AgentConfig
+
+        with pytest.raises(mutator.RateLimitError):
+            mutator.invoke_claude_code(
+                str(tmp_path), "prompt", AgentConfig(backend="opencode")
+            )
+        assert run.call_count == 2
+
+    def test_quota_configuration_error_is_not_a_rate_limit(self, tmp_path, mocker):
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _help("--auto"),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=1,
+                    stdout="",
+                    stderr="Configuration error: quota field is missing",
+                ),
+            ],
+        )
+        from helix.config import AgentConfig
+
+        with pytest.raises(MutationError):
+            mutator.invoke_claude_code(
+                str(tmp_path), "prompt", AgentConfig(backend="opencode")
+            )

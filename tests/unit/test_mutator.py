@@ -1897,6 +1897,46 @@ class TestOpenCodeSubprocessIsolation:
         # The database itself is still per-candidate, which is the whole point.
         assert not (isolated / "opencode.db").exists()
 
+    def test_opencode_credential_state_is_ignored_not_copied(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        """Credential symlinks cannot enter a candidate's committed diff."""
+        source = tmp_path / "real-xdg" / "opencode"
+        source.mkdir(parents=True)
+        secret = "credential-bytes-must-not-be-copied"
+        auth_source = source / "auth.json"
+        auth_source.write_text(secret)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "real-xdg"))
+
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","sessionID":"ses_abc"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(
+            str(worktree), "fix the bug", AgentConfig(backend="opencode")
+        )
+
+        auth_link = worktree / ".helix_opencode_state" / "opencode" / "auth.json"
+        assert auth_link.is_symlink()
+        assert auth_link.readlink() == auth_source
+        assert auth_link.lstat().st_size != len(secret)
+        assert ".helix_opencode_state/" in (worktree / ".gitignore").read_text()
+        # Check Git's actual ignore engine rather than only the .gitignore
+        # text: a candidate can never add the link (and its credential target)
+        # to a committed diff.
+        mocker.stop(mock_run)
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", ".helix_opencode_state/opencode/auth.json"],
+            cwd=worktree,
+        )
+        assert ignored.returncode == 0
+
     def test_opencode_credential_linking_tolerates_missing_source(
         self, tmp_path: Path, mocker, monkeypatch
     ):
@@ -2024,6 +2064,7 @@ class TestOpenCodeSandboxedIsolation:
         self, tmp_path: Path, mocker
     ):
         run_sandboxed = mocker.patch("helix.mutator.run_sandboxed_command")
+        mocker.patch("helix.mutator.opencode_permission_flag", return_value="--auto")
         run_sandboxed.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
             stderr="",
