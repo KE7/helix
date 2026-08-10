@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -11,10 +13,44 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
       - run: uv run pytest tests/unit/ -q
       - run: uv run mypy --strict src/helix/
+
+  # Lint the workflows themselves. actionlint checks workflow structure,
+  # expression types, and the shell inside every `run:`; zizmor checks the
+  # security properties (template injection, unpinned actions, credential
+  # persistence, permission scope).
+  #
+  # Two ways this gate can pass while checking almost nothing. Both are silent,
+  # so neither is obvious from a green run:
+  #
+  #   1. actionlint runs its shellcheck integration only when a `shellcheck`
+  #      binary is on PATH. Without one it skips every SC rule and still exits
+  #      0. GitHub's ubuntu-latest image ships shellcheck, so CI is covered --
+  #      but a local `actionlint` run on a workstation without it reports clean
+  #      on scripts CI will reject. Install shellcheck before trusting a local
+  #      run.
+  #   2. zizmor's ref-version-mismatch is an online audit. Without a GitHub
+  #      token it is skipped silently, so GH_TOKEN below is load-bearing, not
+  #      decoration.
+  lint-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      # ubuntu-latest ships shellcheck; assert it rather than assume it, so
+      # this job cannot silently degrade to structure-only checking.
+      - run: shellcheck --version
+      - run: uvx --from actionlint-py==1.7.7.23 actionlint -color
+      - run: uvx zizmor==1.16.3 --persona=regular .github/workflows/
+        env:
+          GH_TOKEN: ${{ github.token }}
