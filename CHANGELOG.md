@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BEHAVIOUR CHANGE — `evolution.minibatch_size` default is now mode-aware.**
+  When `minibatch_size` is omitted it resolves to **1** in single-task /
+  no-example mode (no `[dataset].train_size` and no `[seedless].train_path`)
+  and stays **3** in multi-task / generalization mode. Previously every mode
+  got a flat 3, which was only ever the multi-task half of the intended
+  default. Single-task is HELIX's default mode, so this affects existing
+  configs that relied on the implicit 3 — including `examples/circle_packing`.
+
+  **The change is user-visible only through `num_parallel_proposals = "auto"`,
+  and there it triples proposal width.** `"auto"` derives
+  `max(1, max_workers // minibatch_size)`, and the resolved `P` drives the
+  proposal-slot loop. A single-task run with `max_workers = 12` and
+  `"auto"` now opens **12** proposal slots per generation where it previously
+  opened 4 — verified end-to-end against the evolution loop. More proposals
+  per generation means more mutation agent invocations per generation, so
+  review `max_workers` before your next single-task `"auto"` run.
+
+  Single-task runs that pin `num_parallel_proposals` to an integer see no
+  behavioural change: with no training split HELIX builds no batch sampler, so
+  `minibatch_size` is never read for sampling and metric-call counts are
+  unaffected. For those configs this is a parity/consistency fix only.
+
+  An explicitly written `minibatch_size` is never rewritten in either
+  direction: set `minibatch_size = 3` to keep the previous behaviour exactly.
+
 ## [0.2.2] - 2026-05-13
 
 ### Added

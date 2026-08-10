@@ -104,6 +104,10 @@ class TestDatasetConfigSizes:
 class TestEvolutionConfigNewFields:
     def test_defaults(self):
         cfg = EvolutionConfig()
+        # EvolutionConfig on its own cannot see whether a training split is
+        # configured, so its field default is the multi-task value. HelixConfig
+        # applies the mode-aware default (1 in single-task mode) — see
+        # tests/unit/test_minibatch_mode_default.py.
         assert cfg.minibatch_size == 3
         # GEPA parity: max_workers defaults to os.cpu_count() or 32
         # (optimize_anything.py:485).

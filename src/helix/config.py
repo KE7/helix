@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from helix.backends import (
     BackendName,
@@ -18,6 +18,21 @@ from helix.backends import (
     EFFORT_VALID_VALUES,
     backend_display_name,
 )
+
+# Mode-aware ``evolution.minibatch_size`` defaults.
+#
+# Multi-task / generalization mode samples k distinct training examples per
+# reflective mutation and genuinely gains signal from k > 1.  Single-task /
+# no-example mode has exactly one task, so there is nothing for k > 1 to
+# sample: ``run_evolution`` builds no train loader and therefore no batch
+# sampler, and ``minibatch_size`` is never read on that path.
+#
+# It is still read as the divisor in the ``num_parallel_proposals="auto"``
+# derivation (``max(1, max_workers // minibatch_size)``), which is where the
+# flat default was actually doing damage — single-task "auto" runs derived a
+# third of the proposal width they should have.
+SINGLE_TASK_MINIBATCH_SIZE = 1
+MULTI_TASK_MINIBATCH_SIZE = 3
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -332,10 +347,17 @@ class EvolutionConfig(BaseModel):
         ),
     )
     minibatch_size: int = Field(
-        default=3,
+        default=MULTI_TASK_MINIBATCH_SIZE,
         description=(
-            "Number of training examples per reflective mutation. "
-            "GEPA parity: ReflectionConfig.reflection_minibatch_size default."
+            "Number of training examples per reflective mutation. The "
+            "default is mode-aware and is applied by HelixConfig: "
+            f"{SINGLE_TASK_MINIBATCH_SIZE} in single-task / no-example mode "
+            "(no training split configured — there is only one task, so "
+            "nothing to sample) and "
+            f"{MULTI_TASK_MINIBATCH_SIZE} in multi-task / generalization "
+            "mode (a training split is configured). Also used as the divisor "
+            "when num_parallel_proposals='auto'. Set this explicitly to "
+            "override the mode-aware default in either direction."
         ),
     )
     max_workers: int = Field(
@@ -550,6 +572,36 @@ class WorktreeConfig(BaseModel):
     cleanup_dominated: bool = False
 
 
+def _raw_section_field(section: Any, name: str) -> Any:
+    """Read *name* from a config section that may be a mapping or a model."""
+    if isinstance(section, dict):
+        return section.get(name)
+    return getattr(section, name, None)
+
+
+def _has_training_split(data: dict[str, Any]) -> bool:
+    """True when the raw config selects multi-task / generalization mode.
+
+    Mirrors the runtime predicate that decides whether a train loader (and
+    therefore the minibatch gate) exists at all — ``evolution.py`` builds one
+    from ``seedless.train_path`` and falls back to a synthetic range loader
+    over ``dataset.train_size``.  Either one means real training examples get
+    sampled per reflective mutation; neither means there is a single task.
+    """
+    if _raw_section_field(data.get("seedless"), "train_path") is not None:
+        return True
+    train_size = _raw_section_field(data.get("dataset"), "train_size")
+    if train_size is None or isinstance(train_size, bool):
+        return False
+    try:
+        # Match Pydantic's own coercion so a quoted ``train_size = "10"``
+        # is still read as multi-task. A value that cannot be an int is left
+        # for DatasetConfig to reject with a proper validation error.
+        return int(train_size) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 class HelixConfig(BaseModel):
     """Top-level HELIX configuration.
 
@@ -585,6 +637,53 @@ class HelixConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_mode_aware_minibatch_default(cls, data: Any) -> Any:
+        """Inject the single-task ``evolution.minibatch_size`` default.
+
+        ``minibatch_size`` lives on :class:`EvolutionConfig`, but the *mode*
+        that selects its default is decided by ``seedless.train_path`` /
+        ``dataset.train_size``, which live in other sections.  ``HelixConfig``
+        is the only place that sees both.
+
+        This must run **before** ``EvolutionConfig`` is constructed, not after.
+        ``EvolutionConfig.model_post_init`` resolves
+        ``num_parallel_proposals="auto"`` to
+        ``max(1, max_workers // minibatch_size)`` at *its own* construction
+        time, which happens before ``HelixConfig.model_post_init``.  Correcting
+        ``minibatch_size`` after the fact would leave an already-resolved
+        ``"auto"`` silently derived from the wrong divisor.  Rewriting the raw
+        mapping keeps the whole derivation consistent with no re-resolution.
+
+        Operating on the raw mapping also makes "explicitly set" unambiguous:
+        presence of the ``minibatch_size`` key *is* explicitness, so a config
+        that deliberately writes ``minibatch_size = 3`` in single-task mode
+        keeps 3.  An ``evolution`` section supplied as an already-constructed
+        :class:`EvolutionConfig` is likewise left untouched — the caller built
+        it deliberately and any ``"auto"`` on it is already resolved.
+        """
+        if not isinstance(data, dict):
+            return data
+        if "evolution" not in data:
+            evolution: dict[str, Any] = {}
+        else:
+            raw = data["evolution"]
+            # Anything that is not a plain mapping (an EvolutionConfig
+            # instance, or a bad value for EvolutionConfig to reject) is
+            # passed through untouched.
+            if not isinstance(raw, dict) or "minibatch_size" in raw:
+                return data
+            evolution = raw
+        if _has_training_split(data):
+            return data
+        patched = dict(data)
+        patched["evolution"] = {
+            **evolution,
+            "minibatch_size": SINGLE_TASK_MINIBATCH_SIZE,
+        }
+        return patched
 
     def model_post_init(self, __context: object) -> None:
         if self.seedless.enabled and not self.objective.strip():
