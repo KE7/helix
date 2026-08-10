@@ -579,15 +579,28 @@ def build_mutation_prompt(
 
 _RATE_LIMIT_KEYWORDS = [
     "rate limit",
+    "rate-limit",
+    "ratelimit",
     "overloaded",
     "529",
     "usage limit",
     "extra usage",
+    "quota",
+    # 429 is the canonical rate-limit status and several CLIs report only the
+    # numeric code, with no prose an operator could match on.
+    "429",
+    "too many requests",
 ]
 
 
 def _looks_like_rate_limit(text: str) -> bool:
-    """Return True if *text* contains a rate-limit / overload keyword."""
+    """Return True if *text* contains a rate-limit / overload signal.
+
+    Detection stays keyword-based and additive: an unrecognised backend error
+    must fall through to the generic unknown-failure path with its own message
+    preserved, rather than being reported as a quota problem the operator
+    cannot act on.
+    """
     lower = text.lower()
     return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
 
@@ -719,6 +732,61 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Non-interactive permission flags accepted by opencode, newest first.
+# 1.18+ renamed --dangerously-skip-permissions to --auto; passing the wrong one
+# makes the CLI exit before doing any work, so the supported flag is probed
+# from `opencode run --help` rather than assumed from a version string.
+OPENCODE_PERMISSION_FLAGS = ("--auto", "--dangerously-skip-permissions")
+
+# Used when the probe cannot run at all (opencode not installed yet, --help
+# failed).  Dispatch then fails with the CLI's own error, which is clearer
+# than anything a guess here would produce.
+OPENCODE_PERMISSION_FLAG_FALLBACK = "--auto"
+
+_opencode_permission_flag_cache: str | None = None
+
+
+def opencode_permission_flag(*, refresh: bool = False) -> str:
+    """Return the non-interactive permission flag this opencode build accepts.
+
+    Probes ``opencode run --help`` once per process and caches the answer, so
+    a P×N batch does not pay for a probe per mutation.  Both the pre-1.18 and
+    1.18+ spellings are supported; whichever the installed CLI advertises is
+    the one that gets passed.
+    """
+    global _opencode_permission_flag_cache
+    if _opencode_permission_flag_cache is not None and not refresh:
+        return _opencode_permission_flag_cache
+
+    help_text = ""
+    try:
+        completed = subprocess.run(
+            ["opencode", "run", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        help_text = f"{completed.stdout}\n{completed.stderr}"
+    except (OSError, subprocess.SubprocessError):
+        help_text = ""
+
+    chosen = OPENCODE_PERMISSION_FLAG_FALLBACK
+    for flag in OPENCODE_PERMISSION_FLAGS:
+        if flag in help_text:
+            chosen = flag
+            break
+    else:
+        if help_text:
+            logger.warning(
+                "opencode run --help advertised no known permission flag; "
+                "falling back to %s",
+                chosen,
+            )
+
+    _opencode_permission_flag_cache = chosen
+    return chosen
+
+
 # OpenCode credential files, which sit beside the session database inside the
 # opencode data directory.  These must survive per-candidate XDG_DATA_HOME
 # isolation; the database deliberately must not.
@@ -845,11 +913,7 @@ def _build_backend_args(
             "run",
             "--format",
             "json",
-            # OpenCode 1.18+ uses --auto for non-interactive permission
-            # approval.  The prior --dangerously-skip-permissions flag is
-            # not accepted by the currently supported CLI, which exits
-            # before doing any work.
-            "--auto",
+            opencode_permission_flag(),
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -911,6 +975,23 @@ def _parse_json_object_output(
     return parsed
 
 
+def _try_parse_single_json_object(stdout: str) -> dict[str, Any] | None:
+    """Return *stdout* parsed as one JSON object, or None if it is not one.
+
+    Only a multi-line document is worth this attempt: a single-line object is
+    already handled by the per-line path, and treating every one-line stream
+    as a candidate here would mask genuine JSONL parsing.
+    """
+    text = stdout.strip()
+    if not text or "\n" not in text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _parse_jsonl_output(
     stdout: str,
     *,
@@ -921,6 +1002,16 @@ def _parse_jsonl_output(
     exit_code: int,
     strict: bool,
 ) -> dict[str, Any]:
+    # Backwards compatibility: opencode 1.18+ emits one JSON object per line,
+    # but older builds emitted a single pretty-printed object spanning several
+    # lines.  That document parses as a whole and not per line, so try it
+    # before treating the stream as broken.  This is additive only: a stream
+    # that is neither valid JSONL nor a valid JSON object still fails loudly
+    # below.
+    single_object = _try_parse_single_json_object(stdout)
+    if single_object is not None:
+        return {"events": [single_object], "unparsable_lines": []}
+
     events: list[dict[str, Any]] = []
     unparsable: list[str] = []
     for raw_line in stdout.splitlines():

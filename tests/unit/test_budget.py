@@ -199,8 +199,19 @@ def test_backend_usage_parsing_charges_llm_budget(
     # Guard against future refactors that bypass ``_build_backend_args`` or
     # leave ``_MUTATOR_OVERRIDE`` set globally — the test must observe the
     # real backend dispatch, not a short-circuited override.
-    assert mock_run.call_count == 1
-    invoked_args = mock_run.call_args.args[0]
+    #
+    # Capability probes (e.g. opencode's ``run --help`` permission-flag probe)
+    # also go through ``subprocess.run``, so count dispatches rather than all
+    # calls; there must still be exactly one actual backend invocation.
+    dispatches = [
+        call.args[0]
+        for call in mock_run.call_args_list
+        if call.args
+        and call.args[0][0] == _BACKEND_EXECUTABLE[backend]
+        and "--help" not in call.args[0]
+    ]
+    assert len(dispatches) == 1
+    invoked_args = dispatches[0]
     assert invoked_args[0] == _BACKEND_EXECUTABLE[backend]
 
     budget.charge_llm_usage(
