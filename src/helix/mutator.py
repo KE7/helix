@@ -811,7 +811,11 @@ def _build_backend_args(
             "run",
             "--format",
             "json",
-            "--dangerously-skip-permissions",
+            # OpenCode 1.18+ uses --auto for non-interactive permission
+            # approval.  The prior --dangerously-skip-permissions flag is
+            # not accepted by the currently supported CLI, which exits
+            # before doing any work.
+            "--auto",
         ]
         if config.model:
             args.extend(["--model", config.model])
