@@ -197,9 +197,11 @@ jobs:
             --output /tmp/builds.json \
             "${force_args[@]+"${force_args[@]}"}"
 
-          echo "base_tag=${base_tag}" >> "$GITHUB_OUTPUT"
-          echo "base_build=${base_build}" >> "$GITHUB_OUTPUT"
-          echo "builds=$(jq -c . /tmp/builds.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "base_tag=${base_tag}"
+            echo "base_build=${base_build}"
+            echo "builds=$(jq -c . /tmp/builds.json)"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "### Runner image plan"
             echo
@@ -421,6 +423,9 @@ jobs:
           # Anchor the version assertion. A bare substring match would let a
           # CLI reporting 1.10 satisfy a claim about 1.1. Escape ERE
           # metacharacters first: Cursor versions contain both `.` and `-`.
+          # shellcheck disable=SC2016  # the single quotes are deliberate: the
+          # bracket expression contains literal `$( )` characters, not a shell
+          # expansion, and must reach sed unmodified.
           escaped="$(printf '%s' "$VERSION" | sed 's/[][\\.*^$(){}?+|]/\\&/g')"
           for platform in linux/amd64 linux/arm64; do
             output="$(docker run --rm --platform "$platform" \
