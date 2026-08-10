@@ -54,6 +54,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
   CATALOG: docker/runner-versions.json
+  LOCKFILE: docker/package-lock.json
   RETENTION_DAYS: 90
   # gh expects [host/]owner/repo/path, not an https:// URL.
   ATTESTATION_SIGNER_WORKFLOW: KE7/helix/.github/workflows/publish-runners.yml
@@ -107,12 +108,18 @@ jobs:
           persist-credentials: false
 
       - name: Validate the checked-in source pins
-        run: python tools/runner_images.py validate --catalog "$CATALOG"
+        run: >-
+          python tools/runner_images.py validate
+          --catalog "$CATALOG"
+          --lockfile "$LOCKFILE"
 
-      - name: Resolve authoritative upstream versions and checksums
+      # Every npm pin is already in git, so this reaches the network only
+      # for Cursor, which belongs to no package ecosystem.
+      - name: Resolve the pinned inputs
         run: >-
           python tools/runner_images.py discover
           --catalog "$CATALOG"
+          --lockfile "$LOCKFILE"
           --cursor-checksums
           --output /tmp/resolved.json
 

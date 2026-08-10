@@ -9,22 +9,62 @@ or roll back what they run.
 This is the point of the whole pipeline. No image ever runs
 `npm install -g <cli>@latest` or `curl https://cursor.com/install | bash`.
 Every byte that lands in an image is fetched from an expected host over HTTPS
-and verified against a checksum recorded in `docker/runner-versions.json`
-before it is unpacked:
+and verified against a recorded checksum before it is unpacked. Those pins live
+in two files, split by who owns the format:
 
-| Layer | Pin |
-| --- | --- |
-| Base OS | `node:22-bookworm-slim` by `sha256:` digest |
-| Base packages | Debian snapshot `20260720T000000Z` — a frozen apt archive |
-| `uv` | version-pinned wheel URL + SHA-256, per architecture |
-| Backend CLI | npm tarball URL + SHA-512, or Cursor archive URL + SHA-256 |
-| Native subpackages | exact package name, tarball URL, and SHA-512 per architecture |
+| Layer | Pin | Where |
+| --- | --- | --- |
+| Base OS | `node:22-bookworm-slim` by `sha256:` digest | `docker/base.Dockerfile` |
+| Base packages | Debian snapshot `20260720T000000Z` — a frozen apt archive | `docker/runner-versions.json` |
+| `uv` | version-pinned wheel URL + SHA-256, per architecture | `docker/runner-versions.json` |
+| claude / codex / opencode CLIs | tarball URL + sha512 integrity, plus each native subpackage | `docker/package-lock.json` |
+| Gemini CLI | bundled parent tarball URL + SHA-512 | `docker/runner-versions.json` |
+| `@lydell/node-pty` (Gemini's native dep) | tarball URL + sha512, per architecture | `docker/package-lock.json` |
+| Cursor CLI | archive URL + SHA-256, per architecture | `docker/runner-versions.json` |
 
-`tools/runner_images.py validate` enforces that shape: npm downloads only from
+### Why a lockfile
+
+`package-lock.json` already stores, for every platform-native binary, exactly
+what a pin catalog would store by hand: the resolved URL, the sha512 integrity,
+and the `cpu`/`os`/`libc` constraints — including transitive optional
+dependencies. Maintaining a second copy of that by hand was the single largest
+source of code in this pipeline.
+
+It is generated with `npm install --package-lock-only --ignore-scripts`, which
+resolves without installing. **This is a pin store, not an install step.** The
+Dockerfiles still hand-extract three verified tarballs each. `npm ci` is
+deliberately not used: it would pull 655 packages for Gemini alone, where the
+image today holds one bundled `bundle/gemini.js` plus node-pty, and it would
+introduce install-script execution the build has never had.
+
+Gemini's own tarball stays a hand-maintained pin because its unbundled
+dependency tree is 655 packages and would make the lockfile 8,459 lines, even
+though its published tarball ships self-contained. Cursor stays hand-maintained
+because it belongs to no package ecosystem at all: its version lives inside a
+shell script, and its archives must be downloaded and hashed directly.
+
+Renovate maintains the lockfile natively, so a version bump and its integrity
+hash arrive in the same PR. Against the previous bespoke catalog it could only
+have bumped version strings and left the digests stale.
+
+### What the tool enforces
+
+`tools/runner_images.py validate` checks both files: npm downloads only from
 `registry.npmjs.org`, Cursor archives only from `downloads.cursor.com`, HTTPS
-only, stable versions only, digests of the correct length, and the exact set of
-native subpackages each backend is allowed to extract — so neither a build nor
-a same-version upstream republish can introduce an unmeasured package.
+only, digests of the correct length, and — importantly — that every artifact an
+image extracts is named in `LOCKFILE_ARTIFACTS` and really is a `linux` binary
+for the expected CPU and a glibc one.
+
+That allowlist is what stops a build from extracting a package nobody reviewed.
+npm records whatever optional dependencies upstream declared; the tool records
+what a human approved. A new native optional dependency appearing upstream
+cannot enter an image without a line changing in the tool. It is named per
+package rather than queried by `cpu`/`os`/`libc`, because those fields do not
+identify a unique artifact — claude publishes `linux-x64` and `linux-x64-musl`,
+opencode publishes `linux-x64` and `linux-x64-baseline`.
+
+The residual catalog rejects a version or digest for a lockfile-owned backend,
+so the two files cannot drift into disagreeing about the same fact.
 
 Cursor's installer is downloaded but never executed. It is parsed for its
 single embedded release version and the official archive URLs, which are then
@@ -174,15 +214,32 @@ docker run --rm --network none --read-only \
 python tools/runner_images.py verify-codex-catalog --input /tmp/codex-models.json
 ```
 
+To regenerate the npm pins after editing `docker/package.json` (Renovate
+normally does this for you):
+
+```sh
+cd docker && npm install --package-lock-only --ignore-scripts
+python tools/runner_images.py validate --catalog docker/runner-versions.json
+```
+
 Use a task-specific tag; do not reuse `latest`. This proves the Dockerfiles and
 source pins on your native architecture only — the published multi-arch index
 digest and its attestations are the real release identity.
 
 ## Tests
 
-`tests/unit/test_runner_images.py` covers all of this offline: catalog
-validation, upstream discovery against captured fixtures, the change-detection
-policy, the forced-rebuild tag rule, the base-tag recipe binding, and static
-assertions on the workflow itself (no PR trigger, SHA-pinned actions, no
-workflow expression interpolated into a shell body, and no tag created before
-the smokes pass).
+`tests/unit/test_runner_images.py` covers all of this offline — no test
+reaches the network. It validates the catalog and the lockfile, resolves every
+backend, checks that the build arguments cover exactly the ARGs each Dockerfile
+declares (in both directions) and that their digests are the lockfile's own
+integrity fields, exercises the change-detection policy, the forced-rebuild tag
+rule, and the base-tag recipe binding, and invokes all seven CLI subcommands
+through `main()`.
+
+Two workflow properties are asserted here because no linter knows them: that no
+tag is created before the image passes both smokes, and that the registry
+absence check is fail-closed. Everything else about the workflow — YAML
+validity, expression types, shell correctness, template injection, unpinned
+actions, credential persistence, permission scope — is checked by **actionlint**
+and **zizmor**, which run as a blocking `lint-workflows` job in CI. Those
+replaced roughly 130 lines of hand-rolled source-text grep tests.
