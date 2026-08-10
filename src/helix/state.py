@@ -299,19 +299,20 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
         with open(target, "rb") as f:
             loaded = pickle.load(f)
     except Exception as exc:
-        quarantined = _quarantine_corrupt_cache(target, reason="unreadable")
+        _quarantine_corrupt_cache(target, reason="unreadable")
         warnings.warn(
-            f"Ignoring unreadable eval cache at {target}: "
-            f"{type(exc).__name__}: {exc}. Quarantined to {quarantined}.",
+            f"Ignoring unreadable eval cache: {type(exc).__name__}: {exc}. "
+            f"A diagnostic copy was retained alongside it.",
             RuntimeWarning,
             stacklevel=2,
         )
         return None
     if not isinstance(loaded, dict):
-        quarantined = _quarantine_corrupt_cache(target, reason="non-dict")
+        _quarantine_corrupt_cache(target, reason="non-dict")
         warnings.warn(
-            f"Ignoring eval cache at {target}: expected dict, got "
-            f"{type(loaded).__name__}. Quarantined to {quarantined}.",
+            f"Ignoring eval cache: expected dict, got "
+            f"{type(loaded).__name__}. A diagnostic copy was retained "
+            f"alongside it.",
             RuntimeWarning,
             stacklevel=2,
         )
