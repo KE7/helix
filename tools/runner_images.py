@@ -25,29 +25,52 @@ from typing import Any, TypeVar
 
 BACKENDS = ("claude", "codex", "cursor", "gemini", "opencode")
 PLATFORMS = ("amd64", "arm64")
-NPM_PACKAGES = {
-    "claude": "@anthropic-ai/claude-code",
-    "codex": "@openai/codex",
-    "gemini": "@google/gemini-cli",
-    "opencode": "opencode-ai",
-}
-NPM_ARTIFACT_PACKAGES: dict[str, dict[str, tuple[str, ...]]] = {
+# The exact lockfile entry each image extracts, per backend and platform.
+#
+# This stays a checked-in decision rather than a query over the lockfile's
+# cpu/os/libc fields, because those fields do not identify a unique artifact:
+# claude publishes linux-x64 (libc glibc) *and* linux-x64-musl for the same
+# cpu/os, and opencode publishes linux-x64 (AVX2) *and* linux-x64-baseline with
+# identical cpu/os/libc. Naming the package is also what preserves the property
+# that a build extracts exactly the artifacts someone reviewed and nothing
+# else: a new optional dependency appearing upstream cannot enter an image
+# without a line changing here.
+#
+# ``cli`` is the wrapper package; ``shared`` is architecture-independent.
+# Gemini has no ``cli`` entry -- its own tarball is a residual catalog pin,
+# because its 655-package unbundled dependency tree would make the lockfile
+# 8,459 lines even though the published tarball ships a self-contained bundle.
+LOCKFILE_ARTIFACTS: dict[str, dict[str, str]] = {
     "claude": {
-        "amd64": ("@anthropic-ai/claude-code-linux-x64",),
-        "arm64": ("@anthropic-ai/claude-code-linux-arm64",),
+        "cli": "@anthropic-ai/claude-code",
+        "amd64": "@anthropic-ai/claude-code-linux-x64",
+        "arm64": "@anthropic-ai/claude-code-linux-arm64",
+    },
+    "codex": {
+        "cli": "@openai/codex",
+        # npm aliases of @openai/codex itself, not separate packages:
+        # `npm:@openai/codex@<version>-linux-x64`.
+        "amd64": "@openai/codex-linux-x64",
+        "arm64": "@openai/codex-linux-arm64",
     },
     "gemini": {
-        "shared": ("@lydell/node-pty",),
-        "amd64": ("@lydell/node-pty-linux-x64",),
-        "arm64": ("@lydell/node-pty-linux-arm64",),
+        "shared": "@lydell/node-pty",
+        "amd64": "@lydell/node-pty-linux-x64",
+        "arm64": "@lydell/node-pty-linux-arm64",
     },
     "opencode": {
+        "cli": "opencode-ai",
         # Baseline runs on every x86-64 CPU; see docker/opencode.Dockerfile for
         # why the AVX2 build and its runtime /proc/cpuinfo branch were dropped.
-        "amd64": ("opencode-linux-x64-baseline",),
-        "arm64": ("opencode-linux-arm64",),
+        "amd64": "opencode-linux-x64-baseline",
+        "arm64": "opencode-linux-arm64",
     },
 }
+LOCKFILE_CPU = {"amd64": "x64", "arm64": "arm64"}
+# Backends whose own tarball stays a hand-maintained catalog pin.
+RESIDUAL_PARENTS = frozenset(
+    name for name, group in LOCKFILE_ARTIFACTS.items() if "cli" not in group
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$")
@@ -60,6 +83,10 @@ TAG_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_.-]{0,127}$")
 CURSOR_VERSION_RE = re.compile(r"2026\.[0-9]{2}\.[0-9]{2}-[0-9a-f]+")
 # HELIX needs a Codex that ships gpt-5.6-luna with an xhigh reasoning level.
 CODEX_MINIMUM_VERSION = (0, 145, 0)
+
+DEFAULT_LOCKFILE = (
+    Path(__file__).resolve().parent.parent / "docker" / "package-lock.json"
+)
 
 T = TypeVar("T")
 Sleep = Callable[[float], None]
@@ -115,38 +142,6 @@ def _semver_tuple(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
-def _optional_dependencies(release: Mapping[str, Any], context: str) -> dict[str, str]:
-    raw = release.get("optionalDependencies", {})
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise RunnerPlanError(f"{context}: optional dependencies must be an object")
-    dependencies: dict[str, str] = {}
-    for package, version in sorted(raw.items()):
-        if (
-            not isinstance(package, str)
-            or not package
-            or any(ord(character) <= 0x20 for character in package)
-        ):
-            raise RunnerPlanError(f"{context}: invalid optional package name")
-        if not isinstance(version, str):
-            raise RunnerPlanError(f"{context}: invalid version for {package}")
-        try:
-            _semver_tuple(version)
-        except RunnerPlanError:
-            alias = re.fullmatch(
-                r"npm:(@[0-9A-Za-z._-]+/[0-9A-Za-z._-]+|[0-9A-Za-z._-]+)"
-                r"@([0-9A-Za-z][0-9A-Za-z._+-]*)",
-                version,
-            )
-            if alias is None or not VERSION_RE.fullmatch(alias.group(2)):
-                raise RunnerPlanError(
-                    f"{context}: optional dependency {package} is not exact"
-                ) from None
-        dependencies[package] = version
-    return dependencies
-
-
 def _require_source(
     source: object,
     host: str,
@@ -160,6 +155,12 @@ def _require_source(
     _require_url(source.get("tarball") or source.get("url"), host)
     if not digest.fullmatch(str(source.get(digest_field, ""))):
         raise RunnerPlanError(f"{context}: invalid {digest_field}")
+
+
+def _require_version(value: object, context: str) -> str:
+    if not isinstance(value, str) or not VERSION_RE.fullmatch(value):
+        raise RunnerPlanError(f"{context}: invalid version")
+    return value
 
 
 def _require_smoke_command(value: object, context: str) -> str:
@@ -245,166 +246,112 @@ def validate_catalog(catalog: dict[str, Any]) -> None:
         item = backends[name]
         if not isinstance(item, dict):
             raise RunnerPlanError(f"{name}: expected a backend object")
-        version = item.get("version")
-        if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
-            raise RunnerPlanError(f"{name}: invalid version")
         _require_smoke_command(item.get("smoke_command"), name)
         if item.get("dockerfile") != f"docker/{name}.Dockerfile":
             raise RunnerPlanError(f"{name}: unexpected dockerfile")
-        kind = item.get("kind")
-        expected_kind = (
-            "codex" if name == "codex" else "cursor" if name == "cursor" else "npm"
-        )
-        if kind != expected_kind:
-            raise RunnerPlanError(
-                f"{name}: expected backend kind {expected_kind!r}, got {kind!r}"
-            )
 
-        if kind in {"npm", "codex"}:
-            if item.get("package") != NPM_PACKAGES[name]:
-                raise RunnerPlanError(f"{name}: unexpected npm package")
-            _require_source(item, "registry.npmjs.org", SHA512_RE, "sha512", name)
-        if kind == "npm":
-            artifacts = item.get("artifacts")
-            expected_groups = NPM_ARTIFACT_PACKAGES[name]
-            if not isinstance(artifacts, dict) or tuple(sorted(artifacts)) != tuple(
-                sorted(expected_groups)
-            ):
-                raise RunnerPlanError(
-                    f"{name}: exact content-pinned artifact groups are required"
-                )
-            for group, expected_packages in expected_groups.items():
-                group_artifacts = artifacts[group]
-                # Pinning the exact package names is what stops a build from
-                # extracting a package nobody measured.
-                if (
-                    not isinstance(group_artifacts, list)
-                    or tuple(
-                        artifact.get("package")
-                        for artifact in group_artifacts
-                        if isinstance(artifact, dict)
-                    )
-                    != expected_packages
-                ):
-                    raise RunnerPlanError(
-                        f"{name}/{group}: exact artifact packages are required"
-                    )
-                for artifact in group_artifacts:
-                    _require_source(
-                        artifact,
-                        "registry.npmjs.org",
-                        SHA512_RE,
-                        "sha512",
-                        f"{name}/{group}",
-                    )
-        if kind in {"codex", "cursor"}:
-            platforms = item.get("platforms")
-            if not isinstance(platforms, dict) or tuple(sorted(platforms)) != PLATFORMS:
-                raise RunnerPlanError(f"{name}: exact amd64/arm64 inputs required")
-        if kind == "codex":
-            # HELIX requires a Codex that ships gpt-5.6-luna with xhigh.
-            if _semver_tuple(version) < CODEX_MINIMUM_VERSION:
-                raise RunnerPlanError("codex must remain at least 0.145.0")
-            for platform in PLATFORMS:
-                suffix = "linux-x64" if platform == "amd64" else "linux-arm64"
-                source = item["platforms"][platform]
-                if not isinstance(source, dict):
-                    raise RunnerPlanError(f"codex/{platform}: expected an object")
-                if source.get("package_version") != f"{version}-{suffix}":
-                    raise RunnerPlanError(
-                        f"codex/{platform}: unexpected platform package version"
-                    )
-                _require_source(
-                    source,
-                    "registry.npmjs.org",
-                    SHA512_RE,
-                    "sha512",
-                    f"codex/{platform}",
-                )
-        if kind == "cursor":
+        if name == "cursor":
+            # Cursor belongs to no package ecosystem: its version lives inside
+            # a shell script and its archives must be hashed by hand.
             if item.get("installer") != "https://cursor.com/install":
                 raise RunnerPlanError("cursor: unexpected installer")
+            _require_version(item.get("version"), name)
+            platforms = item.get("platforms")
+            if not isinstance(platforms, dict) or tuple(sorted(platforms)) != PLATFORMS:
+                raise RunnerPlanError("cursor: exact amd64/arm64 inputs required")
             for platform in PLATFORMS:
                 _require_source(
-                    item["platforms"][platform],
+                    platforms[platform],
                     "downloads.cursor.com",
                     SHA256_RE,
                     "sha256",
                     f"cursor/{platform}",
                 )
+        elif name in RESIDUAL_PARENTS:
+            # Gemini's own tarball is pinned here rather than in the lockfile;
+            # only its node-pty artifacts come from the lockfile.
+            _require_version(item.get("version"), name)
+            if item.get("package") != "@google/gemini-cli":
+                raise RunnerPlanError(f"{name}: unexpected npm package")
+            _require_source(item, "registry.npmjs.org", SHA512_RE, "sha512", name)
+        elif set(item) - {"dockerfile", "smoke_command"}:
+            # Everything else is owned by docker/package-lock.json. A stray
+            # version or digest here would be a second source of truth that
+            # nothing keeps in step with the lockfile.
+            raise RunnerPlanError(
+                f"{name}: version and digests belong to the lockfile, "
+                f"not the catalog: {sorted(set(item) - {'dockerfile', 'smoke_command'})}"
+            )
 
 
-def parse_npm_metadata(package: str, payload: bytes) -> dict[str, Any]:
-    metadata = json.loads(payload)
-    try:
-        version = metadata["dist-tags"]["latest"]
-        release = metadata["versions"][version]
-        dist = release["dist"]
-        tarball = _require_url(dist["tarball"], "registry.npmjs.org")
-        integrity = dist["integrity"]
-    except (KeyError, TypeError) as exc:
-        raise RunnerPlanError(f"{package}: incomplete npm metadata") from exc
-    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
-        raise RunnerPlanError(f"{package}: invalid latest version")
-    _semver_tuple(version)
+def validate_lockfile(lock: Mapping[str, Any]) -> None:
+    """Check every artifact an image extracts is present and on-platform.
+
+    npm records whatever the upstream optional-dependency closure happened to
+    contain.  ``LOCKFILE_ARTIFACTS`` records what a human reviewed.  This is
+    where the two must agree, and it is what stops a new native optional
+    dependency from entering an image just because upstream declared one.
+    """
+    if lock.get("lockfileVersion") != 3:
+        raise RunnerPlanError("unsupported npm lockfile version")
+    packages = lock.get("packages")
+    if not isinstance(packages, dict):
+        raise RunnerPlanError("lockfile has no packages map")
+
+    for name, group in sorted(LOCKFILE_ARTIFACTS.items()):
+        for slot, package in sorted(group.items()):
+            node = packages.get(f"node_modules/{package}")
+            if not isinstance(node, dict):
+                raise RunnerPlanError(
+                    f"{name}/{slot}: {package} is not in the lockfile"
+                )
+            context = f"{name}/{slot}"
+            _require_url(node.get("resolved"), "registry.npmjs.org")
+            _lockfile_sha512(node, context)
+            if slot in PLATFORMS:
+                if node.get("cpu") != [LOCKFILE_CPU[slot]]:
+                    raise RunnerPlanError(f"{context}: wrong cpu {node.get('cpu')!r}")
+                if node.get("os") != ["linux"]:
+                    raise RunnerPlanError(f"{context}: wrong os {node.get('os')!r}")
+                # The base image is Debian, so a musl build would not run.
+                if node.get("libc") not in (None, ["glibc"]):
+                    raise RunnerPlanError(f"{context}: wrong libc {node.get('libc')!r}")
+
+    codex = packages.get("node_modules/@openai/codex")
+    if not isinstance(codex, dict):
+        raise RunnerPlanError("codex is not in the lockfile")
+    # HELIX requires a Codex that ships gpt-5.6-luna with an xhigh level.
+    if _semver_tuple(str(codex.get("version"))) < CODEX_MINIMUM_VERSION:
+        raise RunnerPlanError("codex must remain at least 0.145.0")
+
+
+def _lockfile_sha512(node: Mapping[str, Any], context: str) -> str:
+    """Return the hex sha512 behind a lockfile ``integrity`` field."""
+    integrity = node.get("integrity")
     if not isinstance(integrity, str) or not integrity.startswith("sha512-"):
-        raise RunnerPlanError(f"{package}: missing sha512 integrity")
+        raise RunnerPlanError(f"{context}: missing sha512 integrity")
     try:
-        sha512 = base64.b64decode(
+        digest = base64.b64decode(
             integrity.removeprefix("sha512-"), validate=True
         ).hex()
     except ValueError as exc:
-        raise RunnerPlanError(f"{package}: malformed sha512 integrity") from exc
-    if not SHA512_RE.fullmatch(sha512):
-        raise RunnerPlanError(f"{package}: malformed sha512 digest")
-    return {
-        "package": package,
-        "version": version,
-        "tarball": tarball,
-        "sha512": sha512,
-        "optional_dependencies": _optional_dependencies(
-            release, f"{package}@{version}"
-        ),
-    }
+        raise RunnerPlanError(f"{context}: malformed sha512 integrity") from exc
+    if not SHA512_RE.fullmatch(digest):
+        raise RunnerPlanError(f"{context}: malformed sha512 digest")
+    return digest
 
 
-def parse_npm_release(package: str, version: str, payload: bytes) -> dict[str, Any]:
-    metadata = json.loads(payload)
-    try:
-        actual_version = metadata["version"]
-        dist = metadata["dist"]
-        tarball = _require_url(dist["tarball"], "registry.npmjs.org")
-        integrity = dist["integrity"]
-    except (KeyError, TypeError) as exc:
-        raise RunnerPlanError(
-            f"{package}@{version}: incomplete npm release metadata"
-        ) from exc
-    if actual_version != version:
-        raise RunnerPlanError(
-            f"{package}: requested {version!r}, registry returned {actual_version!r}"
-        )
-    if not VERSION_RE.fullmatch(version):
-        raise RunnerPlanError(f"{package}: unsafe release version {version!r}")
-    if not isinstance(integrity, str) or not integrity.startswith("sha512-"):
-        raise RunnerPlanError(f"{package}@{version}: missing sha512 integrity")
-    try:
-        sha512 = base64.b64decode(
-            integrity.removeprefix("sha512-"), validate=True
-        ).hex()
-    except ValueError as exc:
-        raise RunnerPlanError(
-            f"{package}@{version}: malformed sha512 integrity"
-        ) from exc
-    if not SHA512_RE.fullmatch(sha512):
-        raise RunnerPlanError(f"{package}@{version}: malformed sha512 digest")
+def _lockfile_source(
+    lock: Mapping[str, Any], package: str, context: str
+) -> dict[str, str]:
+    """Return the ``{package, version, tarball, sha512}`` a Dockerfile needs."""
+    node = lock["packages"][f"node_modules/{package}"]
     return {
         "package": package,
-        "version": version,
-        "tarball": tarball,
-        "sha512": sha512,
-        "optional_dependencies": _optional_dependencies(
-            metadata, f"{package}@{version}"
-        ),
+        # Aliased entries carry the aliased package's own version.
+        "version": str(node["version"]),
+        "tarball": _require_url(node["resolved"], "registry.npmjs.org"),
+        "sha512": _lockfile_sha512(node, context),
     }
 
 
@@ -539,8 +486,18 @@ def resolve_cursor_checksums(
     return checksums
 
 
-def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, Any]:
+def discover(
+    catalog: dict[str, Any], lock: dict[str, Any], *, cursor_checksums: bool
+) -> dict[str, Any]:
+    """Resolve every pinned input into the flat map the workflow builds from.
+
+    Everything except Cursor is already pinned in git -- npm packages by
+    ``docker/package-lock.json``, Gemini's bundled tarball and the base runtime
+    by the catalog -- so this reaches the network only for Cursor, whose
+    version lives inside a shell script at ``https://cursor.com/install``.
+    """
     validate_catalog(catalog)
+    validate_lockfile(lock)
     resolved: dict[str, Any] = {
         "schema_version": 1,
         "base": catalog["base"],
@@ -548,109 +505,79 @@ def discover(catalog: dict[str, Any], *, cursor_checksums: bool) -> dict[str, An
     }
     for name in BACKENDS:
         item = catalog["backends"][name]
-        if item["kind"] in {"npm", "codex"}:
-            package = item["package"]
-            encoded = urllib.parse.quote(package, safe="")
-            npm: dict[str, Any] = dict(
-                parse_npm_metadata(
-                    package,
-                    _fetch(f"https://registry.npmjs.org/{encoded}"),
-                )
-            )
-            npm.update(
-                {key: item[key] for key in ("kind", "dockerfile", "smoke_command")}
-            )
-            if item["kind"] == "codex":
-                if _semver_tuple(npm["version"]) < CODEX_MINIMUM_VERSION:
-                    raise RunnerPlanError("upstream codex is below required minimum")
-                npm["platforms"] = {}
-                for platform, suffix in (
-                    ("amd64", "linux-x64"),
-                    ("arm64", "linux-arm64"),
-                ):
-                    platform_version = f"{npm['version']}-{suffix}"
-                    platform_metadata = parse_npm_release(
-                        package,
-                        platform_version,
-                        _fetch(
-                            "https://registry.npmjs.org/"
-                            f"{encoded}/{urllib.parse.quote(platform_version, safe='')}"
-                        ),
-                    )
-                    npm["platforms"][platform] = {
-                        "package_version": platform_version,
-                        "tarball": platform_metadata["tarball"],
-                        "sha512": platform_metadata["sha512"],
-                    }
-            else:
-                artifact_groups = NPM_ARTIFACT_PACKAGES[name]
-                npm["artifacts"] = {}
-                transitive_optional: dict[str, str] = {}
-                for group in ("shared", "amd64", "arm64"):
-                    if group not in artifact_groups:
-                        continue
-                    npm["artifacts"][group] = []
-                    for artifact_package in artifact_groups[group]:
-                        version_source = (
-                            transitive_optional
-                            if name == "gemini" and group != "shared"
-                            else npm["optional_dependencies"]
-                        )
-                        artifact_version = version_source.get(artifact_package)
-                        if artifact_version is None:
-                            raise RunnerPlanError(
-                                f"{name}: upstream optional dependency closure "
-                                f"does not contain {artifact_package}"
-                            )
-                        artifact_encoded = urllib.parse.quote(artifact_package, safe="")
-                        artifact_metadata = parse_npm_release(
-                            artifact_package,
-                            artifact_version,
-                            _fetch(
-                                "https://registry.npmjs.org/"
-                                f"{artifact_encoded}/"
-                                f"{urllib.parse.quote(artifact_version, safe='')}"
-                            ),
-                        )
-                        npm["artifacts"][group].append(artifact_metadata)
-                        if name == "gemini" and group == "shared":
-                            transitive_optional.update(
-                                artifact_metadata["optional_dependencies"]
-                            )
-            resolved["backends"][name] = npm
+        common = {
+            "kind": "codex"
+            if name == "codex"
+            else "cursor"
+            if name == "cursor"
+            else "npm",
+            "dockerfile": item["dockerfile"],
+            "smoke_command": item["smoke_command"],
+        }
+        if name == "cursor":
+            resolved["backends"][name] = _resolve_cursor(item, common, cursor_checksums)
+            continue
+
+        group = LOCKFILE_ARTIFACTS[name]
+        if name in RESIDUAL_PARENTS:
+            parent = {
+                "package": item["package"],
+                "version": item["version"],
+                "tarball": item["tarball"],
+                "sha512": item["sha512"],
+            }
         else:
-            cursor: dict[str, Any] = dict(
-                parse_cursor_installer(_fetch(str(item["installer"])))
-            )
-            cursor.update(
-                {
-                    "kind": "cursor",
-                    "dockerfile": item["dockerfile"],
-                    "installer": item["installer"],
-                    "smoke_command": item["smoke_command"],
-                    "platforms": {
-                        platform: {
-                            "tarball": cursor[f"{platform}_tarball"],
-                        }
-                        for platform in PLATFORMS
-                    },
+            parent = _lockfile_source(lock, group["cli"], f"{name}/cli")
+        entry: dict[str, Any] = {**parent, **common}
+
+        if name == "codex":
+            # Codex's platform binaries are aliases of @openai/codex itself,
+            # so each one's lockfile version is `<version>-linux-<arch>`.
+            entry["platforms"] = {
+                platform: {
+                    "package_version": (
+                        source := _lockfile_source(
+                            lock, group[platform], f"{name}/{platform}"
+                        )
+                    )["version"],
+                    "tarball": source["tarball"],
+                    "sha512": source["sha512"],
                 }
-            )
-            if cursor_checksums:
-                checksums = resolve_cursor_checksums(
-                    {
-                        platform: str(cursor["platforms"][platform]["tarball"])
-                        for platform in PLATFORMS
-                    },
-                    str(cursor["version"]),
-                    item,
-                )
-                for platform in PLATFORMS:
-                    cursor["platforms"][platform]["sha256"] = checksums[platform]
-            cursor.pop("amd64_tarball")
-            cursor.pop("arm64_tarball")
-            resolved["backends"][name] = cursor
+                for platform in PLATFORMS
+            }
+        else:
+            entry["artifacts"] = {
+                slot: [_lockfile_source(lock, group[slot], f"{name}/{slot}")]
+                for slot in ("shared", "amd64", "arm64")
+                if slot in group
+            }
+        resolved["backends"][name] = entry
     return resolved
+
+
+def _resolve_cursor(
+    item: Mapping[str, Any], common: Mapping[str, str], cursor_checksums: bool
+) -> dict[str, Any]:
+    cursor: dict[str, Any] = dict(
+        parse_cursor_installer(_fetch(str(item["installer"])))
+    )
+    tarballs = {
+        platform: str(cursor.pop(f"{platform}_tarball")) for platform in PLATFORMS
+    }
+    cursor.update(
+        {
+            **common,
+            "installer": item["installer"],
+            "platforms": {
+                platform: {"tarball": tarballs[platform]} for platform in PLATFORMS
+            },
+        }
+    )
+    if cursor_checksums:
+        checksums = resolve_cursor_checksums(tarballs, str(cursor["version"]), item)
+        for platform in PLATFORMS:
+            cursor["platforms"][platform]["sha256"] = checksums[platform]
+    return cursor
 
 
 def build_arguments(item: Mapping[str, Any], base_image: str) -> list[str]:
@@ -808,8 +735,10 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--catalog", type=Path, required=True)
+    validate.add_argument("--lockfile", type=Path, default=DEFAULT_LOCKFILE)
     discovery = subparsers.add_parser("discover")
     discovery.add_argument("--catalog", type=Path, required=True)
+    discovery.add_argument("--lockfile", type=Path, default=DEFAULT_LOCKFILE)
     discovery.add_argument("--output", type=Path, required=True)
     discovery.add_argument("--cursor-checksums", action="store_true")
     plan = subparsers.add_parser("plan")
@@ -836,11 +765,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "validate":
             validate_catalog(load_json(args.catalog))
+            validate_lockfile(load_json(args.lockfile))
         elif args.command == "discover":
             write_json(
                 args.output,
                 discover(
                     load_json(args.catalog),
+                    load_json(args.lockfile),
                     cursor_checksums=args.cursor_checksums,
                 ),
             )
