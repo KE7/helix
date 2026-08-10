@@ -349,14 +349,14 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
     # the new slot rather than silently losing the reflection feedstock.
     version = loaded.get("schema_version") if "schema_version" in loaded else None
     if version != EVAL_CACHE_SCHEMA_VERSION:
-        quarantined = _quarantine_corrupt_cache(
+        _quarantine_corrupt_cache(
             target, reason=f"schema-v{version}-expected-v{EVAL_CACHE_SCHEMA_VERSION}"
         )
         warnings.warn(
-            f"Ignoring eval cache at {target}: schema_version={version!r} "
-            f"does not match current {EVAL_CACHE_SCHEMA_VERSION}.  The next "
-            f"eval pass will repopulate the cache with the current shape.  "
-            f"Previous payload preserved at {quarantined}.",
+            f"Ignoring eval cache: schema_version={version!r} does not match "
+            f"current {EVAL_CACHE_SCHEMA_VERSION}. The next eval pass will "
+            f"repopulate the cache with the current shape; a diagnostic copy "
+            f"was retained.",
             RuntimeWarning,
             stacklevel=2,
         )

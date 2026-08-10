@@ -281,8 +281,13 @@ def test_eval_cache_load_rejects_wrong_schema_version(tmp_path: Path) -> None:
     future_payload = {"schema_version": 999, "entries": {}}
     target.write_bytes(_pickle.dumps(future_payload))
 
-    with pytest.warns(RuntimeWarning, match="schema_version=999"):
+    with pytest.warns(RuntimeWarning, match="schema_version=999") as recorded:
         assert load_eval_cache(tmp_path) is None
+
+    warning = str(recorded[0].message)
+    assert str(target) not in warning
+    assert str(helix_dir) not in warning
+    assert "diagnostic copy was retained" in warning
 
     assert not target.exists()
     quarantined = list(helix_dir.glob("eval_cache.pkl.corrupt-schema-*"))
