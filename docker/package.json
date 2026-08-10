@@ -1,0 +1,12 @@
+{
+  "name": "helix-runner-pins",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pin store for the mutation-runner images. Never installed: package-lock.json is generated with `npm install --package-lock-only --ignore-scripts`, and docker/*.Dockerfile hand-extract the verified tarballs it names. See docs/runner-images.md.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.218",
+    "@lydell/node-pty": "1.1.0",
+    "@openai/codex": "0.145.0",
+    "opencode-ai": "1.18.5"
+  }
+}
