@@ -69,6 +69,64 @@ def test_budget_exhausted_preserves_evaluation_cap_semantics() -> None:
     assert budget.budget_exhausted(make_state(250), make_config(-1)) is False
 
 
+def test_batch_budget_guard_pins_the_documented_maximum_overshoot() -> None:
+    """An eight-unit batch admitted at 19/20 may finish at 27, not 28."""
+    state = make_state(19)
+
+    guard = budget.begin_batch_budget_guard(
+        state, max_evaluations=20, max_in_flight_evaluations=8
+    )
+
+    assert guard.maximum_overshoot == 7
+    state.budget.evaluations = 27
+    budget.enforce_batch_budget_guard(
+        state, guard, actual_in_flight_evaluations=8
+    )
+
+
+def test_batch_budget_guard_rejects_excess_in_flight_work() -> None:
+    state = make_state(19)
+    guard = budget.begin_batch_budget_guard(
+        state, max_evaluations=20, max_in_flight_evaluations=8
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"in-flight.*actual 9, permitted 8",
+    ):
+        budget.enforce_batch_budget_guard(
+            state, guard, actual_in_flight_evaluations=9
+        )
+
+
+def test_batch_budget_guard_rejects_excess_overshoot() -> None:
+    state = make_state(19)
+    guard = budget.begin_batch_budget_guard(
+        state, max_evaluations=20, max_in_flight_evaluations=8
+    )
+    # Simulate an accounting defect: reported in-flight work remains within
+    # the declared bound but the ledger advanced one extra unit.
+    state.budget.evaluations = 28
+
+    with pytest.raises(
+        ValueError,
+        match=r"overshoot.*actual 8, permitted 7",
+    ):
+        budget.enforce_batch_budget_guard(
+            state, guard, actual_in_flight_evaluations=8
+        )
+
+
+def test_batch_budget_guard_rejects_a_negative_in_flight_bound() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"actual -1, permitted >= 0",
+    ):
+        budget.begin_batch_budget_guard(
+            make_state(), max_evaluations=20, max_in_flight_evaluations=-1
+        )
+
+
 def test_charge_evaluation_updates_counter_and_emits_event() -> None:
     state = make_state(3)
 

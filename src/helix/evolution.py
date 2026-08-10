@@ -464,9 +464,11 @@ def _reconcile_incomplete_attempts_on_resume(
     worktrees_dir: Path,
     lineage_path: Path,
 ) -> bool:
-    """Discard interrupted live attempts so resume retries their visible slot.
+    """Discard interrupted live attempts so resume restarts that generation.
 
-    A completed proposal has either an evaluation artifact, an attempt artifact,
+    Resume is generation-granular, not slot-granular: a partially completed
+    P×N batch is discarded and planned again on the next invocation. A completed
+    proposal has either an evaluation artifact, an attempt artifact,
     or frontier membership.  If a lineage entry still has a worktree but none of
     those completion markers, HELIX likely stopped between candidate creation
     and final result persistence.  Remove only those live incomplete worktrees;
@@ -2539,10 +2541,9 @@ def _run_evolution_impl(
             # therefore overspend the cap by up to P*N parent-minibatch evals
             # plus P*N child-minibatch evals — the batch's work is already
             # dispatched and paid for by the time the apply phase charges it.
-            # This is documented rather than accounted for: pre-dispatch
-            # reservation would have to predict cache hits and skip-perfect
-            # outcomes, and guessing low would idle workers on every
-            # iteration to protect a bound that is already approximate.
+            # The conservative per-batch unit bound below is checked after
+            # the already-admitted work drains. It intentionally does not
+            # reserve speculative cache hits or cancel live workers.
             # =============================================================
 
             # GEPA parity: ``num_parallel_proposals="auto"`` is resolved to an int
@@ -2569,6 +2570,40 @@ def _run_evolution_impl(
                 print_warning("Budget exhausted mid-generation -- stopping.")
                 _save_state(state)
                 break
+
+            # The worker pool, sequential gate, and optional validation stages
+            # are all already admitted before the next budget boundary. Keep a
+            # conservative unit bound for that whole P×N batch, then check the
+            # observed charge before ending the generation. This makes the
+            # documented ``max(0, U - 1)`` overshoot contract executable
+            # without reserving speculative cache hits.
+            _selected_capacity = len(presample_contexts)
+            if config.evolution.proposal_selection == "best_improvement":
+                _selected_capacity = min(1, _selected_capacity)
+            elif config.evolution.proposal_selection == "top_k":
+                assert config.evolution.proposal_top_k is not None
+                _selected_capacity = min(
+                    config.evolution.proposal_top_k, _selected_capacity
+                )
+            _batch_in_flight_units = sum(
+                (
+                    2 * len(_context[2])
+                    if _context[2] is not None
+                    # In no-example mode the worker evaluates the parent and
+                    # the sequential gate evaluates the child, one unit each.
+                    else 2
+                )
+                for _context in presample_contexts
+            )
+            _batch_in_flight_units += _selected_capacity * (
+                len(stage_val_example_ids)
+                + (len(full_val_example_ids) if full_val_example_ids else 1)
+            )
+            _batch_budget_guard = budget_api.begin_batch_budget_guard(
+                state,
+                max_evaluations=config.evolution.max_evaluations,
+                max_in_flight_evaluations=_batch_in_flight_units,
+            )
 
             worker_results = _dispatch_proposals(
                 presample_contexts,
@@ -3197,12 +3232,36 @@ def _run_evolution_impl(
                 and semantic_skip_count
                 and retryable_semantic_skip_count == semantic_skip_count
             ):
+                budget_api.enforce_batch_budget_guard(
+                    state,
+                    _batch_budget_guard,
+                    actual_in_flight_evaluations=(
+                        state.budget.evaluations
+                        - _batch_budget_guard.evaluations_before
+                    ),
+                )
                 _save_state(state)
                 TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
                 continue
             # If budget was exhausted during sequential acceptance, break outer loop.
             if _budget_break:
+                budget_api.enforce_batch_budget_guard(
+                    state,
+                    _batch_budget_guard,
+                    actual_in_flight_evaluations=(
+                        state.budget.evaluations
+                        - _batch_budget_guard.evaluations_before
+                    ),
+                )
                 break
+
+            budget_api.enforce_batch_budget_guard(
+                state,
+                _batch_budget_guard,
+                actual_in_flight_evaluations=(
+                    state.budget.evaluations - _batch_budget_guard.evaluations_before
+                ),
+            )
 
             # Render at end of generation using the last result seen.
             # Post-UX upgrade: we update the live display but do NOT

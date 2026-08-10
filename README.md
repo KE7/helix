@@ -70,7 +70,7 @@ This is why a full solver module or a shrinkwrap of an ML kernel behave qualitat
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
 | ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (GEPA parity, bounded by `evolution.max_workers`) |
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
-| 💾 | **State persistence & resume** | Crash-safe — resume from any generation with `helix resume` |
+| 💾 | **State persistence & resume** | Crash-safe generation-granular resume with `helix resume` |
 | 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
 | 📋 | **Semantic mutation log** | Full trajectory with root-cause analysis, changes made, and parent lineage |
 
@@ -92,7 +92,7 @@ flowchart TD
     CFG(["📄 helix.toml"]):::host
     LOAD["Load & validate config\n⚠ ValueError if max_gen ≤ 0\nAND max_eval ≤ 0"]:::host
     RES{"resume?"}:::dec
-    REC["Reconcile on resume:\ncleanup partial attempts\n& orphaned worktrees"]:::host
+    REC["Resume from last completed generation:\ncleanup in-flight attempts\n& orphaned worktrees"]:::host
     SEED["Evaluate seed candidate"]:::eval
     FRONT["🏆 Pareto Frontier"]:::host
 
@@ -424,6 +424,31 @@ skip_special_files = true        # skip FIFOs/sockets/devices during workspace s
 [worktree]
 base_dir = ".helix/worktrees"
 ```
+
+### Resume and parallel-batch boundaries
+
+Resume is generation-granular. If a run is interrupted, HELIX preserves the
+last completed generation and reconciles incomplete children: it avoids
+corruption, duplicate budget charges, duplicate frontier entries, and orphaned
+worktrees, but discards the interrupted generation's in-flight mutations.
+It does not resume a partially completed P×N batch slot-by-slot. The random
+number generator is seeded again for each invocation, so a resumed search need
+not take the same path as an uninterrupted run.
+
+This behaviour was exercised in a multi-hour interrupted run: budget remained
+`336`, cost remained `$0.77971`, the five-member frontier and its lineage were
+unchanged, three full-validation results remained available, and the resumed
+generation completed an accepted gate → validate → promote cycle. This is one
+interruption point only; it does not cover the apply phase or a partially
+written state file.
+
+Evaluation caps are dispatch boundaries rather than cancellation points. For
+an admitted evaluation phase with `U` uncached units, HELIX records and checks
+the in-flight bound; the maximum permitted overshoot is `max(0, U - 1)`. A
+cache-cold P×N minibatch phase has `U <= P*N*minibatch_size`; cache hits and
+failed mutations reduce the observed use. The enclosing proposal batch uses a
+conservative aggregate of its admitted parent, child, and possible validation
+phases before checking the final observed charge.
 
 ### Docker Sandboxing
 
