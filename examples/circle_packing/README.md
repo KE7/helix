@@ -51,3 +51,22 @@ No Sonnet, no Opus, no extended thinking — just Haiku with low effort and a ha
 - `evaluate.py` — scorer that checks validity and returns `Σ rᵢ`.
 - `helix.toml` — project configuration.
 - `solve_optimized.py` — a hand-tuned reference implementation that scores **2.635982**. It is not used during evolution; it is provided as a sanity check / target for comparison.
+
+## Requirements
+
+The solver uses `numpy` and `scipy` and requires Python 3.10+ for PEP 604
+(`X | None`) annotations. The evaluator command in `helix.toml` pins an
+interpreter and installs those two packages itself via `uv`, so no manual
+setup is needed and a fresh clone reproduces the reference score.
+
+Verify the baseline before trusting a run:
+
+```bash
+cd $(mktemp -d) && cp <repo>/examples/circle_packing/evaluate.py . \
+  && cp <repo>/examples/circle_packing/solve_optimized.py solve.py \
+  && uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py
+# {"score": 2.635982, "violations": 0, ...}
+```
+
+A score of `0.0` with `"ERROR: Could not import solve.py"` means the evaluator
+reached the wrong interpreter, not that the candidate is bad.

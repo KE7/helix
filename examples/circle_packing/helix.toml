@@ -6,7 +6,12 @@ objective = "Maximize the sum of radii of 26 non-overlapping circles packed in a
 # passthrough_env = ["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]
 
 [evaluator]
-command = "python3 evaluate.py"
+# The solver needs numpy + scipy and PEP 604 (`X | None`) annotations, so the
+# evaluator must not inherit whatever bare `python3` happens to be on PATH --
+# on macOS that is a 3.9 interpreter with no scipy, which scores every
+# candidate 0.0 including the reference solution.  Pin the interpreter and
+# bring the dependencies with it so a fresh clone reproduces the benchmark.
+command = "uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py"
 score_parser = "json_score"
 
 [evolution]
