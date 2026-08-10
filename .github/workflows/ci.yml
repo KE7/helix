@@ -3,7 +3,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # `stack/**` covers stacked PRs, which target an integration branch rather
+    # than main. Without it their `branches:` filter never matches and CI is
+    # silently skipped -- a green-looking PR that ran nothing.
+    branches: [main, "stack/**"]
 permissions:
   contents: read
 jobs:
