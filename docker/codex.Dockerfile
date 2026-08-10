@@ -26,14 +26,12 @@ RUN case "${TARGETARCH}" in \
     && tar -xzf /tmp/codex.tgz --strip-components=1 -C /opt/codex \
     && tar -xzf /tmp/codex-platform.tgz --strip-components=1 \
         -C "/opt/codex/node_modules/@openai/${platform_name}" \
-    && ln -s /opt/codex/bin/codex.js /usr/local/bin/codex \
+    && ln -s /opt/codex/bin/codex.js /usr/local/bin/codex
     && rm -f /tmp/codex.tgz /tmp/codex-platform.tgz
 
 LABEL org.opencontainers.image.source="https://github.com/KE7/helix" \
       io.helix.runner.backend="codex" \
       io.helix.runner.cli-version="${CLI_VERSION}" \
-      io.helix.runner.cli-tarball="${CLI_TARBALL}" \
-      io.helix.runner.cli-sha512="${CLI_SHA512}" \
       io.helix.runner.required-model="gpt-5.6-luna" \
       io.helix.runner.required-reasoning-effort="xhigh"
 

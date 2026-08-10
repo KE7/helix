@@ -34,10 +34,6 @@ RUN case "${TARGETARCH}" in \
 
 LABEL org.opencontainers.image.source="https://github.com/KE7/helix" \
       io.helix.runner.backend="opencode" \
-      io.helix.runner.cli-version="${CLI_VERSION}" \
-      io.helix.runner.cli-tarball="${CLI_TARBALL}" \
-      io.helix.runner.cli-sha512="${CLI_SHA512}" \
-      io.helix.runner.cli-amd64-sha512="${CLI_AMD64_SHA512}" \
-      io.helix.runner.cli-arm64-sha512="${CLI_ARM64_SHA512}"
+      io.helix.runner.cli-version="${CLI_VERSION}"
 
 WORKDIR /workspace

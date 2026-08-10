@@ -46,8 +46,6 @@ LABEL org.opencontainers.image.source="https://github.com/KE7/helix" \
       org.opencontainers.image.description="HELIX mutation-agent runner base" \
       io.helix.runner.node-base="${NODE_BASE}" \
       io.helix.runner.debian-snapshot="${DEBIAN_SNAPSHOT}" \
-      io.helix.runner.uv-version="${UV_VERSION}" \
-      io.helix.runner.uv-amd64-sha256="${UV_AMD64_SHA256}" \
-      io.helix.runner.uv-arm64-sha256="${UV_ARM64_SHA256}"
+      io.helix.runner.uv-version="${UV_VERSION}"
 
 WORKDIR /workspace

@@ -27,7 +27,7 @@ RUN case "${TARGETARCH}" in \
         'if [ "$1" = "agent" ]; then shift; fi' \
         'exec cursor-agent "$@"' \
         > /usr/local/bin/cursor \
-    && chmod +x /usr/local/bin/cursor \
+    && chmod +x /usr/local/bin/cursor
     && rm -f /tmp/cursor-agent.tgz
 
 LABEL org.opencontainers.image.source="https://github.com/KE7/helix" \
