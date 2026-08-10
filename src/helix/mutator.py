@@ -580,9 +580,22 @@ def build_mutation_prompt(
 # ---------------------------------------------------------------------------
 
 _RATE_LIMIT_PATTERNS = (
-    re.compile(r"\brate(?:[ -]?limit)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:exceeded|hit|reached|exhausted)\s+(?:your\s+)?"
+        r"(?:a\s+)?rate(?:[ -]?limit)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\brate(?:[ -]?limit)\s+(?:has\s+been\s+)?"
+        r"(?:exceeded|hit|reached|exhausted)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\boverloaded\b", re.IGNORECASE),
-    re.compile(r"\b529\b"),
+    # 529 means overloaded only in an HTTP status context.  A bare number can
+    # occur inside a session id (for example, a UUID) and must not discard a
+    # completed mutation.
+    re.compile(r"\bHTTP\s+529\b", re.IGNORECASE),
+    re.compile(r"(?<![\w-])529(?![\w-])\s+(?:server\s+)?overloaded\b", re.IGNORECASE),
     re.compile(r"\busage limit\b", re.IGNORECASE),
     re.compile(r"\bextra usage\b", re.IGNORECASE),
     # A bare ``quota`` appears in unrelated configuration errors (for example,
@@ -593,11 +606,12 @@ _RATE_LIMIT_PATTERNS = (
         r"(?:exceeded|exhausted|reached|depleted|limit(?:ed)?)\b",
         re.IGNORECASE,
     ),
-    # 429 is the canonical rate-limit status and several CLIs report only the
-    # numeric code, with no prose an operator could match on.
-    re.compile(r"\b429\b"),
+    # 429 is canonical, but require it to be its own status token rather than
+    # a hyphen-delimited fragment of an identifier.
+    re.compile(r"(?<![\w-])429(?![\w-])"),
     re.compile(r"\btoo many requests\b", re.IGNORECASE),
 )
+_CONFIGURATION_ERROR_PATTERN = re.compile(r"\b(?:configuration|config) error\b", re.IGNORECASE)
 
 
 def _looks_like_rate_limit(text: str) -> bool:
@@ -608,7 +622,34 @@ def _looks_like_rate_limit(text: str) -> bool:
     preserved, rather than being reported as a quota problem the operator
     cannot act on.
     """
+    # Do not turn invalid local configuration into retryable operator advice.
+    # Structured status fields, when present, are handled by the caller first.
+    if _CONFIGURATION_ERROR_PATTERN.search(text):
+        return False
     return any(pattern.search(text) for pattern in _RATE_LIMIT_PATTERNS)
+
+
+def _api_error_status(parsed: dict[str, Any]) -> int | None:
+    """Return a backend envelope's API status when it is an integer."""
+    value = parsed.get("api_error_status")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _has_structured_failure_signal(parsed: dict[str, Any]) -> bool:
+    """Whether *parsed* contains an unambiguous backend failure field."""
+    return isinstance(parsed.get("subtype"), str) or _api_error_status(parsed) is not None
+
+
+def _backend_error_text(parsed: dict[str, Any]) -> str:
+    """Return the backend's designated error message, if available."""
+    value = parsed.get("error")
+    return value if isinstance(value, str) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1795,8 +1836,25 @@ def invoke_claude_code(
             )
             usage = _normalise_usage_stats(parsed)
             if backend == "claude":
+                if _api_error_status(parsed) == 429:
+                    raise RateLimitError(
+                        f"{backend_name} hit a rate/usage limit (HTTP 429)",
+                        operation=f"{backend_name} invocation",
+                        phase="structured backend result",
+                        command=cmd_str,
+                        cwd=str(worktree_path),
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        exit_code=result.returncode,
+                        suggestion=(
+                            f"{backend_name} reported a rate limit. "
+                            "Retry after backoff or check your API quota."
+                        ),
+                    )
                 error_text = str(parsed.get("error", ""))
-                if _looks_like_rate_limit(error_text):
+                if not _has_structured_failure_signal(parsed) and _looks_like_rate_limit(
+                    error_text
+                ):
                     logger.error(
                         "Rate limit detected in JSON response: %s", error_text[:200]
                     )
@@ -1816,31 +1874,9 @@ def invoke_claude_code(
                     )
             return parsed, usage
 
-        rate_limit_source = result.stderr or result.stdout
-        if _looks_like_rate_limit(rate_limit_source):
-            logger.error(
-                "Rate limit detected in subprocess exit for %s (code %d): %s",
-                backend_name,
-                result.returncode,
-                rate_limit_source[:200],
-            )
-            raise RateLimitError(
-                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
-                operation=f"{backend_name} invocation",
-                phase="subprocess exit",
-                command=cmd_str,
-                cwd=str(worktree_path),
-                stdout=result.stdout,
-                stderr=result.stderr,
-                exit_code=result.returncode,
-                suggestion=(
-                    f"{backend_name} reported a rate limit. "
-                    "Retry after backoff or check your quota."
-                ),
-            )
-
-        # Claude's max-turns exhaustion is intentionally treated as partial
-        # success because the subprocess may have already produced useful edits.
+        # Claude writes a structured result envelope even for many non-zero
+        # exits.  Classify that envelope before inspecting raw output: a UUID
+        # or transcript fragment must never pre-empt a real max-turns result.
         if backend == "claude":
             try:
                 parsed = _parse_backend_output(
@@ -1856,15 +1892,87 @@ def invoke_claude_code(
                         parsed.get("num_turns", "?"),
                     )
                     return parsed, usage
+
+                if _api_error_status(parsed) == 429:
+                    raise RateLimitError(
+                        f"{backend_name} hit a rate/usage limit (HTTP 429)",
+                        operation=f"{backend_name} invocation",
+                        phase="structured backend result",
+                        command=cmd_str,
+                        cwd=str(worktree_path),
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        exit_code=result.returncode,
+                        suggestion=(
+                            f"{backend_name} reported a rate limit. "
+                            "Retry after backoff or check your quota."
+                        ),
+                    )
+
+                # The error field is a bounded fallback only when the envelope
+                # supplies no classifying field.  Do not search session ids or
+                # unrelated JSON fields in a valid structured result.
+                if not _has_structured_failure_signal(parsed) and _looks_like_rate_limit(
+                    _backend_error_text(parsed)
+                ):
+                    raise RateLimitError(
+                        f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
+                        operation=f"{backend_name} invocation",
+                        phase="structured backend result fallback",
+                        command=cmd_str,
+                        cwd=str(worktree_path),
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        exit_code=result.returncode,
+                        suggestion=(
+                            f"{backend_name} reported a rate limit. "
+                            "Retry after backoff or check your quota."
+                        ),
+                    )
+            except RateLimitError:
+                raise
             except MutationError:
                 parsed = None
 
-        parsed = _parse_backend_output(
-            backend,
-            result,
-            cmd_str=cmd_str,
-            worktree_path=worktree_path,
+        # No structured signal was available.  Search both streams so an HTTP
+        # status on stdout is not hidden by an unrelated stderr warning.  This
+        # is deliberately last-resort and retains both streams on the error.
+        rate_limit_source = "\n".join(
+            stream for stream in (result.stdout, result.stderr) if stream
         )
+        use_raw_rate_limit_fallback = parsed is None or (
+            not _has_structured_failure_signal(parsed)
+            and not _backend_error_text(parsed)
+        )
+        if use_raw_rate_limit_fallback and _looks_like_rate_limit(rate_limit_source):
+            logger.error(
+                "Rate limit detected in subprocess exit for %s (code %d): %s",
+                backend_name,
+                result.returncode,
+                rate_limit_source[:200],
+            )
+            raise RateLimitError(
+                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
+                operation=f"{backend_name} invocation",
+                phase="subprocess exit fallback",
+                command=cmd_str,
+                cwd=str(worktree_path),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                suggestion=(
+                    f"{backend_name} reported a rate limit. "
+                    "Retry after backoff or check your quota."
+                ),
+            )
+
+        if parsed is None:
+            parsed = _parse_backend_output(
+                backend,
+                result,
+                cmd_str=cmd_str,
+                worktree_path=worktree_path,
+            )
         usage = _normalise_usage_stats(parsed)
 
         raise MutationError(
