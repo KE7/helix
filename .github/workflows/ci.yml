@@ -17,4 +17,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
       - run: uv run pytest tests/unit/ -q
-      - run: uv run mypy --strict src/helix/
+      # tools/ is in scope deliberately. Until this line existed, nothing in CI
+      # type-checked or linted the runner-image tool, which is how twenty lines
+      # of duplicated dead code in its main() reached the branch unnoticed.
+      - run: uv run mypy --strict src/helix/ tools/
