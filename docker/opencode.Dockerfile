@@ -2,15 +2,15 @@ ARG BASE_IMAGE=helix-runner-base:latest
 FROM ${BASE_IMAGE}
 
 ARG TARGETARCH
-ARG CLI_VERSION=1.18.4
-ARG CLI_TARBALL=https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.18.4.tgz
-ARG CLI_SHA512=07ca4502cd60d79f1953e0ba792889cffe59846ed5af6987ed9eebb981072c4940957f6d7a1ad14e7cd34e08d2c47636bf067fe55a65c11de874553e0da8bc8e
-ARG CLI_AMD64_TARBALL=https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.4.tgz
-ARG CLI_AMD64_SHA512=982899b8a401a911d586da76d181437cd7f9714c13b7afc8f7c3052500c97434d68209e40153a78ad413992b76710c283c9f7856b4700e1672637a48637f8242
-ARG CLI_AMD64_FALLBACK_TARBALL=https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.18.4.tgz
-ARG CLI_AMD64_FALLBACK_SHA512=2e5548bf9e20a4cf08e902550285b9baf71a54ee33fb2e43b307d40acc60683d025a08c46d42da880019212fcbf8de6b470fe31dea9c1d25e22a29c566dd31c3
-ARG CLI_ARM64_TARBALL=https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.4.tgz
-ARG CLI_ARM64_SHA512=de0070f70784efa8e5a0d3c698fbf397718947c6fab1cc1200437150a45d277582902eea723266e3d285c9fa858cee7efb51f54368db9aaab1020b79ba9aa831
+ARG CLI_VERSION=1.18.5
+ARG CLI_TARBALL=https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.18.5.tgz
+ARG CLI_SHA512=4348e55f88a19fbbde31e62c2d7ddce0f60500a214454dc62295edd459e1371367deff3e469219f33f6e986e43d2bf20f129a9f5f64b1a380b7bff6627837263
+ARG CLI_AMD64_TARBALL=https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.5.tgz
+ARG CLI_AMD64_SHA512=69afd8eb1ce7686b44d24036b1929d75d63b88d070ff2ad7587d2603a7c6b381a0ad873d8dc5d2f945cbc0b64b599c0b2d804e158a00a32796889a046746daeb
+ARG CLI_AMD64_FALLBACK_TARBALL=https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.18.5.tgz
+ARG CLI_AMD64_FALLBACK_SHA512=e1e5ce2421bff0a98f52515edaf2534fbbb6e06385f1530b3c794d8eaaf0bb7d42c654fe72c124dbcee52346b23d7dc9d11d696c6ef51cb7092eab28911fb0bf
+ARG CLI_ARM64_TARBALL=https://registry.npmjs.org/opencode-linux-arm64/-/opencode-linux-arm64-1.18.5.tgz
+ARG CLI_ARM64_SHA512=727bf62008bf4e98ad60952ae384c2d028b9cd50a2f50b29c7fecfda90cd729e481fd7fa539f2df688bd5a91f256d905b6101073609d4880726f71ee76eb1c02
 
 # Pin both AVX2 and baseline x64 binaries so the same amd64 image remains
 # portable across runner CPUs. The runtime wrapper chooses without networking.
