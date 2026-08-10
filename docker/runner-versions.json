@@ -99,11 +99,6 @@
       "artifacts": {
         "amd64": [
           {
-            "package": "opencode-linux-x64",
-            "sha512": "69afd8eb1ce7686b44d24036b1929d75d63b88d070ff2ad7587d2603a7c6b381a0ad873d8dc5d2f945cbc0b64b599c0b2d804e158a00a32796889a046746daeb",
-            "tarball": "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.18.5.tgz"
-          },
-          {
             "package": "opencode-linux-x64-baseline",
             "sha512": "e1e5ce2421bff0a98f52515edaf2534fbbb6e06385f1530b3c794d8eaaf0bb7d42c654fe72c124dbcee52346b23d7dc9d11d696c6ef51cb7092eab28911fb0bf",
             "tarball": "https://registry.npmjs.org/opencode-linux-x64-baseline/-/opencode-linux-x64-baseline-1.18.5.tgz"

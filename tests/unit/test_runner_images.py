@@ -731,20 +731,19 @@ def test_build_arguments_cover_every_arg_each_dockerfile_declares() -> None:
         declared -= {"TARGETARCH"}  # supplied by buildx, not by us
         missing = declared - set(arguments)
         assert not missing, f"{name}: unsupplied build args {sorted(missing)}"
+        # ...and nothing else. Supplying an argument no Dockerfile declares
+        # means the tool and the recipe have drifted apart -- buildx accepts it
+        # silently, so only this direction of the check catches it.
+        extra = set(arguments) - declared - {"BASE_IMAGE"}
+        assert not extra, f"{name}: build args no Dockerfile reads {sorted(extra)}"
         assert arguments["BASE_IMAGE"] == base_image
         assert arguments["CLI_VERSION"] == item["version"]
-        # Absent artifacts must be explicit empty strings, never omitted: the
-        # Dockerfile ARG defaults are stale pinned URLs, so an omitted key
-        # would silently build from the previous release.
-        if name == "opencode":
-            assert arguments["CLI_AMD64_FALLBACK_TARBALL"].endswith(".tgz")
-        elif name in {"claude", "gemini"}:
-            assert arguments["CLI_AMD64_FALLBACK_TARBALL"] == ""
-        # Only Gemini has a shared artifact.
+        # Only Gemini has a shared (architecture-independent) artifact, and it
+        # is the only Dockerfile declaring the ARG. The `missing`/`extra` pair
+        # above already pins that correspondence for every backend; this states
+        # the value itself.
         if name == "gemini":
             assert "node-pty" in arguments["CLI_SHARED_TARBALL"]
-        elif name in {"claude", "opencode"}:
-            assert arguments["CLI_SHARED_TARBALL"] == ""
 
 
 def test_build_arguments_fail_closed_on_a_floating_base_or_injected_value() -> None:

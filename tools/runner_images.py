@@ -42,7 +42,9 @@ NPM_ARTIFACT_PACKAGES: dict[str, dict[str, tuple[str, ...]]] = {
         "arm64": ("@lydell/node-pty-linux-arm64",),
     },
     "opencode": {
-        "amd64": ("opencode-linux-x64", "opencode-linux-x64-baseline"),
+        # Baseline runs on every x86-64 CPU; see docker/opencode.Dockerfile for
+        # why the AVX2 build and its runtime /proc/cpuinfo branch were dropped.
+        "amd64": ("opencode-linux-x64-baseline",),
         "arm64": ("opencode-linux-arm64",),
     },
 }
@@ -677,23 +679,22 @@ def build_arguments(item: Mapping[str, Any], base_image: str) -> list[str]:
         # an omitted key would silently build from last release's tarball
         # instead of failing.
         artifacts = item["artifacts"]
-        shared = artifacts.get("shared") or []
-        arguments["CLI_SHARED_TARBALL"] = str(shared[0]["tarball"]) if shared else ""
-        arguments["CLI_SHARED_SHA512"] = str(shared[0]["sha512"]) if shared else ""
+        # Only Gemini declares a shared (architecture-independent) artifact, so
+        # only Gemini's Dockerfile declares the matching ARGs. Emitting the pair
+        # for claude/opencode passed buildx two arguments their recipes never
+        # read -- harmless, but it is exactly the tool-vs-recipe drift the
+        # empty-string rule above exists to prevent.
+        if "shared" in artifacts:
+            shared = artifacts["shared"] or []
+            arguments["CLI_SHARED_TARBALL"] = (
+                str(shared[0]["tarball"]) if shared else ""
+            )
+            arguments["CLI_SHARED_SHA512"] = str(shared[0]["sha512"]) if shared else ""
         for platform in PLATFORMS:
             entries = artifacts[platform]
             upper = platform.upper()
             arguments[f"CLI_{upper}_TARBALL"] = str(entries[0]["tarball"])
             arguments[f"CLI_{upper}_SHA512"] = str(entries[0]["sha512"])
-            if platform == "amd64":
-                # OpenCode ships an AVX2 build plus a baseline fallback.
-                fallback = entries[1] if len(entries) > 1 else None
-                arguments["CLI_AMD64_FALLBACK_TARBALL"] = (
-                    str(fallback["tarball"]) if fallback else ""
-                )
-                arguments["CLI_AMD64_FALLBACK_SHA512"] = (
-                    str(fallback["sha512"]) if fallback else ""
-                )
     elif kind in {"codex", "cursor"}:
         digest_field = "sha512" if kind == "codex" else "sha256"
         for platform in PLATFORMS:
