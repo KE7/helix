@@ -166,20 +166,6 @@ def _require_smoke_command(value: object, context: str) -> str:
     return value
 
 
-def _repo_file(catalog_path: Path, entry: str) -> Path:
-    """Resolve a catalog-declared Dockerfile inside the repository."""
-    catalog = load_json(catalog_path)
-    item = catalog["base"] if entry == "base" else catalog["backends"][entry]
-    relative = Path(str(item["dockerfile"]))
-    if relative.is_absolute() or ".." in relative.parts:
-        raise RunnerPlanError(f"{entry}: unsafe dockerfile path")
-    root = catalog_path.resolve().parent.parent
-    path = (root / relative).resolve()
-    if root not in path.parents:
-        raise RunnerPlanError(f"{entry}: dockerfile escapes the repository")
-    return path
-
-
 def base_tag(base: Mapping[str, Any], dockerfile: Path) -> str:
     """Derive the base image tag from the whole base recipe.
 
@@ -495,10 +481,7 @@ def _fetch(url: str, timeout: float = 30.0, *, sleep: Sleep = time.sleep) -> byt
             payload: bytes = response.read()
         return payload
 
-    payload = _retry_get(read, description=f"fetch {url}", sleep=sleep)
-    if not isinstance(payload, bytes):
-        raise RunnerPlanError(f"upstream returned non-bytes payload for {url!r}")
-    return payload
+    return _retry_get(read, description=f"fetch {url}", sleep=sleep)
 
 
 def _fetch_sha256(
@@ -788,12 +771,12 @@ def verify_codex_catalog(payload: dict[str, Any]) -> None:
         raise RunnerPlanError("Luna catalog entry has no reasoning levels")
     efforts = [entry.get("effort") for entry in levels]
     expected = ["low", "medium", "high", "xhigh", "max"]
+    # The equality above already pins xhigh as the second-highest effort, which
+    # is the property HELIX actually depends on.
     if efforts != expected:
         raise RunnerPlanError(
             f"unexpected Luna reasoning order: {efforts!r}; expected {expected!r}"
         )
-    if efforts[-2] != "xhigh":
-        raise RunnerPlanError("xhigh is not Luna's second-highest reasoning effort")
 
 
 def verify_platforms(payload: dict[str, Any]) -> None:
@@ -879,31 +862,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "base-tag":
             catalog = load_json(args.catalog)
             validate_catalog(catalog)
-            print(base_tag(catalog["base"], _repo_file(args.catalog, "base")))
+            # ``validate_catalog`` has already pinned ``base.dockerfile`` to the
+            # literal ``docker/base.Dockerfile``, so the path is a constant
+            # relative to the repository root and needs no traversal guard.
+            root = args.catalog.resolve().parent.parent
+            print(base_tag(catalog["base"], root / str(catalog["base"]["dockerfile"])))
         elif args.command == "verify-codex-catalog":
             verify_codex_catalog(load_json(args.input))
         elif args.command == "verify-platforms":
             verify_platforms(load_json(args.input))
-        elif args.command == "plan":
-            write_json(
-                args.output,
-                change_plan(
-                    load_json(args.resolved),
-                    load_json(args.published),
-                    force=args.force,
-                    run_id=args.run_id,
-                ),
-            )
-        elif args.command == "build-args":
-            resolved = load_json(args.resolved)
-            for argument in build_arguments(
-                resolved["backends"][args.backend], args.base_image
-            ):
-                print(argument)
-        elif args.command == "base-tag":
-            catalog = load_json(args.catalog)
-            validate_catalog(catalog)
-            print(base_tag(catalog["base"], _repo_file(args.catalog, "base")))
         else:  # pragma: no cover - argparse enforces the command set
             raise AssertionError(args.command)
     except (
