@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.config import AgentConfig, SandboxConfig
+from helix.exceptions import MutationError
 from helix.mutator import invoke_claude_code
 import helix.mutator as mutator
 
@@ -59,6 +60,51 @@ def _env_of(mock) -> dict[str, str]:
 
 
 class TestAnthropicKeyNotForwardedByDefault:
+    def test_claude_login_environment_keeps_identity_and_excludes_api_credentials(
+        self, tmp_path: Path, monkeypatch, local_run
+    ):
+        """The scrubbed Claude environment can resolve a stored login.
+
+        On macOS, Claude Code's Keychain lookup needs ``USER``.  This asserts
+        the environment that reaches the real Claude subprocess has the
+        complete non-secret login identity (rather than merely checking a
+        configuration allowlist), while both API credential overrides remain
+        absent.
+        """
+        mock_run = local_run()
+        monkeypatch.setenv("HOME", "/home/login-user")
+        monkeypatch.setenv("USER", "login-user")
+        monkeypatch.setenv("LOGNAME", "login-logname")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-travel")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "token-should-not-travel")
+
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        env = _env_of(mock_run)
+        assert env["HOME"] == "/home/login-user"
+        assert env["USER"] == "login-user"
+        assert env["LOGNAME"] == "login-logname"
+        assert not {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} & set(env)
+
+    def test_default_login_identity_does_not_clobber_explicit_passthrough(
+        self, tmp_path: Path, monkeypatch, local_run
+    ):
+        """Configured passthrough values coexist with the default identity."""
+        mock_run = local_run()
+        monkeypatch.setenv("USER", "login-user")
+        monkeypatch.setenv("HELIX_LOGIN_TEST_SETTING", "preserve-me")
+
+        invoke_claude_code(
+            str(tmp_path),
+            "prompt",
+            AgentConfig(backend="claude"),
+            passthrough_env=["HELIX_LOGIN_TEST_SETTING"],
+        )
+
+        env = _env_of(mock_run)
+        assert env["USER"] == "login-user"
+        assert env["HELIX_LOGIN_TEST_SETTING"] == "preserve-me"
+
     @pytest.mark.parametrize("key", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
     def test_claude_unsandboxed_does_not_forward(
         self, key: str, tmp_path: Path, monkeypatch, local_run
@@ -229,6 +275,27 @@ class TestExplicitOptIn:
 
 
 class TestUserIsTold:
+    def test_auth_failure_reports_the_scrubbed_agent_environment(
+        self, tmp_path: Path, monkeypatch, mocker
+    ):
+        """Authentication errors reveal the non-secret env names the agent got."""
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout="",
+            stderr="Not logged in · Please run /login",
+            returncode=1,
+        )
+        monkeypatch.setenv("USER", "login-user")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-travel")
+
+        with pytest.raises(MutationError) as exc_info:
+            invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="claude"))
+
+        suggestion = exc_info.value.suggestion
+        assert "environment after HELIX scrubbing contained" in suggestion
+        assert "USER" in suggestion
+        assert "ANTHROPIC_API_KEY" not in suggestion
+
     def test_dropped_key_is_announced(
         self, tmp_path: Path, monkeypatch, local_run, caplog
     ):

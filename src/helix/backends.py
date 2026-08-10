@@ -61,6 +61,17 @@ DEFAULT_BACKEND_IMAGES: dict[str, str] = {
     "opencode": "ghcr.io/ke7/helix-evo-runner-opencode:latest",
 }
 
+AGENT_LOGIN_IDENTITY_ENV: tuple[str, ...] = ("USER", "LOGNAME")
+"""Non-secret identity variables preserved for every agent CLI.
+
+Agent CLIs resolve stored interactive credentials independently.  Claude Code
+on macOS, for example, needs ``USER`` to locate its Keychain entry even when
+``HOME`` is present.  ``LOGNAME`` is harmless, conventional on Unix-like
+systems, and provides compatibility for CLIs that use that spelling instead.
+Keep this narrowly scoped to agent subprocesses: evaluator environments retain
+their existing strict allowlist.
+"""
+
 ANTHROPIC_KEY_ENV: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 """Anthropic API-key credentials that HELIX never auto-forwards to an agent.
 
