@@ -80,6 +80,10 @@ command = "uv run python evaluate.py"
 # Fixed non-secret env values injected into evaluator and agent subprocesses
 # after passthrough_env. Useful for repeatable run-local service endpoints.
 # ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1"
+# Anthropic backends (claude, opencode) authenticate via
+# `helix sandbox login <backend>`. An ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
+# in your shell is NOT forwarded to agents, because it would silently override
+# that login. Set it here (or in passthrough_env) to opt in deliberately.
 # ANTHROPIC_API_KEY = "dummy"
 
 [evolution]

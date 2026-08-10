@@ -10,7 +10,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.backends import (
+    ANTHROPIC_KEY_ENV,
+    ANTHROPIC_LOGIN_BACKENDS,
+    BACKEND_AUTH_ENV,
+    backend_display_name,
+)
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -720,10 +725,65 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 
 
 def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
-    """Pass official headless auth env vars without requiring TOML config."""
+    """Pass official headless auth env vars without requiring TOML config.
+
+    Anthropic API keys are excluded from the auto-forwarded set (see
+    :data:`helix.backends.ANTHROPIC_KEY_ENV`).  Anthropic backends authenticate
+    through ``helix sandbox login <backend>``, and an API key present in the
+    agent's environment silently overrides that login.  HELIX never makes that
+    choice on the user's behalf: the key reaches an agent only when explicitly
+    listed in top-level ``passthrough_env`` or ``[env]`` in ``helix.toml``, which
+    ``_scrub_environment`` has already applied to *env* by the time we get here.
+
+    Either way the user is told which credential won.
+    """
     for key in BACKEND_AUTH_ENV.get(backend, ()):
         if key in os.environ and key not in env:
             env[key] = os.environ[key]
+    _warn_on_anthropic_key(env, backend)
+
+
+# Backends already warned about an Anthropic API key, so a run with many
+# candidates emits one warning per backend rather than one per mutation.
+_ANTHROPIC_KEY_WARNED: set[str] = set()
+
+
+def _warn_on_anthropic_key(env: dict[str, str], backend: str) -> None:
+    """Report which Anthropic credential the agent will end up using."""
+    if backend not in ANTHROPIC_LOGIN_BACKENDS:
+        return
+    opted_in = sorted(key for key in ANTHROPIC_KEY_ENV if key in env)
+    ambient = sorted(
+        key for key in ANTHROPIC_KEY_ENV if key in os.environ and key not in env
+    )
+    if not opted_in and not ambient:
+        return
+    if backend in _ANTHROPIC_KEY_WARNED:
+        return
+    _ANTHROPIC_KEY_WARNED.add(backend)
+
+    backend_name = backend_display_name(backend)
+    if opted_in:
+        logger.warning(
+            "%s is configured with %s. An Anthropic API key takes precedence "
+            "over the login credential in the helix-auth-%s volume, so this run "
+            "bills against the API key and ignores `helix sandbox login %s`. "
+            "Remove it from passthrough_env / [env] to use the login instead.",
+            backend_name,
+            ", ".join(opted_in),
+            backend,
+            backend,
+        )
+    else:
+        logger.warning(
+            "%s found in the environment but NOT forwarded to %s: Anthropic "
+            "backends authenticate via `helix sandbox login %s`, and an API key "
+            "would silently override that login. To use the API key anyway, add "
+            "it to passthrough_env or [env] in helix.toml.",
+            ", ".join(ambient),
+            backend_name,
+            backend,
+        )
 
 
 def _build_backend_args(
@@ -769,9 +829,7 @@ def _build_backend_args(
             # is valid TOML basic-string syntax for all printable ASCII — safe
             # for any realistic effort value.  See ``codex exec --help`` for
             # the full ``-c`` interface.
-            args.extend(
-                ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
-            )
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(config.effort)}"])
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 

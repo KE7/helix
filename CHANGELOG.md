@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (behaviour):** `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` present in
+  your shell are no longer forwarded into agent subprocesses or agent containers.
+  Anthropic backends (`claude`, `opencode`) authenticate through
+  `helix sandbox login <backend>`; an API key in the agent environment silently
+  overrode that login, so a user who had just logged in ran on the key instead
+  without being told. HELIX now resolves the ambiguity in favour of login.
+
+  Before — key auto-forwarded, `helix sandbox login claude` silently ineffective:
+
+  ```console
+  $ export ANTHROPIC_API_KEY=sk-ant-...
+  $ helix sandbox login claude   # credentials written to the helix-auth-claude volume
+  $ helix evolve                 # agent runs on the API key; the login is ignored
+  ```
+
+  After — the login is used, and the dropped key is announced:
+
+  ```console
+  $ helix evolve
+  WARNING  ANTHROPIC_API_KEY found in the environment but NOT forwarded to Claude
+           Code: Anthropic backends authenticate via `helix sandbox login claude` ...
+  ```
+
+  **Migration.** Either run `helix sandbox login <backend>` (recommended), or opt
+  the key in explicitly in `helix.toml`:
+
+  ```toml
+  [env]
+  ANTHROPIC_API_KEY = "sk-ant-..."
+  # or, to take the value from your shell:
+  # passthrough_env = ["ANTHROPIC_API_KEY"]
+  ```
+
+  On the explicit path HELIX warns that the key takes precedence over any login
+  credential, so neither outcome is silent. The OpenAI path is unaffected:
+  `OPENAI_API_KEY` and `OPENCODE_API_KEY` are still auto-forwarded for `opencode`,
+  as are `CURSOR_API_KEY` and the Gemini keys, and evaluator/sidecar credential
+  handling is untouched.
+
 ## [0.2.2] - 2026-05-13
 
 ### Added

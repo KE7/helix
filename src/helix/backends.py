@@ -61,11 +61,32 @@ DEFAULT_BACKEND_IMAGES: dict[str, str] = {
     "opencode": "ghcr.io/ke7/helix-evo-runner-opencode:latest",
 }
 
+ANTHROPIC_KEY_ENV: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+"""Anthropic API-key credentials that HELIX never auto-forwards to an agent.
+
+Anthropic backends authenticate through *login* — ``helix sandbox login
+<backend>`` writes OAuth / subscription credentials into the persistent
+``helix-auth-<backend>`` Docker volume that agent containers mount at
+``/home/node``.  These env vars are the mutually exclusive alternative: when
+one is present in an agent's environment the CLI bills against the API key and
+the login credential sitting in the auth volume is ignored.
+
+Auto-forwarding them therefore silently revokes the login the user just
+performed.  HELIX resolves the ambiguity in favour of login and requires an
+explicit opt-in (top-level ``passthrough_env`` or ``[env]`` in ``helix.toml``)
+before an API key reaches an agent.  See ``helix.mutator._add_backend_auth_env``.
+"""
+
+ANTHROPIC_LOGIN_BACKENDS: frozenset[str] = frozenset({"claude", "opencode"})
+"""Backends whose CLI reads :data:`ANTHROPIC_KEY_ENV` in preference to login."""
+
 BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
-    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    # NOTE: "claude" is deliberately absent, and "opencode" deliberately omits
+    # ANTHROPIC_API_KEY — see ANTHROPIC_KEY_ENV above.  Only credentials with
+    # no login-based alternative are auto-forwarded.
     "cursor": ("CURSOR_API_KEY",),
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+    "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY"),
 }
 
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
