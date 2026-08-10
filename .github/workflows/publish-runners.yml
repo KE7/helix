@@ -1,307 +1,602 @@
-name: Publish Runner Images
+name: Refresh Runner Images
+
+# Nightly is the CHECK cadence, not the release cadence.  The workflow asks
+# every upstream what its latest release is; a backend is rebuilt only when
+# that version is not in the registry yet.  A quiet night is a clean no-op.
+#
+# Recipe changes (editing a Dockerfile, bumping the Debian snapshot or a uv
+# wheel) are not upstream releases, so they ship with a manual `force: true`
+# dispatch rather than a push trigger.
 
 on:
-  push:
-    tags:
-      - "v*"
+  schedule:
+    - cron: "17 07 * * *"
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Refresh upstream CLIs or roll one convenience tag back
+        required: true
+        default: refresh
+        type: choice
+        options:
+          - refresh
+          - rollback
+      backend:
+        description: Backend to force-rebuild or roll back
+        required: false
+        type: choice
+        options:
+          - claude
+          - codex
+          - cursor
+          - gemini
+          - opencode
+      digest:
+        description: Existing multi-arch sha256 digest to roll back to
+        required: false
+        type: string
+      force:
+        description: Rebuild even when the upstream version is unchanged
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # Refresh and rollback are serialized independently so an incident response
+  # is never queued behind a long in-flight nightly build.
+  group: runner-image-${{ github.event.inputs.operation || 'refresh' }}-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
+  CATALOG: docker/runner-versions.json
+  LOCKFILE: docker/package-lock.json
+  RETENTION_DAYS: 90
+  # gh expects [host/]owner/repo/path, not an https:// URL.
+  ATTESTATION_SIGNER_WORKFLOW: KE7/helix/.github/workflows/publish-runners.yml
+  ATTESTATION_SOURCE_REF: refs/heads/main
 
 jobs:
-  # ── 1. Build base image, one job per arch, push by digest ─────────────────
-  build-base:
-    name: Build base image (${{ matrix.platform }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+  guard:
+    name: Authorize protected release context
+    if: >-
+      ${{
+        github.repository == 'KE7/helix' &&
+        github.event.repository.default_branch == 'main' &&
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    steps:
+      - name: Confirm the protected repository and default branch
+        env:
+          EXPECTED_REPOSITORY: KE7/helix
+          EXPECTED_REF: refs/heads/main
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+          ACTUAL_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ACTUAL_REPOSITORY" == "$EXPECTED_REPOSITORY" ]]
+          [[ "$ACTUAL_REF" == "$EXPECTED_REF" ]]
+
+  resolve:
+    name: Resolve upstream releases and decide what changed
+    needs: guard
+    if: >-
+      ${{
+        needs.guard.result == 'success' &&
+        (github.event_name != 'workflow_dispatch' || inputs.operation == 'refresh')
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      base_tag: ${{ steps.plan.outputs.base_tag }}
+      base_build: ${{ steps.plan.outputs.base_build }}
+      builds: ${{ steps.plan.outputs.builds }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Validate the checked-in source pins
+        run: >-
+          python tools/runner_images.py validate
+          --catalog "$CATALOG"
+          --lockfile "$LOCKFILE"
 
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      # Every npm pin is already in git, so this reaches the network only
+      # for Cursor, which belongs to no package ecosystem.
+      - name: Resolve the pinned inputs
+        run: >-
+          python tools/runner_images.py discover
+          --catalog "$CATALOG"
+          --lockfile "$LOCKFILE"
+          --cursor-checksums
+          --output /tmp/resolved.json
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push base by digest
+      - name: Build only what the registry does not already have
+        id: plan
+        env:
+          FORCE: ${{ inputs.force == true }}
+          FORCE_BACKEND: ${{ inputs.backend }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Absence must be distinguishable from failure.  Only a definitive
+          # "this tag does not exist" counts as absent; an auth, network,
+          # rate-limit, or 5xx failure aborts rather than being mistaken for
+          # "nothing published yet" and silently republishing over a good tag.
+          tag_exists() {
+            local reference="$1" stderr="" status=0
+            stderr="$(docker buildx imagetools inspect "$reference" \
+              --format '{{json .Manifest}}' 2>&1 >/dev/null)" || status=$?
+            if [[ "$status" -eq 0 ]]; then
+              return 0
+            fi
+            if grep -qiE 'not found|manifest unknown|no such manifest|404' \
+              <<< "$stderr"; then
+              return 1
+            fi
+            printf 'registry inspection failed for %s: %s\n' \
+              "$reference" "$stderr" >&2
+            exit 1
+          }
+
+          base_tag="$(python tools/runner_images.py base-tag --catalog "$CATALOG")"
+          if [[ "$FORCE" == "true" ]] \
+            || ! tag_exists "${IMAGE_PREFIX}-base:${base_tag}"; then
+            base_build=true
+          else
+            base_build=false
+          fi
+
+          printf '{}\n' > /tmp/published.json
+          for backend in claude codex cursor gemini opencode; do
+            version="$(jq -r --arg b "$backend" '.backends[$b].version' \
+              /tmp/resolved.json)"
+            if tag_exists "${IMAGE_PREFIX}-${backend}:${version}"; then
+              present=true
+            else
+              present=false
+            fi
+            jq --arg b "$backend" --argjson p "$present" '.[$b] = $p' \
+              /tmp/published.json > /tmp/published.next.json
+            mv /tmp/published.next.json /tmp/published.json
+          done
+
+          # A forced dispatch naming one backend forces only that backend.
+          force_args=()
+          if [[ "$FORCE" == "true" ]]; then
+            force_args=(--force --run-id "$GITHUB_RUN_ID")
+            if [[ -n "$FORCE_BACKEND" ]]; then
+              jq --arg b "$FORCE_BACKEND" \
+                'with_entries(if .key == $b then . else .value = true end)' \
+                /tmp/published.json > /tmp/published.next.json
+              mv /tmp/published.next.json /tmp/published.json
+            fi
+          fi
+          python tools/runner_images.py plan \
+            --resolved /tmp/resolved.json \
+            --published /tmp/published.json \
+            --output /tmp/builds.json \
+            "${force_args[@]+"${force_args[@]}"}"
+
+          {
+            echo "base_tag=${base_tag}"
+            echo "base_build=${base_build}"
+            echo "builds=$(jq -c . /tmp/builds.json)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Runner image plan"
+            echo
+            echo "Base \`${base_tag}\` build: \`${base_build}\`"
+            echo
+            jq -r 'if length == 0
+                   then "No upstream CLI released since the last run."
+                   else "| Backend | Version | Tag |", "| --- | --- | --- |",
+                        (.[] | "| \(.name) | \(.version) | `\(.tag)` |")
+                   end' /tmp/builds.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain the resolved manifest and plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runner-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/resolved.json
+            /tmp/published.json
+            /tmp/builds.json
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(env.RETENTION_DAYS) }}
+
+  base:
+    name: Publish the base runtime
+    needs: [guard, resolve]
+    if: ${{ needs.resolve.outputs.base_build == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      # QEMU/binfmt is what lets one job build and smoke both architectures.
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Materialize exact base arguments
+        id: args
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'value<<HELIX_ARGS'
+            echo "NODE_BASE=$(jq -r '.base.node_image' "$CATALOG")"
+            echo "DEBIAN_SNAPSHOT=$(jq -r '.base.debian_snapshot' "$CATALOG")"
+            echo "UV_VERSION=$(jq -r '.base.uv_version' "$CATALOG")"
+            echo "UV_AMD64_WHEEL=$(jq -r '.base.uv_wheels.amd64.url' "$CATALOG")"
+            echo "UV_AMD64_SHA256=$(jq -r '.base.uv_wheels.amd64.sha256' "$CATALOG")"
+            echo "UV_ARM64_WHEEL=$(jq -r '.base.uv_wheels.arm64.url' "$CATALOG")"
+            echo "UV_ARM64_SHA256=$(jq -r '.base.uv_wheels.arm64.sha256' "$CATALOG")"
+            echo HELIX_ARGS
+          } >> "$GITHUB_OUTPUT"
+
+      # Pushed by digest with no tag: nothing in the registry names this image
+      # until it has passed the smoke on both architectures.
+      - name: Build both architectures by digest
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/base.Dockerfile
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
+          build-args: ${{ steps.args.outputs.value }}
           outputs: type=image,name=${{ env.IMAGE_PREFIX }}-base,push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
 
-      - name: Export digest
+      - name: Smoke both architectures before any tag exists
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
         run: |
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
+          set -euo pipefail
+          [[ "$BUILD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-base@${BUILD_DIGEST}"
+          docker buildx imagetools inspect "$image" \
+            --format '{{json .Manifest}}' > /tmp/manifest.json
+          python tools/runner_images.py verify-platforms --input /tmp/manifest.json
+          smoke="$(jq -r '.base.smoke_command' "$CATALOG")"
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --platform "$platform" --network none --read-only \
+              --tmpfs /tmp "$image" sh -lc "$smoke"
+          done
 
-      - name: Upload digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Attach signed GitHub build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          name: digests-base-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
+          subject-name: ${{ env.IMAGE_PREFIX }}-base
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
-  # ── 2. Merge both arch digests into a single multi-arch manifest ──────────
-  merge-base:
-    name: Merge base image manifests
-    runs-on: ubuntu-latest
-    needs: build-base
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          path: /tmp/digests
-          pattern: digests-base-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}-base
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-
-      - name: Create and push merged manifest list
-        working-directory: /tmp/digests
+      - name: Publish the base tags after attestation succeeds
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          BASE_TAG: ${{ needs.resolve.outputs.base_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          # Both substitutions below are deliberately unquoted: each expands to
-          # a *list* of separate arguments (`-t a -t b`, then one image
-          # reference per digest file), which is exactly the word splitting
-          # SC2046 warns about. Quoting either one would collapse it into a
-          # single malformed argument.
-          # shellcheck disable=SC2046
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.IMAGE_PREFIX }}-base@sha256:%s ' *)
+          set -euo pipefail
+          [[ "$BUILD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-base"
+          gh attestation verify "oci://${image}@${BUILD_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$ATTESTATION_SOURCE_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+          docker buildx imagetools create -t "${image}:${BASE_TAG}" \
+            "${image}@${BUILD_DIGEST}"
+          docker buildx imagetools create -t "${image}:latest" \
+            "${image}@${BUILD_DIGEST}"
+          actual="$(docker buildx imagetools inspect "${image}:${BASE_TAG}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual" == "$BUILD_DIGEST" ]]
 
-  # ── 3. Build each backend (5 images × 2 arches = 10 jobs), push by digest ─
-  build-backends:
-    name: Build ${{ matrix.image.name }} (${{ matrix.platform }})
-    needs: merge-base
-    permissions:
-      contents: read
-      packages: write
+  backend:
+    name: Publish ${{ matrix.name }} ${{ matrix.version }}
+    needs: [guard, resolve, base]
+    # One job per changed backend, and that job builds BOTH architectures. The
+    # Dockerfiles only curl, verify, and untar prebuilt binaries -- nothing
+    # compiles -- so emulation costs seconds and there is no per-architecture
+    # digest to hand between jobs at all.
+    if: >-
+      ${{
+        always() &&
+        needs.resolve.result == 'success' &&
+        (needs.base.result == 'success' || needs.base.result == 'skipped') &&
+        needs.resolve.outputs.builds != '[]'
+      }}
     strategy:
       fail-fast: false
       matrix:
-        image:
-          - name: claude
-            dockerfile: docker/claude.Dockerfile
-          - name: codex
-            dockerfile: docker/codex.Dockerfile
-          - name: cursor
-            dockerfile: docker/cursor.Dockerfile
-          - name: gemini
-            dockerfile: docker/gemini.Dockerfile
-          - name: opencode
-            dockerfile: docker/opencode.Dockerfile
-        platform:
-          - linux/amd64
-          - linux/arm64
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+        include: ${{ fromJSON(needs.resolve.outputs.builds) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runner-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/plan
 
-      - name: Choose base tag
-        id: base-tag
+      - name: Materialize exact build arguments
+        id: args
+        env:
+          BACKEND: ${{ matrix.name }}
+          BASE_TAG: ${{ needs.resolve.outputs.base_tag }}
         shell: bash
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=latest" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          # Pin the base by digest, resolved from its recipe-bound tag.
+          base_digest="$(docker buildx imagetools inspect \
+            "${IMAGE_PREFIX}-base:${BASE_TAG}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            echo 'value<<HELIX_ARGS'
+            python tools/runner_images.py build-args \
+              --resolved /tmp/plan/resolved.json \
+              --backend "$BACKEND" \
+              --base-image "${IMAGE_PREFIX}-base@${base_digest}"
+            echo HELIX_ARGS
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push backend by digest
+      - name: Build both architectures by digest
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: ${{ matrix.image.dockerfile }}
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            BASE_IMAGE=${{ env.IMAGE_PREFIX }}-base:${{ steps.base-tag.outputs.value }}
-          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          build-args: ${{ steps.args.outputs.value }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
 
-      - name: Export digest
+      - name: Smoke both architectures before any tag exists
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          BACKEND: ${{ matrix.name }}
+          VERSION: ${{ matrix.version }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
         run: |
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$BUILD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}@${BUILD_DIGEST}"
+          docker buildx imagetools inspect "$image" \
+            --format '{{json .Manifest}}' > /tmp/manifest.json
+          python tools/runner_images.py verify-platforms --input /tmp/manifest.json
+          smoke="$(jq -r --arg b "$BACKEND" '.backends[$b].smoke_command' \
+            /tmp/plan/resolved.json)"
+          # Anchor the version assertion. A bare substring match would let a
+          # CLI reporting 1.10 satisfy a claim about 1.1. Escape ERE
+          # metacharacters first: Cursor versions contain both `.` and `-`.
+          # shellcheck disable=SC2016  # the single quotes are deliberate: the
+          # bracket expression contains literal `$( )` characters, not a shell
+          # expansion, and must reach sed unmodified.
+          escaped="$(printf '%s' "$VERSION" | sed 's/[][\\.*^$(){}?+|]/\\&/g')"
+          for platform in linux/amd64 linux/arm64; do
+            output="$(docker run --rm --platform "$platform" \
+              --network none --read-only \
+              --tmpfs /tmp:rw,nosuid,nodev \
+              --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
+              --user 1000:1000 "$image" sh -lc "$smoke")"
+            if ! grep -Eq "(^|[^0-9A-Za-z.])v?${escaped}"'([^0-9A-Za-z.]|$)' \
+              <<< "$output"; then
+              echo "${platform}: smoke output does not report ${VERSION}:" >&2
+              printf '%s\n' "$output" >&2
+              exit 1
+            fi
+            if [[ "$BACKEND" == codex ]]; then
+              docker run --rm --platform "$platform" \
+                --network none --read-only \
+                --tmpfs /tmp:rw,nosuid,nodev \
+                --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
+                --user 1000:1000 "$image" \
+                codex debug models --bundled > /tmp/codex-models.json
+              python tools/runner_images.py verify-codex-catalog \
+                --input /tmp/codex-models.json
+            fi
+          done
 
-      - name: Upload digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Attach signed GitHub build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          name: digests-${{ matrix.image.name }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
+          subject-name: ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
-  # ── 4. Merge each backend's 2 arch digests into a multi-arch manifest ─────
-  merge-backends:
-    name: Merge ${{ matrix.image.name }} image manifests
-    needs: build-backends
+      - name: Publish the version and latest tags after attestation
+        env:
+          BACKEND: ${{ matrix.name }}
+          IMAGE_TAG: ${{ matrix.tag }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$BUILD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}"
+          gh attestation verify "oci://${image}@${BUILD_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$ATTESTATION_SOURCE_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+          docker buildx imagetools create -t "${image}:${IMAGE_TAG}" \
+            "${image}@${BUILD_DIGEST}"
+          docker buildx imagetools create -t "${image}:latest" \
+            "${image}@${BUILD_DIGEST}"
+          for tag in "$IMAGE_TAG" latest; do
+            actual="$(docker buildx imagetools inspect "${image}:${tag}" \
+              --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "$actual" == "$BUILD_DIGEST" ]]
+          done
+
+  rollback:
+    name: Roll a convenience tag back to a verified digest
+    needs: guard
+    if: >-
+      ${{
+        needs.guard.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.operation == 'rollback'
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        image:
-          - name: claude
-          - name: codex
-          - name: cursor
-          - name: gemini
-          - name: opencode
+      attestations: read
     steps:
-      - name: Download digests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          path: /tmp/digests
-          pattern: digests-${{ matrix.image.name }}-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.image.name }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-
-      - name: Create and push merged manifest list
-        working-directory: /tmp/digests
-        run: |
-          # Both substitutions below are deliberately unquoted: each expands to
-          # a *list* of separate arguments (`-t a -t b`, then one image
-          # reference per digest file), which is exactly the word splitting
-          # SC2046 warns about. Quoting either one would collapse it into a
-          # single malformed argument.
-          # shellcheck disable=SC2046
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.IMAGE_PREFIX }}-${{ matrix.image.name }}@sha256:%s ' *)
-
-  # ── 5. Smoke-test every published image on the native amd64 runner ────────
-  verify:
-    name: Verify published runner images
-    runs-on: ubuntu-latest
-    needs: merge-backends
-    permissions:
-      packages: read
-    strategy:
-      fail-fast: false
-      matrix:
-        image:
-          - name: base
-            command: "python --version && uv --version && git --version"
-          - name: claude
-            command: "claude --version"
-          - name: codex
-            command: "codex --version"
-          - name: cursor
-            command: "cursor agent --version"
-          - name: gemini
-            command: "gemini --version"
-          - name: opencode
-            command: "opencode --version"
-
-    steps:
-      - name: Choose tag
-        id: tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=latest" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull and verify
-        shell: bash
+      # Immutable version tags and every prior digest are never deleted, so a
+      # rollback is a retag against something the registry already holds. No
+      # ledger, no compensating transaction, no signal handling.
+      - name: Verify the target then move latest
         env:
-          IMAGE_NAME: ${{ matrix.image.name }}
-          IMAGE_TAG: ${{ steps.tag.outputs.value }}
-          SMOKE_COMMAND: ${{ matrix.image.command }}
+          BACKEND: ${{ inputs.backend }}
+          TARGET_DIGEST: ${{ inputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          image="${IMAGE_PREFIX}-${IMAGE_NAME}:${IMAGE_TAG}"
-          docker pull "$image"
-          docker run --rm "$image" sh -lc "$SMOKE_COMMAND"
+          set -euo pipefail
+          [[ "$BACKEND" =~ ^(claude|codex|cursor|gemini|opencode)$ ]]
+          [[ "$TARGET_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE_PREFIX}-${BACKEND}"
+          docker buildx imagetools inspect "${image}@${TARGET_DIGEST}" \
+            --format '{{json .Manifest}}' > /tmp/manifest.json
+          python tools/runner_images.py verify-platforms --input /tmp/manifest.json
+          gh attestation verify "oci://${image}@${TARGET_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$ATTESTATION_SOURCE_REF" \
+            --deny-self-hosted-runners
+          smoke="$(jq -r --arg b "$BACKEND" '.backends[$b].smoke_command' "$CATALOG")"
+          for platform in linux/amd64 linux/arm64; do
+            docker run --rm --platform "$platform" --network none --read-only \
+              --tmpfs /tmp:rw,nosuid,nodev \
+              --tmpfs /home/node:rw,nosuid,nodev,uid=1000,gid=1000 \
+              --user 1000:1000 "${image}@${TARGET_DIGEST}" sh -lc "$smoke"
+          done
+          docker buildx imagetools create -t "${image}:latest" \
+            "${image}@${TARGET_DIGEST}"
+          actual="$(docker buildx imagetools inspect "${image}:latest" \
+            --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$actual" == "$TARGET_DIGEST" ]]
+
+  notify:
+    name: Notify maintainers on failure or cancellation
+    # `failure()` is false for a cancelled run, so without `cancelled()` an
+    # interrupted publish would never notify anyone.
+    if: >-
+      ${{
+        always() &&
+        needs.guard.result == 'success' &&
+        (failure() || cancelled())
+      }}
+    needs: [guard, resolve, base, backend, rollback]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          # `cancelled()` is only callable in a job/step `if:`, so classify the
+          # run from the upstream job results instead.
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const results = Object.values(JSON.parse(process.env.JOB_RESULTS));
+            const cancelled = results.some(job => job.result === "cancelled");
+            // A dedicated label lets the dedupe query filter server-side and
+            // paginate, instead of only seeing the first 100 open issues and
+            // filing a fresh duplicate every night after that.
+            const label = "runner-image-refresh";
+            const title = cancelled
+              ? "Automated runner image refresh was cancelled"
+              : "Automated runner image refresh failed";
+            const body = [
+              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              `Event: ${context.eventName}`,
+              `Outcome: ${cancelled ? "cancelled" : "failed"}`,
+              "",
+              "No tag is published until the image passes the smoke on both architectures,",
+              "so a failed or cancelled run leaves the previously published tags untouched."
+            ].join("\n");
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, state: "open", labels: label, per_page: 100
+            });
+            const issue = open.find(item => item.title === title && !item.pull_request);
+            if (issue) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: issue.number, body
+              });
+            } else {
+              await github.rest.issues.create({
+                ...context.repo, title, body, labels: [label]
+              });
+            }
