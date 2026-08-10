@@ -1244,8 +1244,7 @@ def run_evolution(
         raise ValueError(
             "At least one stopping condition is required: set "
             "config.evolution.max_generations to a positive integer, or "
-            "config.evolution.max_evaluations > 0. "
-            "See GEPA api.py:262-265 for the upstream equivalent check."
+            "config.evolution.max_evaluations > 0."
         )
     if config.sandbox.enabled and config.sandbox.evaluator:
         if config.evaluator.sidecar is None:
@@ -2545,10 +2544,11 @@ def _run_evolution_impl(
                         "reason": "perfect_subsample",
                         "parent_eval": wr.parent_eval_result.to_dict(),
                     })
+                    # GEPA parity: reflective_mutation.py:308-327 skips a
+                    # proposal when every parent subsample score is perfect.
                     print_info(
                         f"Iteration {gen}: all subsample scores perfect for parent "
-                        f"{_parent.id}; skipping proposal "
-                        f"(GEPA reflective_mutation.py:308-327)."
+                        f"{_parent.id}; skipping proposal."
                     )
                     semantic_skip_count += 1
                     if _subsample_ids is not None:
