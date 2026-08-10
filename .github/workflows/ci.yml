@@ -24,7 +24,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
       - run: uv run pytest tests/unit/ -q
-      - run: uv run mypy --strict src/helix/
+      # tools/ is in scope deliberately: until it was, nothing type-checked the
+      # runner-image tool, which is how twenty lines of duplicated dead code in
+      # its main() reached this branch unnoticed.
+      - run: uv run mypy --strict src/helix/ tools/
 
   # Lint the workflows themselves. actionlint checks workflow structure,
   # expression types, and the shell inside every `run:`; zizmor checks the

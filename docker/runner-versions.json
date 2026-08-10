@@ -1,0 +1,59 @@
+{
+  "backends": {
+    "claude": {
+      "dockerfile": "docker/claude.Dockerfile",
+      "smoke_command": "claude --version"
+    },
+    "codex": {
+      "dockerfile": "docker/codex.Dockerfile",
+      "smoke_command": "codex --version"
+    },
+    "cursor": {
+      "dockerfile": "docker/cursor.Dockerfile",
+      "installer": "https://cursor.com/install",
+      "platforms": {
+        "amd64": {
+          "sha256": "6e9f17247ffeb5f8f7e2246b4bcd6bb26cb2d5a9f9a4b0012c9a80d868ed25b4",
+          "tarball": "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/x64/agent-cli-package.tar.gz"
+        },
+        "arm64": {
+          "sha256": "2986152b283c70a666b015035b2e99a96d13afd2660a587b8639417cfdd147fb",
+          "tarball": "https://downloads.cursor.com/lab/2026.07.20-8cc9c0b/linux/arm64/agent-cli-package.tar.gz"
+        }
+      },
+      "smoke_command": "cursor-agent --version && cursor agent --version",
+      "version": "2026.07.20-8cc9c0b"
+    },
+    "gemini": {
+      "dockerfile": "docker/gemini.Dockerfile",
+      "package": "@google/gemini-cli",
+      "sha512": "ffa16f7ef95cb0e26d9f7340813a79fdc6bdc52ea799ab78a2d43e3445684fa968be62363798c7c6d06a1ad8cb528f9cbc17c682d4765a69023f1c691e3afad5",
+      "smoke_command": "gemini --version",
+      "tarball": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.52.0.tgz",
+      "version": "0.52.0"
+    },
+    "opencode": {
+      "dockerfile": "docker/opencode.Dockerfile",
+      "smoke_command": "opencode --version"
+    }
+  },
+  "base": {
+    "debian_snapshot": "20260720T000000Z",
+    "dockerfile": "docker/base.Dockerfile",
+    "node_image": "node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3",
+    "smoke_command": "python --version && uv --version && git --version && rg --version",
+    "uv_version": "0.11.7",
+    "uv_wheels": {
+      "amd64": {
+        "sha256": "4e4d5e31bea86e1b6e0f5a0f95e14e80018e6f6c0129256d2915a4b3d793644d",
+        "url": "https://files.pythonhosted.org/packages/83/eb/4e1557daf6693cb446ed28185664ad6682fd98c6dbac9e433cbc35df450a/uv-0.11.7-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+      },
+      "arm64": {
+        "sha256": "5985a15a92bd9a170fc1947abb1fbc3e9828c5a430ad85b5bed8356c20b67a71",
+        "url": "https://files.pythonhosted.org/packages/f2/7f/fbed29775b0612f4f5679d3226268f1a347161abc1727b4080fb41d9f46f/uv-0.11.7-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl"
+      }
+    }
+  },
+  "registry_prefix": "ghcr.io/ke7/helix-evo-runner",
+  "schema_version": 2
+}
