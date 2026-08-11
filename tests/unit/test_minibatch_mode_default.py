@@ -29,6 +29,9 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from helix.config import (
     MULTI_TASK_MINIBATCH_SIZE,
     SINGLE_TASK_MINIBATCH_SIZE,
@@ -38,7 +41,7 @@ from helix.config import (
 )
 from helix.evolution import run_evolution
 from tests.unit.test_evolution import (  # type: ignore[import-untyped]
-    all_mocks,  # noqa: F401, F811 — re-exported pytest fixture
+    all_mocks as _all_mocks,
     make_candidate,
     make_eval_result,
 )
@@ -47,6 +50,12 @@ BASE: dict[str, object] = {
     "objective": "Maximise the score",
     "evaluator": {"command": "pytest"},
 }
+
+
+@pytest.fixture(name="evolution_mocks")
+def _evolution_mocks(mocker):
+    """Expose the shared evolution I/O fixture without a name collision."""
+    return _all_mocks.__wrapped__(mocker)
 
 
 def _config(**overrides: object) -> HelixConfig:
@@ -81,6 +90,13 @@ class TestModeAwareDefault:
         """A zero cardinality builds no train loader, so it is not a split."""
         cfg = _config(dataset={"train_size": 0})
         assert cfg.evolution.minibatch_size == 1
+
+    def test_boolean_train_size_is_rejected(self):
+        """Booleans are not dataset cardinalities, despite ``bool`` being an int."""
+        with pytest.raises(
+            ValidationError, match="dataset.train_size must be an integer"
+        ):
+            _config(dataset={"train_size": True})
 
     def test_explicit_three_in_single_task_mode_is_preserved(self):
         """A deliberately written value is never silently rewritten."""
@@ -198,16 +214,27 @@ class TestAutoWidthReachesTheProposalLoop:
     """
 
     @staticmethod
-    def _run(tmp_path, all_mocks, evolution: dict[str, object]) -> int:  # noqa: F811
-        all_mocks["create_seed_worktree"].return_value = make_candidate("g0-s0")
+    def _run_config(tmp_path, evolution_mocks, cfg: HelixConfig) -> tuple[int, int]:
+        evolution_mocks["create_seed_worktree"].return_value = make_candidate("g0-s0")
         # Every slot's mutation fails fast: we are counting slots, not
         # acceptances, so the loop stays cheap and deterministic.
-        all_mocks["mutate"].return_value = None
-        all_mocks["run_evaluator"].side_effect = (
+        evolution_mocks["mutate"].return_value = None
+        evolution_mocks["run_evaluator"].side_effect = (
             lambda candidate, config, split=None, instances=None, **kw: (
                 make_eval_result(candidate.id, {"i1": 0.5})
             )
         )
+        run_evolution(cfg, tmp_path, tmp_path / ".helix")
+        assert isinstance(cfg.evolution.num_parallel_proposals, int)
+        return (
+            cfg.evolution.num_parallel_proposals,
+            int(evolution_mocks["mutate"].call_count),
+        )
+
+    @classmethod
+    def _run(
+        cls, tmp_path, evolution_mocks, evolution: dict[str, object]
+    ) -> tuple[int, int]:
         cfg = HelixConfig.model_validate(
             {
                 **BASE,
@@ -221,16 +248,21 @@ class TestAutoWidthReachesTheProposalLoop:
                 },
             }
         )
-        run_evolution(cfg, tmp_path, tmp_path / ".helix")
-        return int(all_mocks["mutate"].call_count)
+        return cls._run_config(tmp_path, evolution_mocks, cfg)
 
-    def test_single_task_auto_opens_max_workers_slots(self, tmp_path, all_mocks):  # noqa: F811
+    def test_single_task_auto_opens_max_workers_slots(self, tmp_path, evolution_mocks):
         """max_workers=12 // corrected minibatch 1 -> 12 proposal slots."""
-        assert self._run(tmp_path, all_mocks, {}) == 12
+        resolved_p, planned_proposals = self._run(tmp_path, evolution_mocks, {})
+        assert resolved_p == 12
+        assert planned_proposals == 12
 
     def test_explicit_minibatch_three_still_opens_a_third_of_them(
-        self, tmp_path, all_mocks
-    ):  # noqa: F811
+        self, tmp_path, evolution_mocks
+    ):
         """The pre-fix behaviour, still reachable by writing the value
         explicitly: 12 // 3 -> 4 proposal slots."""
-        assert self._run(tmp_path, all_mocks, {"minibatch_size": 3}) == 4
+        resolved_p, planned_proposals = self._run(
+            tmp_path, evolution_mocks, {"minibatch_size": 3}
+        )
+        assert resolved_p == 4
+        assert planned_proposals == 4

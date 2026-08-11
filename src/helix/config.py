@@ -10,7 +10,14 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from helix.backends import (
     BackendName,
@@ -179,6 +186,16 @@ class DatasetConfig(BaseModel):
             "{worktree}/helix_batch.json."
         ),
     )
+
+    @field_validator("train_size", "val_size", mode="before")
+    @classmethod
+    def _reject_boolean_cardinality(cls, value: Any, info: Any) -> Any:
+        """Reject bools before Pydantic's normal int coercion accepts them."""
+        if isinstance(value, bool):
+            raise ValueError(
+                f"dataset.{info.field_name} must be an integer, not a boolean"
+            )
+        return value
 
     def model_post_init(self, __context: object) -> None:  # noqa: D401
         if self.train_size is not None and self.train_size < 0:
@@ -607,6 +624,14 @@ class HelixConfig(BaseModel):
 
     Combines all configuration sections (objective, evaluator, dataset,
     evolution, agent, worktree) and validates compatibility constraints.
+
+    Validation runs when the model is constructed. Pydantic's
+    :meth:`model_copy` deliberately does not rerun validators, so it must not
+    be used to switch between single-task and multi-task mode: an omitted
+    default is already a concrete ``minibatch_size`` and any resolved
+    ``num_parallel_proposals="auto"`` is already an integer. Rebuild from the
+    raw configuration mapping (with ``minibatch_size`` omitted) when changing
+    the training split.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -663,6 +688,10 @@ class HelixConfig(BaseModel):
         keeps 3.  An ``evolution`` section supplied as an already-constructed
         :class:`EvolutionConfig` is likewise left untouched — the caller built
         it deliberately and any ``"auto"`` on it is already resolved.
+
+        Pydantic's ``model_copy(update=...)`` does not run this validator. It
+        is not a safe way to change a config's dataset mode; construct a fresh
+        ``HelixConfig`` from raw input instead.
         """
         if not isinstance(data, dict):
             return data

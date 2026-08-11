@@ -397,6 +397,8 @@ minibatch_size = 3               # train-set minibatch size for reflective mutat
                                  # Mode-aware default when omitted: 1 in single-task mode
                                  # (no [dataset].train_size and no [seedless].train_path),
                                  # 3 in multi-task mode. An explicit value always wins.
+                                 # model_copy(update=...) does not recompute this default;
+                                 # rebuild from raw config when changing dataset mode.
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate before full val

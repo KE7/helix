@@ -16,14 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default. Single-task is HELIX's default mode, so this affects existing
   configs that relied on the implicit 3 — including `examples/circle_packing`.
 
-  **The change is user-visible only through `num_parallel_proposals = "auto"`,
-  and there it triples proposal width.** `"auto"` derives
+  **The change is user-visible only through `num_parallel_proposals = "auto"`.**
+  `"auto"` derives
   `max(1, max_workers // minibatch_size)`, and the resolved `P` drives the
-  proposal-slot loop. A single-task run with `max_workers = 12` and
-  `"auto"` now opens **12** proposal slots per generation where it previously
-  opened 4 — verified end-to-end against the evolution loop. More proposals
-  per generation means more mutation agent invocations per generation, so
-  review `max_workers` before your next single-task `"auto"` run.
+  proposal-slot loop. Removing the divisor of 3 generally widens a
+  single-task proposal batch, but the exact factor depends on integer
+  flooring and the minimum-one clamp: for example, `max_workers = 12` changes
+  from 4 slots to 12, while 8 changes from 2 to 8 and 2 changes from 1 to 2.
+  More proposals per generation means more mutation agent invocations per
+  generation, so review `max_workers` before your next single-task `"auto"`
+  run.
 
   Single-task runs that pin `num_parallel_proposals` to an integer see no
   behavioural change: with no training split HELIX builds no batch sampler, so
@@ -32,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   An explicitly written `minibatch_size` is never rewritten in either
   direction: set `minibatch_size = 3` to keep the previous behaviour exactly.
+  Pydantic's `HelixConfig.model_copy(update=...)` does not rerun validation,
+  so rebuild from raw config (with `minibatch_size` omitted) rather than using
+  it to switch dataset mode.
 
 ## [0.2.2] - 2026-05-13
 
