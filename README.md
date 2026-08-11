@@ -109,7 +109,7 @@ flowchart TD
     subgraph DOCKER["🐳  Docker Sandbox  —  isolated execution environment"]
         direction LR
         subgraph ANET["  Agent Network  (normal egress)  "]
-            AGENT["Mutation / Merge Container\n──────────────────────────\nclaude · codex · cursor\ngemini · opencode\nAuth: helix-auth-BACKEND"]:::agent
+            AGENT["Mutation / Merge Container\n──────────────────────────\nclaude · codex · cursor\ngemini · opencode\nAuth: private candidate store"]:::agent
         end
         subgraph ENET["  Private Evaluator Network  (helix-eval-*)  "]
             ERUN["Eval Runners\n(short-lived,\ncopied workspace)"]:::eval
@@ -418,8 +418,9 @@ enabled = false                  # true = run agent/evaluator subprocesses in Do
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 network = "bridge"               # "bridge" | "none" | "host"
 skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
-# Agent containers mount a persistent Docker auth volume named
-# helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
+auth = "login"                  # "login" (default) or explicit-key "env"
+# Login credentials are seeded into a fresh candidate volume; agents never
+# mount the persistent helix-auth-<backend> login volume.
 
 [worktree]
 base_dir = ".helix/worktrees"
@@ -615,10 +616,11 @@ During copy and sync, HELIX skips unsupported special files such as FIFOs,
 sockets, and device nodes by default. Set `skip_special_files = false` only if
 you want unsupported workspace file types to raise instead of being ignored.
 
-Agent containers mount a persistent Docker auth volume at `/home/node`;
-evaluator sidecar and runner containers never receive it. Run
-`helix sandbox login <backend>` once per backend to complete that CLI's normal
-login flow inside the same Linux container environment HELIX will use later:
+`helix sandbox login <backend>` writes to a persistent operator-facing volume.
+For `sandbox.auth = "login"` (the default), HELIX seeds only the credential
+files into a fresh candidate-owned volume and mounts that volume below a private
+tmpfs home; no agent container mounts the login volume. Evaluator sidecar and
+runner containers never receive it. Run the login flow once per backend:
 
 ```bash
 helix sandbox login claude

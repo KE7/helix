@@ -35,6 +35,43 @@ HELIX_ARTIFACT_NAMES = {
 
 
 @dataclass(frozen=True)
+class CandidateAuthVolume:
+    """A credential-only volume created for exactly one agent candidate."""
+
+    name: str
+    backend: str
+    labels: tuple[tuple[str, str], ...]
+
+
+class CredentialCleanupError(RuntimeError):
+    """A candidate credential volume could not be removed safely."""
+
+
+_CANDIDATE_AUTH_PREFIX = "helix-candidate-auth-"
+_CANDIDATE_AUTH_LABEL = "helix.auth.candidate"
+_SEED_IMAGE = "python:3.13-alpine"
+_RUNNER_UID_GID = "1000:1000"
+
+# Source paths are relative to the operator-facing login volume; targets are
+# relative to the candidate-owned volume mounted at the destination below.
+AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
+    "claude": ((".claude/.credentials.json", ".credentials.json"),),
+    "codex": ((".codex/auth.json", "auth.json"),),
+    "cursor": ((".cursor/cli-config.json", "cli-config.json"),),
+    "gemini": ((".gemini/oauth_creds.json", "oauth_creds.json"),),
+    "opencode": ((".local/share/opencode/auth.json", "auth.json"),),
+}
+
+AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
+    "claude": "/home/node/.claude",
+    "codex": "/home/node/.codex",
+    "cursor": "/home/node/.cursor",
+    "gemini": "/home/node/.gemini",
+    "opencode": "/home/node/.local/share/opencode",
+}
+
+
+@dataclass(frozen=True)
 class EvaluatorSidecarRuntime:
     network: str
     container_name: str
@@ -184,55 +221,115 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
     return None
 
 
-def _copy_claude_transcript_from_auth_volume(
-    *,
-    workspace: Path,
-    image: str,
-    agent_backend: str | None,
-    sandbox: SandboxConfig,
-    stdout: str,
-) -> None:
-    if agent_backend != "claude" or not sandbox.preserve_backend_transcripts:
-        return
-    session_id = _extract_session_id_from_json_output(stdout)
-    if not session_id:
-        return
-    rel_dir = Path(sandbox.transcript_artifact_dir) / "claude"
-    rel_file = rel_dir / f"{session_id}.jsonl"
-    source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
-    rel_file_str = str(rel_file).lstrip("/")
-    command = (
-        "set -eu; "
-        f"src={shlex.quote(str(source))}; "
-        f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
-        '[ -f "$src" ] || exit 0; '
-        'mkdir -p "$(dirname "$dst")"; '
-        'cp "$src" "$dst"'
+def _candidate_auth_volume_name(agent_backend: str) -> str:
+    return f"{_CANDIDATE_AUTH_PREFIX}{agent_backend}-{uuid.uuid4().hex}"
+
+
+def _create_candidate_auth_volume(agent_backend: str) -> CandidateAuthVolume:
+    """Create a never-reused, labelled candidate credential volume."""
+    if agent_backend not in AUTH_CREDENTIAL_MANIFEST:
+        raise ValueError(f"No credential manifest for backend: {agent_backend}")
+    name = _candidate_auth_volume_name(agent_backend)
+    existing = _run_docker(["docker", "volume", "inspect", name], check=False)
+    # Docker prints a JSON object on a real successful inspect.  The non-empty
+    # condition keeps lightweight command fakes from masquerading as a daemon.
+    if existing.returncode == 0 and '"Name"' in (existing.stdout or ""):
+        raise RuntimeError(f"refusing to reuse existing candidate auth volume {name}")
+    labels = ((_CANDIDATE_AUTH_LABEL, "true"), ("helix.auth.backend", agent_backend))
+    args = ["docker", "volume", "create"]
+    for key, value in labels:
+        args.extend(["--label", f"{key}={value}"])
+    args.append(name)
+    _run_docker(args)
+    return CandidateAuthVolume(name=name, backend=agent_backend, labels=labels)
+
+
+def _seed_command(agent_backend: str) -> str:
+    """Return a fixed allowlist-only copy command for the seed helper."""
+    statements = ["set -eu", "umask 077"]
+    source_paths: list[str] = []
+    for source, target in AUTH_CREDENTIAL_MANIFEST[agent_backend]:
+        source_path = f"/source/{source}"
+        target_path = f"/destination/{target}"
+        source_paths.append(source_path)
+        statements.extend(
+            [
+                f"test -f {shlex.quote(source_path)}",
+                f"test ! -L {shlex.quote(source_path)}",
+                f"test -s {shlex.quote(source_path)}",
+                f"test $(wc -c < {shlex.quote(source_path)}) -le 1048576",
+                f"test $(stat -c %a {shlex.quote(source_path)}) = 600",
+                f"mkdir -p {shlex.quote(str(Path(target_path).parent))}",
+                f"cp {shlex.quote(source_path)} {shlex.quote(target_path)}",
+                f"chmod 600 {shlex.quote(target_path)}",
+            ]
+        )
+    # Every manifest entry is a JSON credential record. Parsing before copying
+    # fails closed on a malformed source without exposing its contents.
+    statements.append(
+        "python -c "
+        + shlex.quote(
+            "import json, pathlib, sys; "
+            "records=[json.loads(pathlib.Path(item).read_text()) for item in sys.argv[1:]]; "
+            "assert all(isinstance(record, dict) and record for record in records)"
+        )
+        + " "
+        + " ".join(shlex.quote(path) for path in source_paths)
     )
+    # Claude's transcript bind is deliberately nested below the auth mount.
+    # Pre-creating it as node avoids Docker synthesising a root-owned parent.
+    if agent_backend == "claude":
+        statements.append("mkdir -p /destination/projects/-workspace")
+    statements.append(f"chown -R {_RUNNER_UID_GID} /destination")
+    return "; ".join(statements)
+
+
+def _seed_candidate_auth_volume(volume: CandidateAuthVolume) -> None:
+    """Copy only declared credential files from the login volume to *volume*."""
     args = [
         "docker",
         "run",
         "--rm",
-        "--workdir",
-        "/workspace",
         "--user",
-        "node",
+        "root",
         "--network",
         "none",
         "--security-opt",
         "no-new-privileges",
         "-v",
-        f"{workspace}:/workspace:rw",
+        f"{sandbox_auth_volume_name(volume.backend)}:/source:ro",
         "-v",
-        f"{sandbox_auth_volume_name(agent_backend)}:/home/node:ro",
-        "-e",
-        "HOME=/home/node",
-        image,
+        f"{volume.name}:/destination:rw",
+        _SEED_IMAGE,
         "sh",
         "-c",
-        command,
+        _seed_command(volume.backend),
     ]
-    _run_docker(args, check=False)
+    try:
+        _run_docker(args)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"credential seed failed for backend {volume.backend}; agent was not started"
+        ) from exc
+
+
+def _remove_candidate_auth_volume(volume: CandidateAuthVolume) -> None:
+    """Remove only a volume HELIX created and labelled as candidate-owned."""
+    labels = dict(volume.labels)
+    if (
+        not volume.name.startswith(_CANDIDATE_AUTH_PREFIX)
+        or volume.name.startswith("helix-auth-")
+        or labels.get(_CANDIDATE_AUTH_LABEL) != "true"
+    ):
+        raise CredentialCleanupError(
+            f"refusing credential cleanup for unsafe volume identifier {volume.name!r}"
+        )
+    result = _run_docker(["docker", "volume", "rm", volume.name], check=False)
+    if result.returncode != 0:
+        raise CredentialCleanupError(
+            "credential cleanup failed; remove candidate volume manually: "
+            f"docker volume rm {volume.name}"
+        )
 
 
 def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
@@ -922,6 +1019,7 @@ def _docker_args(
     scope: Literal["agent", "evaluator"],
     image: str,
     agent_backend: str | None,
+    candidate_auth_volume: CandidateAuthVolume | None = None,
     network: str | None = None,
     container_name: str | None = None,
 ) -> list[str]:
@@ -945,7 +1043,28 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        args.extend(["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"])
+        args.extend(["--tmpfs", "/home/node:rw,uid=1000,gid=1000,mode=700"])
+        if sandbox.auth == "login":
+            if candidate_auth_volume is None:
+                raise ValueError("login auth requires a candidate credential volume")
+            args.extend(
+                [
+                    "-v",
+                    f"{candidate_auth_volume.name}:"
+                    f"{AUTH_MOUNT_DESTINATIONS[agent_backend]}:rw",
+                ]
+            )
+        if agent_backend == "claude" and sandbox.preserve_backend_transcripts:
+            transcript_dir = (
+                workspace / sandbox.transcript_artifact_dir / "claude"
+            )
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            args.extend(
+                [
+                    "-v",
+                    f"{transcript_dir}:/home/node/.claude/projects/-workspace:rw",
+                ]
+            )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])
@@ -967,6 +1086,8 @@ def _docker_args(
     container_env["PATH"] = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
+    if scope == "agent" and agent_backend == "opencode":
+        container_env["XDG_DATA_HOME"] = "/home/node/.local/share"
 
     for key, value in container_env.items():
         args.extend(["-e", f"{key}={value}"])
@@ -998,6 +1119,7 @@ def run_sandboxed_commands(
     if docker_image is None:
         raise ValueError("sandbox image must be provided")
     tmp_path = Path(tempfile.mkdtemp(prefix="helix-sandbox-"))
+    candidate_auth_volume: CandidateAuthVolume | None = None
     try:
         workspace = tmp_path / "workspace"
         omit_paths = (
@@ -1013,6 +1135,11 @@ def run_sandboxed_commands(
         )
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
+        if scope == "agent" and sandbox.auth == "login":
+            if agent_backend is None:
+                raise ValueError("agent_backend is required for login auth")
+            candidate_auth_volume = _create_candidate_auth_volume(agent_backend)
+            _seed_candidate_auth_volume(candidate_auth_volume)
         sidecar_runtime = (
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None
         )
@@ -1031,6 +1158,7 @@ def run_sandboxed_commands(
                     scope,
                     docker_image,
                     agent_backend,
+                    candidate_auth_volume,
                     sidecar_runtime.network if sidecar_runtime is not None else None,
                     container_name=container_name,
                 )
@@ -1045,14 +1173,6 @@ def run_sandboxed_commands(
                     )
                 finally:
                     _run_docker(["docker", "rm", "-f", container_name], check=False)
-                if scope == "agent":
-                    _copy_claude_transcript_from_auth_volume(
-                        workspace=workspace,
-                        image=docker_image,
-                        agent_backend=agent_backend,
-                        sandbox=sandbox,
-                        stdout=results[-1].stdout or "",
-                    )
         finally:
             if host_owner := _host_owner():
                 _docker_chown_workspace(workspace, docker_image, host_owner)
@@ -1069,7 +1189,11 @@ def run_sandboxed_commands(
                 _sync_back_backend_transcripts(workspace, source)
         return results
     finally:
-        _safe_rmtree(tmp_path, docker_image=docker_image)
+        try:
+            if candidate_auth_volume is not None:
+                _remove_candidate_auth_volume(candidate_auth_volume)
+        finally:
+            _safe_rmtree(tmp_path, docker_image=docker_image)
 
 
 def run_sandboxed_command(

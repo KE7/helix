@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from helix.backends import (
     BackendName,
@@ -603,6 +603,36 @@ class SandboxConfig(BaseModel):
     preserve_backend_transcripts: bool = True
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
     claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
+    auth: Literal["login", "env"] = "login"
+    auth_env_allow: list[str] = Field(default_factory=list)
+
+    @field_validator("auth", mode="before")
+    @classmethod
+    def reject_retired_volume_auth(cls, value: object) -> object:
+        if value == "volume":
+            raise ValueError(
+                'sandbox.auth = "volume" has been replaced by "login".\n'
+                "  auth = \"login\" reads the credential from helix-auth-<backend> "
+                "at candidate start, copies only the credential into a private "
+                "candidate store, and never mounts the shared login volume in an "
+                "agent container.\n"
+                "  Set sandbox.auth = \"login\"; do not use environment "
+                "credential transport."
+            )
+        return value
+
+    def model_post_init(self, __context: object) -> None:
+        if self.auth == "login" and self.auth_env_allow:
+            raise ValueError(
+                "sandbox.auth_env_allow is set but sandbox.auth = \"login\"; "
+                "login credential copying has no environment transport. Remove "
+                "auth_env_allow or set auth = \"env\"."
+            )
+        if self.auth == "env" and not self.auth_env_allow:
+            raise ValueError(
+                'sandbox.auth = "env" requires a non-empty '
+                "sandbox.auth_env_allow."
+            )
 
 
 class WorktreeConfig(BaseModel):

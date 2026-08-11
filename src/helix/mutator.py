@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.backends import backend_display_name
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -720,11 +720,30 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
-    """Pass official headless auth env vars without requiring TOML config."""
-    for key in BACKEND_AUTH_ENV.get(backend, ()):
-        if key in os.environ and key not in env:
+def _sandbox_agent_environment(
+    *,
+    sandbox: SandboxConfig,
+    passthrough_env: list[str] | None,
+    fixed_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Build the deliberately small environment for a sandboxed agent.
+
+    Login auth has no environment transport.  Env auth receives only a value
+    both named by ``auth_env_allow`` and explicitly supplied through ``[env]``
+    or ``passthrough_env``; an ambient host credential is never inferred.
+    """
+    env = _scrub_environment()
+    if sandbox.auth != "env":
+        return env
+    configured = set(passthrough_env or []) | set((fixed_env or {}).keys())
+    for key in sandbox.auth_env_allow:
+        if key not in configured:
+            continue
+        if fixed_env is not None and key in fixed_env:
+            env[key] = str(fixed_env[key])
+        elif key in os.environ:
             env[key] = os.environ[key]
+    return env
 
 
 def _build_backend_args(
@@ -1595,10 +1614,15 @@ def invoke_claude_code(
         prompt_artifact_name,
     )
     cmd_str = shlex.join(args)
-    backend_env = _scrub_environment(
-        passthrough_env=passthrough_env, fixed_env=fixed_env
+    backend_env = (
+        _sandbox_agent_environment(
+            sandbox=sandbox,
+            passthrough_env=passthrough_env,
+            fixed_env=fixed_env,
+        )
+        if sandbox is not None and sandbox.enabled
+        else _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
     )
-    _add_backend_auth_env(backend_env, backend)
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
     if backend == "opencode" and (sandbox is None or not sandbox.enabled):

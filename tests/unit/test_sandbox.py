@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,6 +12,7 @@ import helix.sandbox as sandbox_module
 
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
+    _SEED_IMAGE,
     EvaluatorSidecarRuntime,
     _healthcheck_docker_args,
     current_evaluator_sidecar_runtime,
@@ -50,6 +52,14 @@ def _is_workspace_permission_relax(args: list[str]) -> bool:
     )
 
 
+def _is_agent_container(args: list[str]) -> bool:
+    return (
+        args[:2] == ["docker", "run"]
+        and "--user" in args
+        and args[args.index("--user") + 1] == "node"
+    )
+
+
 def test_resolve_sandbox_image_defaults_from_backend():
     cfg = SandboxConfig(enabled=True)
     assert (
@@ -79,7 +89,7 @@ def test_resolve_sandbox_image_honors_override():
     assert resolve_sandbox_image(cfg, "claude") == "custom:latest"
 
 
-def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mocker):
+def test_docker_command_mounts_private_home_and_candidate_auth_volume(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
     (source / "main.py").write_text("print('hi')\n")
@@ -133,7 +143,14 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     assert "helix-test:latest" in docker_call
     assert "-e" in docker_call
     assert "HOME=/home/node" in docker_call
-    assert "helix-auth-codex:/home/node:rw" in docker_call
+    assert "--tmpfs" in docker_call
+    assert "/home/node:rw,uid=1000,gid=1000,mode=700" in docker_call
+    assert not any("helix-auth-codex" in item for item in docker_call)
+    assert any(
+        item.startswith("helix-candidate-auth-codex-")
+        and item.endswith(":/home/node/.codex:rw")
+        for item in docker_call
+    )
     assert f"{tmp_path}:" not in joined
     assert "/workspace:rw" in joined
     chown_calls = [call for call in calls if _is_workspace_chown(call)]
@@ -168,6 +185,109 @@ def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):
         if call.args[0][:2] == ["docker", "run"]
     )
     assert "helix-auth-codex:/home/node:rw" not in docker_call
+
+
+def test_login_auth_seeds_a_private_allowlisted_volume_and_never_mounts_source(
+    tmp_path: Path, mocker
+):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    run_sandboxed_command(
+        ["codex", "exec", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=False,
+        image="helix-test:latest",
+        agent_backend="codex",
+    )
+
+    seed = next(call for call in calls if _SEED_IMAGE in call)
+    agent = next(call for call in calls if _is_agent_container(call))
+    candidate_mount = next(
+        item
+        for item in agent
+        if item.startswith("helix-candidate-auth-codex-")
+    )
+    assert "helix-auth-codex:/source:ro" in seed
+    assert "cp /source/.codex/auth.json /destination/auth.json" in seed[-1]
+    assert "cp -R" not in seed[-1]
+    assert "helix-auth-codex" not in " ".join(agent)
+    assert candidate_mount.endswith(":/home/node/.codex:rw")
+    assert any(
+        call[:3] == ["docker", "volume", "rm"]
+        and call[-1] == candidate_mount.split(":", 1)[0]
+        for call in calls
+    )
+
+
+def test_parallel_login_candidates_use_distinct_private_auth_volumes(tmp_path: Path, mocker):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    def run_one(index: int) -> None:
+        source = tmp_path / f"candidate-{index}"
+        source.mkdir()
+        run_sandboxed_command(
+            ["codex", "exec", "prompt"],
+            cwd=source,
+            env={},
+            sandbox=SandboxConfig(enabled=True),
+            scope="agent",
+            sync_back=False,
+            image="helix-test:latest",
+            agent_backend="codex",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(run_one, range(2)))
+
+    agent_mounts = {
+        item.split(":", 1)[0]
+        for call in calls
+        if _is_agent_container(call)
+        for item in call
+        if item.startswith("helix-candidate-auth-codex-")
+    }
+    assert len(agent_mounts) == 2
+    assert all("helix-auth-codex" not in " ".join(call) for call in calls if _is_agent_container(call))
+
+
+def test_candidate_volume_cleanup_failure_is_loud_and_actionable(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["docker", "volume", "rm"]:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="busy")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    with pytest.raises(RuntimeError, match="credential cleanup failed") as exc:
+        run_sandboxed_command(
+            ["codex", "exec", "prompt"],
+            cwd=source,
+            env={},
+            sandbox=SandboxConfig(enabled=True),
+            scope="agent",
+            sync_back=False,
+            image="helix-test:latest",
+            agent_backend="codex",
+        )
+    assert "docker volume rm helix-candidate-auth-codex-" in str(exc.value)
 
 
 def test_sidecar_runtime_switches_evaluator_to_private_network(tmp_path: Path, mocker):
@@ -329,11 +449,12 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
     (source / "helix.toml").write_text("[evaluator.sidecar]\nendpoint = 'private'\n")
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / ".env").exists()
             assert not (workspace / ".helix").exists()
-            assert not (workspace / ".helix_artifacts").exists()
+            # Claude's nested transcript bind creates this candidate-local
+            # host directory before the agent starts.
             assert not (workspace / "helix.toml").exists()
             (workspace / "keep.py").write_text("new\n")
             (workspace / "delete.py").unlink()
@@ -342,7 +463,7 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
             (workspace / ".env.local").write_text("NEW_SECRET=value\n")
             (workspace / ".helix").mkdir()
             (workspace / ".helix" / "state.json").write_text("tampered\n")
-            (workspace / ".helix_artifacts").mkdir()
+            (workspace / ".helix_artifacts").mkdir(exist_ok=True)
             (workspace / ".helix_artifacts" / "new.txt").write_text("new artifact\n")
             (workspace / ".helix_backend_stdout.txt").write_text("artifact\n")
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
@@ -371,7 +492,7 @@ def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(
     assert (source / ".helix" / "state.json").read_text() == "{}\n"
     assert (source / ".helix_artifacts" / "old.txt").read_text() == "old artifact\n"
     assert not (source / ".helix_artifacts" / "new.txt").exists()
-    assert not (source / ".helix_artifacts" / "backend_transcripts").exists()
+    assert (source / ".helix_artifacts" / "backend_transcripts").exists()
     assert not (source / ".env.local").exists()
     assert not (source / ".git").exists()
     assert not (source / ".helix_backend_stdout.txt").exists()
@@ -395,7 +516,7 @@ def test_agent_sync_tolerates_inaccessible_workspace_paths(
 
     def fake_run(args, **kwargs):
         nonlocal workspace_ready
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             (workspace / "keep.py").write_text("new\n")
             workspace_ready = True
@@ -419,7 +540,7 @@ def test_agent_sync_tolerates_inaccessible_workspace_paths(
     assert (source / ".gitignore").read_text() == "*.tmp\n"
 
 
-def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker):
+def test_agent_transcript_bind_does_not_remount_login_volume(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
     (source / "main.py").write_text("old\n")
@@ -428,20 +549,18 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
 
     def fake_run(args, **kwargs):
         calls.append(args)
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
-            if args[-3:] and args[-3] == "sh" and "sess_123.jsonl" in args[-1]:
-                transcript = (
-                    workspace
-                    / ".helix_artifacts"
-                    / "backend_transcripts"
-                    / "claude"
-                    / "sess_123.jsonl"
-                )
-                transcript.parent.mkdir(parents=True)
-                transcript.write_text('{"message":"saved"}\n')
-            else:
-                (workspace / "main.py").write_text("new\n")
+            (workspace / "main.py").write_text("new\n")
+            transcript = (
+                workspace
+                / ".helix_artifacts"
+                / "backend_transcripts"
+                / "claude"
+                / "sess_123.jsonl"
+            )
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text('{"message":"saved"}\n')
         return subprocess.CompletedProcess(
             args,
             0,
@@ -472,12 +591,9 @@ def test_agent_copies_claude_transcript_from_auth_volume(tmp_path: Path, mocker)
         / "sess_123.jsonl"
     )
     assert transcript.read_text() == '{"message":"saved"}\n'
-    copy_call = next(
-        call
-        for call in calls
-        if call[:2] == ["docker", "run"] and "sess_123.jsonl" in " ".join(call)
-    )
-    assert "helix-auth-claude:/home/node:ro" in copy_call
+    agent_calls = [call for call in calls if _is_agent_container(call)]
+    assert len(agent_calls) == 1
+    assert not any("helix-auth-claude" in item for call in agent_calls for item in call)
 
 
 def test_agent_sync_tolerates_inaccessible_backend_transcripts(
@@ -500,7 +616,7 @@ def test_agent_sync_tolerates_inaccessible_backend_transcripts(
 
     def fake_run(args, **kwargs):
         nonlocal workspace_root
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
             (workspace_root / "main.py").write_text("new\n")
             blocked = workspace_root / ".helix_artifacts" / "backend_transcripts"
@@ -543,8 +659,7 @@ def test_agent_sync_recovers_rootless_workspace_permissions(tmp_path: Path, mock
         nonlocal workspace_root
         calls.append(args)
         if (
-            args[:2] == ["docker", "run"]
-            and not _is_workspace_chown(args)
+            _is_agent_container(args)
             and not _is_workspace_permission_relax(args)
         ):
             workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
@@ -595,8 +710,7 @@ def test_agent_sync_skips_relax_when_host_owner_available(tmp_path: Path, mocker
     def fake_run(args, **kwargs):
         calls.append(args)
         if (
-            args[:2] == ["docker", "run"]
-            and not _is_workspace_chown(args)
+            _is_agent_container(args)
             and not _is_workspace_permission_relax(args)
         ):
             workspace_root = Path(args[args.index("-v") + 1].split(":", 1)[0])
@@ -668,7 +782,7 @@ def test_agent_sync_back_honors_omitted_paths(tmp_path: Path, mocker):
     (source / "private" / "token.txt").write_text("host secret\n")
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / "private" / "token.txt").exists()
             (workspace / "main.py").write_text("new\n")
@@ -698,7 +812,7 @@ def test_agent_sync_back_does_not_create_omitted_paths(tmp_path: Path, mocker):
     source.mkdir()
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             (workspace / "private").mkdir()
             (workspace / "private" / "token.txt").write_text("agent secret\n")
@@ -728,7 +842,7 @@ def test_agent_sync_skips_special_files_by_default(tmp_path: Path, mocker):
     source.mkdir()
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             os.mkfifo(workspace / "agent.pipe")
             (workspace / "regular.txt").write_text("ok\n")
@@ -762,7 +876,7 @@ def test_sync_preserves_existing_host_special_files_when_skipped(
     os.mkfifo(source / "existing.pipe")
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert not (workspace / "existing.pipe").exists()
             (workspace / "regular.txt").write_text("ok\n")
@@ -794,7 +908,7 @@ def test_special_file_skip_can_be_disabled(tmp_path: Path, mocker):
     source.mkdir()
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             os.mkfifo(workspace / "agent.pipe")
         return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
@@ -821,7 +935,7 @@ def test_evaluator_does_not_sync_changes_back(tmp_path: Path, mocker):
     (source / "helix_batch.json").write_text('["0"]\n')
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             assert (workspace / "helix_batch.json").read_text() == '["0"]\n'
             (workspace / "main.py").write_text("mutated\n")
@@ -852,7 +966,7 @@ def test_sandboxed_command_sequence_reuses_workspace(tmp_path: Path, mocker):
     seen_workspaces: list[Path] = []
 
     def fake_run(args, **kwargs):
-        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+        if _is_agent_container(args):
             workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
             seen_workspaces.append(workspace)
             if args[-1] == "write":

@@ -61,13 +61,6 @@ DEFAULT_BACKEND_IMAGES: dict[str, str] = {
     "opencode": "ghcr.io/ke7/helix-evo-runner-opencode:latest",
 }
 
-BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
-    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
-    "cursor": ("CURSOR_API_KEY",),
-    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
-}
-
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "claude": {
         "login": ["claude", "auth", "login", "--claudeai"],

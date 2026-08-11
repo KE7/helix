@@ -98,8 +98,8 @@ enabled = false
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 # network = "bridge"
 # skip_special_files = true  # skip FIFOs/sockets/devices during workspace sync
-# Agent containers mount a persistent Docker auth volume named
-# helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
+# auth = "login"  # default: seed a private candidate volume from the login volume
+# auth = "env"    # explicit key only; also set auth_env_allow = ["API_KEY_NAME"]
 """
 
 _HELIX_DIR = ".helix"

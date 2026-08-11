@@ -1141,18 +1141,42 @@ class TestInvokeClaudeCode:
             == "ghcr.io/ke7/helix-evo-runner-claude:latest"
         )
 
-    def test_backend_auth_env_is_passed_automatically(self, mocker, monkeypatch):
-        mock_run = mocker.patch("helix.mutator.subprocess.run")
+    def test_sandbox_env_auth_forwards_only_explicitly_allowed_key(
+        self, mocker, monkeypatch
+    ):
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
         mock_run.return_value = MagicMock(
             stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
             stderr="",
             returncode=0,
         )
-        monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
+        monkeypatch.setenv("CURSOR_API_KEY", "explicit-key")
+        monkeypatch.setenv("AMBIENT_API_KEY", "must-not-travel")
 
-        invoke_claude_code("/tmp/wt", "prompt", AgentConfig(backend="cursor"))
+        invoke_claude_code(
+            "/tmp/wt",
+            "prompt",
+            AgentConfig(backend="cursor"),
+            passthrough_env=["CURSOR_API_KEY"],
+            sandbox=SandboxConfig(
+                enabled=True, auth="env", auth_env_allow=["CURSOR_API_KEY"]
+            ),
+        )
 
-        assert mock_run.call_args.kwargs["env"]["CURSOR_API_KEY"] == "cursor-key"
+        env = mock_run.call_args.kwargs["env"]
+        assert env["CURSOR_API_KEY"] == "explicit-key"
+        assert "AMBIENT_API_KEY" not in env
+
+    def test_sandbox_login_auth_does_not_forward_ambient_key(self, mocker, monkeypatch):
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")
+
+        invoke_claude_code(
+            "/tmp/wt", "prompt", AgentConfig(), sandbox=SandboxConfig(enabled=True)
+        )
+
+        assert "ANTHROPIC_API_KEY" not in mock_run.call_args.kwargs["env"]
 
     def test_fixed_env_is_passed_to_backend_subprocess(self, mocker, monkeypatch):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
