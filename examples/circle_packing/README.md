@@ -15,7 +15,7 @@ This will evolve `solve.py` against `evaluate.py` using the configuration in `he
 
 ## Expected result
 
-Starting from a trivial seed solver scoring **0.9798**, HELIX evolves a solution that reaches **2.6360**, beating the published GEPA benchmark score of **2.635**.
+Starting from a trivial seed solver scoring **0.9798**, HELIX evolves a solution that reaches **2.635982** — matching the best published result of **2.63598+**, and above AlphaEvolve's **2.6358**.
 
 Score progression along the winning lineage:
 
