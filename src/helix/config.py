@@ -398,8 +398,12 @@ class EvolutionConfig(BaseModel):
         default=None,
         description=(
             "Optional deterministic first-N validation stage that runs after "
-            "the train minibatch gate and before full validation. Disabled "
-            "when unset or 0."
+            "the train minibatch gate and before full validation. A passing "
+            "stage is composed with a later call for the remaining ids. Use "
+            "only when per-id scores/objectives are independent of the id "
+            "set; do not use with batch-relative scores, cross-example "
+            "normalization, shared warm-up, or a batch-global judge used as "
+            "an objective. Disabled when unset or 0."
         ),
     )
     batch_sampler: Literal["epoch_shuffled", "stratified"] = Field(

@@ -26,6 +26,7 @@ from helix.config import (
 from helix.evolution import (
     HelixDataLoader,
     _make_data_loader,
+    _merge_partitioned_evaluations,
     _reconcile_incomplete_attempts_on_resume,
     run_evolution,
 )
@@ -679,10 +680,10 @@ class TestMinibatchGateIntegration:
         assert all_mocks["_save_evaluation"].call_count == 1
         assert all_mocks["remove_worktree"].called
 
-    def test_stage_pass_promotes_to_full_val_with_cache_reuse(
+    def test_stage_pass_promotes_to_partition_carry_without_cache(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """Stage pass should only full-eval the uncached remainder and persist full val."""
+        """Stage pass evaluates only the tail even when caching is disabled."""
         train_path = _write_train_jsonl(tmp_path, n=4)
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
@@ -720,7 +721,7 @@ class TestMinibatchGateIntegration:
             val_stage_size=2,
             max_generations=1,
             max_evaluations=100,
-            cache_evaluation=True,
+            cache_evaluation=False,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -2944,3 +2945,31 @@ class TestAtomicProposalWorker:
             assert snapped is None or snapped.id != child.id, (
                 f"snapshot_candidate must not be called for tampered child {child.id}"
             )
+
+
+def test_merge_partitioned_evaluations_preserves_id_alignment() -> None:
+    candidate = _make_candidate("g1-s1")
+    stage = EvalResult(
+        candidate_id=candidate.id, scores={}, asi={},
+        instance_scores={"0": 0.8, "1": 0.7},
+        objective_scores=[{"quality": 0.8}, {"quality": 0.7}],
+        per_example_side_info=[{"judge": "stage-0"}, {"judge": "stage-1"}],
+    )
+    tail = EvalResult(
+        candidate_id=candidate.id, scores={}, asi={},
+        instance_scores={"2": 0.6},
+        objective_scores=[{"quality": 0.6}],
+        per_example_side_info=[{"judge": "tail-2"}],
+    )
+
+    merged = _merge_partitioned_evaluations(
+        candidate, ["2", "0", "1"], stage, ["0", "1"], tail, ["2"]
+    )
+
+    assert merged.instance_scores == {"2": 0.6, "0": 0.8, "1": 0.7}
+    assert merged.objective_scores == [
+        {"quality": 0.6}, {"quality": 0.8}, {"quality": 0.7}
+    ]
+    assert merged.per_example_side_info == [
+        {"judge": "tail-2"}, {"judge": "stage-0"}, {"judge": "stage-1"}
+    ]
