@@ -24,7 +24,7 @@ background = """
 Circle packing benchmark: pack 26 non-overlapping circles in a unit square [0,1]x[0,1].
 Each circle is (x, y, r) with r <= x, r <= y, r <= 1-x, r <= 1-y (inside bounds).
 No two circles overlap: dist(c_i, c_j) >= r_i + r_j.
-Score = sum of all radii. Current GEPA benchmark: 2.635. AlphaEvolve: ~2.635.
+Score = sum of all radii. Best published result: 2.63598+. AlphaEvolve: 2.6358.
 
 PROVEN WINNING STRATEGIES:
 1. Use scipy.optimize (minimize with SLSQP or L-BFGS-B) for gradient-based optimization
@@ -42,5 +42,5 @@ KNOWN GOOD APPROACH (scipy):
 - Use scipy.optimize.minimize with method='SLSQP' or 'trust-constr'
 - Multiple random starts, keep best valid solution
 
-Target score > 2.635 to beat GEPA benchmark.
+Target score >= 2.63598 to match the best published result.
 """
