@@ -971,19 +971,19 @@ def test_sandbox_auth_opencode_login_uses_full_setup_tui():
 
 
 class TestDockerEnvRedaction:
-    """`-e KEY=VALUE` carries API keys; a failing docker call must not echo them.
+    """`-e KEY=VALUE` can carry a sensitive value; failures must not echo it.
 
     `subprocess.CalledProcessError` keeps the full argv on both `.cmd` and
     `.args`, so an unredacted failure puts the key into logs, tracebacks and
     any crash reporter that renders the exception.
     """
 
-    SECRET = "sk-live-SUPERSECRET-abc123"
+    SENSITIVE_VALUE = "value-that-must-not-appear"
 
     def _args(self) -> list[str]:
         return [
             "docker", "run", "--rm",
-            "-e", f"ANTHROPIC_API_KEY={self.SECRET}",
+            "-e", f"KEY={self.SENSITIVE_VALUE}",
             "-e", "HOME=/home/node",
             "helix-test-image:local", "true",
         ]
@@ -991,8 +991,8 @@ class TestDockerEnvRedaction:
     def test_argv_redaction_keeps_keys_and_drops_values(self) -> None:
         redacted = sandbox_module._redact_docker_argv(self._args())
 
-        assert self.SECRET not in " ".join(redacted)
-        assert "ANTHROPIC_API_KEY=<redacted>" in redacted, (
+        assert self.SENSITIVE_VALUE not in " ".join(redacted)
+        assert "KEY=<redacted>" in redacted, (
             "the key must survive so a rendered command stays diagnosable"
         )
         assert redacted[0:3] == ["docker", "run", "--rm"]
@@ -1027,9 +1027,9 @@ class TestDockerEnvRedaction:
             sandbox_module._run_docker(args, check=True)
 
         exc = excinfo.value
-        assert self.SECRET not in repr(exc)
-        assert self.SECRET not in str(exc.cmd)
-        assert self.SECRET not in str(exc.args)
+        assert self.SENSITIVE_VALUE not in repr(exc)
+        assert self.SENSITIVE_VALUE not in str(exc.cmd)
+        assert self.SENSITIVE_VALUE not in str(exc.args)
         assert exc.returncode == 125
         assert exc.stderr == "no such image"
 
@@ -1044,8 +1044,9 @@ class TestDockerEnvRedaction:
             sandbox_module._run_docker(args, check=False)
 
         exc = excinfo.value
-        assert self.SECRET not in repr(exc)
-        assert self.SECRET not in str(exc.cmd)
+        assert self.SENSITIVE_VALUE not in repr(exc)
+        assert self.SENSITIVE_VALUE not in str(exc.cmd)
+        assert self.SENSITIVE_VALUE not in str(exc.args)
         assert exc.timeout == 1.5
 
     def test_completed_process_args_are_redacted(self, mocker) -> None:
@@ -1059,7 +1060,7 @@ class TestDockerEnvRedaction:
 
         result = sandbox_module._run_docker(args, check=False)
 
-        assert self.SECRET not in str(result.args)
+        assert self.SENSITIVE_VALUE not in str(result.args)
 
     def test_captured_output_is_left_verbatim(self, mocker) -> None:
         """Container output is not scrubbed — deliberately.

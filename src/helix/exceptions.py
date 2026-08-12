@@ -6,13 +6,9 @@ All HELIX modules use these for consistent, never-truncated error diagnostics.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
-
-if TYPE_CHECKING:
-    from helix.redaction import DiagnosticRedactor
 
 
 # ---------------------------------------------------------------------------
@@ -177,30 +173,26 @@ def format_error_context(
     stderr: str = "",
     exit_code: int | None = None,
     suggestion: str = "",
-    redactor: DiagnosticRedactor | None = None,
 ) -> str:
     """Build a formatted, never-truncated error context string.
 
     Useful for log messages or exception messages where Rich is not available.
     """
-    def render(value: str) -> str:
-        return redactor.redact(value) if redactor is not None else value
-
     lines: list[str] = []
     if operation:
-        lines.append(f"[HELIX ERROR] Operation: {render(operation)}")
+        lines.append(f"[HELIX ERROR] Operation: {operation}")
     if phase:
-        lines.append(f"[HELIX ERROR] Phase: {render(phase)}")
+        lines.append(f"[HELIX ERROR] Phase: {phase}")
     if command:
-        lines.append(f"[HELIX ERROR] Command: {render(command)}")
+        lines.append(f"[HELIX ERROR] Command: {command}")
     if exit_code is not None:
         lines.append(f"[HELIX ERROR] Exit code: {exit_code}")
     if cwd:
-        lines.append(f"[HELIX ERROR] Working dir: {render(cwd)}")
+        lines.append(f"[HELIX ERROR] Working dir: {cwd}")
     if stdout:
-        lines.append(f"[HELIX ERROR] Stdout (full):\n{render(stdout)}")
+        lines.append(f"[HELIX ERROR] Stdout (full):\n{stdout}")
     if stderr:
-        lines.append(f"[HELIX ERROR] Stderr (full):\n{render(stderr)}")
+        lines.append(f"[HELIX ERROR] Stderr (full):\n{stderr}")
     if suggestion:
-        lines.append(f"[HELIX ERROR] Suggestion: {render(suggestion)}")
+        lines.append(f"[HELIX ERROR] Suggestion: {suggestion}")
     return "\n".join(lines)

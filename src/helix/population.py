@@ -15,7 +15,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
 from helix.display import UsageStats
-from helix.redaction import DiagnosticRedactor
 
 if TYPE_CHECKING:
     from helix.state import BudgetState
@@ -137,13 +136,6 @@ class EvalResult:
     # frontier when ``evolution.frontier_type`` ∈ {"objective",
     # "hybrid", "cartesian"}; harmless on the default "instance" path.
     objective_scores: list[dict[str, float]] | None = None
-    # Redaction configuration follows an in-memory evaluator result to every
-    # rendering boundary but is deliberately excluded from persisted results.
-    diagnostic_redactor: DiagnosticRedactor = field(
-        default_factory=DiagnosticRedactor,
-        repr=False,
-        compare=False,
-    )
 
     def aggregate_score(self) -> float:
         """Return mean of instance scores, or 0.0 if none."""

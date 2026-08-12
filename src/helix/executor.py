@@ -17,7 +17,6 @@ from helix.asi import (
     read_text as read_asi_log_text,
 )
 from helix.population import Candidate, EvalResult
-from helix.redaction import DiagnosticRedactor
 from helix.config import HelixConfig
 from helix.exceptions import EvaluatorError, format_error_context
 from helix.parsers import get_parser
@@ -247,9 +246,6 @@ def run_evaluator(
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
     )
-    # Keep this with the result until every diagnostic rendering boundary has
-    # run. Parsing below still consumes the captured streams unchanged.
-    diagnostic_redactor = DiagnosticRedactor.from_values(env.values())
     helix_log_name = f".helix_asi_log_{uuid.uuid4().hex}.jsonl"
     helix_log_path = Path(candidate.worktree_path) / helix_log_name
     # Absolute path inside the sidecar — the evaluator command may run
@@ -340,7 +336,6 @@ def run_evaluator(
             stdout=stdout,
             stderr=stderr,
             exit_code=returncode,
-            redactor=diagnostic_redactor,
         )
         logger.info(
             "Evaluator exited with code %d for candidate %s (split=%s):\n%s",
@@ -381,8 +376,8 @@ def run_evaluator(
                     operation="run_evaluator",
                     command=evaluator.command,
                     cwd=str(candidate.worktree_path),
-                    stdout=diagnostic_redactor.redact(stdout),
-                    stderr=diagnostic_redactor.redact(stderr),
+                    stdout=stdout,
+                    stderr=stderr,
                     exit_code=returncode,
                 )
 
@@ -395,35 +390,21 @@ def run_evaluator(
     per_example_side_info: list[dict[str, Any]] | None = None
     objective_scores: list[dict[str, float]] | None = None
 
-    try:
-        if evaluator.score_parser == "pytest":
-            scores, instance_scores = parser(stdout, stderr)
-        elif evaluator.score_parser == "helix_result":
-            # helix_result reads ``{worktree}/helix_batch.json`` to recover
-            # the id list HELIX wrote pre-invocation and zips it with the
-            # per-example ``[score, side_info]`` payload on stdout.
-            (
-                scores,
-                instance_scores,
-                per_example_side_info,
-                objective_scores,
-            ) = parser(returncode, stdout, stderr, candidate.worktree_path)
-        else:
-            # exitcode, json_accuracy, and other parsers take
-            # (returncode, stdout, stderr).
-            scores, instance_scores = parser(returncode, stdout, stderr)
-    except EvaluatorError as exc:
-        # Parsers receive raw protocol streams. If one rejects that protocol,
-        # sanitize every field before its error can cross a rendering boundary.
-        exc.args = tuple(diagnostic_redactor.redact(arg) for arg in exc.args)
-        exc.operation = diagnostic_redactor.redact(exc.operation)
-        exc.phase = diagnostic_redactor.redact(exc.phase)
-        exc.command = diagnostic_redactor.redact(exc.command)
-        exc.cwd = diagnostic_redactor.redact(exc.cwd)
-        exc.stdout = diagnostic_redactor.redact(exc.stdout)
-        exc.stderr = diagnostic_redactor.redact(exc.stderr)
-        exc.suggestion = diagnostic_redactor.redact(exc.suggestion)
-        raise
+    if evaluator.score_parser == "pytest":
+        scores, instance_scores = parser(stdout, stderr)
+    elif evaluator.score_parser == "helix_result":
+        # helix_result reads ``{worktree}/helix_batch.json`` to recover
+        # the id list HELIX wrote pre-invocation and zips it with the
+        # per-example ``[score, side_info]`` payload on stdout.
+        (
+            scores,
+            instance_scores,
+            per_example_side_info,
+            objective_scores,
+        ) = parser(returncode, stdout, stderr, candidate.worktree_path)
+    else:
+        # exitcode, json_accuracy, and other parsers take (returncode, stdout, stderr)
+        scores, instance_scores = parser(returncode, stdout, stderr)
 
     # Post-filter instance_scores when a subset was requested: evaluators
     # that ignore HELIX_INSTANCE_IDS will still have returned the whole
@@ -482,12 +463,12 @@ def run_evaluator(
     _result = EvalResult(
         candidate_id=candidate.id,
         scores=scores,
-        asi=diagnostic_redactor.redact(asi),
+        asi=asi,
         instance_scores=instance_scores,
         # ``side_info`` (legacy batch-level dict) is no longer populated
         # by the executor.  The per-example list in
         # ``per_example_side_info`` replaces it for the reflection path.
-        per_example_side_info=diagnostic_redactor.redact(per_example_side_info),
+        per_example_side_info=per_example_side_info,
         # ``objective_scores`` — per-example ``side_info["scores"]``
         # harvest.  Feeds the multi-axis Pareto frontier
         # (``ParetoFrontier._update_objective`` /
@@ -495,7 +476,6 @@ def run_evaluator(
         # ``config.evolution.frontier_type`` is ``"objective"``,
         # ``"hybrid"``, or ``"cartesian"``.
         objective_scores=objective_scores,
-        diagnostic_redactor=diagnostic_redactor,
     )
     TRACE.emit(
         EventType.EVAL_END,

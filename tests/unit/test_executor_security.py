@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import logging
 import os
 from unittest.mock import MagicMock
 
@@ -17,7 +15,6 @@ from helix.executor import (
     _scrub_environment,
 )
 from helix.exceptions import EvaluatorError
-from helix.mutator import build_mutation_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -413,114 +410,3 @@ class TestRunEvaluator:
 
         mock_host_run.assert_called_once()
         mock_sandbox_run.assert_not_called()
-
-
-class TestEvaluatorDiagnosticSecretRedaction:
-    """Evaluator data is parsed raw, then redacted before rendering."""
-
-    SECRET = "sk-evaluator-secret-47"
-
-    def _config(self, *, score_parser: str = "exitcode") -> HelixConfig:
-        config = make_config(command="python evaluate.py", score_parser=score_parser)
-        return config.model_copy(update={"env": {"EVALUATOR_TOKEN": self.SECRET}})
-
-    def _sandbox_config(self, *, score_parser: str = "exitcode") -> HelixConfig:
-        config = self._config(score_parser=score_parser)
-        config.evaluator.sidecar = EvaluatorSidecarConfig(
-            image="eval:latest",
-            runner_image="eval-runner:latest",
-            command="python -m server",
-            endpoint="http://helix-evaluator:8080/evaluate",
-        )
-        return config.model_copy(
-            update={"sandbox": SandboxConfig(enabled=True, evaluator=True)}
-        )
-
-    def test_stdout_secret_is_absent_from_rendered_prompt(self, mocker):
-        mocker.patch(
-            "helix.executor.current_evaluator_sidecar_runtime",
-            return_value=MagicMock(),
-        )
-        mocker.patch(
-            "helix.executor.run_sandboxed_commands",
-            return_value=[
-                MagicMock(
-                    stdout=f"EVALUATOR_TOKEN={self.SECRET} emitted by evaluator",
-                    stderr="",
-                    returncode=0,
-                ),
-                MagicMock(stdout="", stderr="", returncode=0),
-            ],
-        )
-
-        result = run_evaluator(make_candidate(), self._sandbox_config())
-        prompt = build_mutation_prompt("goal", result)
-
-        assert self.SECRET not in prompt
-        assert "EVALUATOR_TOKEN=<redacted>" in prompt
-
-    def test_stderr_and_untruncated_error_context_are_redacted(self, mocker, caplog):
-        mocker.patch(
-            "helix.executor.current_evaluator_sidecar_runtime",
-            return_value=MagicMock(),
-        )
-        mocker.patch(
-            "helix.executor.run_sandboxed_commands",
-            return_value=[
-                MagicMock(
-                    stdout=f"stdout includes {self.SECRET}",
-                    stderr=f"stderr includes {self.SECRET}",
-                    returncode=1,
-                ),
-                MagicMock(stdout="", stderr="", returncode=0),
-            ],
-        )
-        caplog.set_level(logging.INFO, logger="helix.executor")
-
-        result = run_evaluator(make_candidate(), self._sandbox_config())
-        prompt = build_mutation_prompt("goal", result)
-
-        assert self.SECRET not in prompt
-        assert self.SECRET not in caplog.text
-        assert "stdout includes <redacted>" in caplog.text
-        assert "stderr includes <redacted>" in caplog.text
-
-    def test_parser_receives_raw_stdout_before_rendering_redaction(self, mocker):
-        observed: dict[str, str] = {}
-
-        def parser(returncode: int, stdout: str, stderr: str):
-            observed["stdout"] = stdout
-            return {"success": 1.0}, {"success": 1.0}
-
-        mocker.patch("helix.executor.get_parser", return_value=parser)
-        mocker.patch(
-            "helix.executor.subprocess.run",
-            return_value=MagicMock(stdout=self.SECRET, stderr="", returncode=0),
-        )
-
-        result = run_evaluator(make_candidate(), self._config())
-
-        assert observed["stdout"] == self.SECRET
-        assert self.SECRET not in build_mutation_prompt("goal", result)
-
-    def test_nested_side_info_secret_is_absent_from_diagnostics(self, mocker, tmp_path):
-        (tmp_path / "helix_batch.json").write_text(json.dumps(["example-1"]))
-        side_info = {"diagnostic": {"credential": self.SECRET}}
-        mocker.patch(
-            "helix.executor.subprocess.run",
-            return_value=MagicMock(
-                stdout=f"HELIX_RESULT=[[1.0, {json.dumps(side_info)}]]\n",
-                stderr="",
-                returncode=0,
-            ),
-        )
-
-        result = run_evaluator(
-            make_candidate(str(tmp_path)), self._config(score_parser="helix_result")
-        )
-        prompt = build_mutation_prompt("goal", result)
-
-        assert self.SECRET not in prompt
-        assert "diagnostic" in prompt
-        assert "credential" in prompt
-        assert "<redacted>" in prompt

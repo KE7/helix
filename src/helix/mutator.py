@@ -8,7 +8,7 @@ import os
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
 from helix.display import UsageStats
@@ -570,10 +570,7 @@ def build_mutation_prompt(
     if turn_budget:
         sections.append(turn_budget.strip())
 
-    return cast(
-        str,
-        eval_result.diagnostic_redactor.redact("\n\n".join(sections) + "\n"),
-    )
+    return "\n\n".join(sections) + "\n"
 
 
 # ---------------------------------------------------------------------------
