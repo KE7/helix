@@ -151,6 +151,7 @@ class TestLoadConfig:
         assert cfg.evolution.max_evaluations == -1
         assert cfg.evolution.merge_enabled is False  # GEPA parity: off by default
         assert cfg.evolution.max_merge_invocations == 5
+        assert cfg.evolution.retain_rejected_worktrees is False
 
         # AgentConfig defaults
         assert cfg.agent.backend == "claude"

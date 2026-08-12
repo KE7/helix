@@ -119,6 +119,7 @@ def _make_minibatch_config(
     num_parallel_proposals: int = 1,
     cache_evaluation: bool = True,
     acceptance_criterion: str = "strict_improvement",
+    retain_rejected_worktrees: bool = False,
     max_workers: int | None = None,
 ) -> HelixConfig:
     evo_kwargs: dict[str, Any] = dict(
@@ -130,6 +131,7 @@ def _make_minibatch_config(
         cache_evaluation=cache_evaluation,
         acceptance_criterion=acceptance_criterion,
         val_stage_size=val_stage_size,
+        retain_rejected_worktrees=retain_rejected_worktrees,
         frontier_type="instance",
     )
     if max_workers is not None:
@@ -570,6 +572,7 @@ class TestMinibatchGateIntegration:
             val_stage_size=2,
             max_generations=1,
             max_evaluations=100,
+            retain_rejected_worktrees=True,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -585,8 +588,11 @@ class TestMinibatchGateIntegration:
         # example_ids should be the val stage ids (first val_stage_size=2 val ids).
         assert attempt["attempt"]["example_ids"] is not None
         assert len(attempt["attempt"]["example_ids"]) == 2
-        # Verify worktree cleaned up.
-        assert all_mocks["remove_worktree"].called
+        all_mocks["remove_worktree"].assert_not_called()
+        assert any(
+            "-- retaining worktree for review." in str(call.args[0])
+            for call in all_mocks["print_warning"].call_args_list
+        )
 
     def test_accepted_proposal_triggers_full_val_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]
@@ -678,7 +684,13 @@ class TestMinibatchGateIntegration:
 
         assert child_val_calls == [["0", "1"]]
         assert all_mocks["_save_evaluation"].call_count == 1
-        assert all_mocks["remove_worktree"].called
+        all_mocks["remove_worktree"].assert_called_once()
+        removed_candidate = all_mocks["remove_worktree"].call_args.args[0]
+        assert removed_candidate.id == "g1-s1"
+        assert any(
+            "-- removing." in str(call.args[0])
+            for call in all_mocks["print_warning"].call_args_list
+        )
 
     def test_stage_pass_promotes_to_partition_carry_without_cache(
         self, tmp_path: Path, all_mocks: dict[str, Any]

@@ -3103,13 +3103,24 @@ def _run_evolution_impl(
                             decision="reject_stage", example_ids=list(stage_val_example_ids),
                             score=float(sum(_stage_after)),
                         )
-                        print_warning(
-                            f"Val stage: {child.id} rejected on first "
-                            f"{len(stage_val_example_ids)} val ids "
-                            f"(sum {sum(_stage_after):.4f} vs parent "
-                            f"{sum(_stage_before):.4f}) -- removing."
-                        )
-                        _safe_remove_worktree(child, label="val-stage-rejected candidate")
+                        if config.evolution.retain_rejected_worktrees:
+                            print_warning(
+                                f"Val stage: {child.id} rejected on first "
+                                f"{len(stage_val_example_ids)} val ids "
+                                f"(sum {sum(_stage_after):.4f} vs parent "
+                                f"{sum(_stage_before):.4f}) -- retaining worktree "
+                                f"for review."
+                            )
+                        else:
+                            print_warning(
+                                f"Val stage: {child.id} rejected on first "
+                                f"{len(stage_val_example_ids)} val ids "
+                                f"(sum {sum(_stage_after):.4f} vs parent "
+                                f"{sum(_stage_before):.4f}) -- removing."
+                            )
+                            _safe_remove_worktree(
+                                child, label="val-stage-rejected candidate"
+                            )
                         del candidates[child.id]
                         return
 
