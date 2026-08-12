@@ -683,7 +683,7 @@ the source of truth. During evolution HELIX sets `HELIX_SPLIT` (`train` or `val`
 so evaluator-owned datasets can switch behavior by phase, mirroring GEPA's
 `trainset` / `valset` duality.
 
-When `evolution.val_stage_size` is positive and `dataset.val_size` is set, accepted mutation proposals first evaluate the deterministic first-N validation ids, then evaluate only the remaining ids and compose the per-id results. This is valid only when each per-id score and objective is independent of the requested id set; do not enable it for batch-relative metrics, cross-example normalization, shared warm-up, or objectives derived from a batch-global judge. Stage-only results are never added to the frontier; HELIX persists only the composed full-val result for Pareto ranking and resume stability. Feedback and judge artifacts remain per invocation, so they are partitioned between the stage and tail calls.
+When `evolution.val_stage_size` is positive and `dataset.val_size` is set, accepted mutation proposals first evaluate the deterministic first-N validation ids, then evaluate only the remaining ids and compose the per-id results. This is valid only when each per-id score and objective is independent of the requested id set; do not enable it for batch-relative metrics, cross-example normalization, shared warm-up, or objectives derived from a batch-global judge. Stage-only results are never added to the frontier; HELIX persists only the composed full-val result for Pareto ranking and resume stability. An evaluator may treat `HELIX_EVALUATION_PHASE=val_stage` as a score-only call and defer feedback or candidate-level judge artifacts until the promoted tail/full call.
 
 ### Evaluator Integrity
 

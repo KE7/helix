@@ -874,6 +874,7 @@ def _cached_evaluate_batch(
     config: HelixConfig,
     split: str,
     project_root: Path,
+    evaluation_phase: str | None = None,
 ) -> tuple[EvalResult, int]:
     """Evaluate ``candidate`` on ``example_ids`` with per-example caching.
 
@@ -910,6 +911,7 @@ def _cached_evaluate_batch(
                 config,
                 split=split,
                 instance_ids=example_ids,
+                evaluation_phase=evaluation_phase,
             )
         return result, len(example_ids)
 
@@ -957,6 +959,7 @@ def _cached_evaluate_batch(
                 config,
                 split=split,
                 instance_ids=batch,
+                evaluation_phase=evaluation_phase,
             )
         # HELIX does not track rollout outputs per-example; store ``None``
         # per slot (the cache's ``RolloutOutput`` type parameter is
@@ -3059,7 +3062,7 @@ def _run_evolution_impl(
                     set_phase(HelixPhase.VAL_EVALUATION)
                     stage_result, _n = _cached_evaluate_batch(
                         child, list(stage_val_example_ids), None,
-                        config, "val", project_root,
+                        config, "val", project_root, evaluation_phase="val_stage",
                     )
                     stage_result.candidate_id = child.id
                     _last_eval_result = stage_result

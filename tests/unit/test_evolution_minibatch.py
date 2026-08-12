@@ -689,7 +689,7 @@ class TestMinibatchGateIntegration:
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = _make_candidate("g1-s1")
 
-        child_val_calls: list[list[str]] = []
+        child_val_calls: list[tuple[list[str], str | None]] = []
 
         def run_eval(
             candidate: Candidate,
@@ -699,7 +699,7 @@ class TestMinibatchGateIntegration:
             **kwargs: Any,
         ) -> EvalResult:
             if split == "val" and instance_ids is not None and candidate.id == "g1-s1":
-                child_val_calls.append(list(instance_ids))
+                child_val_calls.append((list(instance_ids), kwargs.get("evaluation_phase")))
             if split == "val" and instance_ids == ["0", "1", "2", "3"] and candidate.id == seed.id:
                 return _make_result(candidate.id, {"0": 0.2, "1": 0.2, "2": 0.2, "3": 0.2})
             if split == "train" and instance_ids is not None:
@@ -725,7 +725,7 @@ class TestMinibatchGateIntegration:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        assert child_val_calls == [["0", "1"], ["2", "3"]]
+        assert child_val_calls == [(["0", "1"], "val_stage"), (["2", "3"], None)]
         assert all_mocks["_save_evaluation"].call_count == 2
         saved_child_result = all_mocks["_save_evaluation"].call_args_list[-1].args[1]
         assert saved_child_result.candidate_id == "g1-s1"
