@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 
+import pytest
+
 from helix.eval_cache import EvaluationCache, _candidate_hash
 
 
@@ -179,3 +181,88 @@ def test_cache_isolation_by_candidate() -> None:
     cached, uncached = cache.get_batch(b, [1])
     assert cached == {}
     assert uncached == [1]
+
+
+class TestBatchCardinalityGuard:
+    """Evaluator results are positional to ``example_ids``.
+
+    A short result list used to raise a bare ``IndexError`` partway through
+    the write, leaving the cache holding a prefix of a batch the caller
+    believes was rejected; a long one was silently truncated.
+    """
+
+    def test_short_batch_is_rejected_without_mutating_the_cache(self) -> None:
+        cache: EvaluationCache[str, str] = EvaluationCache()
+
+        with pytest.raises(ValueError, match="cardinality mismatch"):
+            cache.put_batch(
+                {"prog": "x"}, ["a", "b", "c"], ["oa", "ob", "oc"], [1.0, 2.0]
+            )
+
+        assert cache._cache == {}, (
+            "a rejected batch must not leave partial entries in the cache"
+        )
+
+    def test_long_batch_is_rejected_rather_than_truncated(self) -> None:
+        cache: EvaluationCache[str, str] = EvaluationCache()
+
+        with pytest.raises(ValueError, match="cardinality mismatch"):
+            cache.put_batch({"prog": "x"}, ["a"], ["oa", "ob"], [1.0, 99.0])
+
+        assert cache._cache == {}
+
+    def test_mismatched_side_channel_lists_are_rejected(self) -> None:
+        cache: EvaluationCache[str, str] = EvaluationCache()
+
+        with pytest.raises(ValueError, match="objective_scores=1"):
+            cache.put_batch(
+                {"prog": "x"},
+                ["a", "b"],
+                ["oa", "ob"],
+                [1.0, 2.0],
+                [{"m": 1.0}],
+            )
+
+        with pytest.raises(ValueError, match="side_info=3"):
+            cache.put_batch(
+                {"prog": "x"},
+                ["a", "b"],
+                ["oa", "ob"],
+                [1.0, 2.0],
+                None,
+                [{"i": 1}, {"i": 2}, {"i": 3}],
+            )
+
+        assert cache._cache == {}
+
+    def test_evaluate_with_cache_full_reports_the_contract_violation(self) -> None:
+        """The failure is named, not a bare IndexError from a projection loop."""
+        cache: EvaluationCache[str, str] = EvaluationCache()
+
+        def short_evaluator(batch, candidate):  # type: ignore[no-untyped-def]
+            return ["only-one"], [1.0], None, None
+
+        with pytest.raises(ValueError, match="cardinality mismatch"):
+            cache.evaluate_with_cache_full(
+                {"prog": "x"},
+                ["a", "b", "c"],
+                lambda ids: list(ids),
+                short_evaluator,
+            )
+
+        assert cache._cache == {}
+
+    def test_well_formed_batches_still_round_trip(self) -> None:
+        cache: EvaluationCache[str, str] = EvaluationCache()
+        cache.put_batch(
+            {"prog": "x"},
+            ["a", "b"],
+            ["oa", "ob"],
+            [1.0, 2.0],
+            [{"m": 1.0}, {"m": 2.0}],
+            [{"i": 1}, {"i": 2}],
+        )
+        cached, uncached = cache.get_batch({"prog": "x"}, ["a", "b"])
+        assert uncached == []
+        assert cached["a"].score == 1.0
+        assert cached["b"].side_info == {"i": 2}
