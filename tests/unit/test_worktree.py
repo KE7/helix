@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from helix.population import Candidate
 from helix.worktree import (
     _ensure_git_repo,
     clone_candidate,
@@ -530,3 +531,86 @@ class TestSnapshotCandidateIdentity:
             check=True,
         ).stdout.strip()
         assert log == "HELIX <helix@noreply>"
+
+
+class TestConcurrentWorktreeMetadata:
+    """``git worktree`` common-metadata operations must not interleave.
+
+    ``git worktree add`` walks every entry under ``.git/worktrees/`` while it
+    registers a new one, and ``git worktree remove`` deletes those entries.
+    Run concurrently they race, and ``add`` aborts with
+    ``fatal: failed to read .git/worktrees/<other>/commondir``.
+    """
+
+    @staticmethod
+    def _is_metadata_command(args: object) -> bool:
+        if not isinstance(args, list) or len(args) < 2 or args[0] != "git":
+            return False
+        return args[1] == "worktree" or (args[1] == "branch" and "-D" in args)
+
+    def test_metadata_commands_never_run_concurrently(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import threading
+        import time
+
+        from helix import worktree as worktree_module
+
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        base_dir.mkdir()
+
+        parent = Candidate(
+            id="g0-s0",
+            worktree_path=str(repo_root),
+            branch_name="main",
+            generation=0,
+            parent_id=None,
+            parent_ids=[],
+            operation="seed",
+        )
+
+        probe = threading.Lock()
+        active = 0
+        max_active = 0
+        real_run = worktree_module.subprocess.run
+
+        def instrumented_run(args, *a, **kw):  # type: ignore[no-untyped-def]
+            nonlocal active, max_active
+            if not self._is_metadata_command(args):
+                return real_run(args, *a, **kw)
+            with probe:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                # Widen the window so an unserialised implementation is
+                # observed deterministically rather than probabilistically.
+                time.sleep(0.02)
+                return real_run(args, *a, **kw)
+            finally:
+                with probe:
+                    active -= 1
+
+        monkeypatch.setattr(worktree_module.subprocess, "run", instrumented_run)
+
+        errors: list[BaseException] = []
+
+        def churn(index: int) -> None:
+            try:
+                child = clone_candidate(parent, f"g1-s{index}", base_dir)
+                remove_worktree(child)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=churn, args=(i,)) for i in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert not errors, f"concurrent worktree churn failed: {errors!r}"
+        assert max_active == 1, (
+            "git worktree common-metadata commands ran concurrently "
+            f"(peak={max_active}); they must be serialised"
+        )
