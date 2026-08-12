@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
@@ -623,18 +623,93 @@ def _docker_host_env() -> dict[str, str]:
     return env
 
 
+REDACTED_DOCKER_ENV_VALUE = "<redacted>"
+
+
+def _redact_docker_argv(args: Sequence[str]) -> list[str]:
+    """Return ``args`` with every literal Docker env *value* replaced.
+
+    Docker accepts ``-e KEY=VALUE``, ``--env KEY=VALUE``, ``-eKEY=VALUE`` and
+    ``--env=KEY=VALUE``.  Only the value is replaced; the key is preserved
+    because it is what makes a rendered command diagnosable.
+
+    This is a purely structural rewrite of the argv — it never inspects or
+    rewrites captured stdout/stderr.  Substring-scrubbing evaluator output
+    against every env value would also rewrite the non-secret variables HELIX
+    itself injects (``HOME=/home/node``, ``PATH=...``), mangling container
+    tracebacks and, on a non-zero exit, the output callers still parse.
+    """
+    redacted = list(args)
+    index = 0
+    while index < len(redacted):
+        arg = redacted[index]
+        if arg in {"-e", "--env"} and index + 1 < len(redacted):
+            assignment = redacted[index + 1]
+            if "=" in assignment:
+                key, _ = assignment.split("=", 1)
+                redacted[index + 1] = f"{key}={REDACTED_DOCKER_ENV_VALUE}"
+            index += 1
+        elif arg.startswith("--env=") and "=" in arg.removeprefix("--env="):
+            key, _ = arg.removeprefix("--env=").split("=", 1)
+            redacted[index] = f"--env={key}={REDACTED_DOCKER_ENV_VALUE}"
+        elif arg.startswith("-e") and arg != "-e" and "=" in arg[2:]:
+            key, _ = arg[2:].split("=", 1)
+            redacted[index] = f"-e{key}={REDACTED_DOCKER_ENV_VALUE}"
+        index += 1
+    return redacted
+
+
+def _redact_subprocess_exception(
+    exc: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    args: Sequence[str],
+) -> None:
+    """Strip Docker env values from a subprocess exception, in place.
+
+    ``cmd`` and ``args`` are both rewritten: ``repr()`` and traceback rendering
+    read ``args``, while HELIX's own error formatting reads ``cmd``.
+    """
+    safe_args = _redact_docker_argv(args)
+    exc.cmd = safe_args
+    if isinstance(exc, subprocess.CalledProcessError):
+        exc.args = (exc.returncode, safe_args)
+    else:
+        exc.args = (safe_args, exc.timeout)
+
+
+def _run_docker_process(
+    args: list[str],
+    *,
+    check: bool = False,
+    capture_output: bool = True,
+    cwd: str | None = None,
+    input_text: str | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a Docker command, keeping env values out of its rendered argv."""
+    try:
+        result = subprocess.run(
+            args,
+            check=check,
+            capture_output=capture_output,
+            text=True,
+            cwd=cwd,
+            input=input_text,
+            env=_docker_host_env(),
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        _redact_subprocess_exception(exc, args)
+        raise
+    result.args = _redact_docker_argv(args)
+    return result
+
+
 def _run_docker(
     args: list[str],
     *,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        check=check,
-        capture_output=True,
-        text=True,
-        env=_docker_host_env(),
-    )
+    return _run_docker_process(args, check=check)
 
 
 def _build_add_host_args(
@@ -961,13 +1036,10 @@ def run_sandboxed_commands(
                 )
                 try:
                     results.append(
-                        subprocess.run(
+                        _run_docker_process(
                             docker_cmd,
                             cwd=str(source),
-                            capture_output=True,
-                            text=True,
-                            input=input_text,
-                            env=_docker_host_env(),
+                            input_text=input_text,
                             timeout=sandbox.timeout_seconds,
                         )
                     )
