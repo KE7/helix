@@ -11,6 +11,7 @@ import pytest
 
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
+from helix.executor import _scrub_environment
 from helix.mutator import (
     MutationError,
     BACKEND_RESULT_ARTIFACT_NAME,
@@ -1177,6 +1178,82 @@ class TestInvokeClaudeCode:
         )
 
         assert "ANTHROPIC_API_KEY" not in mock_run.call_args.kwargs["env"]
+
+    def test_login_identity_reaches_only_the_agent(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        """Stored agent logins need identity; evaluator environments remain strict."""
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        monkeypatch.setenv("USER", "login-user")
+        monkeypatch.setenv("LOGNAME", "login-logname")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-secret")
+
+        invoke_claude_code(
+            str(tmp_path), "prompt", AgentConfig(), sandbox=SandboxConfig(enabled=True)
+        )
+
+        agent_env = mock_run.call_args.kwargs["env"]
+        assert agent_env["USER"] == "login-user"
+        assert agent_env["LOGNAME"] == "login-logname"
+        assert "ANTHROPIC_API_KEY" not in agent_env
+        evaluator_env = _scrub_environment()
+        assert "USER" not in evaluator_env
+        assert "LOGNAME" not in evaluator_env
+
+    @pytest.mark.parametrize(
+        ("passthrough_env", "fixed_env", "expected_key"),
+        [
+            (None, {"ANTHROPIC_API_KEY": "configured-in-env"}, "configured-in-env"),
+            (["ANTHROPIC_API_KEY"], None, "configured-by-passthrough"),
+        ],
+    )
+    def test_sandbox_env_auth_requires_explicit_credential_and_preserves_identity(
+        self,
+        tmp_path: Path,
+        mocker,
+        monkeypatch,
+        passthrough_env,
+        fixed_env,
+        expected_key,
+    ):
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        monkeypatch.setenv("USER", "login-user")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "configured-by-passthrough")
+
+        invoke_claude_code(
+            str(tmp_path),
+            "prompt",
+            AgentConfig(),
+            passthrough_env=passthrough_env,
+            fixed_env=fixed_env,
+            sandbox=SandboxConfig(
+                enabled=True, auth="env", auth_env_allow=["ANTHROPIC_API_KEY"]
+            ),
+        )
+
+        env = mock_run.call_args.kwargs["env"]
+        assert env["ANTHROPIC_API_KEY"] == expected_key
+        assert env["USER"] == "login-user"
+
+    def test_authentication_failure_reports_environment_names_not_values(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout="", stderr="Not logged in · Please run /login", returncode=1
+        )
+        monkeypatch.setenv("USER", "login-user")
+        monkeypatch.setenv("LOGNAME", "login-logname")
+
+        with pytest.raises(MutationError) as exc_info:
+            invoke_claude_code(str(tmp_path), "prompt", AgentConfig())
+
+        suggestion = exc_info.value.suggestion
+        assert "environment after HELIX scrubbing contained" in suggestion
+        assert "USER" in suggestion and "LOGNAME" in suggestion
+        assert "login-user" not in suggestion
 
     def test_fixed_env_is_passed_to_backend_subprocess(self, mocker, monkeypatch):
         mock_run = mocker.patch("helix.mutator.subprocess.run")

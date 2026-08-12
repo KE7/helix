@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import backend_display_name
+from helix.backends import AGENT_LOGIN_IDENTITY_ENV, backend_display_name
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -720,6 +720,44 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _agent_passthrough_env(passthrough_env: list[str] | None) -> list[str]:
+    """Return configured passthrough values plus safe login identity values.
+
+    Stored-login resolution is a first-class agent authentication path, not a
+    feature users should have to repair by discovering an OS-specific variable.
+    Values named here are non-secret and apply only to agent CLIs; evaluator
+    subprocesses still receive their original strict environment.
+    """
+    return list(dict.fromkeys([*AGENT_LOGIN_IDENTITY_ENV, *(passthrough_env or [])]))
+
+
+def _looks_like_authentication_failure(stdout: str, stderr: str) -> bool:
+    """Return whether a backend failure appears to be an authentication error."""
+    text = f"{stdout}\n{stderr}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "not logged in",
+            "please run /login",
+            "authentication failed",
+            "unauthenticated",
+            "not authenticated",
+        )
+    )
+
+
+def _agent_failure_suggestion(*, stdout: str, stderr: str, env: dict[str, str]) -> str:
+    """Describe the scrubbed environment when an agent authentication fails."""
+    if not _looks_like_authentication_failure(stdout, stderr):
+        return "Check stderr for rate limits, permission errors, or model availability."
+    names = ", ".join(sorted(env)) or "(none)"
+    return (
+        "Authentication failed. The agent environment after HELIX scrubbing "
+        f"contained these variable names (not values): {names}. "
+        "Confirm the selected backend's login is available to that environment."
+    )
+
+
 def _sandbox_agent_environment(
     *,
     sandbox: SandboxConfig,
@@ -732,7 +770,7 @@ def _sandbox_agent_environment(
     both named by ``auth_env_allow`` and explicitly supplied through ``[env]``
     or ``passthrough_env``; an ambient host credential is never inferred.
     """
-    env = _scrub_environment()
+    env = _scrub_environment(passthrough_env=_agent_passthrough_env(None))
     if sandbox.auth != "env":
         return env
     configured = set(passthrough_env or []) | set((fixed_env or {}).keys())
@@ -1621,7 +1659,9 @@ def invoke_claude_code(
             fixed_env=fixed_env,
         )
         if sandbox is not None and sandbox.enabled
-        else _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
+        else _scrub_environment(
+            passthrough_env=_agent_passthrough_env(passthrough_env), fixed_env=fixed_env
+        )
     )
     if backend == "gemini":
         backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
@@ -1762,7 +1802,11 @@ def invoke_claude_code(
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.returncode,
-            suggestion="Check stderr for rate limits, permission errors, or model availability.",
+            suggestion=_agent_failure_suggestion(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                env=backend_env,
+            ),
         )
     finally:
         _write_backend_artifacts(
