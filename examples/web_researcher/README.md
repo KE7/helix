@@ -104,7 +104,9 @@ robust, production-quality web integration — not just code that looks right.
 
 ## Evaluator Design
 
-`evaluate.py` is itself web-aware. For questions with `"ground_truth": "FETCH:..."`,
+`evaluate.py` is itself web-aware. It reads requested question ids from
+`helix_batch.json` and emits one positional `HELIX_RESULT=[score, side_info]`
+pair per id. For questions with `"ground_truth": "FETCH:..."`,
 the evaluator fetches the live answer from PyPI or other sources. This means:
 
 - The **ground truth is always current** — no stale expected values.

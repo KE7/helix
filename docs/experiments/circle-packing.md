@@ -8,7 +8,7 @@
 
 Circle packing is a classic computational geometry problem and an ideal benchmark for evolutionary code optimization — the search space is continuous, evaluation is fast and deterministic, and the global optimum is well-studied.
 
-This experiment uses HELIX in **single-task / no-example mode** (GEPA O.A. **Single-Task Search**, `dataset=None`, `valset=None`): one evaluator call, no example-id handoff, and no dataset split. The Pareto frontier tracks score metrics directly.
+This experiment mirrors the GEPA O.A. **Single-Task Search** shape (`dataset=None`, `valset=None`), with HELIX's one-train/one-val contract and a Pareto frontier that tracks score metrics directly.
 
 | | Value |
 |---|---|
@@ -29,14 +29,18 @@ objective = "Maximize sum of radii of 26 non-overlapping circles packed in a uni
 seed = "."
 
 [evaluator]
-command = "python evaluate.py"
-score_parser = "json_score"
+command = "uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py"
+
+[dataset]
+train_size = 1
+val_size = 1
 
 [evolution]
 max_generations = 20
 merge_enabled = false   # single-task: no crossover needed
 
-[claude]
+[agent]
+backend = "claude"
 model = "sonnet"
 max_turns = 20
 ```
@@ -72,11 +76,11 @@ The evaluator (`evaluate.py`) validates the solution and computes the score:
 
 1. **Boundary check** — Every circle `(x, y, r)` must satisfy: `r ≤ x ≤ 1-r` and `r ≤ y ≤ 1-r`
 2. **Overlap check** — For every pair `(i, j)`: `dist(center_i, center_j) ≥ r_i + r_j`
-3. **Score** — Sum of all radii (only if all constraints are satisfied; otherwise 0)
+3. **Score** — Sum of all radii; violations are reported in `side_info` and do not alter the score.
 
-Output format:
-```json
-{"score": 2.63, "violations": 0}
+Output format (one pair per id in `helix_batch.json`):
+```text
+HELIX_RESULT=[[2.635982, {"scores": {"sum_radii": 2.635982}, "violations": 0, "arrangement": "26 circles in 6x5 grid, avg_r=0.1014, violations=0"}]]
 ```
 
 ---

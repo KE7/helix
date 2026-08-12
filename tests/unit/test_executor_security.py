@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,6 +25,9 @@ from helix.exceptions import EvaluatorError
 
 
 def make_candidate(worktree_path: str = "/tmp/fake-worktree") -> Candidate:
+    path = Path(worktree_path)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "helix_batch.json").write_text(json.dumps(["example-0"]))
     return Candidate(
         id="cand-001",
         worktree_path=worktree_path,
@@ -36,12 +41,10 @@ def make_candidate(worktree_path: str = "/tmp/fake-worktree") -> Candidate:
 
 def make_config(
     command: str = "pytest -q",
-    score_parser: str = "exitcode",
     extra_commands: list[str] | None = None,
 ) -> HelixConfig:
     evaluator = EvaluatorConfig(
         command=command,
-        score_parser=score_parser,
         include_stdout=True,
         include_stderr=True,
         extra_commands=extra_commands or [],
@@ -221,7 +224,7 @@ class TestRunEvaluator:
         """run_evaluator passes only scrubbed environment variables."""
         mock_run = mocker.patch("helix.executor.subprocess.run")
         mock_run.return_value = MagicMock(
-            stdout="output",
+            stdout="HELIX_RESULT=[[1.0, {}]]",
             stderr="",
             returncode=0,
         )
@@ -252,7 +255,7 @@ class TestRunEvaluator:
         """run_evaluator calls subprocess.run with shell=False."""
         mock_run = mocker.patch("helix.executor.subprocess.run")
         mock_run.return_value = MagicMock(
-            stdout="output",
+            stdout="HELIX_RESULT=[[1.0, {}]]",
             stderr="",
             returncode=0,
         )
@@ -270,7 +273,7 @@ class TestRunEvaluator:
         """run_evaluator passes split command as list."""
         mock_run = mocker.patch("helix.executor.subprocess.run")
         mock_run.return_value = MagicMock(
-            stdout="output",
+            stdout="HELIX_RESULT=[[1.0, {}]]",
             stderr="",
             returncode=0,
         )
@@ -293,7 +296,9 @@ class TestRunEvaluator:
             "helix.executor.current_evaluator_sidecar_runtime",
             return_value=MagicMock(),
         )
-        mock_sandbox_run.return_value = [MagicMock(stdout="", stderr="", returncode=0)]
+        mock_sandbox_run.return_value = [
+            MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]", stderr="", returncode=0)
+        ]
 
         candidate = make_candidate()
         config = make_config(command="python /runner/evaluate.py")
@@ -320,7 +325,7 @@ class TestRunEvaluator:
             return_value=MagicMock(),
         )
         mock_run.return_value = [
-            MagicMock(stdout="main", stderr="", returncode=0),
+            MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]", stderr="", returncode=0),
             MagicMock(stdout="extra", stderr="", returncode=0),
             MagicMock(stdout="", stderr="", returncode=0),
         ]
@@ -369,7 +374,7 @@ class TestRunEvaluator:
             '{"score": 0.7}\n'
         )
         mock_run.return_value = [
-            MagicMock(stdout="HELIX_RESULT=[]\n", stderr="", returncode=0),
+            MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]\n", stderr="", returncode=0),
             MagicMock(stdout=capture_stdout, stderr="", returncode=0),
         ]
 
@@ -400,7 +405,9 @@ class TestRunEvaluator:
     def test_run_evaluator_uses_host_when_sandbox_enabled_but_evaluator_disabled(self, mocker):
         mock_host_run = mocker.patch("helix.executor.subprocess.run")
         mock_sandbox_run = mocker.patch("helix.executor.run_sandboxed_commands")
-        mock_host_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+        mock_host_run.return_value = MagicMock(
+            stdout="HELIX_RESULT=[[1.0, {}]]", stderr="", returncode=0
+        )
 
         candidate = make_candidate()
         config = make_config(command="python evaluate.py")

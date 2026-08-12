@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 from helix.exceptions import EvaluatorError
-from helix.parsers import get_parser
 from helix.parsers.helix_result import parse as helix_result_parse
 
 
@@ -479,6 +478,6 @@ class TestHelixResultStrictness:
 # ---------------------------------------------------------------------------
 
 
-class TestHelixResultRegistry:
-    def test_get_parser_returns_helix_result(self) -> None:
-        assert get_parser("helix_result") is helix_result_parse
+class TestHelixResultImport:
+    def test_sole_parser_is_importable_directly(self) -> None:
+        assert callable(helix_result_parse)

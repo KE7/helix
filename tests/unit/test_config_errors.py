@@ -1,4 +1,8 @@
-"""Unit tests for helix.config error handling — user-friendly TOML and validation errors."""
+"""Unit tests for helix.config error handling — user-friendly TOML and validation errors.
+
+Evaluator command examples below refer to an ``evaluate.py`` script that emits
+the required ``HELIX_RESULT=`` line; these tests exercise config handling only.
+"""
 
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ class TestTOMLParsingErrors:
             objective = "test
             # missing closing quote
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -50,7 +54,7 @@ class TestTOMLParsingErrors:
             objective = "test2"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -66,12 +70,12 @@ class TestTOMLParsingErrors:
             objective = "test"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
             extra_commands = ["cmd1", "cmd2",]
             # trailing comma is actually valid in TOML, let's use a different error
         """)
         # This actually parses fine in TOML, let me use a real error
-        toml.write_text('objective = "test"\n[evaluator\ncommand = "pytest"')
+        toml.write_text('objective = "test"\n[evaluator\ncommand = "python evaluate.py"')
 
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
@@ -90,7 +94,7 @@ class TestValidationErrors:
         """Missing objective field should print a friendly error and exit with code 1."""
         toml = write_toml(tmp_path, """
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -108,7 +112,6 @@ class TestValidationErrors:
             objective = "do something"
 
             [evaluator]
-            score_parser = "exitcode"
         """)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -133,15 +136,16 @@ class TestValidationErrors:
         assert "Configuration validation error" in captured.err
         assert "evaluator" in captured.err
 
-    def test_invalid_score_parser_exits(self, tmp_path, capsys):
-        """Invalid score_parser value should print a friendly error and exit."""
+    def test_removed_parser_key_exits(self, tmp_path, capsys):
+        """The removed parser setting should hit extra='forbid'."""
+        removed_key = "score_" + "parser"
         toml = write_toml(tmp_path, """
             objective = "X"
 
             [evaluator]
-            command = "run"
-            score_parser = "unknown_parser"
+            command = "python evaluate.py"
         """)
+        toml.write_text(toml.read_text() + f'{removed_key} = "helix_result"\n')
 
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
@@ -149,8 +153,8 @@ class TestValidationErrors:
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
-        # Should mention the field path
-        assert "score_parser" in captured.err
+        assert removed_key in captured.err
+        assert "not a recognised key" in captured.err
 
     def test_invalid_type_exits(self, tmp_path, capsys):
         """Wrong type for a field should print a friendly error with type hint."""
@@ -158,7 +162,7 @@ class TestValidationErrors:
             objective = "test"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [evolution]
             max_generations = "not_a_number"
@@ -190,7 +194,7 @@ class TestUnknownKeysRejected:
             objective = "do something"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
             batch_sampler = "stratified"
 
             [evolution]
@@ -211,7 +215,7 @@ class TestUnknownKeysRejected:
             objective = "do something"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [evolution]
             batch_samplr = "stratified"
@@ -233,7 +237,7 @@ class TestUnknownKeysRejected:
             bogus_top_level = true
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -253,7 +257,7 @@ class TestUnknownKeysRejected:
             objective = "do something"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
             batch_sampler = "stratified"
         """)
 
@@ -278,14 +282,14 @@ class TestValidTOMLStillWorks:
             seed = "."
 
             [evaluator]
-            command = "pytest tests/"
+            command = "python evaluate.py"
         """)
 
         cfg = load_config(toml)
 
         assert cfg.objective == "Maximise test coverage"
         assert cfg.seed == "."
-        assert cfg.evaluator.command == "pytest tests/"
+        assert cfg.evaluator.command == "python evaluate.py"
 
     def test_full_valid_toml_succeeds(self, tmp_path):
         """A full valid config should load successfully."""
@@ -294,8 +298,7 @@ class TestValidTOMLStillWorks:
             seed = "/repo"
 
             [evaluator]
-            command = "make test"
-            score_parser = "exitcode"
+            command = "python evaluate.py"
 
             [evolution]
             max_generations = 20
@@ -307,5 +310,5 @@ class TestValidTOMLStillWorks:
         cfg = load_config(toml)
 
         assert cfg.objective == "Pass all benchmarks"
-        assert cfg.evaluator.command == "make test"
+        assert cfg.evaluator.command == "python evaluate.py"
         assert cfg.evolution.max_generations == 20

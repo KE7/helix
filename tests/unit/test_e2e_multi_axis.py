@@ -64,7 +64,6 @@ def _make_config() -> HelixConfig:
         objective="test",
         evaluator=EvaluatorConfig(
             command="python eval.py",
-            score_parser="helix_result",
             include_stdout=True,
             include_stderr=True,
             extra_commands=[],

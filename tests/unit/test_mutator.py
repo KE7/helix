@@ -1769,10 +1769,7 @@ class TestTranscriptToolPatchesUsageInArtifact:
         self, tmp_path: Path, mocker, monkeypatch
     ) -> None:
         """tool_event_count and tool_names are populated from Claude JSONL transcript."""
-        from helix.mutator import (
-            BACKEND_TRANSCRIPT_ARTIFACT_DIR,
-            invoke_claude_code,
-        )
+        from helix.mutator import invoke_claude_code
 
         # Set up a fake transcript with 3 tool_use events
         transcript_root = tmp_path / "claude-home" / ".claude" / "projects" / "-workspace"

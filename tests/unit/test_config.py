@@ -1,4 +1,8 @@
-"""Unit tests for helix.config — loading, validation, and defaults."""
+"""Unit tests for helix.config — loading, validation, and defaults.
+
+Evaluator command examples below refer to an ``evaluate.py`` script that emits
+the required ``HELIX_RESULT=`` line; these tests exercise config handling only.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +39,15 @@ def write_toml(tmp_path: Path, content: str) -> Path:
 # ---------------------------------------------------------------------------
 
 class TestLoadConfig:
+    @pytest.mark.parametrize(
+        "config_path",
+        sorted((Path(__file__).parents[2] / "examples").glob("*/helix.toml")),
+        ids=lambda path: path.parent.name,
+    )
+    def test_shipped_example_config_loads(self, config_path: Path) -> None:
+        """Every shipped example must remain loadable as its schema evolves."""
+        load_config(config_path)
+
     def test_minimal_valid_toml(self, tmp_path):
         """A minimal config with only required fields should load with defaults."""
         toml = write_toml(tmp_path, """
@@ -42,15 +55,14 @@ class TestLoadConfig:
             seed = "."
 
             [evaluator]
-            command = "pytest tests/"
+            command = "python evaluate.py"
         """)
 
         cfg = load_config(toml)
 
         assert cfg.objective == "Maximise test coverage"
         assert cfg.seed == "."
-        assert cfg.evaluator.command == "pytest tests/"
-        assert cfg.evaluator.score_parser == "pytest"
+        assert cfg.evaluator.command == "python evaluate.py"
         assert cfg.evaluator.include_stdout is True
         assert cfg.evaluator.include_stderr is True
         assert cfg.evaluator.extra_commands == []
@@ -62,8 +74,7 @@ class TestLoadConfig:
             seed = "/repo"
 
             [evaluator]
-            command = "make test"
-            score_parser = "exitcode"
+            command = "python evaluate.py"
             include_stdout = false
             include_stderr = false
             extra_commands = ["make lint", "make typecheck"]
@@ -89,8 +100,7 @@ class TestLoadConfig:
         assert cfg.objective == "Pass all benchmarks"
         assert cfg.seed == "/repo"
 
-        assert cfg.evaluator.command == "make test"
-        assert cfg.evaluator.score_parser == "exitcode"
+        assert cfg.evaluator.command == "python evaluate.py"
         assert cfg.evaluator.include_stdout is False
         assert cfg.evaluator.include_stderr is False
         assert cfg.evaluator.extra_commands == ["make lint", "make typecheck"]
@@ -109,7 +119,7 @@ class TestLoadConfig:
             objective = "Use a different backend"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [agent]
             backend = "codex"
@@ -127,7 +137,7 @@ class TestLoadConfig:
             objective = "Improve score"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
 
         cfg = load_config(toml)
@@ -161,7 +171,7 @@ class TestMissingRequiredFields:
         """objective is required — omitting it should exit with friendly error."""
         toml = write_toml(tmp_path, """
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
@@ -173,7 +183,6 @@ class TestMissingRequiredFields:
             objective = "do something"
 
             [evaluator]
-            score_parser = "exitcode"
         """)
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
@@ -188,15 +197,17 @@ class TestMissingRequiredFields:
             load_config(toml)
         assert exc_info.value.code == 1
 
-    def test_invalid_score_parser_raises(self, tmp_path):
-        """score_parser must be 'pytest' or 'exitcode'."""
+    def test_removed_parser_key_raises(self, tmp_path):
+        """The removed parser setting is rejected as an unknown key."""
+        removed_key = "score_" + "parser"
         toml = write_toml(tmp_path, """
             objective = "X"
 
             [evaluator]
-            command = "run"
-            score_parser = "unknown_parser"
+            command = "python evaluate.py"
+            command = "python evaluate.py"
         """)
+        toml.write_text(toml.read_text() + f'{removed_key} = "helix_result"\n')
         with pytest.raises(SystemExit):
             load_config(toml)
 

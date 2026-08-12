@@ -1,4 +1,4 @@
-"""Executor-level tests for ``score_parser="helix_result"`` — now the
+"""Executor-level tests for the sole ``helix_result`` parser — now the
 GEPA-parity per-example contract.
 
 BREAKING (pre-1.0): ``helix_result`` previously accepted one
@@ -45,11 +45,9 @@ def make_candidate(worktree_path: str | Path = "/tmp/fake-worktree") -> Candidat
 
 def make_config(
     command: str = "python eval.py",
-    score_parser: str = "helix_result",
 ) -> HelixConfig:
     evaluator = EvaluatorConfig(
         command=command,
-        score_parser=score_parser,
         include_stdout=True,
         include_stderr=True,
         extra_commands=[],
@@ -208,7 +206,7 @@ class TestHelixResultParsing:
         assert "line2" in result.asi["stdout"]
 
     @patch("helix.executor.subprocess.run")
-    def test_instance_ids_subset_post_filter_matches_batch(
+    def test_instance_ids_subset_matches_batch(
         self, mock_run, tmp_path: Path
     ):
         """When HELIX requests a subset via ``instance_ids``, it writes

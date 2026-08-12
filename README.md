@@ -210,7 +210,6 @@ Then enable the sandbox and configure the evaluator sidecar in `helix.toml`:
 ```toml
 [evaluator]
 command = "python /runner/evaluate_client.py"
-score_parser = "helix_result"
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
@@ -265,7 +264,7 @@ HELIX treats your **entire working tree** as the candidate. There is no `target_
 ```
 my-project/
 ├── helix.toml       # HELIX config (run `helix init` to generate)
-├── evaluate.py      # Your evaluator script (must output JSON with a "score" key)
+├── evaluate.py      # Your evaluator script (must print a HELIX_RESULT= line)
 ├── solve.py         # File(s) you want to evolve (the backend will find them)
 └── ...              # Any other files; HELIX will consider them too
 ```
@@ -313,7 +312,8 @@ HELIX is configured via `helix.toml` in your project root.
 objective = "Maximize test pass rate and code coverage"
 
 [evaluator]
-command = "pytest --tb=short -q"
+# evaluate.py must print one HELIX_RESULT=... line for HELIX to score it.
+command = "uv run python evaluate.py"
 ```
 
 When your evaluator needs project dependencies, make `evaluator.command` use the
@@ -342,7 +342,7 @@ rng_seed = 0
 
 [evaluator]
 command = "uv run python evaluate.py"
-# Available parsers: "pytest" | "exitcode" | "json_accuracy" | "json_score" | "helix_result"
+# The only supported parser is "helix_result".
 # "helix_result" takes a per-example list matching GEPA optimize_anything's
 # `tuple[float, SideInfo] | float` union — each entry is either a bare
 # score or a [score, side_info] pair, mixed allowed:
@@ -353,7 +353,6 @@ command = "uv run python evaluate.py"
 # `instance_scores` and stores the side_info list for the reflection
 # prompt. `HELIX_RESULT` is a machine protocol; use `from helix import log`
 # for human-readable evaluator notes.
-score_parser = "json_score"
 include_stdout = true
 include_stderr = true
 extra_commands = []               # additional commands to run for context
@@ -397,11 +396,15 @@ minibatch_size = 3               # train-set minibatch size for reflective mutat
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate before full val
-frontier_type = "hybrid"         # Pareto dimensionality (GEPA FrontierType parity):
+frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType parity):
                                  # "instance" | "objective" | "hybrid" | "cartesian".
-                                 # Default "hybrid" matches GEPA optimize_anything.
-                                 # Non-instance axes require score_parser="helix_result"
-                                 # emitting per-example side_info["scores"] dicts.
+                                 # The four modes mirror GEPA optimize_anything;
+                                 # "instance" is HELIX's default.
+                                 # Non-instance axes use per-example
+                                 # side_info["scores"] dicts. Without them,
+                                 # hybrid warns/no-ops its objective axis and
+                                 # continues on instances; objective/cartesian
+                                 # raise MissingObjectiveScoresError at selection.
 
 [agent]
 backend = "claude"               # "claude" | "codex" | "cursor" | "gemini" | "opencode"
@@ -526,7 +529,6 @@ files.
 ```toml
 [evaluator]
 command = "uv run python evaluate.py"
-score_parser = "json_accuracy"
 protected_files = [
   "evaluate.py",
   "goldens.json",
@@ -558,39 +560,31 @@ from concurrent.futures import ThreadPoolExecutor
 instance_ids = load_batch_from_helix()   # or argv / HELIX_SPLIT path
 with ThreadPoolExecutor(max_workers=4) as pool:
     results = dict(zip(instance_ids, pool.map(evaluate_one, instance_ids)))
-print(json.dumps({"accuracy": mean(results.values()), "instance_scores": results}))
+payload = [[score, {"scores": {"accuracy": score}}] for score in results.values()]
+print("HELIX_RESULT=" + json.dumps(payload))
 ```
 
 Pick the worker count however you like (constant, CLI arg, derived from
 `os.cpu_count()`). HELIX remains agnostic — it just consumes the per-instance
 scores the evaluator returns.
 
-### Score Parsers
+### Score Parser
 
-HELIX includes 4 built-in score parsers to extract metrics from evaluator output:
-
-| Parser | Input | Output | Use Case |
-|---|---|---|---|
-| **pytest** | Parses `pytest -q` stdout | `scores`: `pass_rate`, `duration`<br>`instance_scores`: per-test pass/fail | Unit test suites |
-| **exitcode** | Exit code only | `scores`: `success` (1.0 or 0.0) | Simple pass/fail evaluators |
-| **json_accuracy** | JSON stdout with `accuracy` field | `scores`: `accuracy`<br>`instance_scores`: per-instance scores | Classification and benchmark tasks |
-| **json_score** | JSON stdout with `score` field | `scores`: `score`<br>`instance_scores`: `score` | Optimization tasks (e.g., circle packing) |
-
-**Example evaluator outputs:**
+HELIX has one score parser: `helix_result`. Evaluators read the positional ids
+from `helix_batch.json` and emit one `[score, side_info]` pair per id:
 
 ```python
-# json_score parser expects:
-print(json.dumps({"score": 2.63}))
-
-# json_accuracy parser expects:
-print(json.dumps({
-    "accuracy": 0.85,
-    "instance_scores": {"puzzle_001": 1.0, "puzzle_002": 0.0}
-}))
+print("HELIX_RESULT=" + json.dumps([
+    [2.63, {"scores": {"sum_radii": 2.63}}],
+]))
 ```
 
+For a batch, the payload must have the same length and order as
+`helix_batch.json`. `side_info` is retained for reflection; its optional
+`scores` dictionary supplies named objective axes.
+
 For GEPA-style reflective feedback, prefer structured per-example
-`side_info` when using `score_parser = "helix_result"`. For additional
+`side_info` with the built-in result parser. For additional
 human-readable notes that are not tied to one example, evaluators may call
 `from helix import log` and then `log("what happened", key=value)`. HELIX
 captures these notes through `HELIX_ASI_LOG`, not stdout, and renders them as

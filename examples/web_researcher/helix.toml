@@ -6,14 +6,14 @@ Questions cover current library versions, API behaviors, and language feature ch
 
 [evaluator]
 command = "uv run python evaluate.py"
-score_parser = "json_accuracy"
 
 [evolution]
 max_generations = 2
 merge_enabled = true
 num_parallel_proposals = 8
 
-[claude]
+[agent]
+backend = "claude"
 model = "haiku"
 effort = "low"
 max_turns = 20

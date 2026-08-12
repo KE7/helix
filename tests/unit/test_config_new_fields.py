@@ -1,4 +1,8 @@
-"""Unit tests for new config fields added in Phase 3 (minibatch/GEPA parity)."""
+"""Unit tests for new config fields added in Phase 3 (minibatch/GEPA parity).
+
+Evaluator command examples below refer to an ``evaluate.py`` script that emits
+the required ``HELIX_RESULT=`` line; these tests exercise config handling only.
+"""
 
 from __future__ import annotations
 
@@ -200,22 +204,21 @@ class TestEvolutionConfigNewFields:
 
 
 # ---------------------------------------------------------------------------
-# evolution.frontier_type — GEPA multi-axis Pareto dimensionality
+# evolution.frontier_type — GEPA FrontierType multi-axis dimensionality
 # ---------------------------------------------------------------------------
 
 
 class TestEvolutionFrontierType:
-    """``evolution.frontier_type`` mirrors GEPA's ``FrontierType``
-    literal (``src/gepa/core/state.py:22-23``).  HELIX's default is
-    ``"hybrid"`` because O.A. is the right parent for HELIX — GEPA's
-    O.A. defaults to ``"hybrid"`` at
-    ``src/gepa/optimize_anything.py:476``.  The base ``api.py`` default
-    is ``"instance"`` but that's not the right baseline for HELIX.
+    """``evolution.frontier_type`` mirrors GEPA's ``FrontierType`` concept
+    and selects the Pareto keyspace.  The HELIX default is ``"instance"``:
+    it is the only value that every score
+    parser can satisfy, since the multi-axis modes need per-example
+    objective scores that only ``helix_result`` evaluators opt into.
     """
 
-    def test_default_is_hybrid(self):
+    def test_default_is_instance(self):
         cfg = EvolutionConfig()
-        assert cfg.frontier_type == "hybrid"
+        assert cfg.frontier_type == "instance"
 
     @pytest.mark.parametrize(
         "variant",
@@ -240,7 +243,7 @@ class TestEvolutionFrontierType:
             objective = "Test"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [evolution]
             frontier_type = "{variant}"
@@ -256,11 +259,11 @@ class TestEvolutionFrontierType:
             objective = "Test"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
         )
         cfg = load_config(toml)
-        assert cfg.evolution.frontier_type == "hybrid"
+        assert cfg.evolution.frontier_type == "instance"
 
     def test_toml_invalid_literal_rejected_at_load(self, tmp_path):
         toml = tmp_path / "helix.toml"
@@ -269,7 +272,7 @@ class TestEvolutionFrontierType:
             objective = "Test"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [evolution]
             frontier_type = "not-a-real-type"
@@ -292,8 +295,7 @@ class TestSandboxConfig:
             ANTHROPIC_API_KEY = "dummy"
 
             [evaluator]
-            command = "pytest -q"
-            score_parser = "exitcode"
+            command = "python evaluate.py"
         """)
         )
 
@@ -320,7 +322,7 @@ class TestSandboxConfig:
         with pytest.raises(ValueError, match=r"\[evaluator.sidecar\]"):
             HelixConfig(
                 objective="Test",
-                evaluator={"command": "pytest"},
+                evaluator={"command": "python evaluate.py"},
                 sandbox=SandboxConfig(enabled=True, evaluator=True),
             )
 
@@ -329,7 +331,6 @@ class TestSandboxConfig:
             objective="Test",
             evaluator={
                 "command": "python /runner/evaluate.py",
-                "score_parser": "helix_result",
                 "sidecar": EvaluatorSidecarConfig(
                     image="eval:latest",
                     runner_image="eval-runner:latest",
@@ -356,7 +357,6 @@ class TestSandboxConfig:
 
             [evaluator]
             command = "python /runner/evaluate.py"
-            score_parser = "helix_result"
 
             [evaluator.sidecar]
             image = "eval:latest"
@@ -416,7 +416,7 @@ class TestSandboxConfig:
             objective = "Test"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
         """)
         )
         (tmp_path / ".env").write_text(
@@ -458,7 +458,7 @@ class TestTomlRoundTrip:
             objective = "Maximise coverage"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [seedless]
             train_path = "/tmp/train.jsonl"
@@ -496,7 +496,7 @@ class TestTomlRoundTrip:
             objective = "Maximise coverage"
 
             [evaluator]
-            command = "pytest"
+            command = "python evaluate.py"
 
             [seedless]
             train_path = "/tmp/train.jsonl"
@@ -509,7 +509,7 @@ class TestTomlRoundTrip:
     def test_model_dump_roundtrip(self):
         cfg = HelixConfig(
             objective="Test",
-            evaluator={"command": "pytest"},
+            evaluator={"command": "python evaluate.py"},
             seedless={"train_path": "/tmp/train.jsonl", "val_path": "/tmp/val.jsonl"},
             evolution={
                 "minibatch_size": 4,

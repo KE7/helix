@@ -42,9 +42,10 @@ def make_eval_result(
 ) -> EvalResult:
     """Build an EvalResult with default per-example ``objective_scores``.
 
-    The synthesised objective slots let the result satisfy
-    :meth:`ParetoFrontier._validate_objective_scores` under the
-    GEPA-O.A. default ``frontier_type = "hybrid"``.
+    The synthesised objective slots are unused by the default
+    ``frontier_type = "instance"`` path, but keep the result valid for
+    :meth:`ParetoFrontier._validate_objective_scores` if a test opts
+    into a multi-axis frontier.
     """
     if instance_scores is None:
         instance_scores = {"i1": 0.5}
@@ -67,10 +68,10 @@ def make_config(
 ) -> HelixConfig:
     """Build a HelixConfig for the seedless test suite.
 
-    Leaves ``frontier_type`` at :class:`EvolutionConfig`'s
-    GEPA-O.A. default (``"hybrid"``).  Eval results from
-    :func:`make_eval_result` carry per-example ``objective_scores``
-    so the validator is satisfied.
+    Leaves ``frontier_type`` at :class:`EvolutionConfig`'s default
+    (``"instance"``).  Eval results from :func:`make_eval_result` carry
+    per-example ``objective_scores`` regardless, so the validator would
+    also be satisfied under a multi-axis frontier.
     """
     from helix.config import SeedlessConfig
 

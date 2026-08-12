@@ -91,7 +91,6 @@ passthrough_env = ["CUDA_VISIBLE_DEVICES", "HF_HOME"]
 
 [evaluator]
 command = "python /runner/evaluate_client.py"
-score_parser = "helix_result"
 include_stdout = true
 include_stderr = true
 
@@ -116,7 +115,7 @@ max_workers = 32
 num_parallel_proposals = 4
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
-frontier_type = "hybrid"
+frontier_type = "instance"
 
 [agent]
 backend = "codex"
@@ -166,12 +165,12 @@ HELIX also sets:
 - `HELIX_INSTANCE_IDS` as a comma-separated copy of requested ids
 - `HELIX_EVALUATOR_ENDPOINT` for sidecar evaluator clients
 
-Prefer `helix_batch.json` for `score_parser = "helix_result"` because the
-parser uses that same file to zip positional results back to ids.
+Prefer `helix_batch.json` because the built-in result parser uses that same
+file to zip positional results back to ids.
 
 ## Evaluator Contract
 
-For `score_parser = "helix_result"`, HELIX writes `helix_batch.json` in the
+HELIX writes `helix_batch.json` in the
 candidate workspace before evaluation. The evaluator-runner reads it, calls the
 sidecar endpoint from `HELIX_EVALUATOR_ENDPOINT`, and must print one line:
 

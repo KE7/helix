@@ -62,13 +62,11 @@ objective = "Describe the optimisation objective"
 # Avoid bare `python3 evaluate.py` unless that interpreter already has every
 # evaluator dependency installed.
 command = "uv run python evaluate.py"
-# score_parser = "pytest"   # or "exitcode", "json_accuracy", "json_score"
 # protected_files = ["evaluate.py"]  # optional extra evaluator-immutable files
 #
 # With [sandbox].enabled = true, configure [evaluator.sidecar] and make
 # command an evaluator-runner command such as:
 #   command = "python /runner/evaluate_client.py"
-#   score_parser = "helix_result"
 #
 # [evaluator.sidecar]
 # image = "my-private-evaluator:latest"
