@@ -100,7 +100,6 @@ Configure:
 ```toml
 [evaluator]
 command = "python /runner/evaluate_client.py"
-score_parser = "helix_result"
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
@@ -115,19 +114,18 @@ val_size = 100
 
 ## Single-Task GEPA Mode
 
-If GEPA had no dataset and only optimized one aggregate objective, HELIX can use
-a simpler parser:
+If GEPA had no dataset and only optimized one aggregate objective, HELIX can
+use a single-entry ``helix_result`` output contract:
 
 ```python
 import json
 score = evaluate_candidate()
-print(json.dumps({"score": score}))
+print("HELIX_RESULT=" + json.dumps([[score, {"scores": {"objective": score}}]]))
 ```
 
 ```toml
 [evaluator]
 command = "python /runner/evaluate_client.py"
-score_parser = "json_score"
 
 [evaluator.sidecar]
 image = "my-private-evaluator:latest"
@@ -247,8 +245,8 @@ Use stratified sampling when each minibatch should cover multiple tasks.
 
 ## Docker Sandbox In Migration
 
-For GEPA workflows that relied on a local Python process, HELIX adds coding
-agents and should normally use Docker sandboxing:
+For GEPA workflows that relied on a local Python process, HELIX adds coding agents
+and should normally use Docker sandboxing:
 
 ```toml
 [sandbox]
@@ -263,7 +261,7 @@ Run once per backend:
 helix sandbox login claude
 ```
 
-If the old GEPA evaluator depended on local packages, either:
+If the old GEPA evaluator depends on local packages, either:
 
 - build them into the sidecar image if they are evaluator/benchmark
   dependencies, or

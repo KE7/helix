@@ -162,13 +162,47 @@ class TestObjectiveFrontier:
         assert frontier._objective_best["accuracy"] == {"a", "b"}
 
     @pytest.mark.parametrize("frontier_type", ["objective", "hybrid", "cartesian"])
-    def test_missing_objective_scores_fails_loudly(self, frontier_type):
+    def test_missing_objective_scores_warns_and_is_tolerated(
+        self, frontier_type, caplog
+    ):
         frontier = ParetoFrontier(frontier_type=frontier_type)
-        with pytest.raises(MissingObjectiveScoresError, match="requires"):
-            frontier.add(
-                _make_candidate("a"),
-                _make_result("a", {"i0": 1.0}, objective_scores=None),
-            )
+        frontier.add(
+            _make_candidate("a"),
+            _make_result("a", {"i0": 1.0}, objective_scores=None),
+        )
+        assert "no objective axes" in caplog.text
+
+    @pytest.mark.parametrize("frontier_type", ["objective", "hybrid", "cartesian"])
+    def test_all_empty_objective_scores_exercise_selection(
+        self, frontier_type, caplog
+    ):
+        """Measure the post-validation behavior for every non-instance mode.
+
+        Hybrid retains its instance-axis parent pool. Objective/cartesian
+        have no coherent fallback and retain HELIX's typed actionable error.
+        """
+        frontier = ParetoFrontier(frontier_type=frontier_type, rng=random.Random(0))
+        frontier.add(
+            _make_candidate("a"),
+            _make_result("a", {"i0": 1.0}, objective_scores=[{}]),
+        )
+        assert "no objective axes" in caplog.text
+
+        if frontier_type == "hybrid":
+            assert frontier.active_frontier_snapshot() == {"inst::i0": ["a"]}
+            assert frontier.select_parent().id == "a"
+            assert frontier.get_non_dominated() == {"a"}
+        else:
+            assert frontier.active_frontier_snapshot() == {}
+            assert frontier.get_non_dominated() == set()
+            with pytest.raises(
+                MissingObjectiveScoresError,
+                match=(
+                    rf"frontier_type={frontier_type!r} has no objective axis "
+                    "and cannot select a parent"
+                ),
+            ):
+                frontier.select_parent()
 
     def test_active_frontier_is_objective_dict(self):
         frontier = ParetoFrontier(frontier_type="objective")
@@ -258,13 +292,22 @@ class TestCartesianFrontier:
                 ),
             )
 
-    def test_empty_objective_slots_fail_loudly(self):
+    def test_empty_objective_slots_are_tolerated(self, caplog):
         frontier = ParetoFrontier(frontier_type="hybrid")
-        with pytest.raises(MissingObjectiveScoresError, match="all objective_scores"):
-            frontier.add(
-                _make_candidate("a"),
-                _make_result("a", {"i0": 1.0}, objective_scores=[{}]),
-            )
+        frontier.add(
+            _make_candidate("a"),
+            _make_result("a", {"i0": 1.0}, objective_scores=[{}]),
+        )
+        assert "no objective axes" in caplog.text
+
+    def test_empty_objective_list_is_a_cartesian_noop(self, caplog):
+        frontier = ParetoFrontier(frontier_type="cartesian")
+        frontier.add(
+            _make_candidate("a"),
+            _make_result("a", {"i0": 1.0}, objective_scores=[]),
+        )
+        assert frontier.active_frontier_snapshot() == {}
+        assert "no objective axes" in caplog.text
 
     def test_active_frontier_is_cartesian_dict(self):
         frontier = ParetoFrontier(frontier_type="cartesian")

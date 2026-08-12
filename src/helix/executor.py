@@ -8,7 +8,6 @@ import shlex
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Any
 
 from helix.asi import (
     HELIX_ASI_LOG_ENV,
@@ -19,7 +18,7 @@ from helix.asi import (
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.exceptions import EvaluatorError, format_error_context
-from helix.parsers import get_parser
+from helix.parsers.helix_result import parse as parse_helix_result
 from helix.sandbox import (
     current_evaluator_sidecar_runtime,
     run_sandboxed_commands,
@@ -83,8 +82,8 @@ def _scrub_environment(
             non-evaluator subprocesses like Claude Code.
         instance_ids: Optional list of example IDs to evaluate on. Passed
             to the evaluator as HELIX_INSTANCE_IDS (comma-separated).
-            Evaluators that honor it restrict to these; others ignore it
-            and HELIX post-filters the returned instance_scores.
+            Evaluators may use it to restrict their own work; HELIX always
+            writes the same positional id list to helix_batch.json.
         passthrough_env: Optional list of extra env var names to preserve
             from the parent process (e.g. CUDA_VISIBLE_DEVICES, HF_HOME).
         fixed_env: Optional mapping of explicit env var values to inject after
@@ -196,10 +195,10 @@ def run_evaluator(
         config: HelixConfig with evaluator settings.
         split: Dataset split to use (default "val").
         instance_ids: Optional list of example ids to restrict the
-            evaluation to (GEPA §5.1 minibatch gate).  Exposed to
-            the evaluator via ``HELIX_INSTANCE_IDS`` and applied as
-            a post-filter to ``instance_scores`` for evaluators that
-            do not honour it.  None → evaluate the whole split.
+            evaluation to (GEPA §5.1 minibatch gate). Exposed to
+            the evaluator via HELIX_INSTANCE_IDS. The positional id list
+            in helix_batch.json is the source of truth for the returned
+            instance_scores. None → evaluate the whole split.
 
     Returns:
         EvalResult with scores and instance_scores.
@@ -361,10 +360,7 @@ def run_evaluator(
     # ``evolution.py`` can route it uniformly with the rest of the
     # evaluator-contract failures the parser raises (length mismatch,
     # missing batch file, etc.).  The ``helix_result`` parser does its
-    # own reverse-scan; this pre-check fires across all parser paths
-    # before any parser runs.  Payload shape is parser-specific —
-    # ``helix_result`` takes a list of per-example [score, side_info]
-    # pairs; other parsers ignore this line entirely.
+    # own reverse-scan before the parser runs.
     result_line_count = 0
     for line in reversed(stdout.splitlines()):
         if line.startswith("HELIX_RESULT="):
@@ -381,84 +377,19 @@ def run_evaluator(
                     exit_code=returncode,
                 )
 
-    # Parse scores.  ``helix_result`` returns a 4-tuple with per-example
+    # Parse scores.  The sole parser returns a 4-tuple with per-example
     # side_info (GEPA O.A. evaluator contract: one ``(score, side_info)``
     # pair per example) and the per-example ``objective_scores`` harvest
-    # from ``side_info["scores"]``.  All other parsers return the
-    # 2-tuple ``(scores, instance_scores)``.
-    parser = get_parser(evaluator.score_parser)
-    per_example_side_info: list[dict[str, Any]] | None = None
-    objective_scores: list[dict[str, float]] | None = None
-
-    if evaluator.score_parser == "pytest":
-        scores, instance_scores = parser(stdout, stderr)
-    elif evaluator.score_parser == "helix_result":
-        # helix_result reads ``{worktree}/helix_batch.json`` to recover
-        # the id list HELIX wrote pre-invocation and zips it with the
-        # per-example ``[score, side_info]`` payload on stdout.
-        (
-            scores,
-            instance_scores,
-            per_example_side_info,
-            objective_scores,
-        ) = parser(returncode, stdout, stderr, candidate.worktree_path)
-    else:
-        # exitcode, json_accuracy, and other parsers take (returncode, stdout, stderr)
-        scores, instance_scores = parser(returncode, stdout, stderr)
-
-    # Post-filter instance_scores when a subset was requested: evaluators
-    # that ignore HELIX_INSTANCE_IDS will still have returned the whole
-    # split, but the minibatch gate only looks at the requested subset.
-    if instance_ids is not None:
-        # ``exitcode`` is a global pass/fail parser: it returns
-        # ``{"success": score}`` as instance_scores rather than per-example
-        # ids.  Broadcasting the global result to all requested ids is
-        # correct here — a process that exits 0 passed for all examples; one
-        # that exits non-zero failed for all examples.  Without this
-        # broadcast every requested id lands in ``missing`` and gets filled
-        # with 0.0, causing spurious rejections when the evaluator exited 0.
-        if evaluator.score_parser == "exitcode":
-            global_score = instance_scores.get("success", 0.0)
-            instance_scores = {str(eid): global_score for eid in instance_ids}
-        else:
-            filtered: dict[str, float] = {}
-            missing: list[str] = []
-            for eid in instance_ids:
-                eid_s = str(eid)
-                if eid_s in instance_scores:
-                    filtered[eid_s] = instance_scores[eid_s]
-                else:
-                    # Evaluator produced no result for this id → 0.0
-                    filtered[eid_s] = 0.0
-                    missing.append(eid_s)
-            if missing:
-                # Diagnostic: the silent zero-fill above used to hide evaluator
-                # bugs — most infamously an ``instance_scores`` dict keyed by
-                # aggregate metric names (``task__metric``) instead of the
-                # per-example ids HELIX writes to ``helix_batch.json``
-                # (``task__trialN``).  That mismatch made strict-improvement
-                # acceptance compare ``0.0 vs 0.0`` for 113 straight generations
-                # in one real run.  The per-example ``helix_result`` contract
-                # removes that class of bug at the parser level, but this
-                # warning is still useful defense in depth: e.g. when a user
-                # picks ``score_parser="exitcode"`` and then asks for a
-                # minibatch subset, every requested id lands here.
-                sample = missing[:5]
-                logger.warning(
-                    "evaluator returned %d/%d missing instance_scores for "
-                    "requested ids (sample: %r%s); these were filled with 0.0. "
-                    "If you need per-id scores for the minibatch gate, use "
-                    "score_parser='helix_result' (per-example contract — "
-                    "HELIX reads helix_batch.json and zips it with your list "
-                    "of [score, side_info] pairs).",
-                    len(missing),
-                    len(instance_ids),
-                    sample,
-                    ""
-                    if len(missing) <= len(sample)
-                    else f" ... +{len(missing) - len(sample)} more",
-                )
-            instance_scores = filtered
+    # from ``side_info["scores"]``.
+    # helix_result reads ``{worktree}/helix_batch.json`` to recover the id
+    # list HELIX wrote pre-invocation and zips it with the per-example
+    # ``[score, side_info]`` payload on stdout.
+    (
+        scores,
+        instance_scores,
+        per_example_side_info,
+        objective_scores,
+    ) = parse_helix_result(returncode, stdout, stderr, candidate.worktree_path)
 
     _result = EvalResult(
         candidate_id=candidate.id,

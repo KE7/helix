@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import random as _random
-import shutil
 import shlex
 import subprocess
 import tempfile
@@ -81,7 +80,7 @@ from helix.worktree import (
     remove_worktree,
     snapshot_candidate,
 )
-from helix.evaluator_manifest import (  # noqa: E402  (after helix.worktree intentionally)
+from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatibility symbols)
     # 14 moved symbols — re-exported for backward compatibility and internal use
     _collect_protected_evaluator_paths,
     _copy_protected_path,
@@ -132,8 +131,8 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
     Top-level keys:
       * ``objective``: changes the optimization target outright.
       * ``rng_seed``: pinned for full determinism parity with the prior run.
-      * ``evaluator``: command, parser, stdout/stderr capture flags, extra
-        commands, protected files, sidecar configuration — all influence
+      * ``evaluator``: command, stdout/stderr capture flags, extra commands,
+        protected files, sidecar configuration — all influence
         what saved scores actually mean (GEPA Optimize Anything parity).
       * ``dataset``: full pydantic dump; train/val splits and grouping
         affect which examples saved scores were computed against.
@@ -168,7 +167,6 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
         "rng_seed": config.rng_seed,
         "evaluator": {
             "command": config.evaluator.command,
-            "score_parser": config.evaluator.score_parser,
             "include_stdout": config.evaluator.include_stdout,
             "include_stderr": config.evaluator.include_stderr,
             "extra_commands": list(config.evaluator.extra_commands),
@@ -922,8 +920,8 @@ def _cached_evaluate_batch(
         # Write a REDUCED helix_batch.json containing only the uncached
         # example ids, then invoke the evaluator subprocess.  Evaluators
         # read that file from cwd and filter their own dataset to exactly
-        # these ids; run_evaluator additionally post-filters
-        # instance_scores to ``batch`` in executor.py:245.
+        # these ids; the positional parser reads the same file to construct
+        # the returned instance_scores.
         # Per-worktree lock: see ``_worktree_lock`` — parent-minibatch
         # parallelism (audit-mutation §C4) requires serialising the
         # ``write_helix_batch`` + ``run_evaluator`` pair on a given worktree.

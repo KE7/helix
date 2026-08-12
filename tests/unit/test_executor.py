@@ -1,22 +1,18 @@
-"""Unit tests for HELIX executor."""
+"""Unit tests for the single-parser HELIX executor path."""
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
-
-from helix.population import Candidate, EvalResult
-from helix.config import HelixConfig, EvaluatorConfig
+from helix.config import EvaluatorConfig, HelixConfig
 from helix.executor import run_evaluator
+from helix.population import Candidate, EvalResult
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def make_candidate(worktree_path: str = "/tmp/fake-worktree") -> Candidate:
+def make_candidate(worktree_path: str) -> Candidate:
     return Candidate(
         id="cand-001",
         worktree_path=worktree_path,
@@ -29,253 +25,114 @@ def make_candidate(worktree_path: str = "/tmp/fake-worktree") -> Candidate:
 
 
 def make_config(
-    command: str = "pytest -q",
-    score_parser: str = "exitcode",
+    command: str = "python eval.py",
     include_stdout: bool = True,
     include_stderr: bool = True,
     extra_commands: list[str] | None = None,
 ) -> HelixConfig:
-    evaluator = EvaluatorConfig(
-        command=command,
-        score_parser=score_parser,
-        include_stdout=include_stdout,
-        include_stderr=include_stderr,
-        extra_commands=extra_commands or [],
+    return HelixConfig(
+        objective="test objective",
+        evaluator=EvaluatorConfig(
+            command=command,
+            include_stdout=include_stdout,
+            include_stderr=include_stderr,
+            extra_commands=extra_commands or [],
+        ),
     )
-    return HelixConfig(objective="test objective", evaluator=evaluator)
 
 
-# ---------------------------------------------------------------------------
-# Tests: successful evaluation
-# ---------------------------------------------------------------------------
+def _result_line(scores: list[float], side_info: list[dict] | None = None) -> str:
+    infos = side_info or [{} for _ in scores]
+    return "HELIX_RESULT=" + json.dumps(
+        [[score, info] for score, info in zip(scores, infos)]
+    )
 
 
-class TestRunEvaluatorSuccess:
-    def test_returns_eval_result(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="output text",
-            stderr="",
-            returncode=0,
+def _prepare_batch(path: Path, ids: list[str] | None = None) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "helix_batch.json").write_text(json.dumps(ids or ["example-0"]))
+
+
+class TestRunEvaluator:
+    def test_returns_eval_result_and_per_example_fields(self, mocker, tmp_path: Path):
+        _prepare_batch(tmp_path, ["a", "b"])
+        mocker.patch(
+            "helix.executor.subprocess.run",
+            return_value=MagicMock(
+                stdout=_result_line([1.0, 0.5], [{"note": "a"}, {"note": "b"}]),
+                stderr="",
+                returncode=0,
+            ),
         )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode")
 
-        result = run_evaluator(candidate, config)
+        result = run_evaluator(make_candidate(str(tmp_path)), make_config())
 
         assert isinstance(result, EvalResult)
-        assert result.candidate_id == candidate.id
+        assert result.scores["success"] == 0.75
+        assert result.instance_scores == {"a": 1.0, "b": 0.5}
+        assert result.per_example_side_info == [{"note": "a"}, {"note": "b"}]
 
-    def test_success_scores(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="",
-            stderr="",
-            returncode=0,
+    def test_nonzero_return_code_zeroes_aggregate(self, mocker, tmp_path: Path):
+        _prepare_batch(tmp_path)
+        mocker.patch(
+            "helix.executor.subprocess.run",
+            return_value=MagicMock(
+                stdout=_result_line([1.0]), stderr="error", returncode=1
+            ),
         )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode")
 
-        result = run_evaluator(candidate, config)
-
-        assert result.scores["success"] == 1.0
-
-    def test_failure_scores(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="",
-            stderr="error output",
-            returncode=1,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode")
-
-        result = run_evaluator(candidate, config)
+        result = run_evaluator(make_candidate(str(tmp_path)), make_config())
 
         assert result.scores["success"] == 0.0
+        assert result.instance_scores == {"example-0": 1.0}
 
-    def test_stdout_included_in_asi(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="hello stdout",
-            stderr="",
-            returncode=0,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode", include_stdout=True)
-
-        result = run_evaluator(candidate, config)
-
-        assert result.asi["stdout"] == "hello stdout"
-
-    def test_stderr_included_in_asi(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="",
-            stderr="hello stderr",
-            returncode=0,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode", include_stderr=True)
-
-        result = run_evaluator(candidate, config)
-
-        assert result.asi["stderr"] == "hello stderr"
-
-    def test_stdout_excluded_when_disabled(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="hello stdout",
-            stderr="",
-            returncode=0,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode", include_stdout=False)
-
-        result = run_evaluator(candidate, config)
-
-        assert "stdout" not in result.asi
-
-    def test_stderr_excluded_when_disabled(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout="",
-            stderr="hello stderr",
-            returncode=0,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode", include_stderr=False)
-
-        result = run_evaluator(candidate, config)
-
-        assert "stderr" not in result.asi
-
-    def test_sets_helix_asi_log_env(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
-        candidate = make_candidate()
-        config = make_config(score_parser="exitcode")
-
-        run_evaluator(candidate, config)
-
-        env = mock_run.call_args.kwargs["env"]
-        assert "HELIX_ASI_LOG" in env
-
-    def test_captures_helix_log_in_asi(self, tmp_path):
+    def test_asi_options_and_helix_log(self, tmp_path: Path):
+        _prepare_batch(tmp_path)
         command = (
             f"{sys.executable} -c "
-            "\"from helix import log; log('unique evaluator note', score=0.7)\""
+            '"from helix import log; log(\'unique evaluator note\', score=0.7); '
+            "print('" + _result_line([0.7]) + "')" + '"'
         )
-        candidate = make_candidate(str(tmp_path))
-        config = make_config(command=command, score_parser="exitcode")
-
-        result = run_evaluator(candidate, config)
+        result = run_evaluator(
+            make_candidate(str(tmp_path)),
+            make_config(command=command),
+        )
 
         assert "unique evaluator note" in result.asi["log"]
         assert "score: 0.7" in result.asi["log"]
+        assert _result_line([0.7]) in result.asi["stdout"]
 
-
-# ---------------------------------------------------------------------------
-# Tests: extra_commands
-# ---------------------------------------------------------------------------
-
-
-class TestRunEvaluatorExtraCommands:
-    def test_extra_commands_run(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-
-        # First call: main command; second: extra_command
-        mock_run.side_effect = [
-            MagicMock(stdout="main out", stderr="", returncode=0),
-            MagicMock(stdout="extra out", stderr="", returncode=0),
-        ]
-        candidate = make_candidate()
-        config = make_config(
-            score_parser="exitcode",
-            extra_commands=["cat coverage.txt"],
+    def test_extra_commands_are_captured(self, mocker, tmp_path: Path):
+        _prepare_batch(tmp_path)
+        mocker.patch(
+            "helix.executor.subprocess.run",
+            side_effect=[
+                MagicMock(stdout=_result_line([0.8]), stderr="", returncode=0),
+                MagicMock(stdout="extra output", stderr="", returncode=0),
+            ],
         )
 
-        run_evaluator(candidate, config)
-
-    def test_extra_command_output_in_asi(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-
-        mock_run.side_effect = [
-            MagicMock(stdout="main out", stderr="", returncode=0),
-            MagicMock(stdout="extra out 0", stderr="", returncode=0),
-        ]
-        candidate = make_candidate()
-        config = make_config(
-            score_parser="exitcode",
-            extra_commands=["cat coverage.txt"],
+        result = run_evaluator(
+            make_candidate(str(tmp_path)),
+            make_config(extra_commands=["echo extra"]),
         )
 
-        result = run_evaluator(candidate, config)
+        assert result.asi["extra_0"] == "extra output"
 
-        assert "extra_0" in result.asi
-        assert result.asi["extra_0"] == "extra out 0"
-
-    def test_multiple_extra_commands_in_asi(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-
-        mock_run.side_effect = [
-            MagicMock(stdout="main out", stderr="", returncode=0),
-            MagicMock(stdout="extra 0", stderr="", returncode=0),
-            MagicMock(stdout="extra 1", stderr="", returncode=0),
-        ]
-        candidate = make_candidate()
-        config = make_config(
-            score_parser="exitcode",
-            extra_commands=["cat file0.txt", "cat file1.txt"],
+    def test_requested_ids_follow_batch_order(self, mocker, tmp_path: Path):
+        _prepare_batch(tmp_path, ["a", "b"])
+        mocker.patch(
+            "helix.executor.subprocess.run",
+            return_value=MagicMock(
+                stdout=_result_line([0.25, 0.75]), stderr="", returncode=0
+            ),
         )
 
-        result = run_evaluator(candidate, config)
-
-        assert result.asi["extra_0"] == "extra 0"
-        assert result.asi["extra_1"] == "extra 1"
-
-
-# ---------------------------------------------------------------------------
-# Tests: pytest parser integration via executor
-# ---------------------------------------------------------------------------
-
-
-class TestRunEvaluatorWithPytestParser:
-    def test_pytest_parser_pass_rate(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        pytest_output = (
-            "tests/test_foo.py::test_a PASSED\n"
-            "FAILED tests/test_foo.py::test_b - AssertionError\n"
-            "1 passed, 1 failed in 0.5s\n"
+        result = run_evaluator(
+            make_candidate(str(tmp_path)),
+            make_config(),
+            split="train",
+            instance_ids=["a", "b"],
         )
-        mock_run.return_value = MagicMock(
-            stdout=pytest_output,
-            stderr="",
-            returncode=1,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="pytest")
 
-        result = run_evaluator(candidate, config)
-
-        assert abs(result.scores["pass_rate"] - 0.5) < 1e-6
-
-    def test_pytest_instance_scores(self, mocker):
-        mock_run = mocker.patch("helix.executor.subprocess.run")
-        pytest_output = (
-            "tests/test_foo.py::test_a PASSED\n"
-            "FAILED tests/test_foo.py::test_b - AssertionError\n"
-            "1 passed, 1 failed in 0.5s\n"
-        )
-        mock_run.return_value = MagicMock(
-            stdout=pytest_output,
-            stderr="",
-            returncode=1,
-        )
-        candidate = make_candidate()
-        config = make_config(score_parser="pytest")
-
-        result = run_evaluator(candidate, config)
-
-        assert result.instance_scores["tests/test_foo.py::test_a"] == 1.0
-        assert result.instance_scores["tests/test_foo.py::test_b"] == 0.0
+        assert result.instance_scores == {"a": 0.25, "b": 0.75}

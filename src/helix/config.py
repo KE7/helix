@@ -80,15 +80,13 @@ class EvaluatorConfig(BaseModel):
     Defines how candidates are evaluated via shell commands and how
     their results are parsed into scores.
 
-    ``score_parser`` selects how HELIX turns evaluator output into
-    ``(scores, instance_scores)``.  For the minibatch-gate at
-    :func:`helix.evolution._minibatch_gate_accept` the **per-id keys**
-    in ``instance_scores`` matter: the gate looks up
+    HELIX reads a list of per-example ``[score, side_info]`` pairs from
+    evaluator output (GEPA ``optimize_anything`` evaluator parity).  For
+    the minibatch-gate at :func:`helix.evolution._minibatch_gate_accept` the
+    **per-id keys** in ``instance_scores`` matter: the gate looks up
     ``instance_scores[eid]`` where ``eid`` is whatever HELIX wrote to
-    ``helix_batch.json`` pre-invocation.  Pick ``"helix_result"`` to
-    hand HELIX a list of per-example ``[score, side_info]`` pairs
-    (GEPA ``optimize_anything`` evaluator parity) — HELIX owns the
-    id-keying so the evaluator never types a HELIX-internal id.
+    ``helix_batch.json`` pre-invocation.  HELIX owns the id-keying so the
+    evaluator never types a HELIX-internal id.
 
     ``helix_result`` is the only parser that populates the new
     :attr:`helix.population.EvalResult.per_example_side_info` and
@@ -97,20 +95,15 @@ class EvaluatorConfig(BaseModel):
     the reserved ``side_info_i["scores"]`` sub-dict (multi-axis Pareto
     frontier — see :attr:`EvolutionConfig.frontier_type`).
 
-    The other parsers (``"pytest"``, ``"exitcode"``, ``"json_accuracy"``,
-    ``"json_score"``) aggregate to a single score and do NOT produce
-    id-keyed per-instance scores; combining them with ``instance_ids``
-    triggers the zero-fill warning in :mod:`helix.executor`.  They also
-    leave ``objective_scores`` empty, so ``frontier_type`` values other
-    than ``"instance"`` fail loudly when selected with these parsers.
+    The ``helix_result`` parser is the only supported parser. Evaluators emit one
+    ``[score, side_info]`` pair per id in ``helix_batch.json``; HELIX owns
+    id-keying, aggregate scores, per-example diagnostics, and objective-score
+    harvesting from ``side_info["scores"]``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     command: str
-    score_parser: Literal[
-        "pytest", "exitcode", "json_accuracy", "json_score", "helix_result"
-    ] = "pytest"
     include_stdout: bool = True
     include_stderr: bool = True
     extra_commands: list[str] = Field(default_factory=list)
@@ -410,32 +403,34 @@ class EvolutionConfig(BaseModel):
         ),
     )
     frontier_type: Literal["instance", "objective", "hybrid", "cartesian"] = Field(
-        default="hybrid",
+        default="instance",
         description=(
-            "Pareto frontier dimensionality.  Mirrors GEPA's "
-            "``FrontierType`` at ``src/gepa/core/state.py:22-23``.  Default "
-            'is ``"hybrid"`` to match GEPA ``optimize_anything``\'s own '
-            "default at ``src/gepa/optimize_anything.py:476`` — O.A. is the "
-            "right parent for HELIX, not the base ``api.py`` path whose "
-            'default is ``"instance"``.\n\n'
-            '- ``"instance"``: one frontier key per example-id.  Matches '
-            "HELIX's historical behaviour and GEPA's ``frontier_type="
-            '"instance"``.\n'
+            "Pareto frontier dimensionality.  The four modes mirror GEPA's "
+            "``FrontierType`` concept; HELIX defaults to ``\"instance\"``.\n\n"
+            '- ``"instance"`` (default): one frontier key per example-id, '
+            "built from the per-instance scores the built-in helix_result "
+            "produces.  This is the only mode with no extra evaluator "
+            "requirements.\n"
             '- ``"objective"``: one frontier key per objective-name, '
-            "score = mean of that objective across the valset.  Harvested "
-            'from ``side_info["scores"]`` via ``helix_result``.\n'
+            "score = mean of that objective across the valset.\n"
             '- ``"hybrid"``: both instance and objective frontiers '
             "maintained; a candidate is retained if it survives on either.\n"
             '- ``"cartesian"``: one frontier key per (val_id, '
-            "objective_name) pair.  Mirrors GEPA "
-            "``_update_pareto_front_for_cartesian``.\n\n"
+            "objective_name) pair.\n\n"
+            "**Opting into a multi-axis mode.**  The three non-"
+            '``"instance"`` modes need per-example objective scores, which '
+            "only the ``helix_result`` score parser can supply: your "
+            "evaluator must emit a ``[score, side_info]`` pair per example "
+            'with a ``"scores"`` sub-dict mapping objective names to '
+            'floats (e.g. ``[0.8, {"scores": {"speed": 0.9, "cost": '
+            '0.2}}]``).  Selecting a multi-axis mode without objective '
+            "scores emits a "
+            "warning; hybrid continues on its instance axis, while "
+            "objective/cartesian selection raises an actionable "
+            ":class:`helix.population.MissingObjectiveScoresError`.\n\n"
             "The acceptance gate stays positional on ``scores_list`` "
-            "regardless of ``frontier_type`` (GEPA ``acceptance.py:39-48``); "
-            "only the Pareto retention / parent-selection decision is "
-            "multi-axis.  Non-``instance`` paths require ``helix_result`` "
-            'to emit per-example ``side_info["scores"]`` dicts — without '
-            "them the objective / cartesian frontiers raise instead of "
-            "falling back to scalar semantics."
+            "regardless of ``frontier_type``; only the Pareto retention / "
+            "parent-selection decision is multi-axis."
         ),
     )
 

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING**: Removed the `evaluator.score_parser` configuration field. The built-in
+  `helix_result` parser is now implicit; configurations that still provide the
+  removed field are rejected by Pydantic's `extra="forbid"` validation.
+  Persisted resume records created before 0.3.0 retain the old field in their
+  semantic snapshot and must be restarted rather than resumed.
+- **BREAKING**: Removed the `pytest`, `exitcode`, `json_accuracy`, and
+  `json_score` score parsers. `helix_result` is now the only supported parser
+  and the default. Migration: emit one `HELIX_RESULT=` line containing a
+  positional `[score, side_info]` pair for every id in `helix_batch.json`.
+- **BREAKING**: `evolution.frontier_type` now defaults to `"instance"`
+  instead of `"hybrid"`.  The multi-axis frontiers require per-example
+  objective scores, which only the built-in result parser can supply
+  and only when the evaluator emits a `"scores"` sub-dict per example.
+  Legacy scalar parser configurations left `objective_scores` empty, so the old default
+  aborted the run with `MissingObjectiveScoresError` during the *seed*
+  evaluation — before generation 1.  Migration: projects that were
+  relying on the implicit `"hybrid"` default **and** do emit objective
+  scores must now set `frontier_type = "hybrid"` explicitly, otherwise
+  they silently get the single-axis instance frontier. Runs recorded under
+  the old `"hybrid"` default also cannot be resumed after upgrading:
+  resume validation rejects a saved `frontier_type` that differs from the
+  new `"instance"` default before it compares parser-key snapshots.
+  Explicitly requesting `"objective"` or `"cartesian"` without objective
+  scores warns during frontier updates and raises
+  `MissingObjectiveScoresError` when selection needs that axis; explicitly
+  requesting `"hybrid"` warns and no-ops its objective axis, continuing on
+  the instance axis.
+
 ## [0.2.2] - 2026-05-13
 
 ### Added
@@ -30,9 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
   bypassed when re-evaluating the parent's minibatch, ensuring consistent
   parent-comparison semantics across resume scenarios. (PR #32)
-- `exitcode` score parser now broadcasts the success score to *all* instance
-  IDs in the batch, fixing a bug where only the first instance was populated
-  when using `exitcode` with multi-example runs. (PR #32)
+- Scalar evaluator results now populate every requested instance ID in multi-example runs. (PR #32)
 
 ### Fixed
 - Mandatory stop-condition enforcement: `run_evolution` now raises `ValueError`
@@ -92,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation errors, pointing users at likely typos or misplaced keys.
 
 ### Changed
-- **BREAKING**: `score_parser = "helix_result"` now rejects malformed
+- **BREAKING**: The built-in result parser now rejects malformed
   `side_info["scores"]` payloads instead of silently dropping fields.
   Non-dict `"scores"` values, non-string objective names, and non-finite
   / non-numeric objective values now raise `EvaluatorError` at parse
@@ -122,7 +149,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across re-derivations.  Configs that previously relied on cache hits
   (e.g. resume scenarios that re-evaluate the seed) should set
   `cache_evaluation = true` explicitly.
-- **BREAKING**: `score_parser = "helix_result"` now takes a **per-example**
+- **BREAKING**: The built-in result parser now takes a **per-example**
   `HELIX_RESULT=[[score_0, side_info_0], [score_1, side_info_1], ...]`
   payload — one `[score, side_info]` pair per id in `helix_batch.json`.
   HELIX zips it into `instance_scores` and stores `side_info_i` on
@@ -138,7 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post-filter zero-fills any requested id (naming the count and a sample
   of up to five).  Non-breaking — behaviour is unchanged, only
   observability improves.  Catches parser / id-keying mismatches on
-  parsers other than `helix_result` (e.g. `exitcode` plus `instance_ids`).
+  evaluator/id mismatches.
 - **BREAKING**: `seedless` is now a section (`[seedless]` with `enabled = …`),
   not a top-level boolean.
 - **BREAKING**: `dataset.train_path` / `dataset.val_path` have moved to

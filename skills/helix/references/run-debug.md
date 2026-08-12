@@ -136,7 +136,7 @@ best candidate outside `.helix/`.
 
 Symptoms and checks:
 
-- No score: verify `score_parser` matches evaluator output.
+- No score: verify the evaluator emits the required result line.
 - `helix_result` failure: ensure `helix_batch.json` is read from cwd and output
   has exactly one final `HELIX_RESULT=` line.
 - Length mismatch: `len(HELIX_RESULT payload) == len(helix_batch.json)`.
@@ -226,7 +226,7 @@ venvs directly unless the user accepts portability and sandbox tradeoffs.
   dependencies to `runner_image`.
 - Add `passthrough_env` for non-secret runtime vars such as CUDA/HF caches.
 - Use `protected_files` only for non-sandboxed local prototypes.
-- Switch to `score_parser = "helix_result"` for per-example datasets.
+- Emit one positional result pair per example for per-example datasets.
 - Lower `num_parallel_proposals` if backend rate limits or resource contention
   dominate.
 - Raise `timeout_seconds`, `memory`, or custom image resources for simulators.

@@ -2,7 +2,7 @@
 Evaluator for circle packing solution.
 
 Imports solve.pack_circles(26), checks validity constraints,
-computes total radius sum as score, and prints JSON results.
+computes total radius sum as score, and prints one ``HELIX_RESULT=`` line.
 Exits with code 0 on success.
 
 Score = sum of all radii (no penalty for violations — matching the
@@ -10,31 +10,43 @@ GEPA blog: https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-a
 """
 import json
 import math
-import sys
+from pathlib import Path
+
+
+def _read_batch_ids() -> list[str]:
+    """Read the positional example ids supplied by HELIX."""
+    ids = json.loads((Path.cwd() / "helix_batch.json").read_text())
+    if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+        raise ValueError("helix_batch.json must contain a JSON list[str]")
+    return ids
+
+
+def _emit(score: float, *, violations: int, arrangement: str) -> None:
+    side_info = {
+        "scores": {"sum_radii": score},
+        "violations": violations,
+        "arrangement": arrangement,
+    }
+    payload = [[score, side_info] for _ in _read_batch_ids()]
+    print("HELIX_RESULT=" + json.dumps(payload))
 
 
 def evaluate():
     try:
         import solve
     except Exception as e:
-        result = {
-            "score": 0.0,
-            "violations": 1,
-            "arrangement": f"ERROR: Could not import solve.py: {type(e).__name__}: {e}",
-        }
-        print(json.dumps(result))
-        sys.exit(0)
+        _emit(
+            0.0,
+            violations=1,
+            arrangement=f"ERROR: Could not import solve.py: {type(e).__name__}: {e}",
+        )
+        return
 
     try:
         circles = solve.pack_circles(26)
     except Exception as e:
-        result = {
-            "score": 0.0,
-            "violations": 1,
-            "arrangement": f"ERROR: pack_circles(26) raised: {e}",
-        }
-        print(json.dumps(result))
-        sys.exit(0)
+        _emit(0.0, violations=1, arrangement=f"ERROR: pack_circles(26) raised: {e}")
+        return
 
     violations = 0
 
@@ -64,14 +76,7 @@ def evaluate():
         f"violations={violations}"
     )
 
-    result = {
-        "score": round(score, 6),
-        "violations": violations,
-        "arrangement": arrangement,
-    }
-
-    print(json.dumps(result))
-    sys.exit(0)
+    _emit(round(score, 6), violations=violations, arrangement=arrangement)
 
 
 if __name__ == "__main__":

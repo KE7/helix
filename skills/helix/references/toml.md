@@ -37,7 +37,6 @@ short-lived evaluator-runner containers that can reach it.
 ```toml
 [evaluator]
 command = "python /runner/evaluate_client.py"
-score_parser = "helix_result"
 include_stdout = true
 include_stderr = true
 extra_commands = []
@@ -75,13 +74,11 @@ Rules:
   They are only for non-sandboxed local prototypes; do not use repo-local
   evaluator files as the Docker sandbox security boundary.
 
-Score parsers:
+Score parser:
 
-- `pytest`: score from pytest-like output.
-- `exitcode`: success is based on process exit code.
-- `json_accuracy`: parse JSON output with accuracy-like fields.
-- `json_score`: parse JSON output with score-like fields.
-- `helix_result`: GEPA-compatible per-example contract; use for datasets,
+- `helix_result`: the only supported parser. This is the GEPA-compatible
+  per-example contract: emit one positional
+  `[score, side_info]` pair per id in `helix_batch.json`; use it for datasets,
   minibatches, side info, and multi-objective frontiers.
 
 ## Dataset
@@ -132,7 +129,7 @@ val_stage_size = 10
 batch_sampler = "epoch_shuffled"  # or "stratified"
 group_key_separator = "__"
 
-frontier_type = "hybrid"  # "instance" | "objective" | "hybrid" | "cartesian"
+frontier_type = "instance"  # "instance" | "objective" | "hybrid" | "cartesian"
 
 merge_enabled = false
 max_merge_invocations = 5
@@ -142,10 +139,13 @@ merge_subsample_size = 5
 
 Important choices:
 
-- `frontier_type = "hybrid"` is the HELIX default and matches GEPA
-  `optimize_anything`'s multi-axis intent.
-- Non-`instance` frontiers need `score_parser = "helix_result"` and
-  per-example `side_info["scores"]`.
+- The four frontier modes mirror GEPA's `FrontierType`; `frontier_type =
+  "instance"` is the HELIX default and needs no objective
+  scores beyond the per-example results from the built-in `helix_result` parser.
+- Non-`instance` frontiers need per-example `side_info["scores"]`. Missing
+  objective scores warn and no-op the objective axis for `hybrid`, which
+  continues on its instance axis; `objective` and `cartesian` raise
+  `MissingObjectiveScoresError` when parent selection needs that axis.
 - `num_parallel_proposals` controls concurrent agent mutations per generation.
   Keep it low for expensive agent backends.
 - `max_workers` bounds evaluation/mutation thread pools.

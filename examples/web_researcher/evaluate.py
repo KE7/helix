@@ -12,15 +12,8 @@ HELIX passes `HELIX_SPLIT=train|val`; this evaluator also accepts the legacy
        - 'version_prefix': ground truth starts with agent's answer (agent can give
                            major.minor when ground truth is major.minor.patch)
 
-Outputs JSON:
-  {
-    "accuracy": float,
-    "instance_scores": {q_id: 0.0 | 1.0, ...},
-    "details": [{"question": str, "expected": str, "got": str, "correct": bool}, ...],
-    "ground_truth_source": "live" | "fallback" | "static"
-  }
-
-Exits with code 0 always; HELIX reads the JSON stdout via score_parser=json_accuracy.
+Emits one ``HELIX_RESULT=`` line containing a ``[score, side_info]`` pair for
+each id in ``helix_batch.json``. The pair order is positional to that file.
 
 Note: This evaluator itself fetches live ground truth for version questions.
 An evolved agent that *also* fetches live data will stay perfectly aligned with the
@@ -30,9 +23,19 @@ evaluator as library versions advance — a naive offline agent will drift.
 import json
 import os
 import pathlib
-import sys
 import urllib.request
 import urllib.error
+
+
+def _read_batch_ids() -> list[str] | None:
+    """Return HELIX's requested ids, or None for standalone full-split runs."""
+    batch_file = pathlib.Path.cwd() / "helix_batch.json"
+    if not batch_file.exists():
+        return None
+    ids = json.loads(batch_file.read_text())
+    if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+        raise ValueError("helix_batch.json must contain a JSON list[str]")
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -178,62 +181,42 @@ def evaluate():
     question_dir = base_dir / split
 
     if not question_dir.exists():
-        result = {
-            "accuracy": 0.0,
-            "instance_scores": {},
-            "details": [],
-            "error": f"Question directory not found: {question_dir}",
-        }
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
+        print("HELIX_RESULT=[]")
+        return
 
     question_files = sorted(question_dir.glob("*.json"))
     if not question_files:
-        result = {
-            "accuracy": 0.0,
-            "instance_scores": {},
-            "details": [],
-            "error": f"No question files found in {question_dir}",
-        }
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
+        print("HELIX_RESULT=[]")
+        return
+
+    questions_by_id = {}
+    for qfile in question_files:
+        try:
+            qdata = json.loads(qfile.read_text())
+        except Exception:
+            continue
+        questions_by_id[str(qdata.get("id", qfile.stem))] = (qfile, qdata)
+    requested_ids = _read_batch_ids()
+    if requested_ids is None:
+        requested_ids = list(questions_by_id)
 
     # Import agent
     try:
         import agent
     except ImportError as e:
-        result = {
-            "accuracy": 0.0,
-            "instance_scores": {},
-            "details": [],
-            "error": f"Could not import agent.py: {e}",
-        }
-        print(json.dumps(result, indent=2))
-        sys.exit(0)
+        print("HELIX_RESULT=" + json.dumps([
+            [0.0, {"error": f"Could not import agent.py: {e}"}]
+            for _ in requested_ids
+        ]))
+        return
 
-    instance_scores = {}
-    details = []
-    correct = 0
-    total = 0
-
-    for qfile in question_files:
-        try:
-            with open(qfile) as f:
-                qdata = json.load(f)
-        except Exception as e:
-            q_id = qfile.stem
-            instance_scores[q_id] = 0.0
-            details.append({
-                "question": str(qfile),
-                "expected": "?",
-                "got": "",
-                "correct": False,
-                "error": str(e),
-            })
-            total += 1
+    payload = []
+    for q_id in requested_ids:
+        question_entry = questions_by_id.get(q_id)
+        if question_entry is None:
+            payload.append([0.0, {"error": f"Unknown question id: {q_id}"}])
             continue
-
-        q_id = qdata.get("id", qfile.stem)
+        qfile, qdata = question_entry
         question_text = qdata.get("question", "")
         match_mode = qdata.get("match_mode", "exact")
 
@@ -251,11 +234,7 @@ def evaluate():
         # Score
         is_correct = answers_match(got, expected, match_mode)
         score = 1.0 if is_correct else 0.0
-        if is_correct:
-            correct += 1
-
-        instance_scores[q_id] = score
-        details.append({
+        payload.append([score, {
             "question": question_text,
             "expected": expected,
             "expected_source": gt_source,
@@ -263,21 +242,10 @@ def evaluate():
             "correct": is_correct,
             "match_mode": match_mode,
             "category": qdata.get("category", "unknown"),
-        })
-        total += 1
+            "scores": {"accuracy": score},
+        }])
 
-    accuracy = correct / total if total > 0 else 0.0
-
-    result = {
-        "accuracy": round(accuracy, 4),
-        "instance_scores": instance_scores,
-        "details": details,
-        "total": total,
-        "correct": correct,
-    }
-
-    print(json.dumps(result, indent=2))
-    sys.exit(0)
+    print("HELIX_RESULT=" + json.dumps(payload))
 
 
 if __name__ == "__main__":
