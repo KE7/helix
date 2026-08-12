@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from helix.config import (
     DatasetConfig,
+    EvaluatorConfig,
     EvaluatorSidecarConfig,
     EvolutionConfig,
     HelixConfig,
@@ -300,10 +301,10 @@ class TestSandboxConfig:
         assert cfg.transcript_artifact_dir == ".helix_artifacts/backend_transcripts"
         assert cfg.claude_transcript_root == "/home/node/.claude/projects/-workspace"
 
-    def test_login_auth_is_the_default_and_rejects_env_allowlist(self):
+    def test_volume_auth_is_the_default_and_rejects_env_allowlist(self):
         cfg = SandboxConfig(enabled=True)
-        assert cfg.auth == "login"
-        with pytest.raises(ValueError, match="login credential copying has no environment"):
+        assert cfg.auth == "volume"
+        with pytest.raises(ValueError, match="volume credential copying has no environment"):
             SandboxConfig(enabled=True, auth_env_allow=["ANTHROPIC_API_KEY"])
 
     def test_env_auth_requires_an_explicit_allowlist(self):
@@ -314,9 +315,34 @@ class TestSandboxConfig:
         )
         assert cfg.auth_env_allow == ["ANTHROPIC_API_KEY"]
 
-    def test_retired_volume_auth_has_a_migration_error(self):
-        with pytest.raises(ValueError, match='has been replaced by "login"'):
-            SandboxConfig(enabled=True, auth="volume")  # type: ignore[arg-type]
+    def test_sidecar_accepts_its_own_passthrough_environment(self):
+        sidecar = EvaluatorSidecarConfig(
+            image="eval:latest",
+            command="python -m server",
+            endpoint="http://helix-evaluator:8080/evaluate",
+            passthrough_env=["OPENAI_API_KEY"],
+        )
+        assert sidecar.passthrough_env == ["OPENAI_API_KEY"]
+
+    def test_agent_and_sidecar_credential_sets_must_be_disjoint(self):
+        with pytest.raises(ValueError, match="credential sets must be disjoint"):
+            HelixConfig(
+                objective="Test",
+                evaluator=EvaluatorConfig(
+                    command="python /runner/evaluate.py",
+                    sidecar=EvaluatorSidecarConfig(
+                        image="eval:latest",
+                        command="python -m server",
+                        endpoint="http://helix-evaluator:8080/evaluate",
+                        passthrough_env=["OPENAI_API_KEY"],
+                    ),
+                ),
+                sandbox=SandboxConfig(
+                    enabled=True,
+                    auth="env",
+                    auth_env_allow=["OPENAI_API_KEY"],
+                ),
+            )
 
     def test_sandboxed_evaluator_requires_sidecar(self):
         with pytest.raises(ValueError, match=r"\[evaluator.sidecar\]"):

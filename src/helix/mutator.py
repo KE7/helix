@@ -728,7 +728,7 @@ def _sandbox_agent_environment(
 ) -> dict[str, str]:
     """Build the deliberately small environment for a sandboxed agent.
 
-    Login auth has no environment transport.  Env auth receives only a value
+    Volume auth has no environment transport.  Env auth receives only a value
     both named by ``auth_env_allow`` and explicitly supplied through ``[env]``
     or ``passthrough_env``; an ambient host credential is never inferred.
     """

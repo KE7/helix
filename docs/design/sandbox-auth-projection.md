@@ -1,4 +1,4 @@
-# Sandbox auth projection: login volume as source, private state per candidate
+# Sandbox auth projection: volume mode source, private state per candidate
 
 **Status:** proposed; implementation requires approval.  This document changes
 no runtime behavior.
@@ -8,7 +8,7 @@ no runtime behavior.
 Keep `helix sandbox login <backend>` and the backend-specific
 `helix-auth-<backend>` volume.  They remain the operator-facing login store and
 the source of truth.  A mutation agent must never mount that shared volume.
-For `sandbox.auth = "login"`, HELIX will make a new, random,
+For `sandbox.auth = "volume"`, HELIX will make a new, random,
 candidate-owned Docker volume; a short-lived seeding helper copies an allowlist
 of credential files from the login volume into it; and the agent mounts only
 that candidate volume inside an otherwise private tmpfs `HOME`.  The candidate
@@ -29,6 +29,10 @@ candidate can mount that volume and it is destroyed at cleanup.
   not write it, and the seeding helper mounts it read-only.
 - This design is about agent authentication.  Evaluators and credentialed
   sidecars retain their existing, separately scoped configuration.
+- `evaluator.sidecar.passthrough_env` is the explicit allowlist for host values
+  needed by the private scoring service. Its names must be disjoint from
+  `sandbox.auth_env_allow`, so a sidecar credential cannot become an
+  agent credential.
 - It is not a mechanism for returning a refreshed credential to the login
   volume.  That limitation is stated in [Rotation](#rotation-and-its-open-question).
 
@@ -166,7 +170,7 @@ entrypoint, and persistent credential image.
 
 ## Recommended mechanism: per-candidate credential-only volume
 
-For each sandboxed agent candidate using `auth = "login"`:
+For each sandboxed agent candidate using `auth = "volume"`:
 
 1. HELIX creates a random, labelled Docker volume owned by that candidate.
    The name and labels contain run/candidate identity and backend, never a
@@ -211,7 +215,7 @@ The mechanism is common; its manifest is backend-specific.  No backend needs a
 custom agent image merely to receive the credential.  The helper is one generic
 HELIX utility action, not five entrypoints; it must be pinned and tested like
 other runtime tooling.  A backend is not enabled
-for `auth = "login"` until its manifest is confirmed by an authenticated
+for `auth = "volume"` until its manifest is confirmed by an authenticated
 candidate test.  In particular, Cursor's unverified split must not be promoted
 to a claim of readiness merely because a candidate volume would isolate it.
 
@@ -225,7 +229,7 @@ HOME and pre-created nested mount path. Its nine-hour, 37-generation run is
 useful evidence for the livebench write-up.
 
 It is not a HELIX auth mechanism. HELIX has exactly two paths: `auth =
-"login"` and `auth = "env"`. HELIX contains no projection-variable name,
+"volume"` and `auth = "env"`. HELIX contains no projection-variable name,
 encoding, decoding, runner-image selection, or compatibility branch. An
 operator-owned image may independently interpret an allowlisted environment
 value under `auth = "env"`; that image behavior is outside HELIX's contract.
@@ -238,11 +242,11 @@ mechanism.  The production surface stays small:
 ```toml
 [sandbox]
 enabled = true
-auth = "login"  # "login" (from helix-auth-<backend>) or "env" (explicit host value)
+auth = "volume"  # "volume" (from helix-auth-<backend>) or "env" (explicit host value)
 auth_env_allow = []
 ```
 
-- `auth = "login"` selects the candidate-volume projection described here.
+- `auth = "volume"` selects the candidate-volume projection described here.
   `auth_env_allow` must be empty: no credential transport variable is needed.
 - `auth = "env"` means an explicit host environment value is the credential
   source; `auth_env_allow` remains the non-empty scrub allowlist of names that
@@ -252,7 +256,7 @@ auth_env_allow = []
   choice into a second configuration language.
 
 This retains `auth_env_allow` because it is the actual final scrub allowlist
-for named values.  It does not use that key as hidden plumbing for login
+for named values.  It does not use that key as hidden plumbing for volume
 credentials.  The validation/documentation change should stay roughly 30–50
 lines; backend manifests and runtime cleanup are implementation details, not
 new user knobs.
@@ -295,7 +299,7 @@ does not use it.
 Unit and integration tests must make the structural boundary observable on the
 final Docker argv and live Docker objects, not merely on a helper function.
 
-1. **No shared source mount.** For every login-enabled backend, assert the
+1. **No shared source mount.** For every volume-enabled backend, assert the
    final agent argv and `docker inspect` contain no `helix-auth-<backend>`
    mount.  The seeding helper may contain that name only as a read-only source;
    it must not be the agent container.
@@ -324,26 +328,9 @@ final Docker argv and live Docker objects, not merely on a helper function.
    changed record reaches the source volume.  Do not run the observer against
    the same grant.
 
-## Migration and errors
-
-`sandbox.auth = "volume"` is invalid after this change because it describes
-the retired mount mechanism, not a source.  Config loading should fail before
-Docker is invoked with:
-
-```
-sandbox.auth = "volume" has been replaced by "login".
-  auth = "login" reads the credential from helix-auth-<backend> at candidate
-  start, copies only the credential into a private candidate store, and never
-  mounts the shared login volume in an agent container.
-  Set sandbox.auth = "login"; do not use environment credential transport.
-```
-
-Existing `auth = "env"` configurations continue to mean explicit named host
-values and continue to require a non-empty `auth_env_allow`.  Configurations
-that set `auth_env_allow` with `auth = "login"` fail with an error explaining
-that login copying has no environment transport. `auth = "env"` remains the
-separate, explicit API-key mechanism and is gated by `auth_env_allow`.
-
-This makes the ordinary login-volume workflow structural and image-neutral. It
-also introduces the small `sandbox.auth` and `auth_env_allow` configuration
-contract needed for an explicit choice of credential source.
+The value `auth = "volume"` names the credential source, not the old shared
+mount behavior. It still selects the projection above: HELIX copies the
+allowlisted credential files from the operator login volume into a fresh,
+per-candidate volume, and never mounts `helix-auth-<backend>` in an agent
+container. `auth = "env"` remains the separate explicit API-key mechanism and
+requires a non-empty `auth_env_allow`.

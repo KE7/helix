@@ -187,7 +187,7 @@ def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):
     assert "helix-auth-codex:/home/node:rw" not in docker_call
 
 
-def test_login_auth_seeds_a_private_allowlisted_volume_and_never_mounts_source(
+def test_volume_auth_seeds_a_private_allowlisted_volume_and_never_mounts_source(
     tmp_path: Path, mocker
 ):
     source = tmp_path / "candidate"
@@ -229,7 +229,7 @@ def test_login_auth_seeds_a_private_allowlisted_volume_and_never_mounts_source(
     )
 
 
-def test_parallel_login_candidates_use_distinct_private_auth_volumes(tmp_path: Path, mocker):
+def test_parallel_volume_candidates_use_distinct_private_auth_volumes(tmp_path: Path, mocker):
     calls: list[list[str]] = []
 
     def fake_run(args, **kwargs):
@@ -432,6 +432,33 @@ def test_start_evaluator_sidecar_injects_fixed_env(mocker):
 
     docker_run = next(call for call in calls if call[:3] == ["docker", "run", "-d"])
     assert "EVALUATOR_BASE_URL=https://model-service.example.invalid/v1" in docker_run
+
+
+def test_start_evaluator_sidecar_injects_its_own_passthrough_env(mocker, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run_docker(args, *, check=True):
+        calls.append(args)
+        if args[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="true running\n", stderr=""
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox._run_docker", side_effect=fake_run_docker)
+    monkeypatch.setenv("OPENAI_API_KEY", "sidecar-only-test-key")
+    sidecar = EvaluatorSidecarConfig(
+        image="eval-service:latest",
+        command="python -m server",
+        endpoint="http://helix-evaluator:8080/evaluate",
+        passthrough_env=["OPENAI_API_KEY"],
+    )
+
+    with start_evaluator_sidecar(sidecar):
+        pass
+
+    docker_run = next(call for call in calls if call[:3] == ["docker", "run", "-d"])
+    assert "OPENAI_API_KEY=sidecar-only-test-key" in docker_run
 
 
 def test_agent_syncs_changes_back_but_excludes_git_and_artifacts(

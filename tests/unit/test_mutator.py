@@ -1167,7 +1167,7 @@ class TestInvokeClaudeCode:
         assert env["CURSOR_API_KEY"] == "explicit-key"
         assert "AMBIENT_API_KEY" not in env
 
-    def test_sandbox_login_auth_does_not_forward_ambient_key(self, mocker, monkeypatch):
+    def test_sandbox_volume_auth_does_not_forward_ambient_key(self, mocker, monkeypatch):
         mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-key")

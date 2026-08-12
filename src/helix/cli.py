@@ -73,6 +73,7 @@ command = "uv run python evaluate.py"
 # runner_image = "my-evaluator-runner:latest"
 # command = "python -m benchmark_server"
 # endpoint = "http://helix-evaluator:8080/evaluate"
+# passthrough_env = ["OPENAI_API_KEY"]  # sidecar-only host values
 
 [env]
 # Fixed non-secret env values injected into evaluator and agent subprocesses
@@ -98,7 +99,7 @@ enabled = false
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 # network = "bridge"
 # skip_special_files = true  # skip FIFOs/sockets/devices during workspace sync
-# auth = "login"  # default: seed a private candidate volume from the login volume
+# auth = "volume"  # default: seed a private candidate volume from the login volume
 # auth = "env"    # explicit key only; also set auth_env_allow = ["API_KEY_NAME"]
 """
 

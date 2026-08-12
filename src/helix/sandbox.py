@@ -978,7 +978,10 @@ def start_evaluator_sidecar(
         args.extend(
             _build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts)
         )
-        for key in passthrough_env or []:
+        sidecar_env_names = list(
+            dict.fromkeys([*(passthrough_env or []), *sidecar.passthrough_env])
+        )
+        for key in sidecar_env_names:
             if key in os.environ:
                 args.extend(["-e", f"{key}={os.environ[key]}"])
         for key, value in (fixed_env or {}).items():
@@ -1044,9 +1047,9 @@ def _docker_args(
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
         args.extend(["--tmpfs", "/home/node:rw,uid=1000,gid=1000,mode=700"])
-        if sandbox.auth == "login":
+        if sandbox.auth == "volume":
             if candidate_auth_volume is None:
-                raise ValueError("login auth requires a candidate credential volume")
+                raise ValueError("volume auth requires a candidate credential volume")
             args.extend(
                 [
                     "-v",
@@ -1135,9 +1138,9 @@ def run_sandboxed_commands(
         )
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
-        if scope == "agent" and sandbox.auth == "login":
+        if scope == "agent" and sandbox.auth == "volume":
             if agent_backend is None:
-                raise ValueError("agent_backend is required for login auth")
+                raise ValueError("agent_backend is required for volume auth")
             candidate_auth_volume = _create_candidate_auth_volume(agent_backend)
             _seed_candidate_auth_volume(candidate_auth_volume)
         sidecar_runtime = (

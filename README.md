@@ -217,6 +217,8 @@ runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
 startup_timeout_seconds = 120
+# API keys needed only by the scoring service; they never reach mutation agents.
+passthrough_env = ["OPENAI_API_KEY"]
 
 [sandbox]
 enabled = true
@@ -418,8 +420,8 @@ enabled = false                  # true = run agent/evaluator subprocesses in Do
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 network = "bridge"               # "bridge" | "none" | "host"
 skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
-auth = "login"                  # "login" (default) or explicit-key "env"
-# Login credentials are seeded into a fresh candidate volume; agents never
+auth = "volume"                # "volume" (default) or explicit-key "env"
+# Volume credentials are seeded into a fresh candidate volume; agents never
 # mount the persistent helix-auth-<backend> login volume.
 
 [worktree]
@@ -617,7 +619,7 @@ sockets, and device nodes by default. Set `skip_special_files = false` only if
 you want unsupported workspace file types to raise instead of being ignored.
 
 `helix sandbox login <backend>` writes to a persistent operator-facing volume.
-For `sandbox.auth = "login"` (the default), HELIX seeds only the credential
+For `sandbox.auth = "volume"` (the default), HELIX seeds only the credential
 files into a fresh candidate-owned volume and mounts that volume below a private
 tmpfs home; no agent container mounts the login volume. Evaluator sidecar and
 runner containers never receive it. Run the login flow once per backend:

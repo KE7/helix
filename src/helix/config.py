@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from helix.backends import (
     BackendName,
@@ -68,6 +68,13 @@ class EvaluatorSidecarConfig(BaseModel):
     healthcheck_command: str | None = None
     startup_timeout_seconds: int = 60
     internal_network: bool = True
+    passthrough_env: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Environment variable names passed only to the private evaluator "
+            "sidecar, never to mutation-agent containers."
+        ),
+    )
 
     @property
     def resolved_runner_image(self) -> str:
@@ -603,29 +610,14 @@ class SandboxConfig(BaseModel):
     preserve_backend_transcripts: bool = True
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
     claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
-    auth: Literal["login", "env"] = "login"
+    auth: Literal["volume", "env"] = "volume"
     auth_env_allow: list[str] = Field(default_factory=list)
 
-    @field_validator("auth", mode="before")
-    @classmethod
-    def reject_retired_volume_auth(cls, value: object) -> object:
-        if value == "volume":
-            raise ValueError(
-                'sandbox.auth = "volume" has been replaced by "login".\n'
-                "  auth = \"login\" reads the credential from helix-auth-<backend> "
-                "at candidate start, copies only the credential into a private "
-                "candidate store, and never mounts the shared login volume in an "
-                "agent container.\n"
-                "  Set sandbox.auth = \"login\"; do not use environment "
-                "credential transport."
-            )
-        return value
-
     def model_post_init(self, __context: object) -> None:
-        if self.auth == "login" and self.auth_env_allow:
+        if self.auth == "volume" and self.auth_env_allow:
             raise ValueError(
-                "sandbox.auth_env_allow is set but sandbox.auth = \"login\"; "
-                "login credential copying has no environment transport. Remove "
+                "sandbox.auth_env_allow is set but sandbox.auth = \"volume\"; "
+                "volume credential copying has no environment transport. Remove "
                 "auth_env_allow or set auth = \"env\"."
             )
         if self.auth == "env" and not self.auth_env_allow:
@@ -697,6 +689,16 @@ class HelixConfig(BaseModel):
                 raise ValueError(
                     "Docker sandboxing requires [evaluator.sidecar] with image, "
                     "command, and endpoint."
+                )
+        sidecar = self.evaluator.sidecar
+        if sidecar is not None:
+            shared = sorted(set(self.sandbox.auth_env_allow) & set(sidecar.passthrough_env))
+            if shared:
+                names = ", ".join(repr(name) for name in shared)
+                raise ValueError(
+                    f"{names} appears in both sandbox.auth_env_allow and "
+                    "evaluator.sidecar.passthrough_env. The agent and sidecar "
+                    "credential sets must be disjoint."
                 )
         _validate_agent_effort(self.agent)
 
