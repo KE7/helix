@@ -249,8 +249,8 @@ def dedupe_children(
     """Split ``selected`` into first-seen children and byte-identical repeats.
 
     Two proposals in a batch can produce identical children — most easily
-    two of the N siblings of one parent, which start from the same worktree
-    and the same reflection.  Inserting both would put two frontier entries
+    multiple siblings of one parent, which start from the same worktree and
+    the same reflection.  Inserting both would put two frontier entries
     on one point, double-charge a full validation for a score already known,
     and skew parent selection toward whatever that point happens to be.
 

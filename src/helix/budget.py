@@ -32,10 +32,16 @@ from helix.trace import TRACE, EventType
 class BatchBudgetGuard:
     """The explicit budget contract for one admitted proposal batch.
 
-    ``max_in_flight_evaluations`` is the conservative number of uncached
-    evaluation units that the batch can still consume after it has crossed a
-    dispatch boundary. It is deliberately a unit bound, not a worker count:
-    one evaluator invocation can account for several minibatch examples.
+    A batch uses ``P = evolution.num_parallel_proposals`` parents sampled with
+    replacement and ``N = evolution.mutations_per_parent`` reflective
+    mutations per selected parent, yielding up to ``P*N`` proposal slots.
+
+    Let ``U = max_in_flight_evaluations`` be the conservative number of
+    uncached evaluation units that the batch can still consume after it has
+    crossed a dispatch boundary. It is deliberately a unit bound, not a
+    worker count: one evaluator invocation can account for several minibatch
+    examples.
+
     """
 
     evaluations_before: int
@@ -127,9 +133,9 @@ def evaluation_budget_units(
 ) -> int:
     """Return evaluation budget units for an evaluation attempt.
 
-    Cached results charge 0 units; minibatch evals with N uncached
-    examples charge N (clamped at 0); single-task / no-example paths
-    charge 1 (one evaluator invocation).
+    Cached results charge 0 units; minibatch evals charge one unit per
+    uncached example (clamped at 0); single-task / no-example paths charge 1
+    (one evaluator invocation).
     """
     if was_cached:
         return 0

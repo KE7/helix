@@ -73,8 +73,8 @@ class TestBuildMergePrompt:
 
     def test_background_section_omitted_when_none(self):
         """GEPA parity: empty optional inputs skip the section entirely
-        instead of emitting a placeholder.  Mirrors GEPA O.A.'s
-        ``_build_reflection_prompt_template`` (optimize_anything.py:501-596),
+        instead of emitting a placeholder.  Mirrors GEPA's
+        ``_build_reflection_prompt_template`` in ``gepa_launcher.py``,
         which only appends a section when its content is non-empty.
         """
         prompt = build_merge_prompt("goal", None, None, "")

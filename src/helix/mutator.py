@@ -165,7 +165,7 @@ def _evaluator_failed(eval_result: EvalResult) -> bool:
 # section is suppressed) or a fully-formed Markdown section.  Empty
 # returns let ``build_mutation_prompt`` skip the section entirely —
 # mirrors GEPA's ``_build_reflection_prompt_template`` accumulator
-# pattern (``gepa/optimize_anything.py:501-596``).  Non-empty returns
+# pattern in ``gepa_launcher.py``.  Non-empty returns
 # may carry trailing whitespace; ``build_mutation_prompt`` rstrips
 # before joining sections with a uniform blank-line separator.
 
@@ -392,8 +392,8 @@ def _render_per_example_diagnostics(
     """Render per-example side_info as the mutation-prompt Diagnostics section.
 
     Mirrors GEPA's ``OptimizeAnythingAdapter.make_reflective_dataset`` +
-    ``format_samples`` at
-    ``src/gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py:524-553``
+    ``format_samples`` in
+    ``adapters/optimize_anything_adapter/optimize_anything_adapter.py``
     and ``src/gepa/strategies/instruction_proposal.py:54-95``:
 
       * each example gets an ``{'#' * example_header_level} Example <id>``
@@ -453,9 +453,10 @@ def _render_scores_section(eval_result: EvalResult) -> str:
     """Render ``## Current Evaluation Scores`` or ``""`` when no scores exist.
 
     Mirrors GEPA O.A.'s "only emit a section when there is content for it"
-    pattern (``gepa/optimize_anything.py:501-596``).  Previously HELIX
-    emitted the section with a ``"(no scores recorded)"`` placeholder; now
-    the section header is omitted entirely so the agent never sees a stub.
+    pattern in ``_build_reflection_prompt_template`` (``gepa_launcher.py``).
+    Previously HELIX emitted the section with a ``"(no scores recorded)"``
+    placeholder; now the section header is omitted entirely so the agent
+    never sees a stub.
     """
     lines = [f"  {k}: {v}" for k, v in sorted(eval_result.scores.items())]
     if not lines:
@@ -526,7 +527,7 @@ def build_mutation_prompt(
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    (``gepa/optimize_anything.py:501-596``).  Empty ``objective``, empty
+    in ``gepa_launcher.py``.  Empty ``objective``, empty
     ``eval_result.scores``, absent diagnostics, absent evaluator notes,
     absent stdout/stderr fallback, absent extra ASI, and absent
     ``background`` all skip their respective sections entirely instead of

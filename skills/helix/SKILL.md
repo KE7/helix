@@ -248,7 +248,6 @@ Map source concepts to HELIX this way:
 | `EngineConfig(seed=N)` | top-level `rng_seed = N` |
 | `EngineConfig(max_metric_calls=N)` | `[evolution].max_evaluations = N` |
 | `EngineConfig(max_workers=N)` | `[evolution].max_workers = N` |
-| `EngineConfig(num_parallel_proposals=N|"auto")` | `[evolution].num_parallel_proposals = N` or `"auto"` |
 | `ReflectionConfig(reflection_minibatch_size=K)` | `[evolution].minibatch_size = K` |
 | `EngineConfig(cache_evaluation=True)` | `[evolution].cache_evaluation = true` |
 | `EngineConfig(acceptance_criterion=...)` | `[evolution].acceptance_criterion = "..."` |

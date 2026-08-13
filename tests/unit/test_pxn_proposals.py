@@ -308,10 +308,10 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="max_workers must be >= 1"):
             EvolutionConfig(max_workers=w)
 
-    def test_max_workers_checked_before_auto_resolution(self) -> None:
-        """``max(1, 0 // k)`` must not launder a zero worker count into P=1."""
+    def test_max_workers_checked_before_num_parallel_proposals(self) -> None:
+        """A zero worker count is rejected regardless of a valid P."""
         with pytest.raises(ValueError, match="max_workers must be >= 1"):
-            EvolutionConfig(num_parallel_proposals="auto", max_workers=0)
+            EvolutionConfig(num_parallel_proposals=5, max_workers=0)
 
     def test_defaults_are_the_historical_single_proposal_shape(self) -> None:
         cfg = EvolutionConfig()

@@ -332,7 +332,9 @@ class TestMinibatchGateIntegration:
     def test_perfect_minibatch_skip_advances_generation(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """Perfect minibatch skip advances gen unconditionally (GEPA engine.py:649).
+        """Perfect minibatch skip advances gen unconditionally (GEPA parity:
+        ``state.i`` is incremented unconditionally at the top of
+        ``GEPAEngine.run()``'s main loop, before any merge/reflective branch).
 
         After Change 1 (unconditional gen increment), a perfect-subsample skip
         no longer rolls back to retry the same generation slot.  Gen was already
@@ -917,7 +919,7 @@ class TestMinibatchGateIntegration:
 #
 # These tests directly exercise the new per-example cache-consumer helper
 # that wires HELIX's minibatch eval sites up to the GEPA
-# ``cached_evaluate_full`` semantics (gepa/core/state.py:94-130).
+# ``GEPAState.cached_evaluate_full`` semantics (``core/state.py``).
 # ---------------------------------------------------------------------------
 
 
@@ -1522,10 +1524,13 @@ class TestWriteHelixBatchStringIds:
 
 
 # ---------------------------------------------------------------------------
-# MODERATE E (audit-mutation §C4) — parent minibatch eval runs in parallel
-# worker threads, matching GEPA core/engine.py:381-452 which submits
-# ``execute_proposal`` (reflective_mutation.py:239-285) — including
-# ``adapter.evaluate`` at :268 — to a ``ThreadPoolExecutor``.
+# MODERATE E (finding C4) — parent minibatch eval runs in parallel
+# worker threads.  HELIX's bounded-executor design mirrors the general shape
+# of GEPA's adapter-level concurrent evaluation dispatch (``GEPAAdapter
+# .evaluate`` in ``core/adapter.py``, invoked via ``default_batch_evaluate``);
+# GEPA's own reflective-mutation proposer evaluates parent/child minibatches
+# through a single batched adapter call rather than a per-proposal thread
+# pool.
 #
 # Parent minibatch accounting counts evaluations: one budget unit per uncached
 # example, and zero for pure cache hits.
@@ -1538,7 +1543,7 @@ class TestParentMinibatchParallelism:
     ) -> None:
         """Under ``num_parallel_proposals > 1`` the N parent-minibatch evals
         must be dispatched to a ``ThreadPoolExecutor`` (call-count evidence
-        of concurrency per audit-mutation §C4 MODERATE E).
+        of concurrency per finding C4 MODERATE E).
 
         We cannot block on a barrier because parents share the same seed
         worktree and the per-worktree file-handoff lock correctly serialises
@@ -1628,8 +1633,9 @@ class TestMaxWorkersBoundsParentEvalPool:
         ``num_parallel_proposals=3`` we must never see >2 parent evals
         running concurrently, even though 3 proposals are pre-sampled.
 
-        Mirrors GEPA ``EngineConfig.max_workers`` plumbing
-        (optimize_anything.py:485).
+        Mirrors GEPA's ``EngineConfig.max_workers`` plumbing
+        (``gepa_launcher.py``), which bounds a ``ThreadPoolExecutor`` in the
+        optimize-anything adapter's parallel-evaluation helpers.
         """
         import threading
         import time
@@ -1689,8 +1695,8 @@ class TestParentEvalExceptionDoesNotAbortGeneration:
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """Fix B: when one of N parent-eval futures raises, the remaining
-        proposals must still complete.  Mirrors GEPA engine.py:427-443
-        which wraps ``future.result()`` in try/except so a single eval
+        proposals must still complete — HELIX's own isolation guarantee for
+        its bounded parent-eval ``ThreadPoolExecutor`` so a single eval
         failure does not abort the generation.
         """
         train_path = _write_train_jsonl(tmp_path, n=6)
@@ -1764,13 +1770,16 @@ class TestParentMinibatchBudgetCharge:
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """Parent minibatch evals always charge the full minibatch size (GEPA
-        reflective_mutation.py:268-269 parity: minibatch path bypasses cache).
+        parity: the minibatch path bypasses the read side of the cache).
 
         Change 2: ``_eval_parent`` now passes ``None`` instead of
         ``minibatch_cache`` to ``_cached_evaluate_batch``, matching GEPA's
-        ``execute_proposal`` which calls ``adapter.evaluate(ctx.minibatch, ...)``
-        directly, never through the cache.  Both iterations therefore invoke the
-        evaluator subprocess for the parent and charge 2 budget units each.
+        ``ReflectiveMutationProposer`` which evaluates parent/child
+        minibatches via ``adapter.evaluate``/``batch_evaluate`` directly —
+        results are written into ``state.evaluation_cache`` afterward
+        (``put_batch``) but never read through it first.  Both iterations
+        therefore invoke the evaluator subprocess for the parent and charge
+        2 budget units each.
         """
         train_path = _write_train_jsonl(tmp_path, n=2)  # 2 ids → minibatch always [0,1]
         seed = _make_candidate("g0-s0")
@@ -1806,7 +1815,8 @@ class TestParentMinibatchBudgetCharge:
 
         # max_generations=2: the parent (seed) is evaluated on [0,1] in BOTH
         # iterations because Change 2 bypasses the minibatch cache for parent
-        # evals, matching GEPA reflective_mutation.py:268.
+        # evals, matching GEPA's ``ReflectiveMutationProposer`` (which never
+        # reads parent/child minibatch evals through the cache).
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
@@ -1963,7 +1973,8 @@ class TestEvaluationCacheThreadSafety:
 
 
 class TestStateIBumpUnconditional:
-    """GEPA parity (engine.py:649): ``state.i`` must advance once per outer
+    """GEPA parity: ``state.i`` is incremented unconditionally at the top of
+    ``GEPAEngine.run()``'s main loop, so it must advance once per outer
     iteration regardless of which path (mutation, merge, early-exit) is
     taken.  Previously HELIX bumped ``state.i`` only inside the §1a
     minibatch pre-sample loop, so iterations that exited early (perfect
@@ -2020,9 +2031,10 @@ class TestStateIBumpUnconditional:
 
 
 class TestStrictInstanceScoresAccess:
-    """GEPA parity (adapter.py:154 — len(outputs) == len(scores) ==
-    len(batch)): a missing instance id in a parent or child minibatch
-    eval is an evaluator bug, not a benign zero.  HELIX must raise.
+    """GEPA parity: ``GEPAAdapter.evaluate``'s documented contract
+    (``core/adapter.py``) requires ``len(scores) == len(batch)`` — a
+    missing instance id in a parent or child minibatch eval is an
+    evaluator bug, not a benign zero.  HELIX must raise.
     """
 
     def test_missing_id_in_child_minibatch_raises(
@@ -2051,10 +2063,12 @@ class TestStrictInstanceScoresAccess:
 
         all_mocks["run_evaluator"].side_effect = run_eval
 
-        # Cache must be OFF: the cache layer (_cached_evaluate_batch's
-        # _evaluator at evolution.py:704-727) silently zeros missing ids
-        # before they reach the acceptance criterion, so we can only
-        # exercise the strict-access invariant on the no-cache path.
+        # Cache must be OFF: with caching on, ``_cached_evaluate_batch``'s
+        # inner ``_evaluator`` closure raises its own "Evaluator did not
+        # return scores" assertion before the result ever reaches the
+        # acceptance criterion (see test_missing_id_in_cached_evaluator_raises
+        # below); only the no-cache path lets a missing id reach the
+        # acceptance criterion's own strict-id check exercised here.
         config = _make_minibatch_config(
             train_path,
             minibatch_size=2,
@@ -2072,7 +2086,8 @@ class TestStrictInstanceScoresAccess:
         must enforce the same strict-id invariant as the acceptance path.
         With ``cache_evaluation=True`` (default), a missing id reported by
         the evaluator must raise before the cached scores reach the
-        acceptance criterion.  Mirrors the fix at evolution.py:730-738.
+        acceptance criterion.  Mirrors the strict-id assert inside
+        ``_cached_evaluate_batch``'s inner ``_evaluator`` closure.
         """
         train_path = _write_train_jsonl(tmp_path, n=4)
         seed = _make_candidate("g0-s0")
@@ -2345,9 +2360,12 @@ class TestAlwaysPerfectDataTerminates:
     must not produce an infinite loop.
 
     Three GEPA-aligned guards independently prevent NB-2:
-      1. gen advances unconditionally at top of loop (Change 1, engine.py:649)
+      1. gen advances unconditionally at top of loop (Change 1; mirrors the
+         unconditional ``state.i += 1`` at the top of ``GEPAEngine.run()``)
       2. Parent minibatch eval bypasses cache — always charges budget (Change 2)
-      3. Mandatory stopping condition check (Change 3, api.py:262-265)
+      3. Mandatory stopping condition check (Change 3; mirrors the
+         ``ValueError`` ``gepa.api.optimize`` raises when no stopping
+         condition is configured)
 
     This test exercises the gen-advance guard (1) and budget guard (2) together:
     max_generations=5 must be the loop exit trigger, with 5 skip records written.
@@ -2419,13 +2437,13 @@ class TestAlwaysPerfectDataTerminates:
 
 
 # ---------------------------------------------------------------------------
-# Change 3: mandatory stopping condition validation (GEPA api.py:262-265)
+# Change 3: mandatory stopping condition validation (GEPA api.py)
 # ---------------------------------------------------------------------------
 
 
 class TestStoppingConditionValidation:
-    """Mirror GEPA api.py:262-265: run_evolution must raise ValueError when
-    no effective stopping condition is configured.
+    """Mirror GEPA's ``gepa.api.optimize``: run_evolution must raise
+    ValueError when no effective stopping condition is configured.
 
     In helix, max_generations (loop bound, default 10) is the primary stop
     and max_evaluations (budget cap, -1 = disabled) is secondary.  The guard
@@ -2500,18 +2518,21 @@ class TestStoppingConditionValidation:
 #
 # The atomic-worker pattern merges parent-eval + LLM + child-eval into one
 # atomic worker per proposal slot, all running inside a single
-# ThreadPoolExecutor.  Budget charging is deferred to the sequential
-# acceptance loop (GEPA apply_proposal_output parity,
-# reflective_mutation.py:472).
+# ThreadPoolExecutor.  Budget charging is deferred to a sequential
+# acceptance loop, run only after the parallel workers finish.  This is
+# HELIX's own design; it no longer has a direct upstream GEPA counterpart —
+# GEPA's own ``ReflectiveMutationProposer`` now dispatches parent/child
+# minibatch evaluation as a single batched adapter call rather than a
+# per-proposal thread pool.
 #
-# NOTE: Tests 1–4 will likely fail against the CURRENT evolution.py (before
-# W1's changes implement the atomic worker).  They are written correctly for
-# the atomic-worker design and should pass after W1's commit is merged.
+# The atomic-worker design is implemented in the current evolution.py; all
+# tests in this class pass against it.
 # ---------------------------------------------------------------------------
 
 
 class TestAtomicProposalWorker:
-    """Tests for the atomic proposal worker (GEPA execute_proposal parity)."""
+    """Tests for the atomic proposal worker (HELIX's own design; see the
+    module-level note above on why this no longer mirrors GEPA 1:1)."""
 
     def test_worker_executes_parent_eval_and_child_eval_on_same_thread(
         self, tmp_path: Path, all_mocks: dict[str, Any]
@@ -2520,10 +2541,11 @@ class TestAtomicProposalWorker:
 
         Under the atomic-worker design, each proposal worker executes parent_eval →
         skip-perfect → LLM → child_eval atomically in a single
-        ThreadPoolExecutor worker thread (GEPA execute_proposal shape,
-        reflective_mutation.py:268,308,369,420).  The child eval therefore
-        must NOT run on the main thread — unlike the current three-stage
-        pipeline where Step 3 (child eval) is sequential on the main thread.
+        ThreadPoolExecutor worker thread — HELIX's own design (see the
+        module-level note above on why this is no longer a 1:1 GEPA mirror).
+        The child eval therefore must NOT run on the main thread — unlike the
+        current three-stage pipeline where Step 3 (child eval) is sequential
+        on the main thread.
 
         Verification: record threading.get_ident() for parent evals (seed.id,
         split=train, instance_ids not None) and child evals (non-seed,
@@ -2650,9 +2672,11 @@ class TestAtomicProposalWorker:
 
         Under the atomic-worker design, each worker catches non-fatal exceptions from
         mutate() and returns ``_ProposalResult(kind='llm_failed', ...)`` rather
-        than propagating the exception out of the worker (GEPA
-        reflective_mutation.py:369-420 error path).  The pool continues with
-        the remaining slots.
+        than propagating the exception out of the worker — the same per-task
+        isolation shape as GEPA's ``ReflectiveMutationProposer.propose``,
+        which wraps each task's proposal-prep step in its own try/except and
+        continues with the remaining tasks on failure.  The pool continues
+        with the remaining slots.
 
         Config: n=3 proposals.  The first mutate() call (thread-safely tracked)
         raises RuntimeError; the other two return valid candidates.
@@ -2717,7 +2741,9 @@ class TestAtomicProposalWorker:
         """With n=3, parent minibatch evals are dispatched to a thread pool.
 
         Under the atomic-worker design, all N atomic workers run inside a single
-        ThreadPoolExecutor (GEPA engine.py:422-443 parity).  With n=3 proposals
+        ThreadPoolExecutor — HELIX's own bounded-concurrency design (see the
+        module-level note above on GEPA's now-batched proposal dispatch).
+        With n=3 proposals
         and a time.sleep(0.05) inside each parent eval, the pool must spawn
         multiple worker threads simultaneously.
 
@@ -2787,8 +2813,9 @@ class TestAtomicProposalWorker:
         """budget.evaluations never decreases across consecutive save_state calls.
 
         Under the atomic-worker design, budget mutations happen only inside the sequential
-        acceptance loop (GEPA apply_proposal_output parity,
-        reflective_mutation.py:472) — never inside the parallel workers.
+        acceptance loop — HELIX's own design (see the module-level note above
+        on GEPA's now-batched proposal dispatch) — never inside the parallel
+        workers.
         Capturing ``state.budget.evaluations`` at each ``save_state`` call must
         therefore produce a monotonically non-decreasing sequence, regardless of
         which order the parallel workers completed.

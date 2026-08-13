@@ -311,17 +311,19 @@ class EvolutionConfig(BaseModel):
     # Number of val ids sampled for merge acceptance. Default 5 matches
     # GEPA (merge.py:262 num_subsample_ids=5). Must be >= 1.
     merge_subsample_size: int = 5
-    # GEPA parity: number of parallel proposals per generation. When > 1,
-    # sample N parents, run N mutations in parallel via ThreadPoolExecutor,
-    # then accept sequentially. See GEPA core/engine.py
-    # _run_parallel_reflective_batch.
-    num_parallel_proposals: int | Literal["auto"] = Field(
+    # HELIX's own P: the number of parents sampled per iteration for
+    # parallel mutation proposals. Upstream expresses the same idea via
+    # its SamplingStrategy classes — see PxNSampling(p, n) in
+    # src/gepa/strategies/proposal_sampling.py ("P parents x N mutations
+    # each = P*N total tasks").
+    num_parallel_proposals: int = Field(
         default=1,
         description=(
-            "Number of concurrent mutation proposals per iteration. "
-            "GEPA parity: EngineConfig.num_parallel_proposals. "
-            "Set to 'auto' to derive from max_workers // minibatch_size, "
-            "matching GEPA's optimize_anything._resolve_num_parallel_proposals."
+            "Number of concurrent mutation proposals per iteration (P). "
+            "Upstream GEPA expresses the same idea through its "
+            "PxNSampling(p, n) sampling strategy. See "
+            "https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/ "
+            "for the scaling analysis."
         ),
     )
     mutations_per_parent: int = Field(
@@ -333,7 +335,9 @@ class EvolutionConfig(BaseModel):
             "Each of the P*N tasks draws its own minibatch. Default 1 keeps "
             "the historical one-child-per-parent behaviour. Note that "
             "max_evaluations is checked between slots, so raising P*N raises "
-            "how far a single iteration can overshoot the cap."
+            "how far a single iteration can overshoot the cap. See "
+            "https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/ "
+            "for GEPA's scaling analysis."
         ),
     )
     proposal_selection: Literal[
@@ -366,14 +370,13 @@ class EvolutionConfig(BaseModel):
             "GEPA parity: ReflectionConfig.reflection_minibatch_size default."
         ),
     )
+    # GEPA parity: ``EngineConfig.max_workers`` in ``gepa_launcher.py``,
+    # default ``os.cpu_count() or 32``.
     max_workers: int = Field(
         default_factory=lambda: os.cpu_count() or 32,
         description=(
             "Max parallel eval workers — bounds both the parent-eval and "
-            "mutation ThreadPools in the num_parallel_proposals pipeline. "
-            "GEPA parity: EngineConfig.max_workers "
-            "(/tmp/gepa-official/src/gepa/optimize_anything.py:485, "
-            "default os.cpu_count() or 32)."
+            "mutation ThreadPools in the num_parallel_proposals pipeline."
         ),
     )
     cache_evaluation: bool = Field(
@@ -464,35 +467,28 @@ class EvolutionConfig(BaseModel):
             "objective/cartesian selection raises an actionable "
             ":class:`helix.population.MissingObjectiveScoresError`.\n\n"
             "The acceptance gate stays positional on ``scores_list`` "
-            "regardless of ``frontier_type``; only the Pareto retention / "
-            "parent-selection decision is multi-axis."
+            "regardless of ``frontier_type`` (GEPA's acceptance criteria "
+            "in ``strategies/acceptance.py`` compare subsample score lists "
+            "positionally); only the Pareto retention / parent-selection decision is "
+            "multi-axis.  Non-``instance`` paths require ``helix_result`` "
+            'to emit per-example ``side_info["scores"]`` dicts — without '
+            "them the objective / cartesian frontiers raise instead of "
+            "falling back to scalar semantics."
         ),
     )
 
     def model_post_init(self, __context: object) -> None:
-        # ``max_workers`` is validated before the "auto" resolution below
-        # consumes it: ``max(1, 0 // k)`` would silently launder a zero or
-        # negative worker count into a P of 1 instead of rejecting it.
         if self.max_workers < 1:
             raise ValueError(
                 f"evolution.max_workers must be >= 1 (got {self.max_workers})"
             )
-        # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
-        # ``max(1, max_workers // minibatch_size)`` once at construction
-        # time so every downstream consumer sees a plain int.  Mirrors
-        # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
-        _p_raw = self.num_parallel_proposals
-        if isinstance(_p_raw, str):
-            num_proposals = max(1, self.max_workers // max(1, self.minibatch_size))
-            self.num_parallel_proposals = num_proposals
-        else:
-            num_proposals = _p_raw
         # A zero or negative P was accepted before P×N landed: it produced an
         # empty proposal batch every iteration, so the run burned through
         # max_generations without ever proposing a candidate.
-        if num_proposals < 1:
+        if self.num_parallel_proposals < 1:
             raise ValueError(
-                f"evolution.num_parallel_proposals must be >= 1 (got {num_proposals})"
+                "evolution.num_parallel_proposals must be >= 1 "
+                f"(got {self.num_parallel_proposals})"
             )
         if self.mutations_per_parent < 1:
             raise ValueError(
@@ -502,7 +498,7 @@ class EvolutionConfig(BaseModel):
         # ``proposal_top_k`` is meaningful only for the strategy that reads
         # it; accepting it elsewhere would let a config claim a bound that
         # silently does nothing.
-        _batch_size = num_proposals * self.mutations_per_parent
+        _batch_size = self.num_parallel_proposals * self.mutations_per_parent
         if self.proposal_selection == "top_k":
             if self.proposal_top_k is None:
                 raise ValueError(

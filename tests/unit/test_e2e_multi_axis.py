@@ -18,14 +18,13 @@ on ``scores_list`` regardless of ``frontier_type``, and the e2e story
 is about the multi-axis retention path.
 
 GEPA cross-references:
-  * Evaluator contract — per-example ``(score, side_info)``:
-    ``src/gepa/optimize_anything.py:387-438``.
+  * Evaluator contract — per-example ``(score, side_info)``: the
+    ``Evaluator`` protocol in ``gepa_launcher.py``.
   * ``side_info["scores"]`` → ``objective_scores`` harvest:
-    ``optimize_anything_adapter.py:260-272``.
-  * ``FrontierType`` literal:
-    ``src/gepa/core/state.py:22-23``.
-  * O.A. default ``"hybrid"``:
-    ``src/gepa/optimize_anything.py:476``.
+    ``_extract_objective_scores`` in ``optimize_anything_adapter.py``.
+  * ``FrontierType`` literal, defined in ``core/state.py``.
+  * O.A. default ``"hybrid"``: GEPA's ``EngineConfig.frontier_type``
+    in ``gepa_launcher.py``.
 """
 
 from __future__ import annotations

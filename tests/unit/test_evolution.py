@@ -1,6 +1,6 @@
 """Unit tests for helix.evolution — the HELIX evolution loop.
 
-Ported from GEPA's evolution loop test scenarios (gepa-research.md).
+Ported from GEPA's evolution loop test scenarios.
 
 Covers:
 - degrades() helper (gating acceptance/rejection/tie logic)
@@ -115,8 +115,8 @@ def make_config(
     """Build a HelixConfig for evolution unit tests.
 
     ``frontier_type`` defaults to ``"hybrid"`` to match
-    :class:`EvolutionConfig`'s GEPA-O.A. default
-    (``src/gepa/optimize_anything.py:476``).  The companion
+    :class:`EvolutionConfig`'s GEPA-O.A. default — GEPA's
+    ``EngineConfig.frontier_type`` in ``gepa_launcher.py``.  The companion
     :func:`make_eval_result` synthesises per-example
     ``objective_scores`` slots so results pass
     :meth:`ParetoFrontier._validate_objective_scores` under the default;
@@ -192,8 +192,8 @@ def all_mocks(mocker):
         "record_entry": mocker.patch("helix.evolution.record_entry"),
         "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value={}),
         "HelixLiveDisplay": mocker.patch("helix.evolution.HelixLiveDisplay"),
-        # GEPA parity (merge-pairing audit D1):
-        # the merge branch now enforces GEPA's ``len(parent_program_for_candidate) < 3``
+        # GEPA parity (merge-pairing audit D1): the merge branch now
+        # enforces GEPA's ``len(parent_program_for_candidate) < 3``
         # early-exit (merge.py:130-131), i.e. you need two siblings plus one
         # ancestor.  Provide a 3-entry dummy lineage by default so merge tests
         # that mock ``find_merge_triplet`` directly continue to exercise the
@@ -1455,10 +1455,10 @@ class TestMergeBehavior:
             f"merge eval must route through val, saw splits: "
             f"{[s for s, _ in merged_eval_calls]}"
         )
-        # GEPA parity (merge-gate audit M3):
-        # after the subsample gate passes, HELIX now runs a SECOND (full-val)
-        # eval on the merged candidate mirroring GEPA ``engine.py:690`` →
-        # ``_run_full_eval_and_add`` → ``_evaluate_on_valset``.  With
+        # GEPA parity (merge-gate audit M3): after the subsample gate
+        # passes, HELIX now runs a SECOND (full-val) eval on the merged
+        # candidate mirroring GEPA's ``_run_full_eval_and_add`` in
+        # ``core/engine.py``.  With
         # val_size=None (single-task/no-example mode) the full-val path falls through
         # to ``_cached_eval`` which calls ``run_evaluator`` *without*
         # instance_ids.  Assert the *first* call is the subsample
@@ -1540,9 +1540,8 @@ class TestMergeBehavior:
         # GEPA parity (merge-gate audit M3): the first merge eval is the
         # subsample gate (exactly ``merge_subsample_size`` ids drawn from
         # the common val intersection); subsequent calls are the
-        # GEPA-aligned post-acceptance full-val pass (merge-gate audit
-        # M3).  Assert only the first
-        # call against the subsample contract.
+        # GEPA-aligned post-acceptance full-val pass.  Assert only the
+        # first call against the subsample contract.
         first_batch = merged_eval_batches[0]
         assert len(first_batch) == 3, (
             f"merge subsample must use exactly merge_subsample_size ids, "
@@ -1685,8 +1684,8 @@ class TestMergeBehavior:
         Once the subsample gate passes, HELIX runs a SECOND (full-val)
         eval on the merged candidate and uses THAT result for
         ``frontier.add`` / ``state.instance_scores[merged.id]`` — mirrors
-        GEPA ``engine.py:688-696`` → ``_run_full_eval_and_add``
-        (engine.py:175-197) → ``_evaluate_on_valset`` (engine.py:154-173).
+        GEPA's ``_run_full_eval_and_add`` in ``core/engine.py``, which
+        runs a full-valset evaluation before adding the candidate.
 
         Before this fix, the frontier entry for the merged candidate
         only carried scores for the 5 subsample ids, so
@@ -1696,7 +1695,8 @@ class TestMergeBehavior:
         and over-representing them as tiebreak-eliminated candidates.
 
         Regression invariant: ``val_stage_size`` gates the mutation path
-        only (src/helix/evolution.py:719) — it does not affect the merge
+        only (consumed via ``_stage_val_example_ids()`` in the proposal's
+        staged-val gate) — it does not affect the merge
         flow — so the full-val pass runs regardless of its value.
         """
         seed = make_candidate("g0-s0")

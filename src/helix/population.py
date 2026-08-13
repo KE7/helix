@@ -135,8 +135,8 @@ class EvalResult:
     # Per-example objective-axis harvest: each slot is
     # ``side_info_i.get("scores", {})`` filtered down to
     # ``{str: float}`` entries.  GEPA analogue:
-    # :attr:`gepa.core.adapter.EvaluationBatch.objective_scores`
-    # (``src/gepa/core/adapter.py:26``).  Feeds the multi-axis Pareto
+    # :attr:`gepa.core.adapter.EvaluationBatch.objective_scores`.
+    # Feeds the multi-axis Pareto
     # frontier when ``evolution.frontier_type`` ∈ {"objective",
     # "hybrid", "cartesian"}; harmless on the default "instance" path.
     objective_scores: list[dict[str, float]] | None = None
@@ -346,27 +346,27 @@ class ParetoFrontier:
 
     Multi-axis frontier (GEPA ``FrontierType`` parity)
     ---------------------------------------------------
-    The ``frontier_type`` constructor arg mirrors GEPA's literal at
-    ``src/gepa/core/state.py:22-23``:
+    The ``frontier_type`` constructor arg mirrors GEPA's ``FrontierType``
+    literal in ``core/state.py``:
 
     - ``"instance"`` (default): per-example-id keyspace, built from
       ``EvalResult.instance_scores``.  Matches HELIX's historical
       behaviour and GEPA's ``frontier_type="instance"`` path.
     - ``"objective"``: per-objective-name keyspace, values = mean of
       that objective across the valset, built from
-      ``EvalResult.objective_scores``.  GEPA
-      ``_update_objective_pareto_front`` (``state.py:474-484``).
+      ``EvalResult.objective_scores``.  GEPA's
+      ``GEPAState._update_objective_pareto_front``.
     - ``"hybrid"``: union of the instance and objective keyspaces.
       A candidate survives if it's non-dominated on the combined
       keyset.
     - ``"cartesian"``: per ``(val_id, objective_name)`` keyspace.
-      GEPA ``_update_pareto_front_for_cartesian``
-      (``state.py:512-525``).
+      GEPA's ``GEPAState._update_pareto_front_for_cartesian``.
 
     The **acceptance gate stays positional** on ``scores_list``
-    regardless of ``frontier_type`` (GEPA ``acceptance.py:39-48``);
-    only the Pareto retention / parent-selection decision is
-    multi-axis.
+    regardless of ``frontier_type`` (GEPA's default
+    ``StrictImprovementAcceptance`` in ``strategies/acceptance.py``
+    sums subsample scores positionally); only the Pareto retention /
+    parent-selection decision is multi-axis.
 
     Implementation: each axis has its own ``_..._best`` /
     ``_..._best_score`` dict, populated on ``add()``.
@@ -392,7 +392,7 @@ class ParetoFrontier:
         # (val_id → best score).
         self._per_key_best: dict[str, set[str]] = {}
         self._per_key_best_score: dict[str, float] = {}
-        # ``"objective"`` axis — mirrors GEPAState.program_at_objective_pareto_front
+        # ``"objective"`` axis — mirrors GEPAState.program_at_pareto_front_objectives
         # (objective_name → {candidates tied for best mean-across-valset})
         # and ``objective_pareto_front`` (objective_name → best mean).
         self._objective_best: dict[str, set[str]] = {}
@@ -465,12 +465,16 @@ class ParetoFrontier:
     def _validate_objective_scores(self, cid: str, result: EvalResult) -> None:
         """Validate objective-score shape without rejecting empty axes.
 
-        Upstream GEPA tolerates missing or all-empty objective mappings and
-        its objective update simply no-ops. HELIX follows that behavior for
-        the update path while retaining a positional length invariant when
-        objective mappings are present. A warning records the degraded
-        non-instance run; objective-only selection later raises a typed,
-        actionable error if there is no objective frontier to sample.
+        Upstream GEPA raises a plain ``ValueError`` at both the seed-time
+        check in ``GEPAState.__init__`` and the per-update check in
+        ``GEPAState.update_state_with_new_program`` when
+        ``valset_evaluation.objective_scores_by_val_id`` is missing/empty
+        for an objective-bearing ``frontier_type``.  HELIX diverges here:
+        rather than raising immediately at add-time, it emits a warning
+        and no-ops, deferring the hard failure to selection time, where
+        objective-only selection raises a typed, actionable
+        :class:`MissingObjectiveScoresError` if there is no objective
+        frontier to sample.
 
         The positional length check remains a structural invariant for
         HELIX's list-shaped objective field.
@@ -514,11 +518,14 @@ class ParetoFrontier:
     def _update_objective(self, cid: str, result: EvalResult) -> None:
         """Update the per-objective frontier using mean-across-valset.
 
-        Mirrors GEPA's ``_update_objective_pareto_front``
-        (``state.py:474-484``) with its ``_per_prog_mean_objective_scores``
-        helper (``state.py:462-472``): for each objective name present
-        in any per-example slot, take the mean of that objective's
-        scores across the entire ``objective_scores`` list.
+        HELIX computes the per-candidate mean of each objective across
+        its own ``objective_scores`` list, then tracks the best mean
+        (and any candidates tied for it) per objective name — the same
+        two-stage shape as upstream GEPA, which aggregates per-val_id
+        objective scores into a per-program mean via
+        ``GEPAState._aggregate_objective_scores`` before handing that
+        pre-aggregated dict to ``GEPAState._update_objective_pareto_front``
+        for the best-tracking step.
         """
         # Empty or absent objective scores are an intentional no-op, matching
         # GEPA's ``if not objective_scores: return`` update behavior.
@@ -542,8 +549,8 @@ class ParetoFrontier:
     def _update_cartesian(self, cid: str, result: EvalResult) -> None:
         """Update the (val_id, objective_name) frontier.
 
-        Mirrors GEPA's ``_update_pareto_front_for_cartesian``
-        (``state.py:512-525``): each per-example ``objective_scores[i]``
+        Mirrors GEPA's ``GEPAState._update_pareto_front_for_cartesian``:
+        each per-example ``objective_scores[i]``
         slot is combined with the corresponding ``val_id`` (from
         ``instance_scores``' ordered keys) to form a tuple key.  We
         encode the tuple as ``f"{val_id}::{objective_name}"`` so the
@@ -630,8 +637,8 @@ class ParetoFrontier:
             return self._objective_best
         if self._frontier_type == "cartesian":
             return self._cartesian_best
-        # "hybrid": union of instance ∪ objective keyspaces (GEPA O.A.
-        # default — see src/gepa/optimize_anything.py:476).
+        # "hybrid": union of instance ∪ objective keyspaces — GEPA's
+        # default (``EngineConfig.frontier_type`` in ``gepa_launcher.py``).
         merged: dict[str, set[str]] = {}
         for k, v in self._per_key_best.items():
             merged[f"inst::{k}"] = v

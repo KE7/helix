@@ -118,8 +118,8 @@ class TestBuildMutationPrompt:
 
     def test_background_section_omitted_when_none(self):
         """GEPA parity: empty optional inputs skip the section entirely
-        instead of emitting a placeholder.  Mirrors GEPA O.A.'s
-        ``_build_reflection_prompt_template`` (optimize_anything.py:501-596),
+        instead of emitting a placeholder.  Mirrors GEPA's
+        ``_build_reflection_prompt_template`` in ``gepa_launcher.py``,
         which only appends a section when its content is non-empty.
         """
         er = make_eval_result()
@@ -251,7 +251,8 @@ class TestTurnBudgetArticleAgreement:
 class TestPerExampleDiagnostics:
     """``build_mutation_prompt`` renders ``eval_result.per_example_side_info``
     as the Diagnostics section under the new GEPA O.A. contract
-    (``optimize_anything_adapter.py:524-553`` + ``format_samples``
+    (``OptimizeAnythingAdapter.make_reflective_dataset`` in
+    ``optimize_anything_adapter.py`` + ``format_samples``
     at ``gepa/strategies/instruction_proposal.py:54-95``).  The legacy
     batch-level ``side_info`` rendering is used only when
     ``per_example_side_info`` is absent.
