@@ -192,7 +192,7 @@ def all_mocks(mocker):
         "record_entry": mocker.patch("helix.evolution.record_entry"),
         "generate_seed": mocker.patch("helix.evolution.generate_seed", return_value={}),
         "HelixLiveDisplay": mocker.patch("helix.evolution.HelixLiveDisplay"),
-        # GEPA parity (merge-pairing audit D1, /tmp/audit_audit-merge-pairing.md:49-50):
+        # GEPA parity (merge-pairing audit D1):
         # the merge branch now enforces GEPA's ``len(parent_program_for_candidate) < 3``
         # early-exit (merge.py:130-131), i.e. you need two siblings plus one
         # ancestor.  Provide a 3-entry dummy lineage by default so merge tests
@@ -1455,7 +1455,7 @@ class TestMergeBehavior:
             f"merge eval must route through val, saw splits: "
             f"{[s for s, _ in merged_eval_calls]}"
         )
-        # GEPA parity (merge-gate audit M3, /tmp/audit_audit-merge-gate.md:10-32):
+        # GEPA parity (merge-gate audit M3):
         # after the subsample gate passes, HELIX now runs a SECOND (full-val)
         # eval on the merged candidate mirroring GEPA ``engine.py:690`` →
         # ``_run_full_eval_and_add`` → ``_evaluate_on_valset``.  With
@@ -1540,8 +1540,8 @@ class TestMergeBehavior:
         # GEPA parity (merge-gate audit M3): the first merge eval is the
         # subsample gate (exactly ``merge_subsample_size`` ids drawn from
         # the common val intersection); subsequent calls are the
-        # GEPA-aligned post-acceptance full-val pass
-        # (/tmp/audit_audit-merge-gate.md:10-32).  Assert only the first
+        # GEPA-aligned post-acceptance full-val pass (merge-gate audit
+        # M3).  Assert only the first
         # call against the subsample contract.
         first_batch = merged_eval_batches[0]
         assert len(first_batch) == 3, (
@@ -1680,7 +1680,7 @@ class TestMergeBehavior:
     def test_merge_accepted_entry_has_full_val_coverage(
         self, mocker, tmp_path, all_mocks
     ):
-        """GEPA parity (merge-gate audit M3, /tmp/audit_audit-merge-gate.md:10-32).
+        """GEPA parity (merge-gate audit M3).
 
         Once the subsample gate passes, HELIX runs a SECOND (full-val)
         eval on the merged candidate and uses THAT result for

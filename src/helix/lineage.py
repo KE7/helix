@@ -125,7 +125,7 @@ def find_merge_triplet(
     GEPA parity (L1): improvement filter is non-strict (``>``) matching
     GEPA merge.py:59 — ancestor score must not exceed either candidate.
 
-    GEPA parity (merge-pairing audit B1/B2/C3, /tmp/audit_audit-merge-pairing.md):
+    GEPA parity (merge-pairing audit B1/B2/C3):
     - Canonicalize ``(i, j)`` inside the sampling loop so downstream
       consumers (the merge subprocess, the attempted-pair ledger) always
       see a lex-sorted tuple.  Mirrors GEPA ``merge.py:94-95``

@@ -1,6 +1,6 @@
 """Unit tests for GEPA-aligned state persistence.
 
-Covers the additions called out in /tmp/audit_audit-rng-state-persist.md
+Covers the additions called out in the RNG/state-persistence audit
 (MODERATE_DIVERGENCE — schema thin vs GEPA):
 
 * C1 — per-(candidate, example) eval cache survives save → load round-trip
@@ -80,7 +80,7 @@ def _make_full_state() -> EvolutionState:
 def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     """save_state → load_state must deep-equal the original on every field.
 
-    Audit ref: /tmp/audit_audit-rng-state-persist.md C/§3 + D1.
+    Audit ref: RNG/state-persistence audit C/§3 + D1.
     """
     state = _make_full_state()
     save_state(state, tmp_path)
@@ -225,7 +225,10 @@ def test_eval_cache_load_tolerates_non_dict(tmp_path: Path) -> None:
     target = helix_dir / "eval_cache.pkl"
     target.write_bytes(_pickle.dumps(["not", "a", "dict"]))
 
-    with pytest.warns(RuntimeWarning, match="Quarantined to "):
+    # The message deliberately does NOT name the quarantine path (it would
+    # leak the machine's directory layout); the quarantine itself is asserted
+    # below, so the behaviour is still pinned.
+    with pytest.warns(RuntimeWarning, match="A diagnostic copy was retained"):
         assert load_eval_cache(tmp_path) is None
 
     # The corrupt file must be moved aside (not deleted) so the user can
@@ -401,3 +404,33 @@ def test_clear_eval_cache_removes_stale_pickle(tmp_path: Path) -> None:
     clear_eval_cache(tmp_path)
 
     assert load_eval_cache(tmp_path) is None
+
+
+def test_eval_cache_warnings_do_not_leak_filesystem_paths(tmp_path):
+    """Corrupt-cache warnings must not print absolute paths.
+
+    These RuntimeWarnings reach the user directly.  Naming the on-disk
+    location leaks the machine's directory layout for no diagnostic gain:
+    the caller already knows which project it ran.  The quarantine copy is
+    still written; only its path is withheld from the message.
+    """
+    import pickle
+    import warnings as _warnings
+
+    from helix.state import _eval_cache_path, load_eval_cache
+
+    for payload in (b"not-a-pickle", pickle.dumps(["not", "a", "dict"])):
+        base = tmp_path / f"case-{len(payload)}"
+        (base / ".helix").mkdir(parents=True, exist_ok=True)
+        _eval_cache_path(base).write_bytes(payload)
+
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            assert load_eval_cache(base) is None
+
+        assert caught, "expected a RuntimeWarning"
+        for entry in caught:
+            message = str(entry.message)
+            assert str(base) not in message, message
+            assert str(tmp_path) not in message, message
+            assert ".corrupt-" not in message, message

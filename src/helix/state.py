@@ -87,7 +87,7 @@ class EvolutionState:
     # filter in ``lineage.find_merge_triplet`` reads this set to short-
     # circuit already-seen pairs (merge-pairing audit B2).
     merge_attempted_pairs: list[list[str]] = field(default_factory=list)
-    # GEPA parity (merge-pairing audit C1, /tmp/audit_audit-merge-pairing.md:28-31):
+    # GEPA parity (merge-pairing audit C1):
     # mirrors GEPA ``merges_performed[1]`` at gepa/proposer/merge.py:195-203.
     # Each entry is [cid_i, cid_j, desc_hash] with cid_i <= cid_j
     # lexicographically and desc_hash = post-snapshot git SHA of the
@@ -299,19 +299,20 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
         with open(target, "rb") as f:
             loaded = pickle.load(f)
     except Exception as exc:
-        quarantined = _quarantine_corrupt_cache(target, reason="unreadable")
+        _quarantine_corrupt_cache(target, reason="unreadable")
         warnings.warn(
-            f"Ignoring unreadable eval cache at {target}: "
-            f"{type(exc).__name__}: {exc}. Quarantined to {quarantined}.",
+            f"Ignoring unreadable eval cache: {type(exc).__name__}: {exc}. "
+            f"A diagnostic copy was retained alongside it.",
             RuntimeWarning,
             stacklevel=2,
         )
         return None
     if not isinstance(loaded, dict):
-        quarantined = _quarantine_corrupt_cache(target, reason="non-dict")
+        _quarantine_corrupt_cache(target, reason="non-dict")
         warnings.warn(
-            f"Ignoring eval cache at {target}: expected dict, got "
-            f"{type(loaded).__name__}. Quarantined to {quarantined}.",
+            f"Ignoring eval cache: expected dict, got "
+            f"{type(loaded).__name__}. A diagnostic copy was retained "
+            f"alongside it.",
             RuntimeWarning,
             stacklevel=2,
         )
