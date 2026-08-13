@@ -402,7 +402,7 @@ class EvolutionConfig(BaseModel):
             "stage is composed with a later call for the remaining ids. Use "
             "only when per-id scores/objectives are independent of the id "
             "set; do not use with batch-relative scores, cross-example "
-            "normalization, shared warm-up, or a batch-global judge used as "
+            "normalization, shared warm-up, or an aggregate metric used as "
             "an objective. Disabled when unset or 0."
         ),
     )
@@ -413,8 +413,8 @@ class EvolutionConfig(BaseModel):
             "gate. Regardless of this setting, their identity, lineage, and "
             "scores are saved in .helix/lineage.json and .helix/attempts/, "
             "so the run can be reconstructed without candidate worktrees. "
-            "When enabled, each rejected candidate's complete worktree—the "
-            "mutation plus whatever artifacts the evaluator wrote—and its live "
+            "When enabled, each rejected candidate's complete worktree at "
+            "the point of rejection and its live "
             "helix/<id> ref are kept; that ref keeps its snapshot commit "
             "reachable. When disabled (the default), HELIX removes the "
             "worktree and ref, making the commit eventually garbage-collectable, "
