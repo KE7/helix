@@ -1057,6 +1057,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "cache_creation_input_tokens",
                     "cacheCreationInputTokens",
                     "cacheCreation",
+                    "cache_write_input_tokens",
+                    "cacheWriteTokens",
                 ),
             ),
             (
@@ -1064,10 +1066,20 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                 (
                     "cache_read_input_tokens",
                     "cacheReadInputTokens",
+                    "cacheReadTokens",
                     "cacheRead",
                 ),
             ),
-            ("reasoning_tokens", ("reasoning_tokens", "reasoningTokens", "thoughts")),
+            (
+                "reasoning_tokens",
+                (
+                    "reasoning_tokens",
+                    "reasoningTokens",
+                    "reasoning_output_tokens",
+                    "thoughts",
+                    "reasoning",
+                ),
+            ),
             (
                 "cost_usd",
                 ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total"),
@@ -1103,6 +1115,21 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
             coerced = _coerce_number(value)
             if coerced is not None:
                 _d["cost_usd"] = coerced
+
+        # OpenCode emits cache accounting as ``tokens.cache.{read,write}``.
+        # Keep this contextual rather than treating generic ``read``/``write``
+        # fields elsewhere in a transcript as token counts.
+        cache = node.get("cache")
+        if isinstance(cache, dict):
+            for key, field in (
+                ("cache_creation_input_tokens", "write"),
+                ("cache_read_input_tokens", "read"),
+            ):
+                if key in _d:
+                    continue
+                value = _coerce_number(cache.get(field))
+                if value is not None:
+                    _d[key] = value
 
     if tool_event_count and "tool_event_count" not in _d:
         _d["tool_event_count"] = tool_event_count

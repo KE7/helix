@@ -850,9 +850,9 @@ class TestInvokeClaudeCode:
                     [
                         '{"type":"session.started","session_id":"codex-session"}',
                         (
-                            '{"type":"turn","usage":{"prompt_tokens":12,'
-                            '"completion_tokens":8,"cached_input_tokens":21,'
-                            '"reasoning_tokens":6,"total_cost_usd":0.32}}'
+                            '{"type":"turn.completed","usage":{"input_tokens":12,'
+                            '"cached_input_tokens":21,"cache_write_input_tokens":3,'
+                            '"output_tokens":8,"reasoning_output_tokens":6}}'
                         ),
                     ]
                 ),
@@ -860,8 +860,8 @@ class TestInvokeClaudeCode:
                     "input_tokens": 12,
                     "output_tokens": 8,
                     "cached_input_tokens": 21,
+                    "cache_creation_input_tokens": 3,
                     "reasoning_tokens": 6,
-                    "cost_usd": 0.32,
                     "session_id": "codex-session",
                 },
                 id="codex",
@@ -873,7 +873,8 @@ class TestInvokeClaudeCode:
                         '{"type":"system","sessionId":"cursor-session"}',
                         (
                             '{"type":"assistant","usage":{"inputTokens":13,'
-                            '"outputTokens":9,"cachedTokens":22,'
+                            '"outputTokens":9,"cacheReadTokens":22,'
+                            '"cacheWriteTokens":5,'
                             '"reasoningTokens":7,"costUsd":0.33}}'
                         ),
                     ]
@@ -881,7 +882,8 @@ class TestInvokeClaudeCode:
                 {
                     "input_tokens": 13,
                     "output_tokens": 9,
-                    "cached_input_tokens": 22,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 22,
                     "reasoning_tokens": 7,
                     "cost_usd": 0.33,
                     "session_id": "cursor-session",
@@ -895,9 +897,11 @@ class TestInvokeClaudeCode:
                         "MCP advisory preamble tolerated by the Gemini parser.",
                         '{"type":"init","session_id":"gemini-session"}',
                         (
-                            '{"type":"result","usageMetadata":{"prompt_tokens":14,'
-                            '"completion_tokens":10,"cachedTokens":23},'
-                            '"thoughts":8,"cost":0.34}'
+                            '{"type":"result","stats":{"input_tokens":14,'
+                            '"output_tokens":10,"cached":23,"input":14,'
+                            '"models":{"gemini":{"total_tokens":47,'
+                            '"input_tokens":14,"output_tokens":10,'
+                            '"cached":23,"input":14}}}}'
                         ),
                     ]
                 ),
@@ -905,8 +909,6 @@ class TestInvokeClaudeCode:
                     "input_tokens": 14,
                     "output_tokens": 10,
                     "cached_input_tokens": 23,
-                    "reasoning_tokens": 8,
-                    "cost_usd": 0.34,
                     "session_id": "gemini-session",
                 },
                 id="gemini",
@@ -918,14 +920,16 @@ class TestInvokeClaudeCode:
                         '{"type":"step_start","sessionID":"opencode-session"}',
                         (
                             '{"type":"step_finish","part":{"tokens":{"input":15,'
-                            '"output":11,"cached":24,"thoughts":9},"cost":0.35}}'
+                            '"output":11,"reasoning":9,'
+                            '"cache":{"read":24,"write":4}},"cost":0.35}}'
                         ),
                     ]
                 ),
                 {
                     "input_tokens": 15,
                     "output_tokens": 11,
-                    "cached_input_tokens": 24,
+                    "cache_creation_input_tokens": 4,
+                    "cache_read_input_tokens": 24,
                     "reasoning_tokens": 9,
                     "cost_usd": 0.35,
                     "session_id": "opencode-session",
@@ -961,6 +965,31 @@ class TestInvokeClaudeCode:
                 assert payload["usage"][key] == pytest.approx(value)
             else:
                 assert payload["usage"][key] == value
+
+    def test_usage_normalization_keeps_legacy_aliases(self):
+        from helix.mutator import _normalise_usage_stats
+
+        usage = _normalise_usage_stats(
+            {
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "cachedTokens": 3,
+                    "cacheCreationInputTokens": 4,
+                    "cacheReadInputTokens": 5,
+                    "reasoningTokens": 6,
+                    "totalCostUsd": 0.07,
+                }
+            }
+        )
+
+        assert usage.input_tokens == 1
+        assert usage.output_tokens == 2
+        assert usage.cached_input_tokens == 3
+        assert usage.cache_creation_input_tokens == 4
+        assert usage.cache_read_input_tokens == 5
+        assert usage.reasoning_tokens == 6
+        assert usage.cost_usd == pytest.approx(0.07)
 
     def test_claude_backend_artifacts_copy_local_transcript(
         self, tmp_path: Path, mocker, monkeypatch
