@@ -1,7 +1,6 @@
 # Sandbox auth projection: volume mode source, private state per candidate
 
-**Status:** proposed; implementation requires approval.  This document changes
-no runtime behavior.
+**Status:** accepted.
 
 ## Decision in one paragraph
 
@@ -38,16 +37,13 @@ candidate can mount that volume and it is destroyed at cleanup.
 
 ## Why a shared writable auth directory is retired
 
-The prior rejection of shared-volume agent execution remains correct, even
-though the rejection exception itself will be removed.  A writable auth
-directory cannot be made candidate-independent with a denylist: OAuth rotation
-requires write and rename authority in the credential directory, so an agent
-can create an unenumerated file which a later agent reads.  Resetting a *single*
-shared directory between samples can address sequential residue, but cannot
-address P×N candidates that run at the same time.
+A writable auth directory cannot be made candidate-independent with a denylist:
+OAuth rotation requires write and rename authority in the credential directory,
+so an agent can create an unenumerated file which a later agent reads.
+Resetting a *single* shared directory between samples can address sequential
+residue, but cannot address P×N candidates that run at the same time.
 
-The backend evidence behind that decision is retained here so that a future
-change does not reintroduce a direct shared mount:
+Per-backend constraints under the retired shared-store design:
 
 | Backend | Finding under the retired shared-store design |
 | --- | --- |
@@ -55,7 +51,7 @@ change does not reintroduce a direct shared mount:
 | Gemini | Per-run state lives beside the credential; its available home knob moves the credential too. |
 | Cursor | A config/data split looks plausible but was not verified. Plausible is not an isolation proof. |
 | OpenCode | Its session DB shares the only relocation knob with the credential. |
-| Codex | Agent-memory databases do isolate: across three clean full-layout runs, `CODEX_SQLITE_HOME` left the shared directory untouched and redirected six files. Codex nevertheless fails on `models_cache.json` alone; it must not be described as leaking agent memory. |
+| Codex | Agent-memory databases do isolate: `CODEX_SQLITE_HOME` redirects them and leaves the shared directory untouched. Codex nevertheless fails on `models_cache.json` alone; it must not be described as leaking agent memory. |
 
 `models_cache.json` is carrying state: its presence and version change later
 control flow by skipping or refetching network work.  That result, and the
@@ -65,8 +61,7 @@ mount the login volume in an agent container again.
 ## Credential-transfer options considered
 
 The credential must cross from the login volume to a candidate without making
-the login volume visible to that candidate.  The working image prototype is
-important evidence, not a reason to choose its transport by default.
+the login volume visible to that candidate.
 
 | Option | Secret in agent env / Docker metadata | Agent-image requirement | Runtime-path impact | Rotation and isolation | Verdict |
 | --- | --- | --- | --- | --- | --- |
@@ -76,37 +71,26 @@ important evidence, not a reason to choose its transport by default.
 | (d) Read-only bind of the credential file | No | No | Low only in the happy path | Cannot preserve credential-file rotation; parent-path ownership is also problematic | Reject |
 | (e) Credential baked into a local derived image | No | One local derivative per backend/credential revision | Low at launch; requires local build, image selection, and rotation rebuild lifecycle | **Does satisfy candidate isolation**, but persists the secret in image layers/cache | Reject as default |
 
-### Evidence gathered for this choice
+### Mount-layout constraints behind the verdicts
 
-The stock local Claude runner (`2.1.120`) and Codex runner (`0.125.0`) were
-probed without any real credential, network access, or login volume mount.
-Both lack their target dot-directory in the base image.  A direct file bind
-causes Docker to create the intervening directory as `root:root`; Codex then
-fails at startup with `Error loading configuration: Permission denied`.  The
-same topology gives Claude a root-owned `.claude` parent.  This repeats the
-mount-layout lesson from the working Claude prototype: tests that omit HELIX's
-real nested mounts and ownership topology are not integration evidence.
+Stock backend runner images do not contain their target dot-directory.  A
+direct file bind therefore makes Docker create the intervening directory as
+`root:root`: Codex fails at startup with `Error loading configuration:
+Permission denied`, and Claude gets a root-owned `.claude` parent.  Any
+credential path must create that directory itself with the runner uid/gid.  A
+test that omits HELIX's real nested mounts and ownership topology does not
+exercise this constraint.
 
-A `docker create` followed by `docker cp` of a Claude credential file also
-failed before start because `/home/node/.claude` is absent in the unmodified
-image.  Making (b) work requires a bootstrap container or injected startup
-command, plus materializing the source credential on the host between two
-copies.  When `docker cp` was instead aimed at an already-existing target
-directory, it installed the synthetic file as root-owned `0644`, so (b) also
-needs a privileged ownership/mode repair before a normal `node` agent can
-rotate it.  In contrast, a synthetic source-volume → candidate-volume seed,
-followed by a node-owned private write and atomic rename, completed locally in
-327 ms.  That is a setup measurement, not a claim about OAuth; it is about
-0.4% of a 90-second mutation budget and should be remeasured in the integration
-suite.
+That same absent dot-directory blocks (b): `docker create` → `docker cp` fails
+before start, so (b) additionally needs a bootstrap container or injected
+startup command and must materialize the source credential on the host between
+two copies.  Aimed at an already-existing target directory, `docker cp`
+installs the file root-owned `0644`, so (b) also needs a privileged
+ownership/mode repair before a normal `node` agent can rotate it.
 
-The read-only bind probe cannot establish live OAuth rotation because it used a
-synthetic, unauthenticated record.  It does establish that (d) is not a trivial
-drop-in topology.  More fundamentally, a read-only credential file cannot
-support a successful atomic refresh write, so it cannot meet the desired normal
-CLI semantics even if a particular command tolerates it before expiry.  A
-dedicated-grant test remains required for the exact Claude and Codex refresh
-behavior.
+Option (d) is not a trivial drop-in topology, and more fundamentally a
+read-only credential file cannot support an atomic refresh write, so it cannot
+meet normal CLI semantics even where a command tolerates it before expiry.
 
 ### Option (e): local credential image
 
@@ -115,15 +99,10 @@ would start from the same read-only credential layer and can write only to its
 own container overlay; it receives no shared writable store.  Isolation is not
 the reason to reject it.
 
-Its operational cost is also lower than it may first appear.  Against the
-cached local Claude base, a synthetic 516-byte credential image took 558 ms for
-the first build and 371 ms after changing only the credential `COPY` input.
-Copying that 516-byte file into a stopped container took 35 ms, or 0.039% of a
-90-second mutation.  The complete synthetic candidate-volume seed and private
-atomic-write check took 327 ms, or 0.36% of the same budget.  These are local
-Docker measurements, not portability promises, but they show that avoiding
-candidate-time plumbing saves milliseconds rather than meaningful mutation
-time.
+Latency is not the reason either.  Every candidate-time credential path in this
+table — image rebuild, container copy, volume seed — costs milliseconds against
+a mutation budget measured in tens of seconds, so avoiding candidate-time
+plumbing saves no meaningful mutation time.
 
 The baked design loses on lifecycle and at-rest exposure, not latency:
 
@@ -132,20 +111,19 @@ The baked design loses on lifecycle and at-rest exposure, not latency:
   layer; build cache can retain it even after the visible image tag is removed.
   A candidate volume is credential-bearing only until its narrow cleanup path
   runs, while a tmpfs home dies with its container.
-- An observed access-token rotation requires rebuilding the local derivative
-  and switching future candidates to its new identity.  Access credentials
-  rotated roughly every eight hours in two observations.  If a stale baked
-  record cannot refresh in a fresh candidate, every candidate using that one
-  image fails together.  Whether a candidate can self-refresh remains
-  unmeasured, so this is a real synchronized-risk path rather than a claim that
-  refresh is broken.
+- Access credentials are short-lived, on the order of hours.  Each rotation
+  requires rebuilding the local derivative and switching future candidates to
+  its new identity.  If a stale baked record cannot refresh in a fresh
+  candidate, every candidate using that one image fails together.  Whether a
+  candidate can self-refresh remains unmeasured, so this is a real
+  synchronized-risk path rather than a claim that refresh is broken.
 - Published runner images are registry artifacts pinned by digest.  Baking
   cannot modify those artifacts: it creates a local `FROM <published digest>`
   derivative and requires HELIX to track its base digest, local image id, and
   source-volume revision.  That is a second identity and rotation-update
   lifecycle, rather than the existing one source-of-truth volume.
 
-The 35–327 ms avoided by (e) does not justify adding a long-lived credential
+The milliseconds avoided by (e) do not justify adding a long-lived credential
 layer and an image-rebuild state machine.  Preserve (e) as an operator-managed
 experimental option if needed, but do not make it the default.
 
@@ -219,17 +197,11 @@ for `auth = "volume"` until its manifest is confirmed by an authenticated
 candidate test.  In particular, Cursor's unverified split must not be promoted
 to a claim of readiness merely because a candidate volume would isolate it.
 
-## Earlier image-side experiments
+## Operator-owned image auth is outside the contract
 
-An earlier image experiment authenticated in a private home, removed its
-input from the process environment before agent exec, wrote mode `0600`, and
-failed closed on malformed data. It also exposed the root-owned nested
-transcript-parent failure that this design avoids with a uid/gid-correct tmpfs
-HOME and pre-created nested mount path. Its nine-hour, 37-generation run is
-useful evidence for the livebench write-up.
-
-It is not a HELIX auth mechanism. HELIX has exactly two paths: `auth =
-"volume"` and `auth = "env"`. HELIX contains no projection-variable name,
+An image that carries its own credential is not a HELIX auth mechanism. HELIX
+has exactly two paths: `auth = "volume"` and `auth = "env"`.
+HELIX contains no projection-variable name,
 encoding, decoding, runner-image selection, or compatibility branch. An
 operator-owned image may independently interpret an allowlisted environment
 value under `auth = "env"`; that image behavior is outside HELIX's contract.
@@ -257,9 +229,8 @@ auth_env_allow = []
 
 This retains `auth_env_allow` because it is the actual final scrub allowlist
 for named values.  It does not use that key as hidden plumbing for volume
-credentials.  The validation/documentation change should stay roughly 30–50
-lines; backend manifests and runtime cleanup are implementation details, not
-new user knobs.
+credentials.  Backend manifests and runtime cleanup are implementation details,
+not new user knobs.
 
 ## Deletions and documentation to retain
 
@@ -276,25 +247,22 @@ HELIX must not forbid or otherwise manipulate a variable it does not set.  The
 existing warning for both credential forms being present remains the right
 diagnostic for an ambiguous explicit-env configuration.
 
-The history in [Why a shared writable auth directory is retired](#why-a-shared-writable-auth-directory-is-retired)
-stays as product documentation.  Delete the retirement code, not the reason
-for structural isolation.
+Delete the retirement code, not the reason for structural isolation recorded in
+[Why a shared writable auth directory is retired](#why-a-shared-writable-auth-directory-is-retired).
 
 ## Rotation and its open question
 
 The candidate auth volume is writable, so a backend can attempt its normal
 in-container OAuth refresh and atomic rename.  Any refreshed credential stays
 only in that candidate volume and dies when the volume is removed; it is never
-written back to the login volume. The earlier image experiment observed the
-same candidate-local rotation boundary during a nine-hour, 37-generation run.
+written back to the login volume.
 
-Whether in-container OAuth refresh works at all is **unmeasured**.  Two prior
-attempts were void: the supervising process shared the grant and its own API
-activity revoked the grant under observation.  They do not show refresh working
-or broken.  Resolving the question requires a dedicated grant whose observer
-does not use it.
+Whether in-container OAuth refresh works at all is **unmeasured**.  Measuring
+it requires a dedicated grant whose observer does not use it: an observer that
+shares the grant revokes it through its own API activity, which yields no
+signal either way.
 
-## Verification plan
+## Verification requirements
 
 Unit and integration tests must make the structural boundary observable on the
 final Docker argv and live Docker objects, not merely on a helper function.
@@ -321,7 +289,7 @@ final Docker argv and live Docker objects, not merely on a helper function.
    deletion path, and makes manual cleanup actionable.
 7. **Real mount topology.** Run the Claude test with tmpfs `HOME`, the nested
    transcript bind, workspace bind, and runner user.  This guards against the
-   root-owned intervening-directory failure found by the proven runner.
+   root-owned intervening-directory failure.
 8. **Dedicated-grant rotation test.** For Claude and Codex, start a candidate
    after its access token expires while retaining a valid refresh token, then
    distinguish authenticated refresh from a revoked-grant failure.  Confirm no
