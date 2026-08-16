@@ -375,8 +375,11 @@ class EvolutionConfig(BaseModel):
     max_workers: int = Field(
         default_factory=lambda: os.cpu_count() or 32,
         description=(
-            "Max parallel eval workers — bounds both the parent-eval and "
-            "mutation ThreadPools in the num_parallel_proposals pipeline."
+            "Caps how many proposal slots run concurrently; each slot's "
+            "worker does that slot's parent eval and mutation. No effect "
+            "with a single slot (no pool is created). Does not bound full "
+            "validation, which runs sequentially afterward, or "
+            "concurrency inside the evaluator."
         ),
     )
     cache_evaluation: bool = Field(
