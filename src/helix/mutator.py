@@ -766,11 +766,25 @@ def _sandbox_agent_environment(
 ) -> dict[str, str]:
     """Build the deliberately small environment for a sandboxed agent.
 
-    Volume auth has no environment transport.  Env auth receives only a value
-    both named by ``auth_env_allow`` and explicitly supplied through ``[env]``
-    or ``passthrough_env``; an ambient host credential is never inferred.
+    The config-declared ``[env]`` (``fixed_env``) and ``passthrough_env``
+    values are applied in both auth modes — this is the same "read what the
+    config declares" transport the evaluator sidecar and the unsandboxed
+    agent already use, and it is what config.py's ``HelixConfig.env`` /
+    ``passthrough_env`` docstrings promise ("evaluator and agent
+    subprocesses"). Nothing here is inferred from ambient host state: a
+    value only reaches the agent because the caller explicitly named it in
+    ``passthrough_env`` or gave it a value in ``fixed_env``.
+
+    ``auth_env_allow`` is a separate, additional gate that applies only
+    under ``auth = "env"``: for names listed there, an ambient host value
+    may also be pulled in as the credential HELIX otherwise gets from the
+    login volume. It does not restrict the general ``fixed_env`` /
+    ``passthrough_env`` transport above — it only widens what a
+    caller-declared credential name is allowed to resolve to.
     """
-    env = _scrub_environment(passthrough_env=_agent_passthrough_env(None))
+    env = _scrub_environment(
+        passthrough_env=_agent_passthrough_env(passthrough_env), fixed_env=fixed_env
+    )
     if sandbox.auth != "env":
         return env
     configured = set(passthrough_env or []) | set((fixed_env or {}).keys())

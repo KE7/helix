@@ -80,6 +80,10 @@ command = "uv run python evaluate.py"
 # after passthrough_env. Useful for repeatable run-local service endpoints.
 # ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1"
 # ANTHROPIC_API_KEY = "dummy"
+# A credential-shaped value here reaches the agent even under sandbox
+# auth = "volume". For some backends that value outranks the seeded login
+# (see the "Docker Sandboxing" section of README.md) — only set one if you
+# mean it to authenticate the agent, or know it won't.
 
 [evolution]
 max_generations = 20

@@ -341,6 +341,9 @@ rng_seed = 0
 # after passthrough_env. Useful for repeatable run-local service endpoints.
 # ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1"
 # ANTHROPIC_API_KEY = "dummy"
+# See "Docker Sandboxing" below: for some backends, a credential-shaped
+# `[env]`/`passthrough_env` value outranks the sandbox.auth = "volume"
+# seeded login.
 
 [evaluator]
 command = "uv run python evaluate.py"
@@ -628,6 +631,28 @@ runner containers never receive it. Run the login flow once per backend:
 helix sandbox login claude
 helix sandbox status claude
 ```
+
+**`sandbox.auth = "volume"` seeds a login, but a configured `[env]`/
+`passthrough_env` credential can still be what the agent actually
+authenticates with** — HELIX passes those values through to the agent in
+both auth modes (that is the whole point of `[env]`: it also reaches
+non-sandboxed and `auth = "env"` runs), and each backend CLI, not HELIX,
+decides which credential source wins when more than one is present. Per
+backend, from each CLI's own documented/observed precedence:
+
+| Backend | If both a seeded login and a configured credential env var are present |
+| --- | --- |
+| `claude` | The env var wins. Anthropic's own docs put `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` above subscription/`\`/login\`` credentials, and specifically call out that in non-interactive mode (which is how HELIX always invokes `claude`) the key "is always used when present." |
+| `gemini` | The env var appears to win — Google's docs say `GEMINI_API_KEY`/`GOOGLE_API_KEY` must be unset to fall back to a stored login. Not independently confirmed against HELIX's exact seeded-login flow; treat as likely, not certain. |
+| `codex` | The seeded login appears to win by default — community reports describe `OPENAI_API_KEY` being ignored once a ChatGPT login exists, unless `preferred_auth_method = "apikey"` is set in the backend's own config. Not confirmed against OpenAI's own precedence docs (no page states this order explicitly). |
+| `cursor` | Undetermined — no documentation found stating the precedence between a `cursor-agent` login and `CURSOR_API_KEY`. |
+| `opencode` | Undetermined — secondary sources disagree on whether `auth.json` or an env var wins. |
+
+If you configure a credential-shaped `[env]`/`passthrough_env` value for
+`claude` or `gemini` under `auth = "volume"`, assume it — not the seeded
+login — is what authenticates the agent. For `codex`, `cursor`, and
+`opencode`, don't rely on either direction until it's verified against
+that CLI's actual behavior.
 
 For Claude, HELIX uses `claude setup-token` for sandbox login because that is
 the flow that works cleanly in browserless Docker/SSH-style environments; it
