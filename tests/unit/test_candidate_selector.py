@@ -145,7 +145,7 @@ class TestEpsilonGreedy:
         seen = {select_epsilon_greedy(frontier, rng, 1.0).id for _ in range(200)}
         assert seen == {"dominator", "dominated"}
 
-    def test_epsilon_one_never_consumes_extra_randomness_on_greedy_path(self):
+    def test_epsilon_zero_never_consumes_extra_randomness_on_greedy_path(self):
         """Greedy branch (else) must not draw from rng — only the coin-flip
         draw is consumed when the random branch isn't taken."""
         frontier = ParetoFrontier()
@@ -174,27 +174,64 @@ class TestTopKPareto:
         # k larger than the pool must degrade cleanly too.
         assert select_top_k_pareto(frontier, random.Random(0), 99).id == "only"
 
-    def test_k_greater_equal_pool_matches_pareto(self):
-        """k >= pool size makes the top-k filter a mathematical no-op, so
-        this must reduce exactly to ``pareto`` (frontier.select_parent()),
-        including its exact rng draw for a given seed."""
-        frontier_a = ParetoFrontier(rng=random.Random(42))
-        frontier_b = ParetoFrontier(rng=random.Random(42))
-        for f in (frontier_a, frontier_b):
-            add(f, "a", {"i1": 1.0, "i2": 0.2})
-            add(f, "b", {"i1": 0.2, "i2": 1.0})
-            add(f, "c", {"i1": 0.5, "i2": 0.5})
+    def test_k_greater_equal_pool_uses_mean_pareto_not_legacy_sum_pareto(self):
+        """k >= pool size makes the top-k *membership* filter a no-op, but
+        that must NOT be read as "reduces to legacy `pareto`" — legacy
+        `pareto` (``ParetoFrontier.select_parent``) feeds ``sum_score()``
+        into dominance removal, while every other read in this function
+        uses ``aggregate_score()`` (the mean). The two diverge whenever
+        candidates carry unequal numbers of scored instances, which this
+        pool is built to do:
 
-        expected = frontier_a.select_parent().id
-        got = select_top_k_pareto(frontier_b, frontier_b._rng, 3)
-        assert got.id == expected
+            a  {i1: 1.0}                agg=1.00  sum=1.00  (wins i1)
+            b  {i1: 1.0, i2: 0.9}       agg=0.95  sum=1.90  (wins nothing)
+            c  {i2: 1.0}                agg=1.00  sum=1.00  (wins i2)
 
-        # k strictly larger than the pool degrades the same way.
-        frontier_c = ParetoFrontier(rng=random.Random(42))
-        add(frontier_c, "a", {"i1": 1.0, "i2": 0.2})
-        add(frontier_c, "b", {"i1": 0.2, "i2": 1.0})
-        add(frontier_c, "c", {"i1": 0.5, "i2": 0.5})
-        assert select_top_k_pareto(frontier_c, frontier_c._rng, 100).id == expected
+        By MEAN, "b" (agg=0.95) is dominated by "a" on i1's front and never
+        survives dominance removal — only "a"/"c" (tied at agg=1.00) can be
+        drawn. By SUM, "b" (sum=1.90) survives and even displaces "a" from
+        i1's cleaned front (see ``TestTopKPareto`` module docstring context
+        / the sibling regression test below for the full trace). So at
+        k == len(frontier) == 3, "b" must never be selected — confirming
+        the mean path ran, not a sum-based shortcut.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "a", {"i1": 1.0})
+        add(frontier, "b", {"i1": 1.0, "i2": 0.9})
+        add(frontier, "c", {"i2": 1.0})
+        rng = random.Random(5)
+        seen = {select_top_k_pareto(frontier, rng, 3).id for _ in range(200)}
+        assert seen == {"a", "c"}
+        assert "b" not in seen
+
+        # k strictly larger than the pool must behave identically.
+        frontier2 = ParetoFrontier()
+        add(frontier2, "a", {"i1": 1.0})
+        add(frontier2, "b", {"i1": 1.0, "i2": 0.9})
+        add(frontier2, "c", {"i2": 1.0})
+        rng2 = random.Random(5)
+        seen2 = {select_top_k_pareto(frontier2, rng2, 100).id for _ in range(200)}
+        assert seen2 == {"a", "c"}
+        assert "b" not in seen2
+
+    def test_k_greater_equal_pool_regression_reviewer_counterexample(self):
+        """Regression guard for the exact counterexample that caught the
+        ``k >= len(frontier): return frontier.select_parent()`` shortcut
+        bug: with ``Random(1)`` seeding the shared frontier rng, the buggy
+        shortcut (sum-based ``ParetoFrontier.select_parent()``) selected
+        "b" at ``k=3``. The mean-based normal path cannot select "b" here
+        (see ``test_k_greater_equal_pool_uses_mean_pareto_not_legacy_sum_pareto``
+        for the full dominance trace) — pin that with the exact seed that
+        exposed the bug.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "a", {"i1": 1.0})
+        add(frontier, "b", {"i1": 1.0, "i2": 0.9})
+        add(frontier, "c", {"i2": 1.0})
+        rng = random.Random(1)
+        seen = {select_top_k_pareto(frontier, rng, 3).id for _ in range(50)}
+        assert "b" not in seen
+        assert seen == {"a", "c"}
 
     def test_ranks_by_mean_score_and_intersects_per_key_fronts(self):
         """Hand-built frontier: A/B/D each own one key; only A/B survive a

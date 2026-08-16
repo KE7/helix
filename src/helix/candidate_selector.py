@@ -65,10 +65,18 @@ Determinism
 -----------
 Every strategy takes the SAME ``random.Random`` instance the caller already
 threads through ``ParetoFrontier`` (see ``evolution.py``'s ``rng =
-random.Random(config.rng_seed)``), so a seeded run stays reproducible
-end-to-end. ``current_best`` never touches ``rng`` — GEPA parity, ``idxmax``
-is a pure argmax. Its tie-break is defined explicitly (see
-:func:`_first_argmax`) rather than left to dict/set iteration order.
+random.Random(config.rng_seed)``), so within a single process a seeded run
+draws the same sequence from that ``rng`` on repeated invocations.
+This is NOT a claim of cross-process/end-to-end reproducibility: both
+``pareto`` (via ``ParetoFrontier.select_parent``) and ``top_k_pareto``'s
+dominance-removal path iterate ``set[str]`` candidate-id fronts, and
+CPython salts ``str`` hashing per process, so tie-broken outcomes can
+differ across ``PYTHONHASHSEED`` values even with an identical ``rng``
+seed. ``current_best`` never touches ``rng`` — GEPA parity, ``idxmax``
+is a pure argmax. Its tie-break is defined explicitly
+(see :func:`_first_argmax`) rather than left to dict/set iteration order,
+and does not read any ``set[str]`` front, so it is unaffected by the
+``PYTHONHASHSEED`` caveat above.
 
 Anti-collapse / distinctness
 -----------------------------
@@ -193,17 +201,25 @@ def select_top_k_pareto(
        the same canonical implementation, rather than re-deriving it).
 
     When ``k`` covers the whole pool, the top-k intersection can never
-    remove anything — it is mathematically a no-op — so this degrades
-    directly to :meth:`ParetoFrontier.select_parent` (byte-for-byte
-    ``"pareto"`` behaviour) instead of re-deriving an equivalent result
-    through a differently-ordered mapping.
+    remove anything from any front — it is mathematically a no-op on the
+    *membership* side — but there is no shortcut back to
+    :meth:`ParetoFrontier.select_parent`: that method feeds ``sum_score()``
+    into dominance removal, whereas every other read in this function uses
+    the mean (``aggregate_score()``, see module docstring). Those two
+    quantities only coincide when every candidate has the same number of
+    scored instances, which HELIX does not guarantee. So ``k >= len(frontier)``
+    is handled by simply letting the normal path run to completion with the
+    full candidate set as its top-k slice: same mean mapping feeds the
+    ranking, :meth:`ParetoFrontier._remove_dominated_programs`, and the
+    empty-filter fallback, all three. The result is "Pareto frontier over
+    the full mapping, ranked and dominance-checked by MEAN" — deliberately
+    NOT identical to the legacy ``"pareto"`` strategy, which uses sums (see
+    the module docstring's "Pre-existing divergence" section).
     """
     if len(frontier) == 0:
         raise ValueError(
             "Frontier is empty — cannot select a top-k-pareto candidate."
         )
-    if k >= len(frontier):
-        return frontier.select_parent()
 
     ordered_ids = list(frontier.candidates.keys())
     scores = {
