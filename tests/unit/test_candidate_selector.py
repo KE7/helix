@@ -15,7 +15,6 @@ from helix.candidate_selector import (
     select_candidate,
     select_current_best,
     select_epsilon_greedy,
-    select_parents,
     select_top_k_pareto,
 )
 from helix.population import Candidate, EvalResult, ParetoFrontier
@@ -197,10 +196,10 @@ class TestTopKPareto:
         add(frontier_c, "c", {"i1": 0.5, "i2": 0.5})
         assert select_top_k_pareto(frontier_c, frontier_c._rng, 100).id == expected
 
-    def test_ranks_by_sum_score_and_intersects_per_key_fronts(self):
+    def test_ranks_by_mean_score_and_intersects_per_key_fronts(self):
         """Hand-built frontier: A/B/D each own one key; only A/B survive a
-        top-2 filter by sum_score, so D's key must be dropped and the draw
-        must never return D."""
+        top-2 filter by aggregate_score, so D's key must be dropped and the
+        draw must never return D."""
         frontier = ParetoFrontier()
         add(frontier, "a", {"i1": 1.0})  # sum=1.0, wins i1
         add(frontier, "b", {"i2": 1.0})  # sum=1.0, wins i2
@@ -210,26 +209,54 @@ class TestTopKPareto:
         assert seen == {"a", "b"}
         assert "d" not in seen
 
-    def test_empty_filtered_mapping_falls_back_to_sum_score_argmax(self):
-        """A, B, D each win exactly one key. X wins its own unique key with
-        a high aggregate but low sum. Y never wins any key but has the
-        highest SUM overall (two near-misses beat two clean wins + a lone
-        low-sum win). For k=1, top-1-by-sum is Y alone; intersecting Y into
-        every per-key front empties all of them, forcing the fallback.
+    def test_empty_filtered_mapping_falls_back_to_mean_score_argmax(self):
+        """Y has the highest MEAN but wins no per-key front, so a top-1
+        filter empties every front and forces the fallback.
 
-        The fallback must be sum_score()-argmax, not aggregate_score()
-        argmax: aggregate_score() ranks A/B/D (agg=1.0 each, tied) above Y
-        (agg=0.9), so a fallback that mistakenly used aggregate_score would
-        return the tie-break winner "a" instead of "y".
+        A owns key i1 outright (1.0) but carries a 0.0 on i2 that drags its
+        mean to 0.5; B takes i2 with 0.6; Y scores 0.9 on i1 alone — a clean
+        loss on the only key it touches, but the best mean in the pool.
+
+        Both the ranking and the fallback must read aggregate_score(). A
+        sum_score() implementation returns "a" twice over: sums are
+        a=1.0 > y=0.9 > b=0.6, so top-1-by-sum is A, whose front is
+        non-empty, and the draw returns A without ever reaching the
+        fallback. Asserting "y" therefore pins mean semantics end to end.
         """
         frontier = ParetoFrontier()
-        add(frontier, "a", {"i1": 1.0})  # sum=1.0 agg=1.0, wins i1
-        add(frontier, "b", {"i2": 1.0})  # sum=1.0 agg=1.0, wins i2
-        add(frontier, "d", {"i3": 1.0})  # sum=1.0 agg=1.0, wins i3
-        add(frontier, "x", {"i9": 0.99})  # sum=0.99 agg=0.99, wins i9
-        add(frontier, "y", {"i1": 0.9, "i2": 0.9})  # sum=1.8 agg=0.9, wins nothing
+        add(frontier, "a", {"i1": 1.0, "i2": 0.0})  # agg=0.5 sum=1.0, wins i1
+        add(frontier, "b", {"i2": 0.6})  # agg=0.6 sum=0.6, takes i2
+        add(frontier, "y", {"i1": 0.9})  # agg=0.9 sum=0.9, wins nothing
         rng = random.Random(0)
         assert select_top_k_pareto(frontier, rng, 1).id == "y"
+
+    def test_ranking_uses_mean_not_sum_when_cardinality_differs(self):
+        """Regression guard for the sum-vs-mean mapping defect.
+
+        Upstream ranks top-K by ``per_program_tracked_scores``, which is a
+        MEAN (``get_program_average_val_subset`` -> ``sum(...)/num_samples``).
+        Sum and mean only disagree when candidates have unequal numbers of
+        scored instances, so this pool gives Y two instances and everyone
+        else one:
+
+            a/b/d  agg=1.00  sum=1.00   (each owns one key)
+            x      agg=0.99  sum=0.99   (owns its own key)
+            y      agg=0.90  sum=1.80   (wins nothing)
+
+        Top-1 by MEAN is "a" (first among the three tied at 1.0), whose
+        front survives the intersection, so the draw returns "a".
+        Top-1 by SUM would be "y", which owns no key — that empties the
+        filtered mapping and the sum fallback yields "y". The two rankings
+        disagree on the returned candidate, which is exactly the defect.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "a", {"i1": 1.0})
+        add(frontier, "b", {"i2": 1.0})
+        add(frontier, "d", {"i3": 1.0})
+        add(frontier, "x", {"i9": 0.99})
+        add(frontier, "y", {"i1": 0.9, "i2": 0.9})
+        rng = random.Random(0)
+        assert select_top_k_pareto(frontier, rng, 1).id == "a"
 
 
 # ---------------------------------------------------------------------------
@@ -291,29 +318,3 @@ class TestSeededReproducibility:
         # does) diverge — otherwise the test would trivially pass even if
         # the rng were ignored entirely.
         assert run(999) != seq_a
-
-    def test_select_parents_matches_looped_select_candidate(self):
-        """select_parents(p) must be byte-identical to calling
-        select_candidate() p times with the same shared rng (GEPA parity:
-        PxNSampling's ``for _ in range(p): select_candidate_idx(state)``).
-        """
-        frontier_a = ParetoFrontier()
-        frontier_b = ParetoFrontier()
-        self._build_pool(frontier_a)
-        self._build_pool(frontier_b)
-        rng_a = random.Random(5)
-        rng_b = random.Random(5)
-
-        batched = select_parents(
-            "epsilon_greedy", frontier_a, rng_a, 6, epsilon=0.5
-        )
-        looped = [
-            select_candidate("epsilon_greedy", frontier_b, rng_b, epsilon=0.5)
-            for _ in range(6)
-        ]
-        assert [c.id for c in batched] == [c.id for c in looped]
-
-    def test_select_parents_empty_batch(self):
-        frontier = ParetoFrontier()
-        add(frontier, "only", {"i1": 0.5})
-        assert select_parents("current_best", frontier, random.Random(0), 0) == []

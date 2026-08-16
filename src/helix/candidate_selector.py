@@ -24,34 +24,42 @@ score arrays off ``GEPAState``:
   array ``ParetoCandidateSelector`` passes into
   ``select_program_candidate_from_pareto_front``.
 
-At the upstream commit this was implemented against, both properties
-happen to be computed with the identical formula (mean of each program's
-validation subscores) — but a ``TODO`` on ``program_full_scores_val_set``
-notes it "should be using the val_evaluation_policy instead", so the two
-are documented as expected to diverge and must not be treated as
-interchangeable by name alone.
+Both properties are computed by the *identical* expression — a list
+comprehension over ``get_program_average_val_subset(program_idx)[0]``,
+which returns ``sum(scores.values()) / num_samples``. So both upstream
+arrays are **means**, and the correct HELIX analogue for both is
+``EvalResult.aggregate_score()`` (HELIX's own docstring: "mean of
+instance scores"), never ``EvalResult.sum_score()``.
 
-HELIX maps each upstream array to the existing HELIX quantity that already
-plays its role, rather than assuming they're the same array:
+Both properties carry ``TODO`` comments about routing through the
+``val_evaluation_policy`` instead. Those TODOs are about *where the
+number should come from*, not a signal that the two arrays are expected
+to diverge into different aggregation functions — and in any case a
+speculative future divergence is not a licence to substitute a sum for
+a mean today. If upstream ever does split them, this mapping should be
+re-derived from the new definitions rather than guessed.
 
-* ``per_program_tracked_scores`` feeds *both* the Pareto dominance-removal
-  sort key and the top-k ranking upstream. HELIX's own ``ParetoFrontier``
-  already uses ``EvalResult.sum_score()`` for exactly that role (see the
-  "GEPA parity (W1)" comments on ``ParetoFrontier.get_non_dominated`` and
-  ``select_parent`` in ``population.py``). So ``top_k_pareto`` here uses
-  ``sum_score()`` for both its ranking *and* its empty-mapping fallback —
-  matching upstream's reuse of the same local ``scores`` variable for both
-  roles inside ``TopKParetoCandidateSelector.select_candidate_idx``.
-* ``program_full_scores_val_set`` is upstream's "how good is this program
-  overall" figure. The closest existing HELIX quantity, both by name and
-  by mean-based semantics, is ``EvalResult.aggregate_score()`` (HELIX's own
-  docstring: "mean of instance scores"). ``current_best`` and
-  ``epsilon_greedy``'s greedy branch use ``aggregate_score()``.
+Accordingly every strategy in this module reads the mean:
 
-This split is deliberately exercised by
-``tests/unit/test_candidate_selector.py::TestScoreQuantityMapping``, which
-constructs a pool where ``sum_score()`` and ``aggregate_score()`` argmax
-disagree and asserts each strategy resolves to the quantity above.
+* ``current_best`` and ``epsilon_greedy``'s greedy branch use
+  ``aggregate_score()`` for ``program_full_scores_val_set``.
+* ``top_k_pareto`` uses ``aggregate_score()`` for its top-k ranking, its
+  filtered-front dominance-removal sort key, and its empty-mapping
+  fallback — the three places upstream's
+  ``TopKParetoCandidateSelector.select_candidate_idx`` reuses its single
+  local ``scores = state.per_program_tracked_scores`` variable.
+
+Sum-vs-mean only diverges when candidates have unequal numbers of scored
+instances, which HELIX permits; ``tests/unit/test_candidate_selector.py``
+— ``TestTopKPareto.test_ranking_uses_mean_not_sum_when_cardinality_differs``
+pins the disagreeing case.
+
+Pre-existing divergence (NOT addressed here): ``ParetoFrontier.select_parent``
+and ``get_non_dominated`` in ``population.py`` pass ``sum_score()`` into
+``_remove_dominated_programs`` under a "GEPA parity (W1)" comment. Upstream's
+``ParetoCandidateSelector`` passes the mean array, so that comment does not
+hold; it is deliberately left untouched by this module because the default
+``"pareto"`` path must stay behaviourally identical. Tracked separately.
 
 Determinism
 -----------
@@ -85,13 +93,16 @@ CandidateSelectionStrategy = Literal[
 
 
 def _aggregate_score_or_floor(result: EvalResult | None) -> float:
-    """HELIX analog of upstream's ``program_full_scores_val_set`` entry."""
+    """HELIX analog of an entry in either upstream per-program score array.
+
+    Upstream's ``program_full_scores_val_set`` and
+    ``per_program_tracked_scores`` are the same mean-valued expression (see
+    the module docstring), so one helper serves both. The ``-inf`` floor for
+    an unevaluated candidate matches upstream's
+    ``get_program_average_val_subset``, which returns ``float("-inf")`` when a
+    program has no recorded subscores.
+    """
     return result.aggregate_score() if result is not None else float("-inf")
-
-
-def _sum_score_or_floor(result: EvalResult | None) -> float:
-    """HELIX analog of upstream's ``per_program_tracked_scores`` entry."""
-    return result.sum_score() if result is not None else float("-inf")
 
 
 def _first_argmax(
@@ -159,24 +170,23 @@ def select_epsilon_greedy(
 def select_top_k_pareto(
     frontier: ParetoFrontier, rng: random.Random, k: int
 ) -> Candidate:
-    """Pareto draw restricted to the top-``k`` candidates by ``sum_score()``.
+    """Pareto draw restricted to the top-``k`` candidates by ``aggregate_score()``.
 
     GEPA parity: ``TopKParetoCandidateSelector.select_candidate_idx``:
 
-    1. Rank all evaluated candidates by score (HELIX: ``sum_score()``,
-       see module docstring) descending; ties keep discovery order (a
-       stable sort over an already discovery-ordered id list, matching
-       upstream's stable ``sorted(range(len(scores)), ...)`` over program
-       indices).
+    1. Rank all evaluated candidates by score (HELIX: ``aggregate_score()``,
+       the mean — see module docstring) descending; ties keep discovery
+       order (a stable sort over an already discovery-ordered id list,
+       matching upstream's stable ``sorted(range(len(scores)), ...)`` over
+       program indices).
     2. Intersect the top-k id set into every per-key frontier front
        (:meth:`ParetoFrontier.active_frontier_snapshot`); drop any key
        whose intersection is empty.
     3. If EVERY key's intersection is empty, fall back to a direct argmax
-       over the SAME ``sum_score()`` array used for ranking — upstream's
-       fallback reuses its local ``scores`` variable verbatim, not the
-       ``program_full_scores_val_set``/``aggregate_score()`` quantity
-       ``current_best`` uses. That fallback is load-bearing: replicate it
-       exactly, including which score array it reads.
+       over the SAME mean array used for ranking — upstream's fallback
+       reuses its local ``scores`` variable verbatim. Because both upstream
+       score arrays are the same mean expression, this is also the same
+       quantity ``current_best`` uses.
     4. Otherwise, run the identical dominance-removal + frequency-weighted
        draw :meth:`ParetoFrontier.select_parent` uses, over the filtered
        mapping (reusing :meth:`ParetoFrontier._remove_dominated_programs`,
@@ -197,7 +207,7 @@ def select_top_k_pareto(
 
     ordered_ids = list(frontier.candidates.keys())
     scores = {
-        cid: _sum_score_or_floor(frontier.get_result(cid)) for cid in ordered_ids
+        cid: _aggregate_score_or_floor(frontier.get_result(cid)) for cid in ordered_ids
     }
     ranked = sorted(ordered_ids, key=lambda cid: scores[cid], reverse=True)
     top_k_ids = set(ranked[:k])
@@ -209,7 +219,7 @@ def select_top_k_pareto(
             filtered_mapping[key] = filtered
 
     if not filtered_mapping:
-        return _first_argmax(frontier, _sum_score_or_floor)
+        return _first_argmax(frontier, _aggregate_score_or_floor)
 
     _, cleaned = ParetoFrontier._remove_dominated_programs(filtered_mapping, scores)
     program_frequency: dict[str, int] = {}
@@ -225,7 +235,7 @@ def select_top_k_pareto(
         # non-"instance" path) — guarded so an algorithm change fails
         # loudly here instead of surfacing as an opaque IndexError from
         # ``rng.choice([])``.
-        return _first_argmax(frontier, _sum_score_or_floor)
+        return _first_argmax(frontier, _aggregate_score_or_floor)
     return frontier.candidates[rng.choice(sampling_list)]
 
 
@@ -254,45 +264,3 @@ def select_candidate(
         assert top_k is not None
         return select_top_k_pareto(frontier, rng, top_k)
     raise ValueError(f"Unknown candidate_selection_strategy: {strategy!r}")
-
-
-def select_parents(
-    strategy: CandidateSelectionStrategy,
-    frontier: ParetoFrontier,
-    rng: random.Random,
-    p: int,
-    *,
-    epsilon: float | None = None,
-    top_k: int | None = None,
-) -> list[Candidate]:
-    """Batch seam: draw ``p`` parents, one independent :func:`select_candidate`
-    call each.
-
-    GEPA parity check: upstream's own ``CandidateSelector`` Protocol is
-    scalar (``select_candidate_idx(self, state) -> int``,
-    ``gepa.proposer.reflective_mutation.base``), and every upstream sampling
-    strategy — including ``PxNSampling(p, n)``, the direct analog of
-    HELIX's ``num_parallel_proposals * mutations_per_parent`` — draws its
-    P parents with a plain ``for _ in range(self.p):
-    candidate_selector.select_candidate_idx(state)`` loop
-    (``gepa.strategies.proposal_sampling``). So this default — looping the
-    existing scalar draw ``p`` times — isn't new behaviour; it's the same
-    loop GEPA already runs today, exposed as a batch-shaped HELIX API.
-
-    This exists purely as a seam: a future JOINT allocation strategy (e.g.
-    systematic/low-variance resampling over the frontier's per-key
-    frequency weights, so P parallel draws stop collapsing onto one
-    candidate) can replace this default without HELIX callers needing to
-    change how they call candidate selection. Deliberately NOT implemented
-    here — every strategy above still draws independently with
-    replacement, exactly as upstream GEPA does; see this module's
-    docstring on distinctness. ``evolution.py``'s proposal loop is not
-    migrated to call this: it already performs the equivalent "p
-    sequential scalar draws" inline, interleaved with per-slot budget and
-    minibatch-sampling logic that a batch call can't express without a
-    larger, out-of-scope restructure.
-    """
-    return [
-        select_candidate(strategy, frontier, rng, epsilon=epsilon, top_k=top_k)
-        for _ in range(p)
-    ]
