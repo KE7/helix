@@ -110,7 +110,7 @@ class TestEvolutionConfigNewFields:
         cfg = EvolutionConfig()
         assert cfg.minibatch_size == 3
         # GEPA parity: max_workers defaults to os.cpu_count() or 32
-        # (optimize_anything.py:485).
+        # (GEPA's ``EngineConfig.max_workers`` in ``gepa_launcher.py``).
         import os
 
         assert cfg.max_workers == (os.cpu_count() or 32)
@@ -178,29 +178,11 @@ class TestEvolutionConfigNewFields:
         with pytest.raises(ValidationError):
             EvolutionConfig(num_sampled_groups=1, num_examples_per_group=2)
 
-    def test_num_parallel_proposals_auto_resolves(self):
-        """GEPA parity: ``num_parallel_proposals="auto"`` resolves to
-        ``max(1, max_workers // minibatch_size)`` in model_post_init.
-
-        Mirrors GEPA ``optimize_anything._resolve_num_parallel_proposals``
-        (src/gepa/optimize_anything.py:1108-1116).
-        """
-        cfg = EvolutionConfig(
-            num_parallel_proposals="auto",
-            max_workers=10,
-            minibatch_size=3,
-        )
-        assert cfg.num_parallel_proposals == 3  # 10 // 3
-
-    def test_num_parallel_proposals_auto_clamps_to_one(self):
-        """When ``max_workers < minibatch_size``, ``"auto"`` clamps to 1
-        (GEPA: ``max(1, max_workers // minibatch_size)``)."""
-        cfg = EvolutionConfig(
-            num_parallel_proposals="auto",
-            max_workers=2,
-            minibatch_size=5,
-        )
-        assert cfg.num_parallel_proposals == 1
+    def test_num_parallel_proposals_auto_rejected(self):
+        """``num_parallel_proposals`` is a plain int; the old ``"auto"``
+        sentinel is no longer accepted and must fail validation."""
+        with pytest.raises(ValidationError):
+            EvolutionConfig(num_parallel_proposals="auto")
 
 
 # ---------------------------------------------------------------------------

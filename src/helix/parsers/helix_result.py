@@ -1,12 +1,12 @@
 """Parse ``HELIX_RESULT=<per-example [score, side_info] pairs>``.
 
-GEPA ``optimize_anything`` evaluator-contract parity.  GEPA's O.A.
-evaluator returns ``(score: float, side_info: dict)`` **per example**
-(``src/gepa/optimize_anything.py:387-438``); the O.A. adapter then wraps
-that per-example stream into ``EvaluationBatch(scores=list[float],
-trajectories=list[SideInfo], ...)``
-(``optimize_anything_adapter.py:218-292``).  This parser hands HELIX
-the same per-example stream.
+GEPA ``optimize_anything`` evaluator-contract parity.  GEPA's
+``EvaluatorWrapper`` (``gepa.gepa_launcher``) normalises each
+per-example evaluator return to ``(score, output, side_info)``, and
+``OptimizeAnythingAdapter.evaluate`` packages the resulting per-example
+stream into an ``EvaluationBatch(scores=list[float],
+trajectories=list[SideInfo], ...)``.  This parser hands HELIX the same
+per-example stream.
 
 **BREAKING (pre-1.0):** ``helix_result`` previously accepted
 ``[score: float, side_info: dict]`` with an id-keyed
@@ -30,10 +30,10 @@ bare score::
 Element ``i`` corresponds to the id at position ``i`` in the
 ``helix_batch.json`` HELIX wrote pre-invocation (see
 :func:`helix.evolution._write_helix_batch`).  A bare ``float`` is
-normalised to ``(score, {})`` — matching GEPA O.A.'s
-``EvaluatorWrapper`` at ``src/gepa/optimize_anything.py:971`` which
-auto-wraps a bare score to ``(score, None, {})``.  Rich entries are
-a 2-element ``[score: float, side_info: dict]`` list.
+normalised to ``(score, {})`` — matching GEPA's ``EvaluatorWrapper``
+(``gepa.gepa_launcher``), which auto-wraps a bare evaluator return
+into ``(score, None, side_info)``.  Rich entries are a 2-element
+``[score: float, side_info: dict]`` list.
 
 ``len(payload) == len(ids)`` is required.
 
@@ -47,8 +47,9 @@ the mutation prompt's ``## Diagnostics`` section (GEPA
 
 Reserved key: ``side_info_i["scores"]``
 ---------------------------------------
-Mirrors GEPA's ``OptimizeAnythingAdapter._process_side_info``
-(``optimize_anything_adapter.py:260-272``).  When a per-example
+Mirrors GEPA's ``OptimizeAnythingAdapter._extract_objective_scores``,
+which pulls the same ``side_info["scores"]`` dict out per example and
+folds it into the batch's ``objective_scores``.  When a per-example
 ``side_info_i["scores"]`` is a dict of ``{objective_name: float}``,
 HELIX harvests it into the corresponding slot of
 :attr:`helix.population.EvalResult.objective_scores`
@@ -61,7 +62,7 @@ through on :class:`EvalResult`.
 Aggregate
 ---------
 * ``instance_scores = dict(zip(ids, [p[0] for p in payload]))`` —
-  feeds the minibatch gate at ``evolution.py:1920-1939`` as before.
+  feeds the minibatch gate in ``evolution.py``'s ``_gate_proposal`` as before.
 * ``scores["success"] = mean([p[0] for p in payload])`` — or 0.0 when
   ``returncode != 0`` or the payload is empty.
 
@@ -138,30 +139,29 @@ def _extract_helix_result_line(stdout: str) -> str | None:
 def _harvest_objective_scores(side_info: dict[str, Any]) -> dict[str, float]:
     """Extract ``side_info["scores"]`` into a ``dict[str, float]``.
 
-    Mirrors GEPA's ``OptimizeAnythingAdapter._process_side_info``
-    (``optimize_anything_adapter.py:260-272``): the reserved
-    ``"scores"`` key carries a dict of ``{objective_name: float}`` that
-    becomes the per-example ``objective_scores`` slot feeding the
-    multi-axis Pareto frontier.  Pairwise / Bradley-Terry payloads are
-    not implemented in HELIX yet, so non-scalar objective values fail
-    loudly instead of being dropped and misread as scalar objective
-    semantics.
+    Mirrors GEPA's ``OptimizeAnythingAdapter._extract_objective_scores``:
+    the reserved ``"scores"`` key carries a dict of
+    ``{objective_name: float}`` that becomes the per-example
+    ``objective_scores`` slot feeding the multi-axis Pareto frontier.
+    Pairwise / Bradley-Terry payloads are not implemented in HELIX yet,
+    so non-scalar objective values fail loudly instead of being dropped
+    and misread as scalar objective semantics.
 
     Stricter than upstream GEPA (a very minor improvement)
     ------------------------------------------------------
     GEPA's adapter does ``objective_score.update(side_info["scores"])``
     blindly, so non-finite / non-numeric / non-string-keyed entries
     sail through the parser and only blow up later inside
-    ``_aggregate_objective_scores`` (``state.py:432``) where the error
-    message is far less actionable.  HELIX validates at parse time and
-    raises :class:`EvaluatorError` with the offending key/value type.
+    ``GEPAState._aggregate_objective_scores`` where the error message
+    is far less actionable.  HELIX validates at parse time and raises
+    :class:`EvaluatorError` with the offending key/value type.
     Practical consequence: an evaluator built against upstream GEPA
     that legitimately emits finite numeric scalars under ``"scores"``
     is unaffected; only payloads that would break GEPA later are
     rejected here earlier.
 
-    Per-predictor namespacing (``param_name + "_specific_info"``,
-    ``optimize_anything_adapter.py:266-270``) is intentionally not
+    Per-predictor namespacing (``param_name + "_specific_info"``, also
+    handled by ``_extract_objective_scores``) is intentionally not
     replicated: HELIX evolves whole git worktrees rather than
     multi-component named-predictor programs.  See the tracking issue
     on ``KE7/helix`` for the architectural gap.
@@ -275,9 +275,8 @@ def parse(
         * ``objective_scores: list[dict[str, float]]`` — the
           ``side_info_i["scores"]`` harvest for each example, in id
           order.  GEPA analogue:
-          :attr:`gepa.core.adapter.EvaluationBatch.objective_scores`
-          (``src/gepa/core/adapter.py:26``).  Feeds the multi-axis
-          Pareto frontier; stored on
+          :attr:`gepa.core.adapter.EvaluationBatch.objective_scores`.
+          Feeds the multi-axis Pareto frontier; stored on
           :attr:`helix.population.EvalResult.objective_scores`.
 
     Raises
@@ -387,10 +386,10 @@ def parse(
 
     for eid, entry in zip(ids, payload):
         # GEPA optimize_anything union parity: per-example entry is
-        # either a bare score or a ``[score, side_info]`` pair.  The
-        # O.A. ``EvaluatorWrapper`` at
-        # ``src/gepa/optimize_anything.py:971`` auto-normalizes a bare
-        # float to ``(score, None, {})`` — HELIX does the same here,
+        # either a bare score or a ``[score, side_info]`` pair.  GEPA's
+        # ``EvaluatorWrapper`` (``gepa.gepa_launcher``) auto-normalizes
+        # a bare evaluator return to ``(score, None, side_info)`` —
+        # HELIX does the same here,
         # materialising ``side_info = {}`` for bare entries so the
         # downstream objective harvest is a no-op rather than a crash.
         # Mixed bare / rich within one payload is allowed.  ``bool`` is

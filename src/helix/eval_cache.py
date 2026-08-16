@@ -1,7 +1,7 @@
 """HELIX evaluation cache — GEPA parity.
 
-Line-for-line port of the GEPA cache layer at
-``gepa/core/state.py:27-130``.
+Ports the cache layer GEPA implements as ``_candidate_hash``,
+``CachedEvaluation``, and ``EvaluationCache`` in ``core/state.py``.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
     _cache: dict[CacheKey, CachedEvaluation[RolloutOutput]] = field(
         default_factory=dict
     )
-    # Thread safety (audit-mutation §C4 / audit-budget-caching §C1): the
+    # Thread safety (mutation audit C4 / budget-caching audit C1): the
     # parent-minibatch eval now runs inside a ThreadPoolExecutor (see
     # evolution.py parent-eval parallel stage), so concurrent readers/writers
     # can race on ``_cache``.  A single lock serialises every access.

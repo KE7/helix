@@ -2,18 +2,22 @@
 
 Covers three audit findings:
 
-- **M1** (audit-init-engine.md B1/B2, audit-mutation.md C1) — perfect-score
+- **M1** (findings B1/B2, C1) — perfect-score
   hitting the threshold skips ONE proposal (``continue``) instead of
   terminating the run (``break``), and uses the GEPA per-example
   ``all(s >= threshold)`` criterion instead of mean ``aggregate_score()``.
-  GEPA reference: ``reflective_mutation.py:308-327``.
-- **M2** (audit-init-engine.md B3) — merge-branch fail-fast paths fall
+  GEPA reference: the per-task perfect-score skip in
+  ``ReflectiveMutationProposer.propose`` (``proposer/reflective_mutation/
+  reflective_mutation.py``).
+- **M2** (finding B3) — merge-branch fail-fast paths fall
   through to reflective mutation instead of consuming the iteration.
   Only an actually-evaluated merge (accepted or rejected) consumes the
-  iteration.  GEPA reference: ``engine.py:664-741``.
-- **MODERATE D** (audit-mutation.md C3) — legacy (no-minibatch) mutation
-  gating uses sum-score acceptance only (GEPA ``engine.py:287-303`` /
-  ``reflective_mutation.py:420``); the old ``degrades()`` pre-check is
+  iteration.  GEPA reference: the merge-then-mutation dispatch in
+  ``GEPAEngine.run()``'s main loop (``core/engine.py``).
+- **MODERATE D** (finding C3) — legacy (no-minibatch) mutation
+  gating uses sum-score acceptance only (GEPA's ``StrictImprovementAcceptance
+  .should_accept`` in ``strategies/acceptance.py``, applied via
+  ``GEPAEngine``'s acceptance criterion); the old ``degrades()`` pre-check is
   removed so the legacy path matches the minibatch path.
 
 All tests run with ``val_stage_size=None`` (default) to exercise the
@@ -37,7 +41,7 @@ from tests.unit.test_evolution import (  # type: ignore[import-untyped]
 
 
 class TestPerfectScoreContinues:
-    """GEPA parity (M1) — audit-init-engine.md B1.
+    """GEPA parity (M1) — finding B1.
 
     Pre-fix: perfect-score set ``_budget_break=True`` + broke the inner loop,
     and the outer ``if _budget_break and not proposal_contexts: break`` exited
@@ -76,20 +80,21 @@ class TestPerfectScoreContinues:
             f"`_budget_break = True; break` at the perfect-score check)."
         )
         # Every parent (the seed, reused across gens) reports perfect
-        # scores, so mutation is skipped in every generation — per
-        # GEPA reflective_mutation.py:308-327 the proposal is dropped
-        # but the outer iteration loop continues.
+        # scores, so mutation is skipped in every generation — per GEPA's
+        # per-task perfect-score skip in ``ReflectiveMutationProposer
+        # .propose`` the proposal is dropped but the outer iteration loop
+        # continues.
         all_mocks["mutate"].assert_not_called()
 
     def test_perfect_score_uses_per_example_all_not_mean(
         self, mocker, tmp_path, all_mocks  # noqa: F811
     ):
-        """GEPA parity (M1) — audit-init-engine.md B2.
+        """GEPA parity (M1) — finding B2.
 
         Pre-fix: criterion was ``aggregate_score() >= threshold`` (mean),
         which fires on ``{0.5, 1.0, 1.0}`` at ``threshold=0.8`` because
-        the mean is 0.83.  GEPA reflective_mutation.py:311 uses
-        ``all(s >= perfect_score)`` — the 0.5 per-example score would
+        the mean is 0.83.  GEPA's ``ReflectiveMutationProposer.propose``
+        uses ``all(s >= perfect_score)`` — the 0.5 per-example score would
         prevent the skip, so mutation must proceed.
         """
         seed = make_candidate("g0-s0")
@@ -130,12 +135,15 @@ class TestPerfectScoreContinues:
 
 
 class TestMergeFallthroughToMutation:
-    """GEPA parity (M2) — audit-init-engine.md B3.
+    """GEPA parity (M2) — finding B3.
 
     When the merge gate is entered but no merge is actually evaluated
     (no triplet, pair already attempted, overlap floor fails, merge op
     failed, tamper-reject pre-eval), GEPA falls through to reflective
-    mutation in the SAME iteration (engine.py:741-742).  Pre-fix HELIX
+    mutation in the SAME iteration — ``GEPAEngine.run()``'s merge branch
+    only ``continue``s past reflective mutation when a merge proposal was
+    actually produced and evaluated (accepted or rejected); otherwise
+    control falls through into reflective mutation.  Pre-fix HELIX
     ``continue``d on every merge-gate entry regardless of whether an
     attempt happened.
     """
@@ -145,10 +153,10 @@ class TestMergeFallthroughToMutation:
     ):
         """``merge()`` returns None (Claude Code / subprocess failure) →
         no merged candidate instantiated → no eval → GEPA falls through
-        to reflective mutation (audit-init-engine.md B3).
+        to reflective mutation (finding B3).
 
         Pre-fix HELIX: ``print_error`` fell through to the end-of-merge
-        ``save_state/update/continue`` at evolution.py ~1343 (INSIDE the
+        ``save_state/update/continue`` sequence (INSIDE the
         ``if triplet is not None`` nesting), consuming the iteration.
         """
         seed = make_candidate("g0-s0")
@@ -197,7 +205,7 @@ class TestMergeFallthroughToMutation:
             f"failure falls through); got {all_mocks['mutate'].call_count}. "
             f"Pre-fix: 1 (merge branch consumed gen 2 via the "
             f"end-of-merge `continue` even though ``merged is None`` "
-            f"meant no eval happened — audit-init-engine.md B3)."
+            f"meant no eval happened — finding B3)."
         )
         # Sanity: merge was attempted (find_merge_triplet returned a
         # triplet, merge(...) was called), but returned None.
@@ -207,7 +215,8 @@ class TestMergeFallthroughToMutation:
         self, mocker, tmp_path, all_mocks  # noqa: F811
     ):
         """Guard rail: when a merge IS attempted (eval runs), the iteration
-        is still consumed (GEPA engine.py:719 on accept, 737 on reject).
+        is still consumed — ``GEPAEngine.run()``'s merge branch ``continue``s
+        past reflective mutation on both the accept and reject paths.
 
         Failing this test would mean the M2 fix over-corrected and let
         mutation also run on the same iteration as an actual merge.
@@ -253,7 +262,8 @@ class TestMergeFallthroughToMutation:
         # AND accepted, so mutation does NOT run in gen 2.  Total: 1.
         assert all_mocks["mutate"].call_count == 1, (
             f"When a merge is actually attempted in gen 2, mutation must "
-            f"NOT also run (GEPA engine.py:719 `continue`).  Got "
+            f"NOT also run (GEPA's merge-accept path `continue`s past "
+            f"reflective mutation).  Got "
             f"{all_mocks['mutate'].call_count} mutate calls."
         )
         all_mocks["merge"].assert_called_once()
@@ -265,14 +275,16 @@ class TestMergeFallthroughToMutation:
 
 
 class TestLegacyGatingUsesSumOnly:
-    """GEPA parity (MODERATE D) — audit-mutation.md C3.
+    """GEPA parity (MODERATE D) — finding C3.
 
-    GEPA has a single acceptance path: ``should_accept(proposal, state)``
-    on sum-score (engine.py:287-303, reflective_mutation.py:420).  HELIX's
-    legacy (no-train-loader) path previously ran ``degrades()`` as a
-    pre-check, applying a tolerance that GEPA does not have.  After the
-    fix, ``degrades()`` is not consulted on the legacy path; the same
-    ``acceptance`` criterion used by the minibatch path gates everything.
+    GEPA has a single acceptance path: ``StrictImprovementAcceptance
+    .should_accept`` (``strategies/acceptance.py``) accepts only when the
+    new subsample-score sum is strictly greater than the old sum — no
+    tolerance.  HELIX's legacy (no-train-loader) path previously ran
+    ``degrades()`` as a pre-check, applying a tolerance that GEPA does not
+    have.  After the fix, ``degrades()`` is not consulted on the legacy
+    path; the same ``acceptance`` criterion used by the minibatch path
+    gates everything.
     """
 
     def test_degrades_is_not_called_in_legacy_path(
@@ -288,7 +300,7 @@ class TestLegacyGatingUsesSumOnly:
             called.append(1)
             raise AssertionError(
                 "degrades() must NOT be called in legacy gating "
-                "(GEPA parity MODERATE D — audit-mutation.md C3)."
+                "(GEPA parity MODERATE D — finding C3)."
             )
 
         monkeypatch.setattr(_evo, "degrades", _boom)

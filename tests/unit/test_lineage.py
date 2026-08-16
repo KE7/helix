@@ -2,7 +2,7 @@
 
 Ported from GEPA's merge pair-selection behavior
 (gepa/proposer/merge.py:87-115, 118-207).  Covers the post-align-merge
-changes spelled out in the merge-pairing audit:
+changes spelled out below:
 
 - B1: overlap-floor filter moved INTO the retry loop.
 - B2: attempted-pair filter moved INTO the retry loop.

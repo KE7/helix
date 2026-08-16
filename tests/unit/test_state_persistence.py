@@ -1,15 +1,18 @@
 """Unit tests for GEPA-aligned state persistence.
 
-Covers the additions called out in the RNG/state-persistence audit
-(MODERATE_DIVERGENCE — schema thin vs GEPA):
+Covers the additions called out in an internal divergence audit
+(schema thin vs GEPA):
 
 * C1 — per-(candidate, example) eval cache survives save → load round-trip
-  (GEPA core/state.py:185, 306-340, 348-376, 683-687).
+  (GEPA's ``evaluation_cache`` field plus ``GEPAState.save``/``GEPAState.load``
+  and the cache-sync logic in ``initialize_gepa_state``, all in
+  ``core/state.py``).
 * C/§3 — per-program discovery budget (``num_metric_calls_by_discovery``)
-  is persisted on every accept site (GEPA core/state.py:177, 537).
+  is persisted on every accept site (GEPA's ``num_metric_calls_by_discovery``
+  field, appended to in ``update_state_with_new_program``, ``core/state.py``).
 * D1 — schema_version is written and a missing version is treated as the
-  unversioned predecessor with defaulted new fields (GEPA core/state.py:153,
-  402-420).
+  unversioned predecessor with defaulted new fields (GEPA's
+  ``_VALIDATION_SCHEMA_VERSION`` and ``_upgrade_state_dict``, ``core/state.py``).
 * Backward compatibility — pre-migration state.json files load cleanly
   with new fields populated to defaults.
 * Resume fidelity — when val_stage_size is None the new state additions
@@ -80,7 +83,7 @@ def _make_full_state() -> EvolutionState:
 def test_state_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     """save_state → load_state must deep-equal the original on every field.
 
-    Audit ref: RNG/state-persistence audit C/§3 + D1.
+    Audit ref: C/§3 + D1.
     """
     state = _make_full_state()
     save_state(state, tmp_path)
@@ -122,7 +125,7 @@ def _write_legacy_state_json(base_dir: Path) -> None:
     legacy = {
         # Note: deliberately omits "schema_version" and
         # "num_metric_calls_by_discovery".  Mirrors the on-disk format that
-        # existed before audit-rng-state-persist D1 was addressed.
+        # existed before rng-state-persist audit D1 was addressed.
         "generation": 1,
         "frontier": ["g0-s0"],
         "instance_scores": {"g0-s0": {"task_a": 0.5}},
@@ -162,8 +165,8 @@ def test_load_legacy_state_populates_defaults(tmp_path: Path) -> None:
 def test_load_state_rejects_newer_schema_version(tmp_path: Path) -> None:
     """A future-version state.json must be rejected with a clear error.
 
-    Audit ref: D1 — schema migration path (analogous to GEPA's schema check
-    at gepa/core/state.py:355-376).
+    Audit ref: D1 — schema migration path (analogous to GEPA's schema-version
+    check in ``GEPAState.load``, ``core/state.py``).
     """
     helix_dir = tmp_path / ".helix"
     helix_dir.mkdir(parents=True)
@@ -190,7 +193,8 @@ def test_eval_cache_pickle_roundtrip(tmp_path: Path) -> None:
 
     Audit ref: C1 — JSON cannot encode tuple keys; we use a sibling pickle
     so the per-(candidate_hash, example_id) cache survives crash/resume the
-    same way GEPA's pickled state does (gepa/core/state.py:306-340, 348-376).
+    same way GEPA's pickled state does (``GEPAState.save``/``GEPAState.load``,
+    ``core/state.py``).
     """
     cache: MinibatchEvalCache[object, str] = MinibatchEvalCache[object, str]()
     cache.put({"prompt.md": "v1"}, "task_a", output="out-a", score=0.4)
