@@ -370,8 +370,6 @@ class EvolutionConfig(BaseModel):
             "GEPA parity: ReflectionConfig.reflection_minibatch_size default."
         ),
     )
-    # GEPA parity: ``EngineConfig.max_workers`` in ``gepa_launcher.py``,
-    # default ``os.cpu_count() or 32``.
     max_workers: int = Field(
         default_factory=lambda: os.cpu_count() or 32,
         description=(
