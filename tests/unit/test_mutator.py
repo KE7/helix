@@ -1074,7 +1074,7 @@ class TestInvokeClaudeCode:
             (
                 "opencode",
                 ["opencode", "run"],
-                ["--format", "json", "--dangerously-skip-permissions"],
+                ["--format", "json", "--auto"],
             ),
         ],
     )
