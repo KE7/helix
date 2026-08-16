@@ -723,6 +723,9 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 def _agent_passthrough_env(passthrough_env: list[str] | None) -> list[str]:
     """Return configured passthrough values plus safe login identity values.
 
+    Host/unsandboxed agents only: the login-identity names are keychain-shaped,
+    and a sandboxed agent has a tmpfs ``HOME`` and no keychain to unlock.
+
     Stored-login resolution is a first-class agent authentication path, not a
     feature users should have to repair by discovering an OS-specific variable.
     Values named here are non-secret and apply only to agent CLIs; evaluator
@@ -782,9 +785,7 @@ def _sandbox_agent_environment(
     ``passthrough_env`` transport above — it only widens what a
     caller-declared credential name is allowed to resolve to.
     """
-    env = _scrub_environment(
-        passthrough_env=_agent_passthrough_env(passthrough_env), fixed_env=fixed_env
-    )
+    env = _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
     if sandbox.auth != "env":
         return env
     configured = set(passthrough_env or []) | set((fixed_env or {}).keys())

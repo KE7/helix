@@ -62,7 +62,7 @@ DEFAULT_BACKEND_IMAGES: dict[str, str] = {
 }
 
 AGENT_LOGIN_IDENTITY_ENV: tuple[str, ...] = ("USER", "LOGNAME")
-"""Non-secret identity variables preserved for every agent CLI.
+"""Non-secret identity variables preserved for host/unsandboxed agent CLIs.
 
 Agent CLIs resolve stored interactive credentials independently. Claude Code
 on macOS, for example, needs ``USER`` to locate its Keychain entry even when
