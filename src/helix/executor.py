@@ -344,6 +344,23 @@ def run_evaluator(
             error_ctx,
         )
 
+    # Docker reserves exit 125 for failures before the container command
+    # starts (daemon, image, or invocation errors).  A structured-result
+    # parser cannot add useful information here and would otherwise hide the
+    # actual Docker diagnostic behind "no HELIX_RESULT= line".
+    if returncode == 125:
+        raise EvaluatorError(
+            "Evaluator Docker invocation failed before the evaluator started.",
+            operation="run_evaluator",
+            phase="docker invocation",
+            command=evaluator.command,
+            cwd=str(candidate.worktree_path),
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=returncode,
+            suggestion="Check the Docker diagnostic in stderr above.",
+        )
+
     # Collect ASI
     asi = _collect_asi(
         stdout,

@@ -114,10 +114,10 @@ class RateLimitError(HelixError):
     logging the failure and returning ``None`` for that proposal slot rather
     than crashing the entire run.
 
-    Detected heuristically from non-zero exit codes or JSON error fields that
-    contain keywords such as "rate limit", "overloaded", "529", "usage limit",
-    or "extra usage".  After retries are exhausted the error bubbles up to the
-    evolution loop, which logs it and continues with a smaller proposal set.
+    Classified first from structured backend status fields, with a narrowly
+    scoped text fallback only when no structured signal is available. After
+    retries are exhausted the error bubbles up to the evolution loop, which
+    logs it and continues with a smaller proposal set.
     """
 
 

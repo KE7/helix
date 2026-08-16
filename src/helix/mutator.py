@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -578,19 +579,47 @@ def build_mutation_prompt(
 # Rate-limit detection
 # ---------------------------------------------------------------------------
 
-_RATE_LIMIT_KEYWORDS = [
-    "rate limit",
-    "overloaded",
-    "529",
-    "usage limit",
-    "extra usage",
-]
+# Numeric statuses are matched on their own token.  A bare substring search
+# for "529" or "429" also matches a hex fragment inside a session id, which
+# would discard a completed mutation as a rate limit.
+_RATE_LIMIT_PATTERNS = (
+    re.compile(r"\brate[ -]?limit", re.IGNORECASE),
+    re.compile(r"\boverloaded\b", re.IGNORECASE),
+    re.compile(r"\busage limit\b", re.IGNORECASE),
+    re.compile(r"\bextra usage\b", re.IGNORECASE),
+    re.compile(r"\btoo many requests\b", re.IGNORECASE),
+    # A bare "quota" also appears in configuration errors ("quota field
+    # missing"), so require language saying the quota was consumed.
+    re.compile(r"\bquota\b[^.]{0,20}\b(?:exceeded|exhausted|reached)\b", re.IGNORECASE),
+    re.compile(r"(?<![\w-])(?:429|529)(?![\w-])"),
+)
 
 
 def _looks_like_rate_limit(text: str) -> bool:
-    """Return True if *text* contains a rate-limit / overload keyword."""
-    lower = text.lower()
-    return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
+    """Return True if *text* contains a rate-limit / overload signal.
+
+    Detection stays deliberately narrow: an unrecognised backend error must
+    fall through to the generic unknown-failure path with its own message
+    preserved, rather than being reported as a quota problem the operator
+    cannot act on.
+    """
+    return any(pattern.search(text) for pattern in _RATE_LIMIT_PATTERNS)
+
+
+def _api_error_status(parsed: dict[str, Any]) -> int | None:
+    """Return a backend envelope's API status when it is an integer."""
+    value = parsed.get("api_error_status")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _has_structured_failure_signal(parsed: dict[str, Any]) -> bool:
+    """Whether *parsed* carries an unambiguous backend failure field.
+
+    When it does, the free-text fallback must not run: the envelope already
+    says what happened, and searching the rest of it only risks matching an
+    unrelated field such as a session id.
+    """
+    return isinstance(parsed.get("subtype"), str) or _api_error_status(parsed) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1647,6 +1676,41 @@ def invoke_claude_code(
         )
 
     parsed: dict[str, Any] | None = None
+
+    def _rate_limit_error(summary: str, phase: str) -> RateLimitError:
+        return RateLimitError(
+            summary,
+            operation=f"{backend_name} invocation",
+            phase=phase,
+            command=cmd_str,
+            cwd=str(worktree_path),
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.returncode,
+            suggestion=(
+                f"{backend_name} reported a rate limit. "
+                "Retry after backoff or check your quota."
+            ),
+        )
+
+    def _rate_limit_from_envelope(envelope: dict[str, Any]) -> RateLimitError | None:
+        """Rate-limit verdict for a parsed backend envelope, if it carries one."""
+        if _api_error_status(envelope) == 429:
+            return _rate_limit_error(
+                f"{backend_name} hit a rate/usage limit (HTTP 429)",
+                "structured backend result",
+            )
+        # The error field is a bounded fallback, consulted only when the
+        # envelope supplies no classifying field of its own.
+        error_text = str(envelope.get("error") or "")
+        if _has_structured_failure_signal(envelope) or not _looks_like_rate_limit(error_text):
+            return None
+        logger.error("Rate limit detected in JSON response: %s", error_text[:200])
+        return _rate_limit_error(
+            f"{backend_name} returned a rate/usage limit error in JSON response",
+            "structured backend result fallback",
+        )
+
     try:
         if result.returncode == 0:
             parsed = _parse_backend_output(
@@ -1657,52 +1721,15 @@ def invoke_claude_code(
             )
             usage = _normalise_usage_stats(parsed)
             if backend == "claude":
-                error_text = str(parsed.get("error", ""))
-                if _looks_like_rate_limit(error_text):
-                    logger.error(
-                        "Rate limit detected in JSON response: %s", error_text[:200]
-                    )
-                    raise RateLimitError(
-                        f"{backend_name} returned a rate/usage limit error in JSON response",
-                        operation=f"{backend_name} invocation",
-                        phase="JSON parsing",
-                        command=cmd_str,
-                        cwd=str(worktree_path),
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        exit_code=result.returncode,
-                        suggestion=(
-                            f"{backend_name} reported a rate limit. "
-                            "Retry after backoff or check your API quota."
-                        ),
-                    )
+                rate_limited = _rate_limit_from_envelope(parsed)
+                if rate_limited is not None:
+                    raise rate_limited
             return parsed, usage
 
-        rate_limit_source = result.stderr or result.stdout
-        if _looks_like_rate_limit(rate_limit_source):
-            logger.error(
-                "Rate limit detected in subprocess exit for %s (code %d): %s",
-                backend_name,
-                result.returncode,
-                rate_limit_source[:200],
-            )
-            raise RateLimitError(
-                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
-                operation=f"{backend_name} invocation",
-                phase="subprocess exit",
-                command=cmd_str,
-                cwd=str(worktree_path),
-                stdout=result.stdout,
-                stderr=result.stderr,
-                exit_code=result.returncode,
-                suggestion=(
-                    f"{backend_name} reported a rate limit. "
-                    "Retry after backoff or check your quota."
-                ),
-            )
-
-        # Claude's max-turns exhaustion is intentionally treated as partial
-        # success because the subprocess may have already produced useful edits.
+        # Claude writes a structured result envelope even for many non-zero
+        # exits.  Classify that envelope before inspecting raw output, so a
+        # session id or transcript fragment cannot pre-empt a real max-turns
+        # result — which is partial success, not a discarded proposal.
         if backend == "claude":
             try:
                 parsed = _parse_backend_output(
@@ -1718,15 +1745,38 @@ def invoke_claude_code(
                         parsed.get("num_turns", "?"),
                     )
                     return parsed, usage
+                rate_limited = _rate_limit_from_envelope(parsed)
+                if rate_limited is not None:
+                    raise rate_limited
             except MutationError:
                 parsed = None
 
-        parsed = _parse_backend_output(
-            backend,
-            result,
-            cmd_str=cmd_str,
-            worktree_path=worktree_path,
+        # Last resort, only when the envelope said nothing: search both streams
+        # so an HTTP status on stdout is not hidden by an unrelated stderr
+        # warning.
+        already_classified = parsed is not None and (
+            _has_structured_failure_signal(parsed) or bool(parsed.get("error"))
         )
+        raw_output = "\n".join(s for s in (result.stdout, result.stderr) if s)
+        if not already_classified and _looks_like_rate_limit(raw_output):
+            logger.error(
+                "Rate limit detected in subprocess exit for %s (code %d): %s",
+                backend_name,
+                result.returncode,
+                raw_output[:200],
+            )
+            raise _rate_limit_error(
+                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
+                "subprocess exit fallback",
+            )
+
+        if parsed is None:
+            parsed = _parse_backend_output(
+                backend,
+                result,
+                cmd_str=cmd_str,
+                worktree_path=worktree_path,
+            )
         usage = _normalise_usage_stats(parsed)
 
         raise MutationError(

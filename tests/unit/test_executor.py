@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from helix.config import EvaluatorConfig, HelixConfig
+from helix.exceptions import EvaluatorError
 from helix.executor import run_evaluator
 from helix.population import Candidate, EvalResult
 
@@ -85,6 +88,22 @@ class TestRunEvaluator:
 
         assert result.scores["success"] == 0.0
         assert result.instance_scores == {"example-0": 1.0}
+
+    def test_docker_exit_125_surfaces_docker_diagnostic(self, tmp_path, mocker):
+        mocker.patch(
+            "helix.executor.subprocess.run",
+            return_value=MagicMock(
+                stdout="", stderr="docker: Error response from daemon: image unavailable", returncode=125
+            ),
+        )
+        candidate = make_candidate(str(tmp_path))
+        config = make_config()
+
+        with pytest.raises(EvaluatorError) as exc_info:
+            run_evaluator(candidate, config)
+        assert exc_info.value.phase == "docker invocation"
+        assert "image unavailable" in exc_info.value.stderr
+        assert "HELIX_RESULT" not in str(exc_info.value)
 
     def test_asi_options_and_helix_log(self, tmp_path: Path):
         _prepare_batch(tmp_path)
