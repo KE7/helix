@@ -812,7 +812,7 @@ def _build_backend_args(
             "run",
             "--format",
             "json",
-            "--dangerously-skip-permissions",
+            "--auto",
         ]
         if config.model:
             args.extend(["--model", config.model])
