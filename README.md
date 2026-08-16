@@ -577,9 +577,8 @@ the validation-set size and `W` is the worker count:
   approximately `2*C*m`; increasing `P*N` therefore increases `U` and the
   permitted `max(0, U - 1)` overshoot roughly linearly against the fixed
   `evolution.max_evaluations` cap.
-- The blog's analytical `k*V <= W` model — where `k` is the blog's own symbol
-  for accepted candidates, not HELIX's `P*N` — assumes a parallel
-  full-validation stage: up to `k` accepted candidates are each evaluated on all `V` validation
+- The blog's analytical `k*V <= W` model assumes a parallel full-validation
+  stage: up to `k` accepted candidates are each evaluated on all `V` validation
   examples in parallel across `W` workers. That describes upstream's standard
   path: the engine batches accepted candidates into one `adapter.batch_evaluate`
   call, and the standard `OptimizeAnythingAdapter` fans every
