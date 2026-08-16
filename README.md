@@ -461,7 +461,7 @@ of it: each selected parent is reused across its `N` consecutive slots, where
 `N` = `evolution.mutations_per_parent` is the number of reflective mutations
 proposed per selected parent. Each slot draws its own minibatch, so siblings are gated on
 different examples rather than selecting whichever sibling got an easy batch.
-Thus `k = P*N` is the number of proposal slots (logical proposals) per
+Thus `P*N` is the number of proposal slots (logical proposals) per
 iteration. For an admitted proposal batch, let `C` be the number
 of proposal contexts
 actually built (`C <= P*N`). Context construction checks the budget before
@@ -484,7 +484,7 @@ U = 2 * sum(|m_i| for i in 1..C) + s * (V_stage + V_full)
 
 `U` is not bounded by `P*N`: they have different units. `P*N` counts proposal
 slots, while `U` counts example-evaluation units. For the sharper comparison,
-the tempting closed form `2*k*m + s*(V_stage + V_full)`, where `m` is a common
+the tempting closed form `2*(P*N)*m + s*(V_stage + V_full)`, where `m` is a common
 minibatch size, is looser than summing admitted slots: budget exhaustion can make
 `C < P*N`, and a slot's minibatch can be short. Since
 `maximum_overshoot = max(0, evaluations_before + U - max_evaluations)`, inflating
@@ -542,8 +542,8 @@ batched or parallel full-validation call in HELIX today. The `max_workers`
 knob therefore names different layers in the two systems: HELIX's
 `evolution.max_workers` bounds the proposal pool described above, while
 upstream's `EngineConfig.max_workers` bounds the adapter's evaluation pool
-that backs full validation. When `k > evolution.max_workers`, HELIX queues
-excess proposal work. The logical width `k` therefore does not guarantee that
+that backs full validation. When `P*N > evolution.max_workers`, HELIX queues
+excess proposal work. The logical width `P*N` therefore does not guarantee that
 every evaluation runs at once; worker-pool capacity and the sequential apply
 phase still bound HELIX's wall-clock parallelism.
 
@@ -557,8 +557,8 @@ provides the underlying scaling model. In HELIX, the practical knobs are
 interactions to reason about a workload. In the GEPA comparison below, `V` is
 the validation-set size and `W` is the worker count:
 
-- `k = P*N` proposal slots are submitted to one bounded pool. The pool uses
-  `max_workers = min(len(contexts), evolution.max_workers)`, so when `k` is
+- `P*N` proposal slots are submitted to one bounded pool. The pool uses
+  `max_workers = min(len(contexts), evolution.max_workers)`, so when `P*N` is
   larger than `evolution.max_workers`, excess proposal work queues instead of
   adding proposal-stage parallelism.
 - HELIX's proposal executor has no explicit round barrier: it submits all
@@ -573,12 +573,13 @@ the validation-set size and `W` is the worker count:
   `adapter.batch_evaluate` call, so its validation cost is bounded by
   `EngineConfig.max_workers` rather than by `j` sequential passes.
 - The batch bound charges `2 * sum(|m_i|)` for the parent and child training
-  minibatches. With `k` admitted contexts sharing minibatch size `m`, that is
-  approximately `2*k*m`; increasing `k` therefore increases `U` and the
+  minibatches. With `C` admitted contexts sharing minibatch size `m`, that is
+  approximately `2*C*m`; increasing `P*N` therefore increases `U` and the
   permitted `max(0, U - 1)` overshoot roughly linearly against the fixed
   `evolution.max_evaluations` cap.
-- The blog's analytical `k*V <= W` model assumes a parallel full-validation
-  stage: up to `k` accepted candidates are each evaluated on all `V` validation
+- The blog's analytical `k*V <= W` model — where `k` is the blog's own symbol
+  for accepted candidates, not HELIX's `P*N` — assumes a parallel
+  full-validation stage: up to `k` accepted candidates are each evaluated on all `V` validation
   examples in parallel across `W` workers. That describes upstream's standard
   path: the engine batches accepted candidates into one `adapter.batch_evaluate`
   call, and the standard `OptimizeAnythingAdapter` fans every
