@@ -599,3 +599,43 @@ class TestCandidateSelectionConfig:
             candidate_selection_top_k=5,
         )
         assert cfg.candidate_selection_top_k == 5
+
+    @pytest.mark.parametrize(
+        "strategy,epsilon,top_k,error_match",
+        [
+            # pareto / current_best own neither knob.
+            ("pareto", None, None, None),
+            ("pareto", None, 3, "candidate_selection_top_k is only valid"),
+            ("pareto", 0.1, None, "candidate_selection_epsilon is only valid"),
+            ("pareto", 0.1, 3, "candidate_selection_epsilon is only valid"),
+            ("current_best", None, None, None),
+            ("current_best", None, 3, "candidate_selection_top_k is only valid"),
+            ("current_best", 0.1, None, "candidate_selection_epsilon is only valid"),
+            ("current_best", 0.1, 3, "candidate_selection_epsilon is only valid"),
+            # epsilon_greedy owns epsilon only.
+            ("epsilon_greedy", None, None, "candidate_selection_epsilon is required"),
+            ("epsilon_greedy", None, 3, "candidate_selection_epsilon is required"),
+            ("epsilon_greedy", 0.1, None, None),
+            ("epsilon_greedy", 0.1, 3, "candidate_selection_top_k is only valid"),
+            # top_k_pareto owns top_k only.
+            ("top_k_pareto", None, None, "candidate_selection_top_k is required"),
+            ("top_k_pareto", None, 3, None),
+            ("top_k_pareto", 0.1, None, "candidate_selection_epsilon is only valid"),
+            ("top_k_pareto", 0.1, 3, "candidate_selection_epsilon is only valid"),
+        ],
+    )
+    def test_strategy_epsilon_top_k_matrix(self, strategy, epsilon, top_k, error_match):
+        """Full strategy x epsilon-presence x top_k-presence matrix,
+        including both-knobs-set cases for every strategy (not just the
+        owning ones — see the individual tests above for those)."""
+        kwargs: dict[str, object] = {"candidate_selection_strategy": strategy}
+        if epsilon is not None:
+            kwargs["candidate_selection_epsilon"] = epsilon
+        if top_k is not None:
+            kwargs["candidate_selection_top_k"] = top_k
+        if error_match is None:
+            cfg = EvolutionConfig(**kwargs)
+            assert cfg.candidate_selection_strategy == strategy
+        else:
+            with pytest.raises(ValidationError, match=error_match):
+                EvolutionConfig(**kwargs)

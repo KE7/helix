@@ -54,6 +54,17 @@ instances, which HELIX permits; ``tests/unit/test_candidate_selector.py``
 — ``TestTopKPareto.test_ranking_uses_mean_not_sum_when_cardinality_differs``
 pins the disagreeing case.
 
+Empty-score floor
+------------------
+``EvalResult.aggregate_score()`` returns ``0.0`` for a result with empty
+``instance_scores`` (deliberately left unchanged — other callers such as
+reporting and serialization legitimately want ``0.0``). Upstream's
+``get_program_average_val_subset`` instead returns ``float("-inf")`` for a
+program with no recorded subscores, so an unscored candidate must rank
+BELOW every scored candidate, not above negative-but-finite ones.
+:func:`_aggregate_score_or_floor` applies that ``-inf`` floor at the
+selection site — for both an absent result and a present-but-empty one.
+
 Pre-existing divergence (NOT addressed here): ``ParetoFrontier.select_parent``
 and ``get_non_dominated`` in ``population.py`` pass ``sum_score()`` into
 ``_remove_dominated_programs`` under a "GEPA parity (W1)" comment. Upstream's
@@ -105,12 +116,18 @@ def _aggregate_score_or_floor(result: EvalResult | None) -> float:
 
     Upstream's ``program_full_scores_val_set`` and
     ``per_program_tracked_scores`` are the same mean-valued expression (see
-    the module docstring), so one helper serves both. The ``-inf`` floor for
-    an unevaluated candidate matches upstream's
-    ``get_program_average_val_subset``, which returns ``float("-inf")`` when a
-    program has no recorded subscores.
+    the module docstring), so one helper serves both. The ``-inf`` floor
+    matches upstream's ``get_program_average_val_subset``, which returns
+    ``float("-inf")`` when a program has no recorded subscores — that is
+    the case both for an absent result (``result is None``) AND for a
+    present result with empty ``instance_scores`` (an evaluated-but-scoreless
+    candidate). ``EvalResult.aggregate_score()`` itself returns ``0.0`` for
+    the empty case (other callers legitimately want that), so the floor is
+    applied here, at the selection site, rather than in ``aggregate_score``.
     """
-    return result.aggregate_score() if result is not None else float("-inf")
+    if result is None or not result.instance_scores:
+        return float("-inf")
+    return result.aggregate_score()
 
 
 def _first_argmax(
@@ -124,15 +141,22 @@ def _first_argmax(
     ``ParetoFrontier._candidates`` dict is populated the same way — every
     ``add()`` call only ever inserts, never reorders — so Python's
     insertion-order-preserving dict iteration reproduces "first-discovered
-    candidate among the tied leaders" exactly: scan in discovery order,
-    keep only STRICT improvements, so an earlier candidate is never
-    displaced by a later one with an equal score.
+    candidate among the tied leaders" exactly: scan in discovery order, only
+    displace the running leader on a STRICT improvement — EXCEPT the very
+    first candidate is always taken unconditionally (``best_id is None``).
+    That unconditional first pick matters once ``-inf`` is a reachable
+    score (see :func:`_aggregate_score_or_floor`): an all-unscored pool
+    ties every candidate at ``-inf``, and ``-inf > -inf`` is False, so a
+    pure strict-improvement scan would leave ``best_id`` unset. Upstream's
+    ``idxmax`` is ``lst.index(max(lst))``, which always returns the first
+    index even when every value ties — so unconditionally taking the first
+    candidate is what reproduces that, not a special case for it.
     """
     best_id: str | None = None
     best_score = float("-inf")
     for cid in frontier.candidates:
         score = score_of(frontier.get_result(cid))
-        if score > best_score:
+        if best_id is None or score > best_score:
             best_score = score
             best_id = cid
     assert best_id is not None  # caller guarantees a non-empty frontier

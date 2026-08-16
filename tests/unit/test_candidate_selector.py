@@ -297,6 +297,71 @@ class TestTopKPareto:
 
 
 # ---------------------------------------------------------------------------
+# Empty-result floor (-inf, not 0.0) — reviewer-verified blocker
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyResultFloor:
+    """An unscored candidate (``instance_scores == {}``) must rank BELOW
+    every scored candidate, including one with a negative mean — matching
+    upstream ``get_program_average_val_subset``'s ``float("-inf")`` for a
+    program with no recorded subscores. ``EvalResult.aggregate_score()``
+    itself returns ``0.0`` for that case (by design, for other callers), so
+    an unfloored selector wrongly ranks "unscored" above "scored but bad".
+    """
+
+    def test_current_best_prefers_negative_mean_over_empty(self):
+        """Reviewer repro: empty:{} vs negative:{'x': -0.25}. Upstream's
+        equivalent scores are [-inf, -0.25], so upstream picks 'negative'.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "empty", {})
+        add(frontier, "negative", {"x": -0.25})
+        assert select_current_best(frontier).id == "negative"
+
+    def test_top_k_pareto_ranking_never_lets_empty_bump_a_negative_score(self):
+        """'negative' and 'positive' each own a distinct per-key front;
+        'empty' owns none. A top-2 ranking that floors 'empty' at -inf must
+        keep BOTH real candidates' fronts alive. An unfloored ranking (0.0
+        beats -0.25) instead lets 'empty' displace 'negative' out of the
+        top-2, which drops negative's only front and leaves 'positive' as
+        the sole, deterministic winner.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "negative", {"i1": -0.25})
+        add(frontier, "positive", {"i2": 0.5})
+        add(frontier, "empty", {})
+        rng = random.Random(11)
+        seen = {select_top_k_pareto(frontier, rng, 2).id for _ in range(100)}
+        assert seen == {"negative", "positive"}
+        assert "empty" not in seen
+
+    def test_top_k_pareto_fallback_prefers_negative_mean_over_empty(self):
+        """Forces the empty-filtered-mapping fallback (neither the
+        top-ranked real candidate nor 'empty' owns a front: 'dominator' has
+        the worse mean but wins the only key either of them touches), then
+        asserts the fallback argmax floors 'empty' below 'negative'.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "negative", {"i1": -0.1})
+        add(frontier, "dominator", {"i1": 0.0, "i2": -0.9})  # wins i1, mean -0.45
+        add(frontier, "empty", {})
+        assert select_top_k_pareto(frontier, random.Random(0), 1).id == "negative"
+
+    def test_all_empty_pool_returns_first_discovered_not_none_or_raise(self):
+        """Proves ``_first_argmax`` takes its first candidate
+        unconditionally: once every candidate floors to the SAME -inf, a
+        pure strict-improvement scan never satisfies ``score > best_score``
+        for any candidate and would leave ``best_id`` unset.
+        """
+        frontier = ParetoFrontier()
+        add(frontier, "first", {})
+        add(frontier, "second", {})
+        add(frontier, "third", {})
+        assert select_current_best(frontier).id == "first"
+
+
+# ---------------------------------------------------------------------------
 # select_candidate dispatcher
 # ---------------------------------------------------------------------------
 
