@@ -31,4 +31,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
-      - run: uv run pytest tests/integration/ -m docker_integration -q
+      # The tests skip when a fixture image is absent. A fresh runner has
+      # none, so without this pull the job would pass while running nothing.
+      - name: Pull fixture images
+        run: |
+          docker pull -q python:3.13-alpine
+          for b in claude codex cursor gemini opencode; do
+            docker pull -q "ghcr.io/ke7/helix-evo-runner-$b:latest"
+          done
+      # STRICT=1 turns any remaining skip into a failure, so this job can
+      # never be green without actually exercising the isolation tests.
+      - run: uv run pytest tests/integration/ -m docker_integration -q -rs
+        env:
+          HELIX_DOCKER_TESTS_STRICT: "1"

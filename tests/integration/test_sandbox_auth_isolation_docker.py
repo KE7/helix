@@ -170,15 +170,30 @@ def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]
 
 
 def _require_docker_fixture(image: str) -> None:
+    """Skip when Docker or the fixture image is unavailable.
+
+    Set ``HELIX_DOCKER_TESTS_STRICT=1`` to turn every skip into a failure.
+    CI sets it: a Docker job that silently skips every test still reports
+    green, which is worse than not running it at all.
+    """
+    strict = os.environ.get("HELIX_DOCKER_TESTS_STRICT") == "1"
+
+    def _bail(reason: str) -> None:
+        if strict:
+            pytest.fail(f"{reason} [HELIX_DOCKER_TESTS_STRICT=1 forbids skipping]")
+        pytest.skip(reason)
+
     try:
         daemon = _docker("info")
         inspected = _docker("image", "inspect", image)
     except (OSError, subprocess.SubprocessError) as exc:
-        pytest.skip(f"Docker daemon unavailable: {exc}")
+        _bail(f"Docker daemon unavailable: {exc}")
+        return
     if daemon.returncode != 0:
-        pytest.skip(f"Docker daemon unavailable: {daemon.stderr.strip()}")
+        _bail(f"Docker daemon unavailable: {daemon.stderr.strip()}")
+        return
     if inspected.returncode != 0:
-        pytest.skip(f"fixture image {image!r} is not installed locally")
+        _bail(f"fixture image {image!r} is not installed locally")
 
 
 def _diagnostic_docker_args(
