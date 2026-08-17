@@ -1014,6 +1014,27 @@ def sandbox_auth_volume_name(agent_backend: str) -> str:
     return f"helix-auth-{agent_backend}"
 
 
+def _transcript_bind_dir(
+    sandbox: SandboxConfig,
+    workspace: Path,
+    scope: Literal["agent", "evaluator"],
+    agent_backend: str | None,
+) -> Path | None:
+    """Host path bind-mounted over claude's in-container transcript directory.
+
+    ``None`` when this run has no such bind. The directory must be created
+    before the workspace is chowned to ``node:node`` so that chown covers it;
+    creating it afterwards fails on native Linux whenever the host UID is not
+    1000, and silently produces a bind directory the container user cannot
+    write when the host is root.
+    """
+    if scope != "agent" or agent_backend != "claude":
+        return None
+    if not sandbox.preserve_backend_transcripts:
+        return None
+    return workspace / sandbox.transcript_artifact_dir / "claude"
+
+
 def _docker_args(
     command: list[str],
     env: dict[str, str],
@@ -1057,11 +1078,7 @@ def _docker_args(
                     f"{AUTH_MOUNT_DESTINATIONS[agent_backend]}:rw",
                 ]
             )
-        if agent_backend == "claude" and sandbox.preserve_backend_transcripts:
-            transcript_dir = (
-                workspace / sandbox.transcript_artifact_dir / "claude"
-            )
-            transcript_dir.mkdir(parents=True, exist_ok=True)
+        if transcript_dir := _transcript_bind_dir(sandbox, workspace, scope, agent_backend):
             args.extend(
                 [
                     "-v",
@@ -1137,6 +1154,8 @@ def run_sandboxed_commands(
             omit_paths=omit_paths,
         )
         _init_synthetic_git_repo(workspace)
+        if transcript_dir := _transcript_bind_dir(sandbox, workspace, scope, agent_backend):
+            transcript_dir.mkdir(parents=True, exist_ok=True)
         _docker_chown_workspace(workspace, docker_image, "node:node")
         if scope == "agent" and sandbox.auth == "volume":
             if agent_backend is None:
