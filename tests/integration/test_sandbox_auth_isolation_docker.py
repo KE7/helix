@@ -12,15 +12,48 @@ volume-creation/seeding functions (``_create_candidate_auth_volume``,
 ``_seed_candidate_auth_volume``, ``run_sandboxed_command``) -- never a
 hand-rolled reimplementation of the copy/mount logic under test.
 
+Both tests below are parametrized over *every* backend key in
+``helix.sandbox.AUTH_CREDENTIAL_MANIFEST`` -- not just ``claude`` -- because
+each backend's manifest entry (a distinct source path, target filename, and
+mount destination) is a place the copy/mount logic can fail independently.
+This resolves review finding #5 against
+``docs/design/sandbox-auth-projection.md``: that document marks cursor,
+gemini, and opencode as UNVERIFIED and states that a backend is not enabled
+for ``auth = "volume"`` until its manifest is confirmed by a real test. The
+parametrization is driven directly off ``AUTH_CREDENTIAL_MANIFEST`` (backend
+list) and ``AUTH_MOUNT_DESTINATIONS`` (looked up by key, never copied into a
+second hardcoded list), so a future manifest entry is covered automatically
+and a backend present in one dict but missing from the other fails with a
+loud ``KeyError`` rather than being silently skipped.
+
 Credential safety
 ------------------
-Every credential used here is synthetic (``fake-not-a-real-token``, shaped
-like ``AUTH_CREDENTIAL_MANIFEST["claude"]`` expects). The tests never read,
-mount, or reference an operator's real ``~/.claude`` et al., and never touch
-the real ``helix-auth-<backend>`` volumes: ``helix.sandbox.sandbox_auth_volume_name``
+Every credential used here is synthetic. The tests never read, mount, or
+reference an operator's real ``~/.claude``, ``~/.codex``, ``~/.cursor``,
+``~/.gemini``, or ``~/.local/share/opencode``, and never touch the real
+``helix-auth-<backend>`` volumes: ``helix.sandbox.sandbox_auth_volume_name``
 is monkeypatched for the duration of each test to point at a throwaway
 ``helix-test-synthetic-login-*`` volume instead. That is the sole seam
 touched; every other code path under test runs unmodified.
+
+Credential shape: only ``claude``'s real login-volume shape
+(``claudeAiOauth`` with an OAuth token pair) is reflected in the fake
+fixture below, matching what earlier claude-only auth-volume work already
+established. The real on-disk shape of ``codex``'s ``auth.json``,
+``cursor``'s ``cli-config.json``, ``gemini``'s ``oauth_creds.json``, and
+``opencode``'s ``auth.json`` was **not** determined for this change -- doing
+so would require reading an operator's real credential file, which is
+exactly what this module must never do. Those four backends instead get a
+minimal, valid, non-empty JSON object (``_GENERIC_SYNTHETIC_SHAPE`` below).
+This is a deliberate substitution, not an oversight: everything these tests
+assert -- byte-for-byte isolation across candidate volumes, mode/ownership,
+manifest-only contents, and that a write to one candidate never reaches
+another candidate or the login volume -- depends on the manifest's
+source/target *paths* and on file *bytes* being preserved unchanged, not on
+the credential JSON's internal schema. A schema-accurate fixture would not
+change what byte-isolation demonstrates; it would only matter for a test
+that also validates backend-specific JSON semantics, which none of these
+do.
 
 Convention: follows ``docker_integration`` (see ``pyproject.toml`` markers)
 and the ``_require_docker_fixture``-style skip used historically for
@@ -57,33 +90,77 @@ from helix.sandbox import (
 
 pytestmark = pytest.mark.docker_integration
 
-_BACKEND = "claude"
-_FIXTURE_IMAGE = os.environ.get("HELIX_DOCKER_TEST_IMAGE", DEFAULT_BACKEND_IMAGES[_BACKEND])
-_REAL_LOGIN_VOLUME_NAME = f"helix-auth-{_BACKEND}"  # never created/read/written below
+# Every backend HELIX's manifest declares -- the sole source of truth for
+# which backends these tests cover. Sorted only for stable, readable test IDs.
+_BACKENDS = sorted(AUTH_CREDENTIAL_MANIFEST)
 
-_SOURCE_REL, _TARGET_REL = AUTH_CREDENTIAL_MANIFEST[_BACKEND][0]
-_MOUNT_DEST = AUTH_MOUNT_DESTINATIONS[_BACKEND]
+# ``claude``'s real login-volume shape (verified, not read from an operator
+# credential -- this shape is already established by prior claude-only auth
+# work). Every other backend's real shape is unknown here by design; see the
+# module docstring's "Credential shape" section.
+_GENERIC_SYNTHETIC_SHAPE_NOTE = (
+    "real on-disk shape unknown -- placeholder for byte-isolation testing only, "
+    "see test_sandbox_auth_isolation_docker.py module docstring"
+)
 
-_FAKE_CREDENTIAL = json.dumps(
-    {
-        "claudeAiOauth": {
-            "accessToken": "fake-not-a-real-token",
-            "refreshToken": "fake",
-            "expiresAt": 9999999999,
-            "scopes": ["user:inference"],
+
+def _fake_credential(backend: str) -> str:
+    """A synthetic, backend-shaped-where-known seed credential. All fake."""
+    if backend == "claude":
+        return json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "fake-not-a-real-token",
+                    "refreshToken": "fake",
+                    "expiresAt": 9999999999,
+                    "scopes": ["user:inference"],
+                }
+            }
+        )
+    return json.dumps(
+        {
+            "synthetic_credential": True,
+            "backend": backend,
+            "state": "seed",
+            "note": _GENERIC_SYNTHETIC_SHAPE_NOTE,
         }
-    }
-)
-_ROTATED_CREDENTIAL = json.dumps(
-    {
-        "claudeAiOauth": {
-            "accessToken": "fake-rotated-token-from-candidate-a",
-            "refreshToken": "fake-rotated",
-            "expiresAt": 9999999999,
-            "scopes": ["user:inference"],
+    )
+
+
+def _rotated_credential(backend: str) -> str:
+    """A synthetic "rotated" value simulating an in-place token refresh."""
+    if backend == "claude":
+        return json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "fake-rotated-token-from-candidate-a",
+                    "refreshToken": "fake-rotated",
+                    "expiresAt": 9999999999,
+                    "scopes": ["user:inference"],
+                }
+            }
+        )
+    return json.dumps(
+        {
+            "synthetic_credential": True,
+            "backend": backend,
+            "state": "rotated-by-candidate-a",
+            "note": _GENERIC_SYNTHETIC_SHAPE_NOTE,
         }
-    }
-)
+    )
+
+
+def _fixture_image(backend: str) -> str:
+    """Resolve the runner image for *backend*, honoring test-only overrides."""
+    per_backend_override = os.environ.get(f"HELIX_DOCKER_TEST_IMAGE_{backend.upper()}")
+    if per_backend_override:
+        return per_backend_override
+    # Legacy single-backend override, kept for anyone still setting it locally.
+    if backend == "claude":
+        legacy_override = os.environ.get("HELIX_DOCKER_TEST_IMAGE")
+        if legacy_override:
+            return legacy_override
+    return DEFAULT_BACKEND_IMAGES[backend]
 
 
 def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -92,16 +169,16 @@ def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]
     )
 
 
-def _require_docker_fixture() -> None:
+def _require_docker_fixture(image: str) -> None:
     try:
         daemon = _docker("info")
-        image = _docker("image", "inspect", _FIXTURE_IMAGE)
+        inspected = _docker("image", "inspect", image)
     except (OSError, subprocess.SubprocessError) as exc:
         pytest.skip(f"Docker daemon unavailable: {exc}")
     if daemon.returncode != 0:
         pytest.skip(f"Docker daemon unavailable: {daemon.stderr.strip()}")
-    if image.returncode != 0:
-        pytest.skip(f"fixture image {_FIXTURE_IMAGE!r} is not installed locally")
+    if inspected.returncode != 0:
+        pytest.skip(f"fixture image {image!r} is not installed locally")
 
 
 def _diagnostic_docker_args(
@@ -127,17 +204,17 @@ def _diagnostic_docker_args(
     ]
 
 
-def _make_synthetic_login_volume(backend: str, credential_json: str) -> str:
+def _make_synthetic_login_volume(backend: str, credential_json: str, source_rel: str) -> str:
     """Create a throwaway, HELIX-shaped login volume holding a fake credential.
 
-    This mimics the *shape* the real login volume has after ``claude auth
-    login`` (manifest-declared relative path, mode 0600, uid/gid 1000) but is
-    a brand-new randomly-named volume -- it is never ``helix-auth-<backend>``
+    This mimics the *shape* the real login volume has after a real login (a
+    manifest-declared relative path, mode 0600, uid/gid 1000) but is a
+    brand-new randomly-named volume -- it is never ``helix-auth-<backend>``
     and never derived from any real credential.
     """
     name = f"helix-test-synthetic-login-{backend}-{uuid.uuid4().hex}"
     _run_docker(["docker", "volume", "create", name])
-    container_path = f"/home/node/{_SOURCE_REL}"
+    container_path = f"/home/node/{source_rel}"
     parent = str(Path(container_path).parent)
     script = (
         f"set -eu; mkdir -p {shlex.quote(parent)}; "
@@ -202,19 +279,43 @@ def _no_leaked_test_volumes():
 
 
 # --------------------------------------------------------------------------
+# Manifest/destination parity -- makes drift between the two dicts loud.
+# --------------------------------------------------------------------------
+
+
+def test_auth_manifest_and_mount_destinations_cover_the_same_backends() -> None:
+    """Every manifest backend has a mount destination and vice versa.
+
+    The parametrized tests below look up ``AUTH_MOUNT_DESTINATIONS[backend]``
+    directly (never a second hardcoded backend list), so a missing entry
+    already fails those tests loudly with a ``KeyError`` at setup time. This
+    assertion makes that guarantee explicit and independent of Docker.
+    """
+    assert set(AUTH_CREDENTIAL_MANIFEST) == set(AUTH_MOUNT_DESTINATIONS)
+
+
+# --------------------------------------------------------------------------
 # TEST 1 -- runtime isolation via HELIX's own volume-creation/seeding code
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
 def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
+    backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _require_docker_fixture()
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
 
-    login_volume = _make_synthetic_login_volume(_BACKEND, _FAKE_CREDENTIAL)
+    real_login_volume_name = f"helix-auth-{backend}"  # never created/read/written below
+    source_rel, target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    fake_credential = _fake_credential(backend)
+    rotated_credential = _rotated_credential(backend)
+
+    login_volume = _make_synthetic_login_volume(backend, fake_credential, source_rel)
 
     # The only seam we touch: redirect the seeding step's *source* volume
-    # away from the real "helix-auth-claude" toward our synthetic fixture.
+    # away from the real "helix-auth-<backend>" toward our synthetic fixture.
     # `_seed_candidate_auth_volume` looks this up by calling
     # `sandbox_auth_volume_name(volume.backend)` from `helix.sandbox`'s own
     # module globals, so patching the module attribute here also redirects
@@ -225,21 +326,21 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
     candidate_b: CandidateAuthVolume | None = None
     try:
         # 1 & 2: real HELIX volume-creation + seeding code, called directly.
-        candidate_a = _create_candidate_auth_volume(_BACKEND)
-        candidate_b = _create_candidate_auth_volume(_BACKEND)
+        candidate_a = _create_candidate_auth_volume(backend)
+        candidate_b = _create_candidate_auth_volume(backend)
         assert candidate_a.name != candidate_b.name
         assert candidate_a.name != login_volume
         assert candidate_b.name != login_volume
-        assert _REAL_LOGIN_VOLUME_NAME not in (candidate_a.name, candidate_b.name, login_volume)
+        assert real_login_volume_name not in (candidate_a.name, candidate_b.name, login_volume)
 
         _seed_candidate_auth_volume(candidate_a)
         _seed_candidate_auth_volume(candidate_b)
 
         # 3: both candidates contain the credential, mode 0600, owned 1000:1000.
-        content_a, mode_a = _read_credential(candidate_a.name, _TARGET_REL)
-        content_b, mode_b = _read_credential(candidate_b.name, _TARGET_REL)
-        assert content_a == _FAKE_CREDENTIAL
-        assert content_b == _FAKE_CREDENTIAL
+        content_a, mode_a = _read_credential(candidate_a.name, target_rel)
+        content_b, mode_b = _read_credential(candidate_b.name, target_rel)
+        assert content_a == fake_credential
+        assert content_b == fake_credential
         assert mode_a == "600 1000:1000"
         assert mode_b == "600 1000:1000"
 
@@ -247,12 +348,12 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
         # credential into candidate A's own copy (simulating a backend
         # refreshing its token in place, exactly as observed in the
         # incident), then assert candidate B is byte-unchanged.
-        _write_credential(candidate_a.name, _TARGET_REL, _ROTATED_CREDENTIAL)
-        rotated_content_a, _ = _read_credential(candidate_a.name, _TARGET_REL)
-        assert rotated_content_a == _ROTATED_CREDENTIAL
+        _write_credential(candidate_a.name, target_rel, rotated_credential)
+        rotated_content_a, _ = _read_credential(candidate_a.name, target_rel)
+        assert rotated_content_a == rotated_credential
 
-        unaffected_content_b, unaffected_mode_b = _read_credential(candidate_b.name, _TARGET_REL)
-        assert unaffected_content_b == _FAKE_CREDENTIAL, (
+        unaffected_content_b, unaffected_mode_b = _read_credential(candidate_b.name, target_rel)
+        assert unaffected_content_b == fake_credential, (
             "candidate B's credential changed after candidate A rotated its "
             "own copy -- this is exactly the shared-volume rotation incident "
             "this design exists to prevent"
@@ -260,17 +361,24 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
         assert unaffected_mode_b == "600 1000:1000"
 
         # The synthetic login volume itself is also untouched by A's write.
-        login_content, _ = _read_credential(login_volume, _SOURCE_REL, mount="/home/node")
-        assert login_content == _FAKE_CREDENTIAL
+        login_content, _ = _read_credential(login_volume, source_rel, mount="/home/node")
+        assert login_content == fake_credential
 
         # 5: candidate volumes only contain the manifest-declared targets --
         # no trace of the login volume's own nested layout leaks through.
         top_level_a = _list_top_level(candidate_a.name)
         top_level_b = _list_top_level(candidate_b.name)
-        assert ".claude" not in top_level_a  # source's directory name, not the target's
-        assert ".claude" not in top_level_b
-        assert top_level_a == {".credentials.json", "projects"}
-        assert top_level_b == {".credentials.json", "projects"}
+        source_top_component = source_rel.split("/", 1)[0]
+        assert source_top_component not in top_level_a  # source's directory name, not the target's
+        assert source_top_component not in top_level_b
+        expected_top_level = {target for _, target in AUTH_CREDENTIAL_MANIFEST[backend]}
+        # claude's transcript bind is deliberately pre-created by the seed
+        # helper (see `_seed_command`'s claude special case in sandbox.py);
+        # every other backend's candidate volume holds only its credential.
+        if backend == "claude":
+            expected_top_level.add("projects")
+        assert top_level_a == expected_top_level
+        assert top_level_b == expected_top_level
 
         login_mountpoint = _docker(
             "volume", "inspect", "-f", "{{.Mountpoint}}", login_volume
@@ -297,12 +405,22 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
 def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _require_docker_fixture()
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
 
-    login_volume = _make_synthetic_login_volume(_BACKEND, _FAKE_CREDENTIAL)
+    real_login_volume_name = f"helix-auth-{backend}"
+    source_rel, target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    mount_dest = AUTH_MOUNT_DESTINATIONS[backend]
+    fake_credential = _fake_credential(backend)
+    rotated_credential = _rotated_credential(backend)
+
+    login_volume = _make_synthetic_login_volume(backend, fake_credential, source_rel)
     monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
 
     observed_docker_args: list[list[str]] = []
@@ -317,7 +435,7 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
 
     source = tmp_path / "candidate"
     source.mkdir()
-    dest_path = f"{_MOUNT_DEST}/{_TARGET_REL}"
+    dest_path = f"{mount_dest}/{target_rel}"
 
     # A harmless command that never calls a model or any backend CLI: it only
     # reads the seeded credential and process environment, then writes a
@@ -331,7 +449,7 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
             "echo HOME_ENV:$HOME; "
             "if mount | grep -q \" on /home/node type tmpfs\"; then "
             "echo HOME_MOUNT:tmpfs; else echo HOME_MOUNT:not-tmpfs; fi; "
-            f"printf '%s' {shlex.quote(_ROTATED_CREDENTIAL)} > {shlex.quote(dest_path)}"
+            f"printf '%s' {shlex.quote(rotated_credential)} > {shlex.quote(dest_path)}"
         ),
     ]
 
@@ -342,14 +460,16 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
         sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
         scope="agent",
         sync_back=False,
-        image=_FIXTURE_IMAGE,
-        agent_backend=_BACKEND,
+        image=fixture_image,
+        agent_backend=backend,
     )
 
     try:
-        assert result.returncode == 0, f"sandboxed command failed: {result.stderr}"
+        assert result.returncode == 0, (
+            f"sandboxed command failed for backend {backend!r}: {result.stderr}"
+        )
         lines = result.stdout.splitlines()
-        assert lines[0] == _FAKE_CREDENTIAL, "seeded credential not present/readable at mount dest"
+        assert lines[0] == fake_credential, "seeded credential not present/readable at mount dest"
         assert lines[1] == "MODE:600 1000:1000", "credential not owned/moded correctly in container"
         assert lines[2] == "HOME_ENV:/home/node"
         assert lines[3] == "HOME_MOUNT:tmpfs", "HOME is not the private per-container tmpfs"
@@ -361,12 +481,12 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
             call for call in observed_docker_args if call[:2] == ["docker", "run"]
         )
         assert not any(login_volume in item for item in agent_call)
-        assert not any(_REAL_LOGIN_VOLUME_NAME in item for item in agent_call)
+        assert not any(real_login_volume_name in item for item in agent_call)
         mount_arg = next(
-            item for item in agent_call if item.endswith(f":{_MOUNT_DEST}:rw")
+            item for item in agent_call if item.endswith(f":{mount_dest}:rw")
         )
         candidate_volume_in_argv = mount_arg.split(":", 1)[0]
-        assert candidate_volume_in_argv.startswith("helix-candidate-auth-claude-")
+        assert candidate_volume_in_argv.startswith(f"helix-candidate-auth-{backend}-")
 
         # The candidate volume the agent actually used is gone once
         # `run_sandboxed_command` returns (its own cleanup path ran).
@@ -375,8 +495,8 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
         # THE assertion that matters most, replayed through the real E2E
         # entry point: the in-container "rotation" write landed on the
         # candidate's private copy, not on the synthetic login volume.
-        login_content, _ = _read_credential(login_volume, _SOURCE_REL, mount="/home/node")
-        assert login_content == _FAKE_CREDENTIAL, (
+        login_content, _ = _read_credential(login_volume, source_rel, mount="/home/node")
+        assert login_content == fake_credential, (
             "the login volume was mutated by a write made inside the agent "
             "container -- credentials are not isolated"
         )
