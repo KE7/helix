@@ -268,15 +268,11 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
     return None
 
 
-def _candidate_auth_volume_name(agent_backend: str) -> str:
-    return f"{_CANDIDATE_AUTH_PREFIX}{agent_backend}-{uuid.uuid4().hex}"
-
-
 def _create_candidate_auth_volume(agent_backend: str) -> CandidateAuthVolume:
     """Create a never-reused, labelled candidate credential volume."""
     if agent_backend not in AUTH_CREDENTIAL_MANIFEST:
         raise ValueError(f"No credential manifest for backend: {agent_backend}")
-    name = _candidate_auth_volume_name(agent_backend)
+    name = f"{_CANDIDATE_AUTH_PREFIX}{agent_backend}-{uuid.uuid4().hex}"
     existing = _run_docker(["docker", "volume", "inspect", name], check=False)
     # Docker prints a JSON object on a real successful inspect.  The non-empty
     # condition keeps lightweight command fakes from masquerading as a daemon.

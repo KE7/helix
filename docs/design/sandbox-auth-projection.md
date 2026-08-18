@@ -179,15 +179,11 @@ is inaccessible to sibling agents and removed afterwards.  The surrounding
 tmpfs makes unrelated `HOME` state container-local as well.
 
 The source manifest is code-owned, versioned with the runner contract, and
-uses relative paths only.  Initial candidates are:
-
-| Backend | Login-volume source → candidate auth-volume destination | Readiness |
-| --- | --- | --- |
-| Claude | `.claude/.credentials.json` → `.credentials.json` mounted at `$HOME/.claude` | Ready, subject to real-grant end-to-end test |
-| Codex | `.codex/auth.json` → `auth.json` mounted at `$HOME/.codex` | Ready, subject to real-grant end-to-end test |
-| Cursor | `.cursor/cli-config.json` → `cli-config.json` mounted at `$HOME/.cursor` | Needs credential-shape and live-login verification |
-| Gemini | `.gemini/oauth_creds.json` plus any login-required account record | Needs a measured login-volume manifest; current observed source was not OAuth-backed |
-| OpenCode | `.local/share/opencode/auth.json` → `auth.json` mounted at its XDG data auth directory | Needs live-login verification of the complete required file set |
+uses relative paths only.  It is not restated here: the authoritative tables
+are `AUTH_CREDENTIAL_MANIFEST`, `AUTH_MOUNT_DESTINATIONS`,
+`AUTH_SYNTHESIZED_FILES`, and `AUTH_PRECREATED_DIRECTORIES` in
+`src/helix/sandbox.py`, and each entry is graded by the backend's own CLI in
+`tests/integration/test_sandbox_auth_isolation_docker.py`.
 
 The mechanism is common; its manifest is backend-specific.  No backend needs a
 custom agent image merely to receive the credential.  The helper is one generic
@@ -237,22 +233,11 @@ for named values already declared in `[env]`/`passthrough_env`.  It does not
 use that key as hidden plumbing for volume credentials.  Backend manifests and
 runtime cleanup are implementation details, not new user knobs.
 
-## Deletions and documentation to retain
+## Deletions
 
-The implementation removes:
-
-- `VolumeModeUnsupportedError` and its long retired-mode remediation text;
-- the agent-execution paths that mount `helix-auth-<backend>`, including any
-  post-run transcript copy that remounts it;
-- `OAUTH_SUPPRESSING_ENV`;
-- `FORBIDDEN_AUTH_ENV_NAMES` and every policy branch that specially handles
-  `CLAUDE_CODE_OAUTH_TOKEN`.
-
-HELIX must not forbid or otherwise manipulate a variable it does not set.  The
-existing warning for both credential forms being present remains the right
-diagnostic for an ambiguous explicit-env configuration.
-
-Delete the retirement code, not the reason for structural isolation recorded in
+The implementation removes every agent-execution path that mounts
+`helix-auth-<backend>`, including the post-run transcript copy that remounted
+it.  Delete that code, not the reason for structural isolation recorded in
 [Why a shared writable auth directory is retired](#why-a-shared-writable-auth-directory-is-retired).
 
 ## Rotation and its open question

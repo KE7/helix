@@ -1,72 +1,43 @@
 """Real-Docker proof that per-candidate auth volumes actually isolate credentials.
 
-``tests/unit/test_sandbox.py`` proves HELIX's auth-volume design *by
-construction*: it patches ``helix.sandbox.subprocess.run`` and inspects the
-argv HELIX builds, so no container ever runs and no volume is ever created.
-That is necessary but not sufficient -- the credential-rotation incident this
-design exists to prevent was an *observed* runtime failure (a shared
-credential mutated in place under concurrent use), not a static argv defect.
+``tests/unit/test_sandbox.py`` proves the design *by construction*: it patches
+``helix.sandbox.subprocess.run`` and inspects the argv HELIX builds, so no
+container ever runs and no volume is ever created. That is necessary but not
+sufficient -- the credential-rotation incident this design exists to prevent
+was an *observed* runtime failure (a shared credential mutated in place under
+concurrent use), not a static argv defect.
 
-This module closes that gap using a real Docker daemon and HELIX's own
-volume-creation/seeding functions (``_create_candidate_auth_volume``,
-``_seed_candidate_auth_volume``, ``run_sandboxed_command``) -- never a
-hand-rolled reimplementation of the copy/mount logic under test.
-
-Both tests below are parametrized over *every* backend key in
-``helix.sandbox.AUTH_CREDENTIAL_MANIFEST`` -- not just ``claude`` -- because
-each backend's manifest entry (a distinct source path, target filename, and
-mount destination) is a place the copy/mount logic can fail independently.
-This resolves review finding #5 against
-``docs/design/sandbox-auth-projection.md``: that document marks cursor,
-gemini, and opencode as UNVERIFIED and states that a backend is not enabled
-for ``auth = "volume"`` until its manifest is confirmed by a real test. The
-parametrization is driven directly off ``AUTH_CREDENTIAL_MANIFEST`` (backend
-list) and ``AUTH_MOUNT_DESTINATIONS`` (looked up by key, never copied into a
-second hardcoded list), so a future manifest entry is covered automatically
-and a backend present in one dict but missing from the other fails with a
-loud ``KeyError`` rather than being silently skipped.
+This module closes that gap with a real Docker daemon and HELIX's own
+functions (``_create_candidate_auth_volume``, ``_seed_candidate_auth_volume``,
+``run_sandboxed_command``) -- never a reimplementation of the logic under
+test. Every test is parametrized off ``AUTH_CREDENTIAL_MANIFEST`` and looks
+``AUTH_MOUNT_DESTINATIONS`` up by key, so a new manifest entry is covered
+automatically and a backend present in one dict but not the other fails
+loudly rather than being silently skipped.
 
 Credential safety
 ------------------
-Every credential used here is synthetic. The tests never read, mount, or
-reference an operator's real ``~/.claude``, ``~/.codex``, ``~/.cursor``,
-``~/.gemini``, or ``~/.local/share/opencode``, and never touch the real
+Every credential here is synthetic. The tests never read, mount, or reference
+an operator's real ``~/.claude``, ``~/.codex``, ``~/.cursor``, ``~/.gemini``,
+or ``~/.local/share/opencode``, and never touch the real
 ``helix-auth-<backend>`` volumes: ``helix.sandbox.sandbox_auth_volume_name``
-is monkeypatched for the duration of each test to point at a throwaway
-``helix-test-synthetic-login-*`` volume instead. That is the sole seam
-touched; every other code path under test runs unmodified.
+is monkeypatched per test to a throwaway ``helix-test-synthetic-login-*``
+volume. That is the sole seam touched; every other path runs unmodified.
 
-Credential shape: every backend's fixture is now written in that backend's
-*own* record shape (``_CREDENTIAL_SHAPES`` below), with synthetic token
-values invented here. The shapes were established without touching any
-operator credential -- each one was confirmed by writing a made-up record
-into a throwaway container's tmpfs ``HOME`` and observing whether the
-backend's own CLI then reported itself authenticated. That distinction
-matters, because a generic JSON blob is exactly what let a wrong manifest
-entry pass every byte-isolation assertion in this file: the isolation tests
-below depend only on paths and bytes, so they can prove a file was copied
-intact to the declared destination while the declared destination is one
-the CLI never reads.
+Each fixture is written in that backend's *own* record shape
+(``_CREDENTIAL_SHAPES`` below) with invented token values, because a generic
+JSON blob is exactly what let a wrong manifest entry pass every byte-isolation
+assertion in this file -- see
+``test_backend_cli_self_reports_authenticated_from_the_seeded_manifest``.
 
-Self-attestation: ``test_backend_cli_self_reports_authenticated_from_the_seeded_manifest``
-closes that gap. It seeds through HELIX's real code path and then runs the
-backend's *own* status command inside the candidate container, asserting the
-CLI reports itself logged in. That is what catches a wrong filename, a wrong
-mount destination, a wrong ``XDG_*`` assumption, or a required sibling the
-manifest forgot -- none of which any byte-isolation assertion can see.
+Cost and quota: nothing here can spend. Every credential is synthetic and
+every container runs ``--network none``; the commands used are each backend's
+free local status command. ``gemini`` ships no status subcommand and is
+asserted negatively instead (see ``_SELF_ATTESTATION``).
 
-Cost and quota: nothing here can spend. Every credential is synthetic, so no
-token could authenticate against a live service even if one were reachable,
-and every container in this module runs with ``--network none``. The
-commands used are each backend's free local status command; ``gemini``,
-which ships no status subcommand, is instead asserted *negatively* -- its
-output must not contain the "Please set an Auth method" refusal -- and its
-synthetic token fails locally at OAuth before any request is attempted.
-
-Convention: follows ``docker_integration`` (see ``pyproject.toml`` markers)
-and the ``_require_docker_fixture``-style skip used historically for
-Docker-gated tests in this repo -- skip cleanly when the daemon or fixture
-image is unavailable rather than fail CI/a laptop without Docker.
+Convention: ``docker_integration`` (see ``pyproject.toml`` markers), skipping
+cleanly when the daemon or fixture image is unavailable -- unless
+``HELIX_DOCKER_TESTS_STRICT=1``, which turns every skip into a failure.
 """
 
 from __future__ import annotations
@@ -278,16 +249,9 @@ _SELF_ATTESTATION: dict[str, _SelfAttestation] = {
 
 
 def _fixture_image(backend: str) -> str:
-    """Resolve the runner image for *backend*, honoring test-only overrides."""
-    per_backend_override = os.environ.get(f"HELIX_DOCKER_TEST_IMAGE_{backend.upper()}")
-    if per_backend_override:
-        return per_backend_override
-    # Legacy single-backend override, kept for anyone still setting it locally.
-    if backend == "claude":
-        legacy_override = os.environ.get("HELIX_DOCKER_TEST_IMAGE")
-        if legacy_override:
-            return legacy_override
-    return DEFAULT_BACKEND_IMAGES[backend]
+    """Resolve the runner image for *backend*, honoring a test-only override."""
+    override = os.environ.get(f"HELIX_DOCKER_TEST_IMAGE_{backend.upper()}")
+    return override or DEFAULT_BACKEND_IMAGES[backend]
 
 
 def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:

@@ -1316,97 +1316,45 @@ class TestInvokeClaudeCode:
     # and assert it actually arrives — the exact promise documented in
     # config.py's ``HelixConfig.env``/``passthrough_env`` docstrings ("...
     # into evaluator and agent subprocesses") and in the ``helix init``
-    # template. These four tests close that gap: fixed_env and
-    # passthrough_env, under both sandbox.auth = "volume" and
-    # sandbox.auth = "env". They use the init template's own documented
-    # example value, ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1".
+    # template. The matrix below closes that gap over both transports
+    # (fixed_env and passthrough_env) and both auth modes. Under
+    # ``auth = "env"`` the allowlist deliberately names an UNRELATED key:
+    # ``auth_env_allow`` gates the ambient-credential path, not general
+    # user-declared configuration. The value is the init template's own
+    # documented example.
 
-    def test_sandbox_volume_auth_forwards_configured_fixed_env(self, mocker):
-        """[env]-configured values must reach the sandboxed agent under auth='volume'."""
-        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
-        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+    _CONFIGURED_URL = "https://model-service.example.invalid/v1"
 
-        invoke_claude_code(
-            "/tmp/wt",
-            "prompt",
-            AgentConfig(),
-            fixed_env={"ANTHROPIC_BASE_URL": "https://model-service.example.invalid/v1"},
-            sandbox=SandboxConfig(enabled=True, auth="volume"),
-        )
-
-        env = mock_run.call_args.kwargs["env"]
-        assert env["ANTHROPIC_BASE_URL"] == "https://model-service.example.invalid/v1"
-
-    def test_sandbox_volume_auth_forwards_configured_passthrough_env(
-        self, mocker, monkeypatch
-    ):
-        """passthrough_env-named values must reach the sandboxed agent under auth='volume'."""
-        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
-        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-        monkeypatch.setenv(
-            "ANTHROPIC_BASE_URL", "https://model-service.example.invalid/v1"
-        )
-
-        invoke_claude_code(
-            "/tmp/wt",
-            "prompt",
-            AgentConfig(),
-            passthrough_env=["ANTHROPIC_BASE_URL"],
-            sandbox=SandboxConfig(enabled=True, auth="volume"),
-        )
-
-        env = mock_run.call_args.kwargs["env"]
-        assert env["ANTHROPIC_BASE_URL"] == "https://model-service.example.invalid/v1"
-
-    def test_sandbox_env_auth_forwards_configured_fixed_env(self, mocker):
-        """[env]-configured values must reach the sandboxed agent under auth='env',
-
-        even when the key is not also listed in sandbox.auth_env_allow —
-        auth_env_allow gates the ambient-credential path, not general
-        user-declared configuration.
-        """
-        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
-        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-
-        invoke_claude_code(
-            "/tmp/wt",
-            "prompt",
-            AgentConfig(),
-            fixed_env={"ANTHROPIC_BASE_URL": "https://model-service.example.invalid/v1"},
-            sandbox=SandboxConfig(
+    @pytest.mark.parametrize(
+        "sandbox",
+        [
+            SandboxConfig(enabled=True, auth="volume"),
+            SandboxConfig(
                 enabled=True, auth="env", auth_env_allow=["UNRELATED_CREDENTIAL"]
             ),
-        )
-
-        env = mock_run.call_args.kwargs["env"]
-        assert env["ANTHROPIC_BASE_URL"] == "https://model-service.example.invalid/v1"
-
-    def test_sandbox_env_auth_forwards_configured_passthrough_env(
-        self, mocker, monkeypatch
+        ],
+        ids=["volume", "env"],
+    )
+    @pytest.mark.parametrize("transport", ["fixed_env", "passthrough_env"])
+    def test_sandboxed_agent_receives_configured_env(
+        self, mocker, monkeypatch, sandbox, transport
     ):
-        """passthrough_env-named values must reach the sandboxed agent under auth='env',
-
-        even when the key is not also listed in sandbox.auth_env_allow.
-        """
+        """Configured [env]/passthrough_env values must reach a sandboxed agent."""
         mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-        monkeypatch.setenv(
-            "ANTHROPIC_BASE_URL", "https://model-service.example.invalid/v1"
-        )
+        kwargs: dict[str, object] = {}
+        if transport == "fixed_env":
+            kwargs["fixed_env"] = {"ANTHROPIC_BASE_URL": self._CONFIGURED_URL}
+        else:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", self._CONFIGURED_URL)
+            kwargs["passthrough_env"] = ["ANTHROPIC_BASE_URL"]
 
         invoke_claude_code(
-            "/tmp/wt",
-            "prompt",
-            AgentConfig(),
-            passthrough_env=["ANTHROPIC_BASE_URL"],
-            sandbox=SandboxConfig(
-                enabled=True, auth="env", auth_env_allow=["UNRELATED_CREDENTIAL"]
-            ),
+            "/tmp/wt", "prompt", AgentConfig(), sandbox=sandbox, **kwargs
         )
 
         env = mock_run.call_args.kwargs["env"]
-        assert env["ANTHROPIC_BASE_URL"] == "https://model-service.example.invalid/v1"
-
+        assert env["ANTHROPIC_BASE_URL"] == self._CONFIGURED_URL
 
 # ---------------------------------------------------------------------------
 # Tests: mutate
