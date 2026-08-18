@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
@@ -50,13 +50,22 @@ class CredentialCleanupError(RuntimeError):
 _CANDIDATE_AUTH_PREFIX = "helix-candidate-auth-"
 _CANDIDATE_AUTH_LABEL = "helix.auth.candidate"
 _RUNNER_UID_GID = "1000:1000"
+_RUNNER_HOME = "/home/node"
+_RUNNER_HOME_TMPFS_OPTS = "rw,uid=1000,gid=1000,mode=700"
 
 # Source paths are relative to the operator-facing login volume; targets are
 # relative to the candidate-owned volume mounted at the destination below.
+#
+# Every entry names the file the backend's own CLI reads on Linux, inside the
+# runner image, under HELIX's container topology (``HOME=/home/node``, no
+# ``XDG_CONFIG_HOME``). Cursor is the entry that makes the distinction matter:
+# its CLI resolves credentials via ``${XDG_CONFIG_HOME:-$HOME/.config}/cursor/
+# auth.json``, while ``~/.cursor/cli-config.json`` is its *settings* file and
+# holds no credential at all.
 AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
     "claude": ((".claude/.credentials.json", ".credentials.json"),),
     "codex": ((".codex/auth.json", "auth.json"),),
-    "cursor": ((".cursor/cli-config.json", "cli-config.json"),),
+    "cursor": ((".config/cursor/auth.json", "auth.json"),),
     "gemini": ((".gemini/oauth_creds.json", "oauth_creds.json"),),
     "opencode": ((".local/share/opencode/auth.json", "auth.json"),),
 }
@@ -64,9 +73,48 @@ AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
 AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
     "claude": "/home/node/.claude",
     "codex": "/home/node/.codex",
-    "cursor": "/home/node/.cursor",
+    "cursor": "/home/node/.config/cursor",
     "gemini": "/home/node/.gemini",
     "opencode": "/home/node/.local/share/opencode",
+}
+
+# Non-secret files a backend's CLI requires *alongside* its credential before
+# it will use that credential at all.
+#
+# The seeder writes these from the literal text declared here rather than
+# copying them off the operator's login volume, for three reasons: they are
+# configuration rather than secrets, so copying them would drag unrelated
+# operator config into a credential-only store; the CLIs write them
+# world-readable (0644), so a copy would trip the seeder's ``stat = 600``
+# credential gate and fail closed; and declaring the exact bytes here keeps
+# the candidate's view reviewable in this file.
+#
+# gemini: the CLI refuses ``oauth_creds.json`` on its own with "Please set an
+# Auth method in your <HOME>/.gemini/settings.json". Its own bundle gates on
+# ``settings.merged.security.auth.selectedType``, whose ``oauth-personal``
+# member is ``AuthType.LOGIN_WITH_GOOGLE`` -- the method that produces
+# ``oauth_creds.json`` in the first place. The candidate volume is mounted
+# *over* ``/home/node/.gemini``, so it shadows anything the image or the tmpfs
+# HOME could otherwise supply: if the seeder does not place this file, nothing
+# will.
+AUTH_SYNTHESIZED_FILES: dict[str, tuple[tuple[str, str], ...]] = {
+    "gemini": (
+        (
+            "settings.json",
+            json.dumps({"security": {"auth": {"selectedType": "oauth-personal"}}}),
+        ),
+    ),
+}
+
+# Directories the seeder pre-creates inside the candidate volume, relative to
+# the mount destination.
+#
+# claude: its transcript bind is deliberately nested below the auth mount at
+# ``/home/node/.claude/projects/-workspace``. Pre-creating it as the runner
+# user stops Docker from synthesising a root-owned parent the agent cannot
+# write to.
+AUTH_PRECREATED_DIRECTORIES: dict[str, tuple[str, ...]] = {
+    "claude": ("projects/-workspace",),
 }
 
 
@@ -275,12 +323,52 @@ def _seed_command(agent_backend: str) -> str:
         + " "
         + " ".join(shlex.quote(path) for path in source_paths)
     )
-    # Claude's transcript bind is deliberately nested below the auth mount.
-    # Pre-creating it as node avoids Docker synthesising a root-owned parent.
-    if agent_backend == "claude":
-        statements.append("mkdir -p /destination/projects/-workspace")
+    # Required non-secret siblings, written from this module's own declared
+    # bytes rather than copied off the login volume. They are configuration,
+    # not credentials, so they carry the CLIs' own 0644 rather than the 0600
+    # the credential copies above are held to.
+    for target, contents in AUTH_SYNTHESIZED_FILES.get(agent_backend, ()):
+        target_path = f"/destination/{target}"
+        statements.extend(
+            [
+                f"mkdir -p {shlex.quote(str(Path(target_path).parent))}",
+                f"printf '%s' {shlex.quote(contents)} > {shlex.quote(target_path)}",
+                f"chmod 644 {shlex.quote(target_path)}",
+            ]
+        )
+    for directory in AUTH_PRECREATED_DIRECTORIES.get(agent_backend, ()):
+        statements.append(f"mkdir -p {shlex.quote(f'/destination/{directory}')}")
     statements.append(f"chown -R {_RUNNER_UID_GID} /destination")
     return "; ".join(statements)
+
+
+def _auth_mount_parent_tmpfs_args(agent_backend: str) -> list[str]:
+    """Tmpfs mounts claiming every directory between HOME and the auth mount.
+
+    Docker synthesises a missing mountpoint's parent directories itself, as
+    ``root:root`` mode 0755 -- even underneath a tmpfs HOME the runner user
+    owns. Any destination nested more than one level below HOME therefore
+    hands the agent a root-owned directory it cannot write into: with the
+    candidate volume at ``/home/node/.local/share/opencode``, opencode's own
+    ``~/.local/state`` fails with ``EACCES: permission denied`` before it
+    reads a single credential.
+
+    Claiming each intermediate with a runner-owned tmpfs keeps HOME uniformly
+    agent-writable regardless of how deep a backend's destination sits. This
+    is the above-the-volume half of the ownership problem that
+    ``AUTH_PRECREATED_DIRECTORIES`` solves below the volume; both are derived
+    from the destination path rather than enumerated per backend.
+    """
+    destination = PurePosixPath(AUTH_MOUNT_DESTINATIONS[agent_backend])
+    home = PurePosixPath(_RUNNER_HOME)
+    args: list[str] = []
+    # ``parents`` is deepest-first; reverse so the shallowest intermediate is
+    # declared first and the sequence reads like the path itself.
+    for parent in reversed(destination.parents):
+        if home not in parent.parents:
+            continue
+        args.extend(["--tmpfs", f"{parent}:{_RUNNER_HOME_TMPFS_OPTS}"])
+    return args
 
 
 def _seed_candidate_auth_volume(volume: CandidateAuthVolume, image: str) -> None:
@@ -1067,10 +1155,11 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        args.extend(["--tmpfs", "/home/node:rw,uid=1000,gid=1000,mode=700"])
+        args.extend(["--tmpfs", f"{_RUNNER_HOME}:{_RUNNER_HOME_TMPFS_OPTS}"])
         if sandbox.auth == "volume":
             if candidate_auth_volume is None:
                 raise ValueError("volume auth requires a candidate credential volume")
+            args.extend(_auth_mount_parent_tmpfs_args(agent_backend))
             args.extend(
                 [
                     "-v",
@@ -1102,7 +1191,7 @@ def _docker_args(
     container_env = {
         key: value for key, value in env.items() if key not in {"HOME", "PATH"}
     }
-    container_env["HOME"] = "/home/node"
+    container_env["HOME"] = _RUNNER_HOME
     container_env["PATH"] = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
