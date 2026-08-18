@@ -444,7 +444,7 @@ class TraceBus:
         target = Path(path)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            handle = target.open("w", encoding="utf-8", buffering=64 * 1024)
+            handle = target.open("w", encoding="utf-8")
         except OSError as exc:
             raise TraceWriteError(f"Cannot write trace to {target}: {exc}") from exc
         run_id = uuid.uuid4().hex
