@@ -14,12 +14,6 @@
       "description": "The base image FROM must stay digest-pinned, never a floating tag.",
       "matchManagers": ["dockerfile"],
       "pinDigests": true
-    },
-    {
-      "description": "Workflow actions are hash-pinned; zizmor's unpinned-uses rule fails CI otherwise. pypa/gh-action-pypi-publish is exempt by policy (see .github/zizmor.yml) and must stay on release/v1, because PyPA ships security fixes to that branch.",
-      "matchManagers": ["github-actions"],
-      "matchPackageNames": ["!pypa/gh-action-pypi-publish"],
-      "pinDigests": true
     }
   ],
   "vulnerabilityAlerts": {
