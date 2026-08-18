@@ -103,12 +103,15 @@ For backend diagnostics in a candidate worktree, inspect:
 
 The backend result JSON includes normalized usage metadata and, for Claude Code,
 `transcript_artifacts` entries when HELIX can copy the JSONL transcript. In
-Docker sandbox mode HELIX copies Claude transcripts from the backend auth volume
-at `/home/node/.claude/projects/-workspace/<session_id>.jsonl` into the
-candidate worktree before syncing changes back. Codex structured stdout is
-preserved in `.helix_backend_stdout.txt`; durable Codex transcript copying is an
-extension point because HELIX does not currently know a stable Codex transcript
-path in the sandbox auth volume.
+Docker sandbox mode HELIX bind-mounts a candidate-local host directory over
+Claude's in-container transcript path
+(`/home/node/.claude/projects/-workspace/<session_id>.jsonl`), so the agent
+container writes the transcript straight to that bind instead of to the
+persistent backend auth volume; HELIX then syncs it from the bind into the
+candidate worktree along with the rest of the workspace. Codex structured
+stdout is preserved in `.helix_backend_stdout.txt`; durable Codex transcript
+copying is an extension point because HELIX does not currently know a stable
+Codex transcript path.
 
 ## Resuming
 

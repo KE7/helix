@@ -1462,15 +1462,15 @@ def _copy_local_claude_transcript(
             "backend": "claude",
             "session_id": session_id,
             "path": str(rel_path),
-            "source": "sandbox_auth_volume",
+            "source": "sandbox_transcript_bind",
             "available": True,
         }
-    if transcript_root == "sandbox_auth_volume":
+    if transcript_root == "sandbox_transcript_bind":
         return {
             "backend": "claude",
             "session_id": session_id,
             "path": str(rel_path),
-            "source": "sandbox_auth_volume",
+            "source": "sandbox_transcript_bind",
             "available": False,
             "reason": "transcript_not_found",
         }
@@ -1537,7 +1537,7 @@ def _collect_backend_transcript_artifacts(
         else BACKEND_TRANSCRIPT_ARTIFACT_DIR
     )
     transcript_root = (
-        "sandbox_auth_volume"
+        "sandbox_transcript_bind"
         if sandbox is not None and sandbox.enabled
         else sandbox.claude_transcript_root
         if sandbox is not None

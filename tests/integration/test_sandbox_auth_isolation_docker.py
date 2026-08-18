@@ -83,7 +83,6 @@ from helix.sandbox import (
     _remove_candidate_auth_volume,
     _run_docker,
     _seed_candidate_auth_volume,
-    _SEED_IMAGE,
     run_sandboxed_command,
 )
 
@@ -197,8 +196,14 @@ def _require_docker_fixture(image: str) -> None:
 
 
 def _diagnostic_docker_args(
-    volume_name: str, mount: str, script: str, *, writable: bool
+    volume_name: str, mount: str, script: str, *, writable: bool, image: str
 ) -> list[str]:
+    """Build argv for a throwaway inspection container.
+
+    *image* is always one of the already-pulled backend runner images (see
+    ``_fixture_image``) -- these diagnostics never pull a separate
+    third-party image just to poke at a volume.
+    """
     mode = "rw" if writable else "ro"
     return [
         "docker",
@@ -212,14 +217,16 @@ def _diagnostic_docker_args(
         "no-new-privileges",
         "-v",
         f"{volume_name}:{mount}:{mode}",
-        _SEED_IMAGE,
+        image,
         "sh",
         "-c",
         script,
     ]
 
 
-def _make_synthetic_login_volume(backend: str, credential_json: str, source_rel: str) -> str:
+def _make_synthetic_login_volume(
+    backend: str, credential_json: str, source_rel: str, *, image: str
+) -> str:
     """Create a throwaway, HELIX-shaped login volume holding a fake credential.
 
     This mimics the *shape* the real login volume has after a real login (a
@@ -237,11 +244,15 @@ def _make_synthetic_login_volume(backend: str, credential_json: str, source_rel:
         f"chmod 600 {shlex.quote(container_path)}; "
         "chown -R 1000:1000 /home/node"
     )
-    _run_docker(_diagnostic_docker_args(name, "/home/node", script, writable=True))
+    _run_docker(
+        _diagnostic_docker_args(name, "/home/node", script, writable=True, image=image)
+    )
     return name
 
 
-def _read_credential(volume_name: str, rel_path: str, *, mount: str = "/check") -> tuple[str, str]:
+def _read_credential(
+    volume_name: str, rel_path: str, *, mount: str = "/check", image: str
+) -> tuple[str, str]:
     """Return ``(file content, "mode uid:gid")`` read from inside *volume_name*."""
     path = f"{mount}/{rel_path}"
     script = (
@@ -249,20 +260,28 @@ def _read_credential(volume_name: str, rel_path: str, *, mount: str = "/check") 
         "printf '\\n===MODE===\\n'; "
         f"stat -c '%a %u:%g' {shlex.quote(path)}"
     )
-    result = _run_docker(_diagnostic_docker_args(volume_name, mount, script, writable=False))
+    result = _run_docker(
+        _diagnostic_docker_args(volume_name, mount, script, writable=False, image=image)
+    )
     content, mode = result.stdout.split("\n===MODE===\n")
     return content, mode.strip()
 
 
-def _write_credential(volume_name: str, rel_path: str, content: str, *, mount: str = "/check") -> None:
+def _write_credential(
+    volume_name: str, rel_path: str, content: str, *, mount: str = "/check", image: str
+) -> None:
     path = f"{mount}/{rel_path}"
     script = f"printf '%s' {shlex.quote(content)} > {shlex.quote(path)}"
-    _run_docker(_diagnostic_docker_args(volume_name, mount, script, writable=True))
+    _run_docker(
+        _diagnostic_docker_args(volume_name, mount, script, writable=True, image=image)
+    )
 
 
-def _list_top_level(volume_name: str, *, mount: str = "/check") -> set[str]:
+def _list_top_level(volume_name: str, *, mount: str = "/check", image: str) -> set[str]:
     result = _run_docker(
-        _diagnostic_docker_args(volume_name, mount, f"ls -a {mount}", writable=False)
+        _diagnostic_docker_args(
+            volume_name, mount, f"ls -a {mount}", writable=False, image=image
+        )
     )
     return {entry for entry in result.stdout.split() if entry not in {".", ".."}}
 
@@ -327,7 +346,9 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
     fake_credential = _fake_credential(backend)
     rotated_credential = _rotated_credential(backend)
 
-    login_volume = _make_synthetic_login_volume(backend, fake_credential, source_rel)
+    login_volume = _make_synthetic_login_volume(
+        backend, fake_credential, source_rel, image=fixture_image
+    )
 
     # The only seam we touch: redirect the seeding step's *source* volume
     # away from the real "helix-auth-<backend>" toward our synthetic fixture.
@@ -348,12 +369,12 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
         assert candidate_b.name != login_volume
         assert real_login_volume_name not in (candidate_a.name, candidate_b.name, login_volume)
 
-        _seed_candidate_auth_volume(candidate_a)
-        _seed_candidate_auth_volume(candidate_b)
+        _seed_candidate_auth_volume(candidate_a, fixture_image)
+        _seed_candidate_auth_volume(candidate_b, fixture_image)
 
         # 3: both candidates contain the credential, mode 0600, owned 1000:1000.
-        content_a, mode_a = _read_credential(candidate_a.name, target_rel)
-        content_b, mode_b = _read_credential(candidate_b.name, target_rel)
+        content_a, mode_a = _read_credential(candidate_a.name, target_rel, image=fixture_image)
+        content_b, mode_b = _read_credential(candidate_b.name, target_rel, image=fixture_image)
         assert content_a == fake_credential
         assert content_b == fake_credential
         assert mode_a == "600 1000:1000"
@@ -363,11 +384,13 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
         # credential into candidate A's own copy (simulating a backend
         # refreshing its token in place, exactly as observed in the
         # incident), then assert candidate B is byte-unchanged.
-        _write_credential(candidate_a.name, target_rel, rotated_credential)
-        rotated_content_a, _ = _read_credential(candidate_a.name, target_rel)
+        _write_credential(candidate_a.name, target_rel, rotated_credential, image=fixture_image)
+        rotated_content_a, _ = _read_credential(candidate_a.name, target_rel, image=fixture_image)
         assert rotated_content_a == rotated_credential
 
-        unaffected_content_b, unaffected_mode_b = _read_credential(candidate_b.name, target_rel)
+        unaffected_content_b, unaffected_mode_b = _read_credential(
+            candidate_b.name, target_rel, image=fixture_image
+        )
         assert unaffected_content_b == fake_credential, (
             "candidate B's credential changed after candidate A rotated its "
             "own copy -- this is exactly the shared-volume rotation incident "
@@ -376,13 +399,15 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
         assert unaffected_mode_b == "600 1000:1000"
 
         # The synthetic login volume itself is also untouched by A's write.
-        login_content, _ = _read_credential(login_volume, source_rel, mount="/home/node")
+        login_content, _ = _read_credential(
+            login_volume, source_rel, mount="/home/node", image=fixture_image
+        )
         assert login_content == fake_credential
 
         # 5: candidate volumes only contain the manifest-declared targets --
         # no trace of the login volume's own nested layout leaks through.
-        top_level_a = _list_top_level(candidate_a.name)
-        top_level_b = _list_top_level(candidate_b.name)
+        top_level_a = _list_top_level(candidate_a.name, image=fixture_image)
+        top_level_b = _list_top_level(candidate_b.name, image=fixture_image)
         source_top_component = source_rel.split("/", 1)[0]
         assert source_top_component not in top_level_a  # source's directory name, not the target's
         assert source_top_component not in top_level_b
@@ -435,7 +460,9 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
     fake_credential = _fake_credential(backend)
     rotated_credential = _rotated_credential(backend)
 
-    login_volume = _make_synthetic_login_volume(backend, fake_credential, source_rel)
+    login_volume = _make_synthetic_login_volume(
+        backend, fake_credential, source_rel, image=fixture_image
+    )
     monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
 
     observed_docker_args: list[list[str]] = []
@@ -510,7 +537,9 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
         # THE assertion that matters most, replayed through the real E2E
         # entry point: the in-container "rotation" write landed on the
         # candidate's private copy, not on the synthetic login volume.
-        login_content, _ = _read_credential(login_volume, source_rel, mount="/home/node")
+        login_content, _ = _read_credential(
+            login_volume, source_rel, mount="/home/node", image=fixture_image
+        )
         assert login_content == fake_credential, (
             "the login volume was mutated by a write made inside the agent "
             "container -- credentials are not isolated"

@@ -49,7 +49,6 @@ class CredentialCleanupError(RuntimeError):
 
 _CANDIDATE_AUTH_PREFIX = "helix-candidate-auth-"
 _CANDIDATE_AUTH_LABEL = "helix.auth.candidate"
-_SEED_IMAGE = "python:3.13-alpine"
 _RUNNER_UID_GID = "1000:1000"
 
 # Source paths are relative to the operator-facing login volume; targets are
@@ -284,8 +283,9 @@ def _seed_command(agent_backend: str) -> str:
     return "; ".join(statements)
 
 
-def _seed_candidate_auth_volume(volume: CandidateAuthVolume) -> None:
-    """Copy only declared credential files from the login volume to *volume*."""
+def _seed_candidate_auth_volume(volume: CandidateAuthVolume, image: str) -> None:
+    """Copy declared credential files from the login volume to *volume*, using
+    the caller-resolved, in-trust-boundary backend runner *image*."""
     args = [
         "docker",
         "run",
@@ -300,7 +300,7 @@ def _seed_candidate_auth_volume(volume: CandidateAuthVolume) -> None:
         f"{sandbox_auth_volume_name(volume.backend)}:/source:ro",
         "-v",
         f"{volume.name}:/destination:rw",
-        _SEED_IMAGE,
+        image,
         "sh",
         "-c",
         _seed_command(volume.backend),
@@ -1161,7 +1161,7 @@ def run_sandboxed_commands(
             if agent_backend is None:
                 raise ValueError("agent_backend is required for volume auth")
             candidate_auth_volume = _create_candidate_auth_volume(agent_backend)
-            _seed_candidate_auth_volume(candidate_auth_volume)
+            _seed_candidate_auth_volume(candidate_auth_volume, docker_image)
         sidecar_runtime = (
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None
         )

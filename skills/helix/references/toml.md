@@ -212,9 +212,9 @@ Sandbox behavior:
 - `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX artifacts are excluded
   from sandbox workspace copies/sync-back.
 - Claude Code transcript preservation is enabled by default for agent
-  sandboxes. HELIX looks for
-  `/home/node/.claude/projects/-workspace/<session_id>.jsonl` in the auth
-  volume and copies it to
+  sandboxes. HELIX bind-mounts a candidate-local host directory over
+  `/home/node/.claude/projects/-workspace/<session_id>.jsonl` (never the
+  auth volume) and syncs it back to
   `.helix_artifacts/backend_transcripts/claude/<session_id>.jsonl`.
   Set `preserve_backend_transcripts = false` under `[sandbox]` to disable it,
   or override `transcript_artifact_dir` / `claude_transcript_root` for custom

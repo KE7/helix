@@ -12,7 +12,6 @@ import helix.sandbox as sandbox_module
 
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
-    _SEED_IMAGE,
     EvaluatorSidecarRuntime,
     _healthcheck_docker_args,
     current_evaluator_sidecar_runtime,
@@ -210,7 +209,14 @@ def test_volume_auth_seeds_a_private_allowlisted_volume_and_never_mounts_source(
         agent_backend="codex",
     )
 
-    seed = next(call for call in calls if _SEED_IMAGE in call)
+    # The seed helper is the container that mounts the login volume
+    # read-only at /source; it now runs in the same backend runner image as
+    # the agent it is seeding for, so the mount (not the image) identifies
+    # it uniquely.
+    seed = next(
+        call for call in calls if any(item.endswith(":/source:ro") for item in call)
+    )
+    assert "helix-test:latest" in seed
     agent = next(call for call in calls if _is_agent_container(call))
     candidate_mount = next(
         item

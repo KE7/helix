@@ -220,17 +220,22 @@ auth_env_allow = []
 
 - `auth = "volume"` selects the candidate-volume projection described here.
   `auth_env_allow` must be empty: no credential transport variable is needed.
-- `auth = "env"` means an explicit host environment value is the credential
-  source; `auth_env_allow` remains the non-empty scrub allowlist of names that
-  may reach the agent.  It is not inferred from backend or host state.
+- `auth = "env"` means an explicit `[env]`/`passthrough_env` value is the
+  credential source; `auth_env_allow` is a non-empty, explicitly configured
+  *additional* gate, not an allowlist that by itself grants passage.  A name
+  in `auth_env_allow` only widens what a value already declared in `[env]` or
+  `passthrough_env` is allowed to resolve to -- from a literal `[env]` value
+  to the matching ambient host variable when `[env]` gives it no literal
+  value.  A name present in `auth_env_allow` alone, undeclared in `[env]` /
+  `passthrough_env`, never reaches the agent.
 - No `auth_projection_*`, file path, volume name, or backend-specific
   transport key is exposed in configuration.  Those would make a small source
   choice into a second configuration language.
 
-This retains `auth_env_allow` because it is the actual final scrub allowlist
-for named values.  It does not use that key as hidden plumbing for volume
-credentials.  Backend manifests and runtime cleanup are implementation details,
-not new user knobs.
+This retains `auth_env_allow` because it is the actual credential-widening gate
+for named values already declared in `[env]`/`passthrough_env`.  It does not
+use that key as hidden plumbing for volume credentials.  Backend manifests and
+runtime cleanup are implementation details, not new user knobs.
 
 ## Deletions and documentation to retain
 

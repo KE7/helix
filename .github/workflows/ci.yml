@@ -23,7 +23,7 @@ jobs:
     # Real-Docker proof that per-candidate auth volumes actually isolate
     # credentials. Every credential used is synthetic, so this job needs no
     # backend secrets; the runner images are anonymously pullable from GHCR
-    # and the seeding helper runs in python:3.13-alpine.
+    # and the seeding helper runs in the agent's own backend runner image.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -35,7 +35,6 @@ jobs:
       # none, so without this pull the job would pass while running nothing.
       - name: Pull fixture images
         run: |
-          docker pull -q python:3.13-alpine
           for b in claude codex cursor gemini opencode; do
             docker pull -q "ghcr.io/ke7/helix-evo-runner-$b:latest"
           done
