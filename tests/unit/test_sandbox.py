@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,8 +12,13 @@ import helix.sandbox as sandbox_module
 
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
+    AUTH_CREDENTIAL_MANIFEST,
+    AUTH_MOUNT_DESTINATIONS,
+    AUTH_SYNTHESIZED_FILES,
     EvaluatorSidecarRuntime,
+    _auth_mount_parent_tmpfs_args,
     _healthcheck_docker_args,
+    _seed_command,
     current_evaluator_sidecar_runtime,
     evaluator_sidecar_runtime,
     resolve_sandbox_image,
@@ -1229,3 +1234,74 @@ class TestDockerEnvRedaction:
         result = sandbox_module._run_docker(args, check=False)
 
         assert result.stderr == traceback_text
+
+
+# --------------------------------------------------------------------------
+# Credential manifest completeness and mount-parent ownership
+#
+# These run without Docker, so they still guard the manifest when the
+# Docker-gated integration suite is skipped. They deliberately assert on
+# *derived* structure rather than restating the manifest tables, so they
+# cannot drift into a second hardcoded copy of them.
+# --------------------------------------------------------------------------
+
+
+def test_seed_command_synthesizes_required_siblings_instead_of_copying_them():
+    """Declared non-secret siblings are written, never read from the source.
+
+    gemini's CLI refuses ``oauth_creds.json`` unless ``settings.json`` also
+    selects an auth method, and the candidate volume is mounted over
+    ``/home/node/.gemini``, so the seeder is the only thing that can put that
+    sibling there. Copying it instead would trip the seeder's 0600 credential
+    gate, because the CLI writes it 0644.
+    """
+    seed = _seed_command("gemini")
+    for target, contents in AUTH_SYNTHESIZED_FILES["gemini"]:
+        assert f"/destination/{target}" in seed
+        assert contents in seed
+        # Written from declared bytes, not copied off the operator's volume.
+        assert f"cp /source/.gemini/{target}" not in seed
+    # The credential itself is still a copy, and still mode-gated.
+    assert "cp /source/.gemini/oauth_creds.json /destination/oauth_creds.json" in seed
+    assert "stat -c %a /source/.gemini/oauth_creds.json) = 600" in seed
+
+
+def test_seed_command_precreates_claudes_nested_transcript_directory():
+    """The transcript bind's parent is made by the seeder, not by Docker.
+
+    Docker would otherwise synthesise it root-owned inside the candidate
+    volume, leaving the agent unable to write its own transcript.
+    """
+    assert "mkdir -p /destination/projects/-workspace" in _seed_command("claude")
+    assert "mkdir -p /destination/projects/-workspace" not in _seed_command("codex")
+
+
+@pytest.mark.parametrize("backend", sorted(AUTH_CREDENTIAL_MANIFEST))
+def test_every_auth_mount_intermediate_directory_is_runner_owned(backend: str):
+    """No directory between HOME and the auth mount is left root-owned.
+
+    Docker creates a missing mountpoint's parents itself, as root, even inside
+    the runner-owned tmpfs HOME. Left alone that breaks any backend whose
+    destination is nested more than one level down -- opencode's own
+    ``~/.local/state`` fails with EACCES -- so each intermediate is claimed by
+    a runner-owned tmpfs.
+    """
+    destination = AUTH_MOUNT_DESTINATIONS[backend]
+    args = _auth_mount_parent_tmpfs_args(backend)
+    mounted = {item.split(":", 1)[0] for item in args if item != "--tmpfs"}
+
+    # Everything strictly between HOME and the destination itself, derived
+    # here independently of the function under test.
+    home = PurePosixPath(sandbox_module._RUNNER_HOME)
+    expected = {
+        str(parent)
+        for parent in PurePosixPath(destination).parents
+        if home in parent.parents
+    }
+    assert mounted == expected, (
+        f"{backend}: intermediates between /home/node and {destination} are "
+        f"not all claimed by a runner-owned tmpfs"
+    )
+    for item in args:
+        if item != "--tmpfs":
+            assert item.endswith(":rw,uid=1000,gid=1000,mode=700")
