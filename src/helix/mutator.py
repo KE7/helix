@@ -589,8 +589,11 @@ _RATE_LIMIT_PATTERNS = (
     re.compile(r"\bextra usage\b", re.IGNORECASE),
     re.compile(r"\btoo many requests\b", re.IGNORECASE),
     # A bare "quota" also appears in configuration errors ("quota field
-    # missing"), so require language saying the quota was consumed.
+    # missing"), so require language saying the quota was consumed. Backend
+    # messages phrase this in either order ("quota exceeded" as well as
+    # "you exceeded your quota"), so match both.
     re.compile(r"\bquota\b[^.]{0,20}\b(?:exceeded|exhausted|reached)\b", re.IGNORECASE),
+    re.compile(r"\b(?:exceeded|exhausted|reached)\b[^.]{0,20}\bquota\b", re.IGNORECASE),
     re.compile(r"(?<![\w-])(?:429|529)(?![\w-])"),
 )
 

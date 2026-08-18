@@ -41,6 +41,7 @@ class TestRateLimitSignals:
             "server overloaded",
             "usage limit reached",
             "quota exceeded for this model",
+            "You exceeded your quota",
         ],
     )
     def test_real_rate_limit_signals_are_detected(self, text):
