@@ -618,14 +618,14 @@ class TestFraming:
         assert "schema_version" in str(excinfo.value)
 
     def test_a_dropped_event_withholds_the_footer(self, tmp_path):
-        """A queue overflow loses records, so the run may not be stamped complete."""
+        """A record that never landed means the run may not be stamped complete."""
         trace_file = tmp_path / "run.jsonl"
         with pytest.raises(Exception) as excinfo:  # noqa: PT011 - asserted below
             with TRACE.write_jsonl(trace_file):
                 TRACE.emit(EventType.OPT_START)
-                # Simulate the writer falling irrecoverably behind.
-                TRACE._record_error("Trace queue overflowed; simulated in test.")
-        assert "overflowed" in str(excinfo.value)
+                # Simulate a write that failed after the sink was attached.
+                TRACE._record_error("Trace write failed; simulated in test.")
+        assert "Trace write failed" in str(excinfo.value)
         assert all(
             rec.get("record") != RUN_COMPLETE_RECORD
             for rec in _read_raw_lines(trace_file)
@@ -661,10 +661,13 @@ class TestFraming:
 # ---------------------------------------------------------------------------
 
 
-#: The child emits ``_KILL_CHILD_EVENTS`` events, waits for the writer to catch
-#: up, announces that on stdout, and then keeps emitting forever so the SIGKILL
-#: genuinely lands while the writer is working.  It installs no signal handler
-#: and no ``atexit`` hook: SIGKILL runs none of them anyway, which is the point.
+#: The child emits ``_KILL_CHILD_EVENTS`` events, announces on stdout that they
+#: are all on disk, and then keeps emitting forever so the SIGKILL genuinely
+#: lands mid-write.  ``emit`` writes and flushes inline, so returning from the
+#: loop is itself the guarantee that all ``_KILL_CHILD_EVENTS`` have landed --
+#: there is nothing buffered anywhere to drain.  The child installs no signal
+#: handler and no ``atexit`` hook: SIGKILL runs none of them anyway, which is
+#: the point.
 _KILL_CHILD_EVENTS = 200
 
 _KILL_CHILD = """
@@ -675,7 +678,6 @@ path, n = sys.argv[1], int(sys.argv[2])
 with TRACE.write_jsonl(path):
     for i in range(n):
         TRACE.emit(EventType.EVAL_START, candidate_id="g0-s%d" % i)
-    TRACE.drain()
     sys.stdout.write("drained\\n")
     sys.stdout.flush()
     i = n
@@ -711,7 +713,7 @@ class TestAbruptExit:
             # per-record flush being tested, not just the missing footer.
             handshake = proc.stdout.readline()
             assert handshake == "drained\n", (
-                f"child never drained (stdout {handshake!r}, "
+                f"child never reached its handshake (stdout {handshake!r}, "
                 f"stderr {proc.stderr.read() if proc.stderr else ''!r})"
             )
             proc.kill()

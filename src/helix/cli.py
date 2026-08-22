@@ -612,9 +612,9 @@ def sandbox_logout(
     type=click.Path(dir_okay=False, path_type=Path),
     help=(
         "Write a JSON Lines trace of the run to this path (one event per "
-        "line, all timestamps in seconds). A bounded background writer keeps "
-        "disk I/O off measured operations and flushes every record, so a "
-        "killed run leaves whole lines behind. The file opens with a header "
+        "line, all timestamps in seconds). Every record is written and "
+        "flushed before the emitting call returns, so a killed run leaves "
+        "whole lines behind. The file opens with a header "
         "record and ends with a run_complete record written only on a clean "
         "drain; a trace missing that footer must be discarded rather than "
         "trimmed. Every event carries a wall-clock timestamp, a monotonic "

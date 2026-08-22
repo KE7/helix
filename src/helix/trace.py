@@ -26,14 +26,23 @@ timings from:
   only after every accepted event has reached the file and no write error was
   recorded.
 
-The writer thread calls ``flush()`` after *every* record, so a process killed
-at any instant leaves on disk exactly the records it had already emitted, whole
-— the flush is what stops a kill from truncating a line mid-way.  It is a
-``flush()``, not an ``fsync()``: a machine-level power loss can still lose the
-tail.  Either way the footer is the authority, and the footer is absent unless
-the run drained cleanly.  :func:`load_jsonl_trace` enforces both ends and
-raises :class:`TraceIncompleteError` on a trace that was cut short, so a
-consumer cannot silently total a truncated prefix.
+Every record is written and ``flush()``ed inline, under one lock, by the thread
+that emitted it, so a process killed at any instant leaves on disk exactly the
+records it had already emitted, whole — the flush is what stops a kill from
+truncating a line mid-way.  It is a ``flush()``, not an ``fsync()``: a
+machine-level power loss can still lose the tail.  Either way the footer is the
+authority, and the footer is absent unless the run finished cleanly.
+:func:`load_jsonl_trace` enforces both ends and raises
+:class:`TraceIncompleteError` on a trace that was cut short, so a consumer
+cannot silently total a truncated prefix.
+
+Writing inline rather than handing events to a background writer is a
+deliberate sizing decision, not an oversight.  One generation emits on the
+order of fifty events while taking minutes of agent-backend and evaluator
+wall clock, and ``write()+flush()`` of one record costs single-digit
+microseconds; a queue and a writer thread would buy a rounding error on every
+span this file exists to measure, and would cost the guarantee that an event
+that has been emitted is already on disk.
 
 All timestamps in the file are **seconds** (floating point).  ``wall_time`` is
 Unix epoch seconds and ``monotonic`` is a process-local monotonic reading;
@@ -58,7 +67,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import sys
 import threading
 import time
@@ -229,15 +237,16 @@ class TraceBus:
         # event it ever emitted in memory; ``record()`` leaves it True.
         self._collect: bool = True
         self._sink: IO[str] | None = None
-        # The writer owns all file I/O.  Producers only enqueue Event objects,
-        # so cache/budget instrumentation never contends on a filesystem lock.
+        # Held across write-and-flush so a record reaches the file whole even
+        # when several proposal workers emit at the same instant, and across
+        # the header and footer writes so neither can interleave with an event.
         self._sink_lock = threading.Lock()
-        self._queue: queue.Queue[Event | None] | None = None
-        self._writer: threading.Thread | None = None
-        # ``_writer_error`` is written by producer threads (queue overflow, a
-        # malformed emit) and by the writer thread (an OSError on write), and
-        # read by the writer thread before it decides whether the run may be
-        # stamped complete.  It is guarded rather than left to attribute
+        # Number of event records (not framing records) written to ``_sink``.
+        # Mutated only under ``_sink_lock``; becomes the footer's event_count.
+        self._written = 0
+        # Set by whichever thread first fails to record an event -- a write
+        # error, a malformed emit -- and read at close to decide whether the
+        # run may be stamped complete.  Guarded rather than left to attribute
         # atomicity so "first error wins" is actually first-error-wins.
         self._error_lock = threading.Lock()
         self._writer_error: TraceWriteError | None = None
@@ -277,13 +286,11 @@ class TraceBus:
     def _write_record(self, sink: IO[str], payload: dict[str, Any]) -> bool:
         """Write one whole line and push it to the OS.  True if it landed.
 
-        The ``flush()`` is per record, deliberately.  The producers never touch
-        the file — they hand Events to a queue — so the flush cost is paid on
-        the writer thread and never inside a span being measured.  What it buys
-        is that a SIGKILL cannot leave a half-written line behind, and cannot
-        swallow a batch of records that a consumer would then never know were
-        missing.  ``flush()`` reaches the OS, not the platter: this survives the
-        process dying, not the machine dying.
+        The ``flush()`` is per record, deliberately: a SIGKILL cannot leave a
+        half-written line behind, and cannot swallow a batch of records that a
+        consumer would then never know were missing.  ``flush()`` reaches the
+        OS, not the platter: this survives the process dying, not the machine
+        dying.  Callers hold ``_sink_lock``.
         """
         try:
             sink.write(json.dumps(payload, default=str) + "\n")
@@ -296,97 +303,38 @@ class TraceBus:
             )
             return False
 
-    def _write_events(
-        self,
-        sink: IO[str],
-        event_queue: queue.Queue[Event | None],
-        header: dict[str, Any],
-    ) -> None:
-        """Write complete JSONL lines in one dedicated background thread.
-
-        The header goes out first, then one line per event, then — and only if
-        nothing has been recorded as failed — the ``RUN_COMPLETE`` footer.  A
-        reader that finds no footer knows the run did not finish draining, and
-        must reject the file rather than total what it can see.
-
-        Every step inside the loop swallows its own exceptions.  This thread
-        dying would leave ``write_jsonl``'s drain waiting on a queue nobody is
-        consuming — a hang in the middle of a real run — so once it is running
-        it always reaches the sentinel, even after it has given up writing.
-        """
-        written = 0
-        failed = not self._write_record(sink, header)
-        while True:
-            event = event_queue.get()
-            try:
-                if event is None:
-                    break
-                if failed:
-                    continue
-                try:
-                    payload = _event_to_dict(event)
-                except Exception as exc:  # noqa: BLE001 - see docstring
-                    self._record_error(
-                        "Trace event could not be serialized; the trace is "
-                        f"incomplete and cannot be used: {type(exc).__name__}: {exc}"
-                    )
-                    failed = True
-                    continue
-                if self._write_record(sink, payload):
-                    written += 1
-                else:
-                    failed = True
-            finally:
-                event_queue.task_done()
-        # Re-check the shared error: a producer may have overflowed the queue
-        # or failed to build an event while the writer was idle, and such a run
-        # is missing records even though every line the writer saw was fine.
-        if failed or self._take_error() is not None:
-            return
-        self._write_record(
-            sink,
-            {
-                "record": RUN_COMPLETE_RECORD,
-                "schema_version": TRACE_SCHEMA_VERSION,
-                "run_id": header["run_id"],
-                "event_count": written,
-                "time_unit": TIME_UNIT,
-                "wall_time": time.time(),
-                "monotonic": time.monotonic(),
-            },
-        )
-
     def emit(self, type: EventType, **fields: Any) -> None:
         """Record one event.  Never raises while a JSONL sink is attached.
 
         Instrumentation must not be able to end a real run, so with a sink
-        attached any failure here — an unknown field name, a queue overflow —
-        is turned into a recorded error: the run continues, and the trace is
+        attached any failure here — an unknown field name, a full disk — is
+        turned into a recorded error: the run continues, and the trace is
         denied its ``RUN_COMPLETE`` footer so nobody can time from it.  With no
         sink (the in-memory :meth:`record` path used by the differential
         harness and the unit tests) the exception is left to propagate, because
         there is no file to reject and a silently dropped event would only show
         up as a mysterious assertion failure.
+
+        Returning from this method with a sink attached means the event is on
+        disk, whole.  That is what makes the surviving prefix of a killed run
+        trustworthy as far as it goes.
         """
         if not self.enabled:
             return
-        event_queue = self._queue
+        sink = self._sink
         try:
             event = Event(type=type, source=self._source_for_caller(), **fields)
             if self._collect:
                 self.events.append(event)
-            if event_queue is not None:
-                # Never delay the operation being measured.  If the writer
-                # cannot keep up, invalidate the trace instead of fabricating
-                # spans whose starts include tracing backpressure.
-                event_queue.put_nowait(event)
-        except queue.Full:
-            self._record_error(
-                "Trace queue overflowed; the trace is incomplete and cannot be used. "
-                "Reduce trace volume or increase writer capacity."
-            )
+            # Skip the file once the trace is already void: it will be refused
+            # either way, and a failing disk should not be retried per event.
+            if sink is not None and self._writer_error is None:
+                payload = _event_to_dict(event)
+                with self._sink_lock:
+                    if self._write_record(sink, payload):
+                        self._written += 1
         except Exception as exc:  # noqa: BLE001 - never let tracing kill a run
-            if event_queue is None:
+            if sink is None:
                 raise
             # ``exc.__class__``, not ``type(exc)``: ``type`` is this method's
             # own EventType parameter.
@@ -394,18 +342,6 @@ class TraceBus:
                 "Trace event could not be recorded; the trace is incomplete and "
                 f"cannot be used: {exc.__class__.__name__}: {exc}"
             )
-
-    def drain(self) -> None:
-        """Block until every event emitted so far has reached the file.
-
-        A no-op unless a :meth:`write_jsonl` sink is attached.  The orderly
-        exit of ``write_jsonl`` does this implicitly; this is the checkpoint
-        for a caller that wants to know, mid-run, that the trace on disk is
-        caught up with what has been emitted.
-        """
-        event_queue = self._queue
-        if event_queue is not None:
-            event_queue.join()
 
     @contextmanager
     def record(self) -> Iterator[list[Event]]:
@@ -427,14 +363,13 @@ class TraceBus:
     def write_jsonl(self, path: str | Path) -> Iterator[Path]:
         """Enable the bus and stream events to *path* as JSON Lines.
 
-        A bounded background writer performs JSON encoding and file I/O.  The
-        producer never blocks on disk I/O: an overflow or write failure marks
-        the stream incomplete and raises :class:`TraceWriteError` at close.
-        Timestamps are therefore captured at the operation boundary rather
-        than before a locked write/flush delay.  Yields the requested path.
+        Each emitting thread writes and flushes its own record under one lock,
+        so an event that ``emit`` has accepted is already on disk.  A write
+        failure marks the stream incomplete and raises :class:`TraceWriteError`
+        at close.  Yields the requested path.
 
         The file is framed: a header record first, then the events, then a
-        ``RUN_COMPLETE`` footer written only when the drain succeeded.  If this
+        ``RUN_COMPLETE`` footer written only when nothing failed.  If this
         context manager never runs its exit — the process is killed, the
         machine goes down — the footer is simply absent, and
         :func:`load_jsonl_trace` refuses the file.  That is the whole point:
@@ -448,55 +383,52 @@ class TraceBus:
         except OSError as exc:
             raise TraceWriteError(f"Cannot write trace to {target}: {exc}") from exc
         run_id = uuid.uuid4().hex
-        header = {
-            "record": HEADER_RECORD,
-            "schema_version": TRACE_SCHEMA_VERSION,
-            "run_id": run_id,
-            "helix_version": _helix_version(),
-            "pid": os.getpid(),
-            "time_unit": TIME_UNIT,
-            "wall_time": time.time(),
-            "monotonic": time.monotonic(),
-        }
         prev_enabled = self.enabled
         prev_events = self.events
         prev_collect = self._collect
         prev_sink = self._sink
-        # 65,536 records bound memory while absorbing short bursts from a
-        # proposal pool.  Overflow fails the run's trace rather than delaying
-        # the operation being measured or silently dropping span endpoints.
-        event_queue: queue.Queue[Event | None] = queue.Queue(maxsize=65_536)
         self.events = []
         self._collect = False
         with self._sink_lock:
             self._sink = handle
-            self._queue = event_queue
+            self._written = 0
             with self._error_lock:
                 self._writer_error = None
-            self._writer = threading.Thread(
-                target=self._write_events,
-                args=(handle, event_queue, header),
-                name="helix-trace-writer",
-                daemon=True,
+            self._write_record(
+                handle,
+                {
+                    "record": HEADER_RECORD,
+                    "schema_version": TRACE_SCHEMA_VERSION,
+                    "run_id": run_id,
+                    "helix_version": _helix_version(),
+                    "pid": os.getpid(),
+                    "time_unit": TIME_UNIT,
+                    "wall_time": time.time(),
+                    "monotonic": time.monotonic(),
+                },
             )
-            self._writer.start()
         self.enabled = True
         try:
             yield target
         finally:
+            # Disable first: no further emit may reach a sink that is about to
+            # be stamped complete.
             self.enabled = prev_enabled
-            # Finish accepted records before closing the file.  ``None`` is
-            # enqueued after the drain so the single writer emits whole lines.
-            event_queue.join()
-            event_queue.put(None)
-            event_queue.join()
-            writer = self._writer
-            if writer is not None:
-                writer.join()
             with self._sink_lock:
+                if self._take_error() is None:
+                    self._write_record(
+                        handle,
+                        {
+                            "record": RUN_COMPLETE_RECORD,
+                            "schema_version": TRACE_SCHEMA_VERSION,
+                            "run_id": run_id,
+                            "event_count": self._written,
+                            "time_unit": TIME_UNIT,
+                            "wall_time": time.time(),
+                            "monotonic": time.monotonic(),
+                        },
+                    )
                 self._sink = prev_sink
-                self._queue = None
-                self._writer = None
             handle.close()
             self._collect = prev_collect
             self.events = prev_events

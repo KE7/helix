@@ -813,7 +813,7 @@ timings from:
 | middle | one event each |
 | last | `{"record": "helix.trace.run_complete", "run_id": …, "event_count": N, …}` |
 
-The writer thread `flush()`es after every record, so a run killed at any instant
+Every record is written and `flush()`ed inline, so a run killed at any instant
 leaves on disk exactly the whole records it had already written. The
 `run_complete` footer is written **only** after the writer has drained with no
 error, so a killed run — or one whose trace writer failed — leaves a file with
