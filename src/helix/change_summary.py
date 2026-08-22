@@ -3,11 +3,24 @@
 An agent may leave a small self-report in its worktree.  The report is useful
 only beside the evaluator's result, so invalid or incomplete records are kept
 out of later prompts rather than being guessed at or rendered alone.
+
+Per-parent memory of rejected proposals, threaded informationally (not as a
+tabu list) into the next mutation prompt and bounded to the last N attempts,
+follows the design published by the GEPA project's maintainer in upstream
+issue gepa-ai/gepa#379 ("GEPA doesn't remember rejected proposals --
+re-sampling the same parent repeats the same failed mutation"), 2026-06-17,
+with a draft (unmerged, unreviewed) implementation in gepa-ai/gepa#384. This
+module is not the origin of that idea; see the module docstring's sibling
+functions below for where HELIX's implementation diverges (real evaluator
+output instead of a canned reject reason, store-side bounding in addition to
+render-side, secret redaction, and validation of untrusted persisted
+records).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Iterable
 from pathlib import Path
@@ -15,6 +28,8 @@ from typing import Any
 
 from helix.population import EvalResult
 from helix.redaction import redact_diagnostics
+
+logger = logging.getLogger(__name__)
 
 # This name deliberately avoids the ``.helix*`` prefix: sandbox sync-back
 # excludes that internal namespace, whereas this ignored agent artifact must
@@ -179,7 +194,43 @@ def append_rejected_attempt(
         }
     )
     if attempt is None:
+        # Worst-case no-op: the rejection happened but nothing at all is
+        # kept for it -- make that loud rather than silent, since a reader
+        # of ``failed_attempt_history`` cannot otherwise tell the difference
+        # between "this parent has never been rejected" and "it has, but
+        # every record was unusable."
+        logger.warning(
+            "append_rejected_attempt: rejected attempt for parent %s produced "
+            "no usable record (summary and/or evaluator output failed "
+            "validation) -- this rejection leaves no trace in "
+            "failed_attempt_history and will not inform a future mutation "
+            "prompt for this parent.",
+            parent_id,
+        )
         return sanitized
+    if attempt["summary"] is None or attempt["evaluator_output"] is None:
+        # Stored, but only half (or none) of the pair render_failure_history
+        # requires -- the record will sit in state.json forever without
+        # ever reaching a mutation prompt. Most commonly: the mutating
+        # agent did not write .agent_change_summary.json at all, which is
+        # normal for a backend that ignores the artifact instruction --
+        # but an operator asking "is this feature doing anything?" needs
+        # this surfaced, not swallowed.
+        logger.warning(
+            "append_rejected_attempt: rejected attempt for parent %s recorded "
+            "without a usable %s -- stored, but render_failure_history will "
+            "skip it.",
+            parent_id,
+            "change summary" if attempt["summary"] is None else "evaluator output",
+        )
+    else:
+        logger.info(
+            "append_rejected_attempt: rejected attempt for parent %s recorded "
+            "with a usable change summary and evaluator output "
+            "(score=%.6g).",
+            parent_id,
+            attempt["score"],
+        )
     sanitized[parent_id] = [*sanitized.get(parent_id, []), attempt][-limit:]
     return sanitized
 
@@ -190,8 +241,11 @@ def render_failure_history(
     """Render only complete, validated pairs for the next mutation prompt."""
     if not isinstance(entries, list):
         return ""
+    total = len(entries)
     header = "## Previous attempts from this state that did not improve\n\n"
     blocks: list[str] = []
+    incomplete = 0
+    truncated = False
     # Whole entries are retained or omitted together: never cut a report away
     # from its evaluator result merely to meet a prompt budget.
     for raw in reversed(entries):
@@ -201,10 +255,12 @@ def render_failure_history(
             or attempt["summary"] is None
             or attempt["evaluator_output"] is None
         ):
+            incomplete += 1
             continue
         summary = redact_diagnostics(attempt["summary"], secret_values)
         output = redact_diagnostics(attempt["evaluator_output"], secret_values)
         if not isinstance(summary, dict) or not isinstance(output, str):
+            incomplete += 1
             continue
         block = (
             "### Failed attempt\n"
@@ -218,8 +274,34 @@ def render_failure_history(
         )
         rendered = header + "\n\n".join(reversed([block, *blocks]))
         if len(rendered) > MAX_RENDERED_HISTORY_CHARS:
+            truncated = True
             break
         blocks.append(block)
     if not blocks:
+        # An empty ``entries`` list (no rejections recorded for this parent
+        # yet) is normal and not logged. A *non-empty* list that renders to
+        # nothing is the no-op this instrumentation exists to catch: the
+        # feature has data but the mutation prompt gets none of it, and
+        # without this line nothing in the codebase would say so.
+        if total:
+            logger.warning(
+                "render_failure_history: %d stored attempt(s) exist for this "
+                "parent but none were renderable (missing change summary or "
+                "evaluator output) -- the mutation prompt will carry no "
+                "failure-history context this turn.",
+                total,
+            )
         return ""
+    if incomplete or truncated:
+        logger.info(
+            "render_failure_history: rendered %d of %d stored attempt(s) "
+            "into the mutation prompt (%d unusable, byte-cap truncated=%s).",
+            len(blocks), total, incomplete, truncated,
+        )
+    else:
+        logger.info(
+            "render_failure_history: rendered %d attempt(s) into the "
+            "mutation prompt.",
+            len(blocks),
+        )
     return header + "\n\n".join(reversed(blocks))

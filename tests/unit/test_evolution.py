@@ -577,6 +577,84 @@ class TestGatingInEvolutionLoop:
         assert "repair parser boundary" in backgrounds[1]
         assert "expected 2, got 1" in backgrounds[1]
 
+    def test_second_mutation_from_different_parent_does_not_see_others_history(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """End-to-end proof of the per-parent memory hand-off (audit A3):
+
+        gen1: seed g0-s0 is mutated into g1-s1, which is REJECTED (its
+        change summary and evaluator output are recorded against g0-s0).
+        gen2: g0-s0 is mutated again into g2-s2, which is ACCEPTED with a
+        strictly higher score, so g2-s2 -- not g0-s0 -- becomes the sole
+        (non-dominated) frontier candidate.
+        gen3: the *new* parent g2-s2 is mutated into g3-s3.
+
+        This exercises the full production hand-off
+        (append_rejected_attempt -> normalize_failure_history ->
+        _run_proposal_worker -> render_failure_history -> mutation
+        background) for both claims at once: gen2's prompt (same parent,
+        g0-s0) MUST contain gen1's rejected summary and evaluator output;
+        gen3's prompt (a different parent, g2-s2, which has never been
+        rejected) MUST NOT -- even though state.failed_attempt_history
+        still holds g0-s0's entry, keyed away from g2-s2.
+        """
+        seed = make_candidate("g0-s0")
+        rejected_child = make_candidate("g1-s1", generation=1)
+        rejected_child.change_summary = {
+            "intent": "repair parser boundary",
+            "approach": "change final-token check",
+            "expected_effect": "raise the pass rate",
+        }
+        accepted_child = make_candidate("g2-s2", generation=2)
+        grandchild = make_candidate("g3-s3", generation=3)
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        backgrounds: list[str | None] = []
+        mutation_order = [rejected_child, accepted_child, grandchild]
+
+        def capture_background(*_args, **kwargs):
+            backgrounds.append(kwargs["background"])
+            return mutation_order[len(backgrounds) - 1]
+
+        all_mocks["mutate"].side_effect = capture_background
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                # Rejected: scores below its parent (seed, 0.5).
+                return EvalResult(
+                    candidate_id=candidate.id,
+                    scores={},
+                    asi={"stdout": "ImportError: nonexistent_pkg"},
+                    instance_scores={"i1": 0.2},
+                    objective_scores=[{"quality": 0.2}],
+                )
+            if candidate.id == "g2-s2":
+                return make_eval_result(candidate.id, {"i1": 0.9})
+            if candidate.id == "g3-s3":
+                return make_eval_result(candidate.id, {"i1": 0.95})
+            # Seed baseline, evaluated fresh every generation.
+            return make_eval_result(candidate.id, {"i1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        run_evolution(
+            make_config(max_generations=3, max_evaluations=10000),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        assert len(backgrounds) == 3
+        assert backgrounds[0] is None  # gen1: g0-s0 has no history yet.
+        # gen2: same parent (g0-s0) -- must see gen1's rejected attempt.
+        assert backgrounds[1] is not None
+        assert "repair parser boundary" in backgrounds[1]
+        assert "ImportError: nonexistent_pkg" in backgrounds[1]
+        # gen3: a DIFFERENT parent (g2-s2) -- must NOT see g0-s0's history.
+        assert backgrounds[2] is None
+        assert not (backgrounds[2] and "repair parser boundary" in backgrounds[2])
+        assert not (
+            backgrounds[2] and "ImportError: nonexistent_pkg" in backgrounds[2]
+        )
+
     def test_accepted_mutation_updates_frontier(self, mocker, tmp_path, all_mocks):
         """Accepted mutation becomes the best candidate on the frontier."""
         seed = make_candidate("g0-s0")
