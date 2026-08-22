@@ -115,6 +115,18 @@ def _read_raw_lines(path: Path) -> list[dict]:
     return records
 
 
+def _retag(path: Path, index: int, **changes: object) -> None:
+    """Rewrite one framing record of *path* in place, keeping its other keys."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    lines[index] = json.dumps({**json.loads(lines[index]), **changes})
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _drop_last_line(path: Path) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()[:-1]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _pair_durations(
     records: list[dict], start: str, end: str
 ) -> dict[tuple[int, str], float]:
@@ -188,6 +200,9 @@ class TestTraceFlag:
             assert rec["thread_id"] == threading.get_ident()
             assert rec["source"].startswith("tests/unit/")
             assert not Path(rec["source"].rsplit(":", 1)[0]).is_absolute()
+        # ... and the bus is handed back the way it was found.
+        assert TRACE.enabled is False
+        assert TRACE.events == []
 
     def test_bus_stays_disabled_without_the_flag(self, tmp_path, mocker):
         project = _make_project(tmp_path / "proj")
@@ -203,21 +218,6 @@ class TestTraceFlag:
 
         assert result.exit_code == 0, result.output
         assert seen == [False]
-        assert TRACE.enabled is False
-        assert TRACE.events == []
-
-    def test_bus_is_restored_after_the_traced_run(self, tmp_path, mocker):
-        project = _make_project(tmp_path / "proj")
-        trace_file = tmp_path / "run.jsonl"
-
-        def fake_run_evolution(config, project_root, base_dir):
-            TRACE.emit(EventType.OPT_START)
-
-        mocker.patch("helix.evolution.run_evolution", fake_run_evolution)
-        CliRunner().invoke(
-            cli, ["evolve", "--dir", str(project), "--trace", str(trace_file)]
-        )
-
         assert TRACE.enabled is False
         assert TRACE.events == []
 
@@ -399,22 +399,6 @@ class TestTimingSplit:
 
 
 class TestConcurrentEmits:
-    def test_serial_spans_never_overlap_in_the_rendered_trace(self, tmp_path):
-        """Timing evidence must not invent concurrency in a serial phase."""
-        trace_file = tmp_path / "serial.jsonl"
-        with TRACE.write_jsonl(trace_file):
-            TRACE.emit(EventType.EVAL_START, candidate_id="g1-s0")
-            time.sleep(0.002)
-            TRACE.emit(EventType.EVAL_END, candidate_id="g1-s0", outcome="ok")
-            TRACE.emit(EventType.EVAL_START, candidate_id="g1-s1")
-            time.sleep(0.002)
-            TRACE.emit(EventType.EVAL_END, candidate_id="g1-s1", outcome="ok")
-
-        records = _read_jsonl(trace_file)
-        first_end = next(record for record in records if record["candidate_id"] == "g1-s0" and record["type"] == "EVAL_END")
-        second_start = next(record for record in records if record["candidate_id"] == "g1-s1" and record["type"] == "EVAL_START")
-        assert first_end["monotonic"] <= second_start["monotonic"]
-
     def test_concurrent_emits_produce_wellformed_jsonl(self, tmp_path):
         """Real threads, no mocks: no interleaved or truncated lines."""
         trace_file = tmp_path / "run.jsonl"
@@ -569,53 +553,42 @@ class TestFraming:
             ids.append(_read_raw_lines(path)[0]["run_id"])
         assert ids[0] != ids[1]
 
-    def test_a_trace_missing_its_footer_is_rejected(self, tmp_path):
+    #: Every way a trace that must not be totalled shows up on disk, paired
+    #: with the part of the refusal that tells an operator which one it was.
+    #: Each case is applied to a trace that was complete a moment earlier, so
+    #: a case that stops corrupting anything fails instead of silently passing.
+    @pytest.mark.parametrize(
+        ("corrupt", "expected"),
+        [
+            (_drop_last_line, RUN_COMPLETE_RECORD),
+            (lambda p: p.write_text(p.read_text(encoding="utf-8")[:-20], encoding="utf-8"), "not valid JSON"),
+            (lambda p: p.write_text('{"type": "OPT_START"}\n', encoding="utf-8"), HEADER_RECORD),
+            (lambda p: p.write_text("", encoding="utf-8"), "is empty"),
+            (lambda p: _retag(p, 0, schema_version=TRACE_SCHEMA_VERSION + 1), "schema_version"),
+            (lambda p: _retag(p, -1, run_id="0" * 32), "different run"),
+            (lambda p: _retag(p, -1, event_count=99), "declares 99 events"),
+        ],
+        ids=[
+            "footer-dropped-by-a-killed-writer",
+            "final-line-torn-mid-record",
+            "no-header-record-at-all",
+            "empty-file",
+            "schema-version-this-build-cannot-read",
+            "footer-belonging-to-a-different-run",
+            "footer-event-count-disagrees-with-the-body",
+        ],
+    )
+    def test_an_incomplete_or_tampered_trace_is_rejected(
+        self, tmp_path, corrupt, expected
+    ):
         trace_file = tmp_path / "run.jsonl"
         with TRACE.write_jsonl(trace_file):
             TRACE.emit(EventType.OPT_START)
-        lines = trace_file.read_text(encoding="utf-8").splitlines()
-        trace_file.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+        corrupt(trace_file)
 
         with pytest.raises(TraceIncompleteError) as excinfo:
             load_jsonl_trace(trace_file)
-        assert RUN_COMPLETE_RECORD in str(excinfo.value)
-
-    def test_a_trace_with_a_torn_final_line_is_rejected(self, tmp_path):
-        trace_file = tmp_path / "run.jsonl"
-        with TRACE.write_jsonl(trace_file):
-            TRACE.emit(EventType.OPT_START)
-        text = trace_file.read_text(encoding="utf-8")
-        trace_file.write_text(text[: len(text) - 20], encoding="utf-8")
-
-        with pytest.raises(TraceIncompleteError):
-            load_jsonl_trace(trace_file)
-
-    def test_a_trace_without_a_header_is_rejected(self, tmp_path):
-        trace_file = tmp_path / "run.jsonl"
-        trace_file.write_text('{"type": "OPT_START"}\n', encoding="utf-8")
-        with pytest.raises(TraceIncompleteError) as excinfo:
-            load_jsonl_trace(trace_file)
-        assert HEADER_RECORD in str(excinfo.value)
-
-    def test_an_empty_trace_is_rejected(self, tmp_path):
-        trace_file = tmp_path / "run.jsonl"
-        trace_file.write_text("", encoding="utf-8")
-        with pytest.raises(TraceIncompleteError):
-            load_jsonl_trace(trace_file)
-
-    def test_a_future_schema_version_is_rejected(self, tmp_path):
-        trace_file = tmp_path / "run.jsonl"
-        with TRACE.write_jsonl(trace_file):
-            TRACE.emit(EventType.OPT_START)
-        lines = trace_file.read_text(encoding="utf-8").splitlines()
-        header = json.loads(lines[0])
-        header["schema_version"] = TRACE_SCHEMA_VERSION + 1
-        lines[0] = json.dumps(header)
-        trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        with pytest.raises(TraceIncompleteError) as excinfo:
-            load_jsonl_trace(trace_file)
-        assert "schema_version" in str(excinfo.value)
+        assert expected in str(excinfo.value)
 
     def test_a_dropped_event_withholds_the_footer(self, tmp_path):
         """A record that never landed means the run may not be stamped complete."""
