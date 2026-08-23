@@ -11,7 +11,7 @@
   "labels": ["dependencies"],
   "packageRules": [
     {
-      "description": "The base image FROM must stay digest-pinned, never a floating tag.",
+      "description": "Pin Docker base images by digest so runner image builds are reproducible.",
       "matchManagers": ["dockerfile"],
       "pinDigests": true
     }
