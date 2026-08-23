@@ -582,6 +582,15 @@ def build_mutation_prompt(
 # Numeric statuses are matched on their own token.  A bare substring search
 # for "529" or "429" also matches a hex fragment inside a session id, which
 # would discard a completed mutation as a rate limit.
+#
+# This text is raw combined stdout+stderr from an arbitrary agent backend, so
+# a bare "429"/"529" is not on its own distinguishing: it can just as easily
+# be a line number, a token count, a record id, a duration, or a diff hunk
+# header. Only count the number when it sits near backend-error wording —
+# "HTTP", "status", or "code" — in either order, the same way the quota
+# patterns below require "exceeded"/"exhausted"/"reached" next to "quota"
+# rather than trusting "quota" alone.
+_HTTP_STATUS_WORD = r"(?:HTTP|status|code)"
 _RATE_LIMIT_PATTERNS = (
     re.compile(r"\brate[ -]?limit", re.IGNORECASE),
     re.compile(r"\boverloaded\b", re.IGNORECASE),
@@ -593,7 +602,14 @@ _RATE_LIMIT_PATTERNS = (
     # either ordering: "quota exceeded" and "you exceeded your quota".
     re.compile(r"\bquota\b[^.]{0,20}\b(?:exceeded|exhausted|reached)\b", re.IGNORECASE),
     re.compile(r"\b(?:exceeded|exhausted|reached)\b[^.]{0,20}\bquota\b", re.IGNORECASE),
-    re.compile(r"(?<![\w-])(?:429|529)(?![\w-])"),
+    re.compile(
+        rf"\b{_HTTP_STATUS_WORD}\b[^.\n]{{0,20}}(?<![\w-])(?:429|529)(?![\w-])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?<![\w-])(?:429|529)(?![\w-])[^.\n]{{0,20}}\b{_HTTP_STATUS_WORD}\b",
+        re.IGNORECASE,
+    ),
 )
 
 

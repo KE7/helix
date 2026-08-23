@@ -38,10 +38,14 @@ class TestRateLimitSignals:
         "text",
         [
             "HTTP 429 Too Many Requests",
-            "429",
+            "HTTP 529",
+            "status code: 429",
             "You have exceeded your rate limit",
+            "rate-limit hit",
             "server overloaded",
             "usage limit reached",
+            "extra usage consumed",
+            "too many requests",
             "quota exceeded for this model",
             "You exceeded your quota",
         ],
@@ -57,13 +61,25 @@ class TestRateLimitSignals:
             "model not found",
             _MAX_TURNS_SESSION_ID,
             "",
+            # A bare 429/529 with no accompanying backend-error wording is
+            # ordinary output an agent backend can print for any reason —
+            # it must not be read as a rate limit.
+            "429",
+            "529",
+            "Line 429: unexpected token",
+            "conversation used 429 tokens so far",
+            "record 529 created successfully",
+            "529 ms elapsed",
+            "@@ -12,6 +429,9 @@ def run():",
         ],
     )
     def test_unrelated_errors_are_not_called_rate_limits(self, text):
         """An unclassified failure must not be reported as a quota problem.
 
         Sending an operator to a quota dashboard for a non-quota failure is
-        strictly worse than saying the error is unrecognised.
+        strictly worse than saying the error is unrecognised. This also
+        covers the bare-number case: a "429"/"529" with no HTTP/status/code
+        wording nearby is ordinary backend chatter, not a rate-limit signal.
         """
         assert mutator._looks_like_rate_limit(text) is False
 
@@ -197,3 +213,29 @@ class TestNonZeroExitClassification:
 
         assert not isinstance(exc_info.value, RateLimitError)
         assert exc_info.value.stderr == "backend exploded while preparing request"
+
+    def test_unknown_subtype_with_numeric_error_stays_generic(self, tmp_path, mocker):
+        """An unrecognised structured subtype must not fall through to
+        free-text rate-limit scanning, even when its error field carries a
+        numeric token that would otherwise look like a status code. Once the
+        envelope names a subtype, that is the classifying signal; an unknown
+        one means a generic failure, not a guess at what the number means.
+        """
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=_completed(
+                stdout=json.dumps(
+                    {
+                        "subtype": "error_during_execution",
+                        "error": "worker HTTP 429 restart id logged",
+                    }
+                )
+            ),
+        )
+
+        with pytest.raises(MutationError) as exc_info:
+            mutator.invoke_claude_code(
+                str(tmp_path), "prompt", AgentConfig(backend="claude")
+            )
+
+        assert not isinstance(exc_info.value, RateLimitError)
