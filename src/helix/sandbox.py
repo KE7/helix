@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
@@ -68,6 +68,14 @@ AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
     "gemini": "/home/node/.gemini",
     "opencode": "/home/node/.local/share/opencode",
 }
+
+_AGENT_HOME = "/home/node"
+_AGENT_UID, _AGENT_GID = _RUNNER_UID_GID.split(":")
+
+# Claude's transcript bind always lands here -- three path components below
+# the agent's tmpfs $HOME, nested under (but never equal to)
+# AUTH_MOUNT_DESTINATIONS["claude"].
+_CLAUDE_TRANSCRIPT_MOUNT_DESTINATION = f"{_AGENT_HOME}/.claude/projects/-workspace"
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1033,58 @@ def sandbox_auth_volume_name(agent_backend: str) -> str:
     return f"helix-auth-{agent_backend}"
 
 
+def _tmpfs_owned_by_agent(path: str) -> str:
+    """A ``--tmpfs`` value mounting *path* writable by the agent's uid/gid."""
+    return f"{path}:rw,uid={_AGENT_UID},gid={_AGENT_GID},mode=700"
+
+
+def _synthesized_ancestor_tmpfs_args(mount_destinations: list[str]) -> list[str]:
+    """``--tmpfs`` args pre-owning directories Docker would otherwise root-own.
+
+    Docker synthesises every directory between the agent's tmpfs ``$HOME`` and
+    a deeper ``-v`` mount destination itself -- as ``root:root 0755`` --
+    regardless of ``$HOME``'s own ownership. Any destination nested more than
+    one path component below ``$HOME`` (an ``AUTH_MOUNT_DESTINATIONS`` entry
+    such as opencode's, or Claude's transcript bind) therefore leaves an
+    intervening directory the uid-1000 agent cannot write into.
+
+    *mount_destinations* is every path this docker invocation will mount
+    directly under ``$HOME`` in this call -- derived by the caller from
+    ``AUTH_MOUNT_DESTINATIONS`` and the transcript bind, never hardcoded here.
+    For each, every ancestor directory strictly between ``$HOME`` and that
+    destination needs pre-owning, except one already nested under a
+    *different* entry in *mount_destinations*: that entry's own volume
+    (seeded and chowned by ``_seed_command``) or tmpfs already owns everything
+    beneath it, and stacking another tmpfs inside it would only shadow that
+    ownership rather than extend it.
+    """
+    home = PurePosixPath(_AGENT_HOME)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for destination in mount_destinations:
+        ancestors: list[str] = []
+        current = PurePosixPath(destination).parent
+        while current != home:
+            current_str = str(current)
+            covered_by_another = any(
+                other != destination
+                and (current_str == other or current_str.startswith(other + "/"))
+                for other in mount_destinations
+            )
+            if covered_by_another:
+                break
+            ancestors.append(current_str)
+            current = current.parent
+        for path in reversed(ancestors):  # shallowest first
+            if path not in seen:
+                seen.add(path)
+                ordered.append(path)
+    args: list[str] = []
+    for path in ordered:
+        args.extend(["--tmpfs", _tmpfs_owned_by_agent(path)])
+    return args
+
+
 def _transcript_bind_dir(
     sandbox: SandboxConfig,
     workspace: Path,
@@ -1078,23 +1138,38 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        args.extend(["--tmpfs", "/home/node:rw,uid=1000,gid=1000,mode=700"])
+        args.extend(["--tmpfs", _tmpfs_owned_by_agent(_AGENT_HOME)])
+
+        candidate_destination: str | None = None
         if sandbox.auth == "volume":
             if candidate_auth_volume is None:
                 raise ValueError("volume auth requires a candidate credential volume")
-            args.extend(
-                [
-                    "-v",
-                    f"{candidate_auth_volume.name}:"
-                    f"{AUTH_MOUNT_DESTINATIONS[agent_backend]}:rw",
-                ]
+            candidate_destination = AUTH_MOUNT_DESTINATIONS[agent_backend]
+
+        transcript_dir = _transcript_bind_dir(sandbox, workspace, scope, agent_backend)
+        transcript_destination = (
+            _CLAUDE_TRANSCRIPT_MOUNT_DESTINATION if transcript_dir is not None else None
+        )
+
+        # Pre-own whatever ancestor directories the mounts below would
+        # otherwise leave root-owned -- see F2/F3: under `auth = "env"` with
+        # transcripts on, nothing mounts at AUTH_MOUNT_DESTINATIONS["claude"]
+        # itself; under the default volume mode, opencode's destination is
+        # three levels deep and its own parents are never mounted at all.
+        args.extend(
+            _synthesized_ancestor_tmpfs_args(
+                [d for d in (candidate_destination, transcript_destination) if d is not None]
             )
-        if transcript_dir := _transcript_bind_dir(sandbox, workspace, scope, agent_backend):
+        )
+
+        if candidate_destination is not None:
+            assert candidate_auth_volume is not None
             args.extend(
-                [
-                    "-v",
-                    f"{transcript_dir}:/home/node/.claude/projects/-workspace:rw",
-                ]
+                ["-v", f"{candidate_auth_volume.name}:{candidate_destination}:rw"]
+            )
+        if transcript_dir is not None:
+            args.extend(
+                ["-v", f"{transcript_dir}:{_CLAUDE_TRANSCRIPT_MOUNT_DESTINATION}:rw"]
             )
 
     if sandbox.pids_limit is not None:
