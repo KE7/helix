@@ -55,11 +55,17 @@ All timestamps in the file are **seconds** (floating point).  ``wall_time`` is
 Unix epoch seconds and ``monotonic`` is a process-local monotonic reading;
 durations must be computed from ``monotonic`` only.
 
-Every ``*_END`` event carries ``outcome``, and ``"ok"`` is the single spelling
-of success across all of them; any other value is a failure, narrowed by
-``error_type`` where the exception class is known.  Keep it that way: a
-consumer generalises the vocabulary it sees on one span to the rest, and a
-second spelling of success turns that into a silently wrong total.
+``outcome`` is on the four *operation*-end events -- ``EVAL_END``,
+``MUTATE_END``, ``PROPOSAL_END``, ``VALIDATE_END`` -- and ``"ok"`` is the
+single spelling of success across all four; any other value is a failure,
+narrowed by ``error_type`` where the exception class is known. Keep it that
+way: a consumer generalises the vocabulary it sees on one span to the rest,
+and a second spelling of success turns that into a silently wrong total.
+The remaining ``*_END`` events (``PROPOSAL_BATCH_END``, ``ITER_END``,
+``OPT_END``) are span boundaries, not operation results, and never carry
+``outcome``. To count failures, filter on the four operation-end types --
+do not assume ``outcome`` is present on a record just because its type
+ends in ``_END``.
 
 Spans nest: a ``PROPOSAL_START``/``PROPOSAL_END`` pair contains the
 ``MUTATE_*`` and ``EVAL_*`` pairs of the slot it covers, a

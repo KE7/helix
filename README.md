@@ -864,11 +864,15 @@ $ jq -r 'select(.type|test("PROPOSAL_BATCH|VALIDATE")) | [.type,.generation,.can
     .helix/trace.jsonl
 ```
 
-Every `*_END` event carries `outcome`, which is `"ok"` on success and
-something else on failure; when the failure was an exception, `error_type`
-names its class. Only the class — never the message, which could carry an
-evaluator command line or its output into a file you are about to attach to an
-issue. So the failures in a run are:
+The four *operation*-end events — `EVAL_END`, `MUTATE_END`, `PROPOSAL_END`,
+`VALIDATE_END` — carry `outcome`, which is `"ok"` on success and something
+else on failure; when the failure was an exception, `error_type` names its
+class. Only the class — never the message, which could carry an evaluator
+command line or its output into a file you are about to attach to an issue.
+The other `*_END` events (`PROPOSAL_BATCH_END`, `ITER_END`, `OPT_END`) are
+span boundaries, not operation results, and never carry `outcome`. So to
+find the failures in a run, filter on the four operation-end types rather
+than assuming `outcome` on anything whose type ends in `_END`:
 
 ```console
 $ jq -r 'select(.outcome and .outcome != "ok") | [.type,.candidate_id,.outcome,.error_type] | @tsv' \

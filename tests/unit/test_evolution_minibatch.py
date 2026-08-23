@@ -2733,6 +2733,67 @@ class TestAtomicProposalWorker:
                 or start.monotonic >= batch_end.monotonic
             ), "full validation overlapped the proposal batch window"
 
+    def test_end_event_outcome_field_matches_the_documented_split(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """``outcome`` sits on operation-end events, not on span boundaries.
+
+        ``PROPOSAL_END`` and ``VALIDATE_END`` report the result of the work
+        they close over; ``PROPOSAL_BATCH_END``, ``ITER_END`` and
+        ``OPT_END`` only mark where a span ends and never carry it. A
+        consumer that assumes every ``*_END`` record has ``outcome`` gets a
+        silently wrong answer on the latter three.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            ids = instance_ids or ["v1"]
+            # A child scores strictly better than the seed so the gate
+            # accepts and the run reaches full validation.
+            score = 0.9 if candidate.id != seed.id else 0.1
+            return _make_result(candidate.id, {item: score for item in ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            num_parallel_proposals=2,
+        )
+
+        with TRACE.record() as events:
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        operation_end = {EventType.PROPOSAL_END, EventType.VALIDATE_END}
+        span_boundary_end = {
+            EventType.PROPOSAL_BATCH_END,
+            EventType.ITER_END,
+            EventType.OPT_END,
+        }
+        # Both sides of the split must actually fire this run, or the
+        # assertions below would pass vacuously.
+        assert {e.type for e in events} >= operation_end | span_boundary_end
+
+        for event in events:
+            if event.type in operation_end:
+                assert event.outcome is not None, (
+                    f"{event.type} is documented to carry outcome"
+                )
+            elif event.type in span_boundary_end:
+                assert event.outcome is None, (
+                    f"{event.type} is a span boundary and must not carry outcome"
+                )
+
     def test_worker_skipped_result_returns_without_llm_call(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
