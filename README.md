@@ -632,6 +632,15 @@ helix sandbox login claude
 helix sandbox status claude
 ```
 
+For `sandbox.auth = "env"`, skip the login volume: the credential comes from a
+name you configure directly in `[env]` or `passthrough_env`, the same as any
+other value, and `sandbox.auth_env_allow` must list that name. `auth_env_allow`
+does not filter or restrict what `[env]` / `passthrough_env` deliver — that
+transport works identically in both auth modes. It is a required declaration
+of which name(s) an `auth = "env"` configuration expects to supply, checked
+against the rest of the config, not a separate permission a value must also
+clear.
+
 **Under `sandbox.auth = "volume"`, a credential-shaped `[env]` /
 `passthrough_env` value can still be what the agent actually authenticates
 with.** HELIX forwards configured values to the agent in both auth modes, and

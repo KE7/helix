@@ -1143,9 +1143,18 @@ class TestInvokeClaudeCode:
             == "ghcr.io/ke7/helix-evo-runner-claude:latest"
         )
 
-    def test_sandbox_env_auth_forwards_only_explicitly_allowed_key(
+    def test_sandbox_env_auth_excludes_key_not_named_in_passthrough_env(
         self, mocker, monkeypatch
     ):
+        """Agent-env membership is decided by passthrough_env, not auth_env_allow.
+
+        ``AMBIENT_API_KEY`` is listed in ``auth_env_allow`` here, on top of
+        having an ambient host value, and it still does not reach the agent:
+        it was never named in ``passthrough_env``. ``auth_env_allow`` is a
+        declaration of intent enforced by ``SandboxConfig`` / ``HelixConfig``
+        validation, not a runtime filter -- see
+        ``helix.mutator._sandbox_agent_environment``.
+        """
         mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
         mock_run.return_value = MagicMock(
             stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
@@ -1161,7 +1170,9 @@ class TestInvokeClaudeCode:
             AgentConfig(backend="cursor"),
             passthrough_env=["CURSOR_API_KEY"],
             sandbox=SandboxConfig(
-                enabled=True, auth="env", auth_env_allow=["CURSOR_API_KEY"]
+                enabled=True,
+                auth="env",
+                auth_env_allow=["CURSOR_API_KEY", "AMBIENT_API_KEY"],
             ),
         )
 

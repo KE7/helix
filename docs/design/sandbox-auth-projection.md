@@ -234,21 +234,29 @@ auth_env_allow = []
 - `auth = "volume"` selects the candidate-volume projection described here.
   `auth_env_allow` must be empty: no credential transport variable is needed.
 - `auth = "env"` means an explicit `[env]`/`passthrough_env` value is the
-  credential source; `auth_env_allow` is a non-empty, explicitly configured
-  *additional* gate, not an allowlist that by itself grants passage.  A name
-  in `auth_env_allow` only widens what a value already declared in `[env]` or
-  `passthrough_env` is allowed to resolve to -- from a literal `[env]` value
-  to the matching ambient host variable when `[env]` gives it no literal
-  value.  A name present in `auth_env_allow` alone, undeclared in `[env]` /
-  `passthrough_env`, never reaches the agent.
+  credential source; `auth_env_allow` must be non-empty, and its names must
+  overlap with the union of `[env]` and `passthrough_env` (enforced by
+  `SandboxConfig.model_post_init`). Beyond that check, and the
+  `HelixConfig` disjointness check against
+  `evaluator.sidecar.passthrough_env` described above, `auth_env_allow` is
+  not consulted at runtime. It does not gate which `[env]`/`passthrough_env`
+  values reach the agent -- that transport already runs, in both auth modes,
+  through the same scrubbing HELIX applies everywhere else. Whether a name
+  reaches the agent is decided entirely by `[env]` and `passthrough_env`.
+  `auth_env_allow` is a declaration: it records, in one place, which
+  credential name(s) an `auth = "env"` configuration is expected to supply,
+  so a reader (and the two validators above) can check that declaration
+  against the rest of the config. It grants nothing by itself.
 - No `auth_projection_*`, file path, volume name, or backend-specific
   transport key is exposed in configuration.  Those would make a small source
   choice into a second configuration language.
 
-This retains `auth_env_allow` because it is the actual credential-widening gate
-for named values already declared in `[env]`/`passthrough_env`.  It does not
-use that key as hidden plumbing for volume credentials.  Backend manifests and
-runtime cleanup are implementation details, not new user knobs.
+This keeps `auth_env_allow` as a declared, validated statement of intent, not
+as a second, parallel transport gate.  Making it an actual runtime filter
+would mean `auth = "env"` resolves `[env]`/`passthrough_env` differently from
+every other HELIX code path -- exactly the second configuration language the
+previous paragraph rules out.  Backend manifests and runtime cleanup are
+implementation details, not new user knobs.
 
 ## What HELIX does not do to the agent environment
 

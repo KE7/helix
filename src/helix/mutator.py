@@ -761,7 +761,6 @@ def _agent_failure_suggestion(*, stdout: str, stderr: str, env: dict[str, str]) 
 
 def _sandbox_agent_environment(
     *,
-    sandbox: SandboxConfig,
     passthrough_env: list[str] | None,
     fixed_env: dict[str, str] | None,
 ) -> dict[str, str]:
@@ -773,26 +772,18 @@ def _sandbox_agent_environment(
     agent only because the caller named it in ``passthrough_env`` or gave it a
     value in ``fixed_env``.
 
-    ``auth_env_allow`` is a separate, additional gate that applies only under
-    ``auth = "env"``. For a name listed there, an ambient host value may also
-    resolve as the credential that ``auth = "volume"`` would otherwise seed
-    from the login volume. It does not restrict the general ``fixed_env`` /
-    ``passthrough_env`` transport above; it only widens what an
-    already-declared credential name is allowed to resolve to. A name listed
-    in ``auth_env_allow`` alone never reaches the agent.
+    ``auth_env_allow`` does not run through this function at all, and no code
+    path here checks membership in it. It is a declaration of intent, not an
+    enforcement mechanism: it exists so an operator can name, in one place,
+    which credential(s) ``auth = "env"`` is expected to supply, and so
+    :class:`~helix.config.SandboxConfig`'s ``model_post_init`` and
+    :class:`~helix.config.HelixConfig`'s disjointness check (against
+    ``evaluator.sidecar.passthrough_env``) have something to validate against.
+    Whether a name in ``auth_env_allow`` actually reaches the agent is decided
+    entirely by whether that same name also appears in ``passthrough_env`` or
+    ``[env]`` — the transport this docstring already describes above.
     """
-    env = _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
-    if sandbox.auth != "env":
-        return env
-    configured = set(passthrough_env or []) | set((fixed_env or {}).keys())
-    for key in sandbox.auth_env_allow:
-        if key not in configured:
-            continue
-        if fixed_env is not None and key in fixed_env:
-            env[key] = str(fixed_env[key])
-        elif key in os.environ:
-            env[key] = os.environ[key]
-    return env
+    return _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
 
 
 def _build_backend_args(
@@ -1665,7 +1656,6 @@ def invoke_claude_code(
     cmd_str = shlex.join(args)
     backend_env = (
         _sandbox_agent_environment(
-            sandbox=sandbox,
             passthrough_env=passthrough_env,
             fixed_env=fixed_env,
         )
