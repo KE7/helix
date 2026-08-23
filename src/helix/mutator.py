@@ -589,9 +589,8 @@ _RATE_LIMIT_PATTERNS = (
     re.compile(r"\bextra usage\b", re.IGNORECASE),
     re.compile(r"\btoo many requests\b", re.IGNORECASE),
     # A bare "quota" also appears in configuration errors ("quota field
-    # missing"), so require language saying the quota was consumed. Backend
-    # messages phrase this in either order ("quota exceeded" as well as
-    # "you exceeded your quota"), so match both.
+    # missing"), so require language saying the quota was consumed.  Accept
+    # either ordering: "quota exceeded" and "you exceeded your quota".
     re.compile(r"\bquota\b[^.]{0,20}\b(?:exceeded|exhausted|reached)\b", re.IGNORECASE),
     re.compile(r"\b(?:exceeded|exhausted|reached)\b[^.]{0,20}\bquota\b", re.IGNORECASE),
     re.compile(r"(?<![\w-])(?:429|529)(?![\w-])"),
@@ -601,7 +600,7 @@ _RATE_LIMIT_PATTERNS = (
 def _looks_like_rate_limit(text: str) -> bool:
     """Return True if *text* contains a rate-limit / overload signal.
 
-    Detection stays deliberately narrow: an unrecognised backend error must
+    Detection stays narrow: an unrecognised backend error must
     fall through to the generic unknown-failure path with its own message
     preserved, rather than being reported as a quota problem the operator
     cannot act on.
@@ -1729,10 +1728,10 @@ def invoke_claude_code(
                     raise rate_limited
             return parsed, usage
 
-        # Claude writes a structured result envelope even for many non-zero
-        # exits.  Classify that envelope before inspecting raw output, so a
-        # session id or transcript fragment cannot pre-empt a real max-turns
-        # result — which is partial success, not a discarded proposal.
+        # The claude backend may still write a structured result envelope on a
+        # non-zero exit.  Classify that envelope before inspecting raw output,
+        # so a session id or transcript fragment cannot pre-empt a real
+        # max-turns result — which is partial success, not a discarded proposal.
         if backend == "claude":
             try:
                 parsed = _parse_backend_output(

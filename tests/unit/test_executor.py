@@ -97,9 +97,8 @@ class TestRunEvaluator:
     def test_docker_exit_125_surfaces_docker_diagnostic_when_docker_was_invoked(
         self, tmp_path, mocker
     ):
-        """Exit 125 is only a Docker diagnostic when HELIX itself invoked
-        Docker for this run (sandbox.enabled + sandbox.evaluator) — the
-        branch this test exercises via ``run_sandboxed_commands``.
+        """Exit 125 is a Docker diagnostic only when HELIX itself invoked
+        Docker for this run (sandbox.enabled + sandbox.evaluator).
         """
         mocker.patch(
             "helix.executor.current_evaluator_sidecar_runtime",

@@ -6,8 +6,8 @@ Getting the order wrong discards completed work: a session id containing a
 "429"/"529" hex fragment used to be read as a rate limit and thrown away a
 proposal that had already run to its turn limit.
 
-This is backend-agnostic; the claude backend is used because it is the one
-that emits a structured envelope alongside a non-zero exit.
+Fixtures use the claude backend because its result envelope is what the
+ordering rule applies to.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from helix.config import AgentConfig, HelixConfig
 from helix.exceptions import MutationError, RateLimitError
 from helix.population import Candidate, EvalResult
 
+# Synthetic. Shaped like a session id and carrying "429"/"529" as hex
+# fragments, which is the collision the whole-token match must survive.
 _MAX_TURNS_SESSION_ID = "00000000-0429-4000-8000-000000000529"
 
 

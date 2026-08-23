@@ -233,11 +233,10 @@ def run_evaluator(
 
     evaluator = config.evaluator
     sandbox_image = None
-    # The single honest signal that HELIX itself launched Docker for this
-    # evaluation: we chose the sandboxed branch below.  Evaluator commands
-    # are arbitrary user commands, so the exit code alone (or any text in
-    # it) cannot be trusted to mean "Docker was involved" — only the branch
-    # HELIX actually took can.
+    # Whether HELIX itself launched Docker for this evaluation.  Evaluator
+    # commands are arbitrary user commands, so neither the exit code nor the
+    # command text establishes that Docker was involved; only this branch
+    # does.
     docker_invoked = config.sandbox.enabled and config.sandbox.evaluator
     if docker_invoked:
         if evaluator.sidecar is None:
@@ -351,13 +350,10 @@ def run_evaluator(
         )
 
     # Docker reserves exit 125 for failures before the container command
-    # starts (daemon, image, or invocation errors).  A structured-result
-    # parser cannot add useful information here and would otherwise hide the
-    # actual Docker diagnostic behind "no HELIX_RESULT= line".  Evaluator
-    # commands are arbitrary user commands, though, so exit 125 only means
-    # "Docker failure" when HELIX actually invoked Docker for this run
-    # (``docker_invoked``, set from the same sandbox branch above) — never
-    # from sniffing the command text for the word "docker".
+    # starts (daemon, image, or invocation errors).  Check it ahead of the
+    # result parser, which would otherwise hide the Docker diagnostic behind
+    # "no HELIX_RESULT= line".  Guarded on ``docker_invoked``: for an
+    # evaluator HELIX ran directly, 125 is just the command's own exit code.
     if returncode == 125 and docker_invoked:
         raise EvaluatorError(
             "Evaluator Docker invocation failed before the evaluator started.",
