@@ -18,6 +18,7 @@ from helix.backends import (
     EFFORT_VALID_VALUES,
     backend_display_name,
 )
+from helix.change_summary import MAX_HISTORY_PER_PARENT
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -300,11 +301,13 @@ class EvolutionConfig(BaseModel):
         description=(
             "Maximum rejected attempts retained per parent and replayed into "
             "that parent's next mutation prompt. Set 0 to disable retention; "
-            "the maximum is 20. Larger values give the next agent more history, "
-            "but the rendered block injected into the prompt is separately "
-            "capped by total size: with verbose evaluator output, only a "
-            "handful of the most recent entries may actually reach the prompt "
-            "even when more than that are stored."
+            "the maximum is 3, which is also the default. That ceiling is what "
+            "the prompt's separate size cap on the rendered block can actually "
+            "deliver at the entry sizes seen in real runs, so it is not an "
+            "advertised depth the renderer would quietly fall short of. An "
+            "evaluator markedly more verbose than that still makes entries too "
+            "large to fit, and fewer than the retained number reach the prompt; "
+            "entries are shown whole or not at all, never half."
         ),
     )
     perfect_score_threshold: float | None = None
@@ -559,8 +562,11 @@ class EvolutionConfig(BaseModel):
     def model_post_init(self, __context: object) -> None:
         if self.failed_attempt_history_limit < 0:
             raise ValueError("evolution.failed_attempt_history_limit must be >= 0")
-        if self.failed_attempt_history_limit > 20:
-            raise ValueError("evolution.failed_attempt_history_limit must be <= 20")
+        if self.failed_attempt_history_limit > MAX_HISTORY_PER_PARENT:
+            raise ValueError(
+                "evolution.failed_attempt_history_limit must be <= "
+                f"{MAX_HISTORY_PER_PARENT}"
+            )
         if self.max_workers < 1:
             raise ValueError(
                 f"evolution.max_workers must be >= 1 (got {self.max_workers})"

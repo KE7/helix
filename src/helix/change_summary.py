@@ -39,30 +39,67 @@ logger = logging.getLogger(__name__)
 # excludes that internal namespace, whereas this ignored agent artifact must
 # return from the sandbox after the backend exits.
 CHANGE_SUMMARY_ARTIFACT_NAME = ".agent_change_summary.json"
-# Whole-artifact size cap. A few short paragraphs of plain text fit easily in
-# 4 KiB; this is a round number picked to bound how much untrusted,
-# agent-authored JSON gets parsed per attempt, not a measured budget.
-MAX_CHANGE_SUMMARY_BYTES = 4 * 1024
-# Cap on the rendered evaluator-output JSON stored per attempt. Round number
-# sized to hold a few KB of stdout/stderr from a failing test without one
-# unusually verbose evaluator run dominating the stored history.
-MAX_EVALUATOR_OUTPUT_BYTES = 12 * 1024
+# Whole-artifact size cap, DERIVED from MAX_FIELD_CHARS rather than chosen:
+# three fields at the field cap are 3 * 1_200 = 3_600 normalized characters;
+# the worst raw-JSON-bytes-per-normalized-character ratio observed over 764
+# paragraphs of real agent-authored prose was 1.12, giving 4_032 bytes; the
+# JSON envelope (three quoted keys, quotes, commas, braces, indentation) adds
+# 61; and the resulting 4_093 is multiplied by 1.5 because that ratio is an
+# observation, not a bound -- a field of mostly non-ASCII or heavily escaped
+# text costs more per character than anything in the sample did.
+#   3 * MAX_FIELD_CHARS * 1.12 + 61 = 4_093 -> * 1.5 = 6_140 -> 6 KiB
+# The margin is what keeps the two limits the agent is given -- a per-field
+# character count and a whole-file byte count -- jointly satisfiable. Without
+# it they sit within a few bytes of each other, and an agent that fills all
+# three fields to the per-field limit it was told about loses the whole
+# artifact to the other one.
+MAX_CHANGE_SUMMARY_BYTES = 6 * 1024
+# Cap on the rendered evaluator-output JSON stored per attempt, set at the
+# p95 of `len(json.dumps(EvalResult.to_dict()))` over the 90 rejected
+# attempts of a real 37-generation run (median 16_987 B, p90 28_868, p95
+# 32_162, p99 45_719, max 48_984), rounded up to 32 KiB. Exceeding this cap
+# does not truncate the output -- it drops it, and an attempt stored without
+# its evaluator half can never be rendered into a prompt -- so the cap is set
+# high enough that 95% of real rejections keep that half and only a genuine
+# outlier loses it. Sizing this below the median of what it caps would not
+# buy a shorter prompt; it would silently switch the feature off for most
+# rejections while still writing them to disk.
+MAX_EVALUATOR_OUTPUT_BYTES = 32 * 1024
 # Per-field cap on intent/approach/expected_effect, applied after whitespace
-# normalization. Round number for "a short paragraph", not a measured value.
+# normalization. No agent has ever written this artifact, so this is a PROXY:
+# 764 paragraphs of change-describing prose written by mutating agents in 26
+# real mutation slots (median 124 chars, p90 271, p95 314, p99 371, max 537).
+# Breaking this cap discards the field rather than truncating it, so the cap
+# sits above the whole observed distribution instead of at a percentile of
+# it: 1_200 is 3.2x that p99 and 2.2x the longest paragraph in the sample,
+# and still above the p99 of a complete multi-paragraph agent write-up (987
+# chars). Replace the proxy once real artifacts have accumulated.
 MAX_FIELD_CHARS = 1_200
-# Hard ceiling on `evolution.failed_attempt_history_limit` (see config.py).
-# Round number chosen to bound how many attempts are ever retained per
-# parent; MAX_RENDERED_HISTORY_CHARS below is what actually limits how many
-# of them reach a prompt in practice.
-MAX_HISTORY_PER_PARENT = 20
+# Hard ceiling on `evolution.failed_attempt_history_limit` (see config.py),
+# equal to its default. It is set to what MAX_RENDERED_HISTORY_CHARS below
+# can actually deliver at the median real entry size, so the knob cannot
+# advertise a depth of history that the renderer would silently discard.
+MAX_HISTORY_PER_PARENT = 3
 # Ceiling on the rendered failure-history block injected into a mutation
-# prompt. Round number chosen to bound prompt growth. Worth knowing: at
-# MAX_FIELD_CHARS and MAX_EVALUATOR_OUTPUT_BYTES, one entry can run to
-# roughly 3 * MAX_FIELD_CHARS + MAX_EVALUATOR_OUTPUT_BYTES chars, so with
-# verbose evaluator output this cap -- not MAX_HISTORY_PER_PARENT -- is what
-# decides how many entries actually reach the prompt (in practice, only a
-# handful even when many more are stored).
-MAX_RENDERED_HISTORY_CHARS = 48 * 1024
+# prompt, sized as MAX_HISTORY_PER_PARENT whole entries at the median real
+# entry size. One entry is the fixed block chrome (278 chars) plus three
+# fields at the median observed length (3 * 124) plus the evaluator output
+# at its median observed size (16_987), i.e. 17_637 chars; three of those
+# plus separators and the section header come to 52_974, rounded up to
+# 56 KiB for headroom.
+#
+# The fraction that buys: against the largest mutation prompt measured in
+# real runs (28_072 chars, over 31 prompts whose median was 3_988), a full
+# block is about two thirds of what the next agent reads. That is the
+# deliberate trade -- roughly half of a mutation prompt is fixed
+# boilerplate, and one rejected attempt paired with the evaluator output
+# that rejected it carries more for the next mutator than the boilerplate
+# does -- and it is also why this is a ceiling rather than a target: on a
+# terse evaluator three entries come to a few thousand characters and it
+# never binds. Entries render whole or not at all, so an evaluator markedly
+# more verbose than that median puts fewer than MAX_HISTORY_PER_PARENT
+# entries in the prompt.
+MAX_RENDERED_HISTORY_CHARS = 56 * 1024
 _SUMMARY_FIELDS = ("intent", "approach", "expected_effect")
 _EXAMPLE_SUMMARY = {
     "intent": "Fix the parser's off-by-one error.",
