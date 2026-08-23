@@ -233,13 +233,11 @@ class TestTraceFlag:
     def test_run_that_raises_still_drains_and_stamps_the_trace_complete(
         self, tmp_path
     ):
-        """An exception inside the ``with`` still runs the orderly drain.
+        """A run that raises still exits cleanly, so its trace is complete.
 
-        This is emphatically NOT an abrupt-exit test: raising inside the
-        context manager runs its ``finally``, so the writer drains and the
-        footer is written, and the trace is legitimately complete.  The
-        abrupt-exit case — where no cleanup runs at all — is
-        ``TestAbruptExit`` below, which SIGKILLs a real child process.
+        Raising inside the context manager runs its ``finally``: the footer is
+        written and the trace is legitimately complete.  The opposite case,
+        where no cleanup runs at all, is ``TestAbruptExit`` below.
         """
         trace_file = tmp_path / "run.jsonl"
         with pytest.raises(RuntimeError):
@@ -301,9 +299,9 @@ class TestTimingSplit:
         start = next(e for e in events if e.type is EventType.EVAL_START)
         end = next(e for e in events if e.type is EventType.EVAL_END)
         assert end.monotonic - start.monotonic >= _SLEEP
-        # ``wall_time`` is present for correlation only.  It is deliberately
-        # NOT asserted to be ordered: NTP slew can move it backwards, which is
-        # the whole reason durations come from ``monotonic``.
+        # ``wall_time`` is asserted present but never asserted ordered: NTP
+        # slew can move it backwards, which is why durations come from
+        # ``monotonic``.  Do not add an ordering assertion here.
         assert isinstance(end.wall_time, float)
 
     def test_failed_evaluator_still_closes_its_interval(self, mocker):
@@ -358,7 +356,7 @@ class TestTimingSplit:
         end = next(e for e in events if e.type is EventType.MUTATE_END)
         assert start.candidate_id == "g1-s0"
         assert end.candidate_id == "g1-s0"
-        assert end.reason == "ok"
+        assert end.outcome == "ok"
         assert end.monotonic - start.monotonic >= _SLEEP
 
     def test_failed_mutation_still_closes_its_interval(self, tmp_path, mocker):
@@ -390,7 +388,7 @@ class TestTimingSplit:
 
         ends = [e for e in events if e.type is EventType.MUTATE_END]
         assert len(ends) == 1
-        assert ends[0].reason == "mutation_error"
+        assert ends[0].outcome == "mutation_error"
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +444,7 @@ class TestConcurrentEmits:
             # Staggered sleeps guarantee the ENDs do not come back in the same
             # order the STARTs went out.
             time.sleep(0.01 * (n_threads - i))
-            TRACE.emit(EventType.MUTATE_END, candidate_id=f"g1-s{i}", reason="ok")
+            TRACE.emit(EventType.MUTATE_END, candidate_id=f"g1-s{i}", outcome="ok")
 
         with TRACE.write_jsonl(trace_file):
             threads = [
@@ -553,9 +551,9 @@ class TestFraming:
             ids.append(_read_raw_lines(path)[0]["run_id"])
         assert ids[0] != ids[1]
 
-    #: Every way a trace that must not be totalled shows up on disk, paired
+    #: Ways a trace that must not be totalled shows up on disk, each paired
     #: with the part of the refusal that tells an operator which one it was.
-    #: Each case is applied to a trace that was complete a moment earlier, so
+    #: Every case is applied to a trace that was complete a moment earlier, so
     #: a case that stops corrupting anything fails instead of silently passing.
     @pytest.mark.parametrize(
         ("corrupt", "expected"),
@@ -638,9 +636,9 @@ class TestFraming:
 #: are all on disk, and then keeps emitting forever so the SIGKILL genuinely
 #: lands mid-write.  ``emit`` writes and flushes inline, so returning from the
 #: loop is itself the guarantee that all ``_KILL_CHILD_EVENTS`` have landed --
-#: there is nothing buffered anywhere to drain.  The child installs no signal
-#: handler and no ``atexit`` hook: SIGKILL runs none of them anyway, which is
-#: the point.
+#: there is nothing buffered anywhere to drain.  The child deliberately
+#: installs no signal handler and no ``atexit`` hook, since SIGKILL would run
+#: neither.
 _KILL_CHILD_EVENTS = 200
 
 _KILL_CHILD = """

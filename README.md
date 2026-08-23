@@ -854,13 +854,24 @@ $ jq -r 'select(.type|test("MUTATE|EVAL")) | [.type,.candidate_id,.thread_id,.mo
     .helix/trace.jsonl
 ```
 
-`PROPOSAL_BATCH_*` and `VALIDATE_*` are what answer "is the sequential
-full-validation stage worth parallelising?". The proposal batch is concurrent
-and the validation stages that follow it are not, and the two windows never
-overlap, so their totals can be compared directly:
+`PROPOSAL_BATCH_*` and `VALIDATE_*` answer "how much of a generation is the
+sequential full-validation stage?". The proposal batch is concurrent and the
+validation stages that follow it are not, and the two windows never overlap,
+so their totals partition the generation and can be compared directly:
 
 ```console
 $ jq -r 'select(.type|test("PROPOSAL_BATCH|VALIDATE")) | [.type,.generation,.candidate_id,.monotonic] | @tsv' \
+    .helix/trace.jsonl
+```
+
+Every `*_END` event carries `outcome`, which is `"ok"` on success and
+something else on failure; when the failure was an exception, `error_type`
+names its class. Only the class — never the message, which could carry an
+evaluator command line or its output into a file you are about to attach to an
+issue. So the failures in a run are:
+
+```console
+$ jq -r 'select(.outcome and .outcome != "ok") | [.type,.candidate_id,.outcome,.error_type] | @tsv' \
     .helix/trace.jsonl
 ```
 

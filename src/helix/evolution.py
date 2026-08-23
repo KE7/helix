@@ -1072,12 +1072,29 @@ def _run_full_val_eval(
     the seed-eval path calls ``_refresh_protected_evaluator_files`` before
     invoking this helper on the single-task branch).
 
-    This is the sequential full-validation stage, and it is bracketed by
+    This is the sequential full-validation stage, bracketed by
     ``VALIDATE_START`` / ``VALIDATE_END`` so its wall clock can be totalled
-    separately from the parallel proposal phase that
-    ``PROPOSAL_BATCH_START`` / ``PROPOSAL_BATCH_END`` bracket.  ``source_batch``
-    / ``source_single`` are echoed into the events' ``reason`` field so the
-    seed, merge and mutation call sites stay distinguishable.
+    apart from the concurrent proposal phase that ``PROPOSAL_BATCH_START`` /
+    ``PROPOSAL_BATCH_END`` brackets.  ``source_batch`` / ``source_single`` are
+    echoed into the events' ``reason`` field so the seed, merge and mutation
+    call sites stay distinguishable.
+
+    Keep the pair.  The stage is *not* recoverable from
+    ``ACCEPT_DECISION`` / ``FRONTIER_UPDATE``, on four independent counts:
+
+    * the seed and merge call sites emit neither event, so their full-val time
+      would be invisible rather than merely imprecise;
+    * the mutation ``ACCEPT_DECISION`` is emitted only inside the
+      ``stage_val_example_ids and use_val_stage_gate`` branch, so it is absent
+      whenever the val-stage gate is unconfigured or skipped;
+    * ``_save_evaluation`` and the frontier sync run between this call
+      returning and ``FRONTIER_UPDATE``, and their cost scales with the
+      evaluator's captured output, so the gap between the two is unbounded;
+    * ``FRONTIER_UPDATE`` never fires at all when the budget is found exhausted
+      in that same gap.
+
+    Each of the four turns an inferred stage duration into a confidently wrong
+    number rather than an obviously missing one.
     """
     TRACE.emit(
         EventType.VALIDATE_START,
@@ -1104,7 +1121,7 @@ def _run_full_val_eval(
         _validate_outcome = "ok"
         return _validate_result
     except BaseException as _validate_exc:
-        # Only the exception class: message text can carry evaluator output.
+        # The class only: message text can carry evaluator output (see trace.py).
         _validate_error = type(_validate_exc).__name__
         raise
     finally:
@@ -1660,13 +1677,13 @@ def _dispatch_proposals(
     ``PromptArtifactCollisionError`` is fatal for the whole run and
     propagates.  A single slot keeps the historical in-thread path.
 
-    Tracing lives here rather than inside :func:`_run_proposal_worker` because
-    this is the scope that knows both the batch (``len(presample_contexts)``)
-    and each slot's index; the worker itself receives one context and cannot
+    The trace emits must stay in this scope: it is the only one that knows
+    both the batch width (``len(presample_contexts)``) and each slot's index,
+    while :func:`_run_proposal_worker` receives a single context and cannot
     name its own slot.  ``PROPOSAL_BATCH_START`` / ``PROPOSAL_BATCH_END``
-    bracket the concurrent phase as a whole and ``PROPOSAL_START`` /
-    ``PROPOSAL_END`` bracket one slot each, emitted from inside the pool
-    thread that runs the slot so ``thread_id`` attributes the span to its own
+    bracket the concurrent phase as a whole; ``PROPOSAL_START`` /
+    ``PROPOSAL_END`` bracket one slot each and are emitted from inside the pool
+    thread that runs the slot, so ``thread_id`` attributes the span to its own
     worker.
     """
 
@@ -1681,9 +1698,9 @@ def _dispatch_proposals(
     def _traced_worker(_slot: int, _pctx: ProposalContext) -> ProposalResult:
         """Run one slot, always closing its ``PROPOSAL_START``/``END`` pair.
 
-        ``_slot`` is the index into ``presample_contexts``, i.e. sampling
-        order, so a consumer can bind a span to a slot without relying on the
-        order the events happen to land in the file.
+        ``_slot`` is the index into ``presample_contexts`` — sampling order —
+        so a consumer can bind a span to a slot without relying on the order
+        the events happen to land in the file, which is completion order.
         """
         _cid = _pctx[3]
         _outcome = "error"
@@ -1697,10 +1714,10 @@ def _dispatch_proposals(
         )
         try:
             _res = worker(_pctx)
-            _outcome = "complete"
+            _outcome = "ok"
             return _res
         except BaseException as _exc:
-            # Only the exception class: message text is not trace data.
+            # The class only: message text is not trace data (see trace.py).
             _error_type = type(_exc).__name__
             raise
         finally:
@@ -1723,9 +1740,9 @@ def _dispatch_proposals(
         _run_proposal_batch(presample_contexts, _traced_worker, worker_results,
                             max_workers=max_workers, gen=gen)
     finally:
-        # Deliberately before sequential acceptance, so a consumer can tell
-        # actual worker concurrency apart from the later ordered frontier and
-        # budget updates.  In a ``finally`` so a fatal
+        # This must close before sequential acceptance begins, so that a
+        # consumer can tell real worker concurrency apart from the ordered
+        # frontier and budget updates that follow.  In a ``finally`` so a fatal
         # ``PromptArtifactCollisionError`` still closes the batch span.
         TRACE.emit(
             EventType.PROPOSAL_BATCH_END,

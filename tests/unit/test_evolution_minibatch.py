@@ -2659,19 +2659,17 @@ class TestAtomicProposalWorker:
             (1, 1, 2),
         }
         assert {event.candidate_id for event in starts} == {"g1-s1", "g1-s2"}
-        assert all(event.outcome == "complete" for event in ends)
+        assert all(event.outcome == "ok" for event in ends)
 
     def test_full_validation_is_timed_separately_from_proposal_work(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
         """The sequential full-val stage has its own bracketed wall clock.
 
-        This is the measurement the flag exists for: deciding whether to
-        parallelise full validation needs full validation's own wall clock,
-        not the apply phase's total.  ``VALIDATE_START``/``VALIDATE_END`` are
-        the boundary, and every full-val span must fall wholly outside the
-        ``PROPOSAL_BATCH_START``/``PROPOSAL_BATCH_END`` window so the two
-        totals cannot double-count the same seconds.
+        ``VALIDATE_START``/``VALIDATE_END`` are the boundary, and every full-val
+        span must fall wholly outside the ``PROPOSAL_BATCH_START``/
+        ``PROPOSAL_BATCH_END`` window, so the concurrent and sequential totals
+        partition a generation instead of double-counting the same seconds.
         """
         train_path = _write_train_jsonl(tmp_path, n=6)
         seed = _make_candidate("g0-s0")

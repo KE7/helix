@@ -188,11 +188,12 @@ def run_evaluator(
     split: str = "val",
     instance_ids: list[str] | None = None,
 ) -> EvalResult:
-    """Run one evaluator and always close its trace interval.
+    """Run one evaluator, closing its ``EVAL_START``/``EVAL_END`` span always.
 
-    The implementation is deliberately wrapped rather than relying on its
-    individual return paths: command validation, sandbox setup, subprocess
-    execution, parsing, timeouts, and test overrides can all fail.
+    The body lives in :func:`_run_evaluator` so this ``finally`` covers all of
+    it: command validation, sandbox setup, the subprocess, parsing, timeouts
+    and the test override each have their own way of returning or raising, and
+    an unclosed START inflates every span that encloses it.
     """
     TRACE.emit(
         EventType.EVAL_START,
@@ -208,8 +209,9 @@ def run_evaluator(
         outcome = "ok"
         return result
     except BaseException as exc:
-        # Record only the exception class.  Exception text can include an
-        # evaluator command, path, or diagnostic payload and is not trace data.
+        # The class only.  Exception text here routinely carries the evaluator
+        # command, a path, or captured output -- none of which may enter a file
+        # operators attach to bug reports.
         error_type = type(exc).__name__
         raise
     finally:

@@ -1,7 +1,7 @@
 """HELIX TraceBus — lightweight runtime event stream for differential testing.
 
-Zero overhead when disabled: ``TRACE.emit(...)`` short-circuits on a single
-attribute check (``self.enabled``) before building any event payload.
+Disabled by default, and disabled costs one attribute check: ``TRACE.emit(...)``
+reads ``self.enabled`` and returns before building any event payload.
 
 There are two ways to turn the bus on:
 
@@ -12,8 +12,15 @@ There are two ways to turn the bus on:
 
 ``write_jsonl(path)``
     Flips the flag and streams every event to *path* as JSON Lines, one object
-    per line.  This is what ``helix evolve --trace`` uses.  Streaming (rather
-    than buffering and dumping at the end) keeps a long run's memory bounded.
+    per line.  This is what ``helix evolve --trace`` uses.  Streaming rather
+    than buffering at the end keeps a long run's memory bounded.
+
+Traces are written to be shared: an operator attaches one to a bug report
+without reading it first.  A record may therefore carry only ids, numbers,
+clocks and code-controlled tags.  Exception messages, command lines,
+environment and absolute filesystem paths must never reach one — hence
+``error_type`` holding the exception *class* and never its text, and ``source``
+being repository-relative and dropped entirely for a caller outside the tree.
 
 A JSONL trace is framed, and the framing is what makes it safe to compute
 timings from:
@@ -26,27 +33,33 @@ timings from:
   only after every accepted event has reached the file and no write error was
   recorded.
 
-Every record is written and ``flush()``ed inline, under one lock, by the thread
-that emitted it, so a process killed at any instant leaves on disk exactly the
-records it had already emitted, whole — the flush is what stops a kill from
-truncating a line mid-way.  It is a ``flush()``, not an ``fsync()``: a
-machine-level power loss can still lose the tail.  Either way the footer is the
-authority, and the footer is absent unless the run finished cleanly.
-:func:`load_jsonl_trace` enforces both ends and raises
-:class:`TraceIncompleteError` on a trace that was cut short, so a consumer
-cannot silently total a truncated prefix.
+The footer is the point of the framing: the failure being designed against is a
+truncated trace that still *looks* complete, because a killed run leaves a
+prefix of perfectly well-formed event lines.  :func:`load_jsonl_trace` enforces
+both ends and raises :class:`TraceIncompleteError`, so a consumer cannot
+silently total that prefix.
 
-Writing inline rather than handing events to a background writer is a
-deliberate sizing decision, not an oversight.  One generation emits on the
-order of fifty events while taking minutes of agent-backend and evaluator
-wall clock, and ``write()+flush()`` of one record costs single-digit
-microseconds; a queue and a writer thread would buy a rounding error on every
-span this file exists to measure, and would cost the guarantee that an event
-that has been emitted is already on disk.
+Every record is written and ``flush()``ed inline, under one lock, by the thread
+that emitted it: once ``emit`` returns, its record is on disk.  Nothing is
+buffered and there is no writer thread, so a process killed at any instant
+leaves behind exactly the records it had already emitted.  Do not reintroduce a
+queue or a background writer — that trades this guarantee for throughput the
+trace does not need, at tens of records per generation against minutes of
+agent-backend and evaluator wall clock.
+
+It is a ``flush()``, not an ``fsync()``: a machine-level power loss can still
+lose the tail.  Either way the footer is absent unless the run finished
+cleanly, which is what makes the loss detectable.
 
 All timestamps in the file are **seconds** (floating point).  ``wall_time`` is
 Unix epoch seconds and ``monotonic`` is a process-local monotonic reading;
 durations must be computed from ``monotonic`` only.
+
+Every ``*_END`` event carries ``outcome``, and ``"ok"`` is the single spelling
+of success across all of them; any other value is a failure, narrowed by
+``error_type`` where the exception class is known.  Keep it that way: a
+consumer generalises the vocabulary it sees on one span to the rest, and a
+second spelling of success turns that into a silently wrong total.
 
 Spans nest: a ``PROPOSAL_START``/``PROPOSAL_END`` pair contains the
 ``MUTATE_*`` and ``EVAL_*`` pairs of the slot it covers, a
@@ -54,9 +67,8 @@ Spans nest: a ``PROPOSAL_START``/``PROPOSAL_END`` pair contains the
 generation, and a ``VALIDATE_*`` pair contains the ``EVAL_*`` pairs of the
 evaluator runs it drives.  Totalling spans of different levels therefore
 double-counts; compare one level at a time.  ``PROPOSAL_BATCH_*`` (concurrent)
-and ``VALIDATE_*`` (sequential) are siblings and never overlap, which is what
-makes "how much of the generation is the sequential validation stage?" a
-question this trace can answer.
+and ``VALIDATE_*`` (sequential) are siblings and never overlap, so their totals
+partition a generation rather than double-counting it.
 
 Event points are sprinkled throughout ``evolution.py``, ``eval_cache.py``,
 ``executor.py``, ``batch_sampler.py``, and ``mutator.py``.  The GEPA
@@ -117,12 +129,11 @@ class TraceWriteError(RuntimeError):
 
 
 class TraceIncompleteError(RuntimeError):
-    """A trace read back from disk is missing its header or its footer.
+    """A trace read back from disk is not framed as a complete run.
 
-    Raised by :func:`load_jsonl_trace`.  A trace that hits this is not a
-    slightly-short trace to be used with care: the run it came from was killed
-    or its writer failed, so any span total taken from it is missing an unknown
-    amount of time and must be discarded.
+    Raised by :func:`load_jsonl_trace`.  Such a trace must be discarded, not
+    trimmed and used with care: an unknown number of events is missing, so
+    every span total taken from it under-reports by an unknown amount.
     """
 
 
@@ -135,12 +146,11 @@ class Event:
     hit_ids: list[Any] | None = None
     miss_ids: list[Any] | None = None
     decision: str | None = None
-    # Human-readable label for *why* an event was emitted (e.g., the
+    # Code-controlled tag for *why* an event was emitted (e.g., the
     # ``charge_evaluation`` source: "seed_val", "merge_subsample",
-    # "mutation_minibatch_gate", ...).  Distinct from ``decision``,
-    # which carries iteration-level accept/reject text, and from
-    # ``source`` below, which is reserved for the ``"file:line"`` stack
-    # frame captured when enabled.
+    # "mutation_minibatch_gate", ...).  Never free text.  Distinct from
+    # ``decision``, which carries the iteration-level accept/reject label, and
+    # from ``source`` below, which holds the emitting ``"file:line"``.
     reason: str | None = None
     score: float | None = None
     budget_delta: int | None = None
@@ -157,6 +167,10 @@ class Event:
     merge_counter: int | None = None
     merge_invocations: int | None = None
     n_proposals: int | None = None
+    # Terminal status of a ``*_END`` span: "ok" on success, anything else a
+    # failure.  ``error_type`` narrows a failure to an exception class name and
+    # nothing more -- never the exception's message, which routinely carries an
+    # evaluator command line or its output.
     outcome: str | None = None
     error_type: str | None = None
     source: str | None = None  # repository-relative "file:line"
@@ -170,8 +184,8 @@ class Event:
     # duration.  ``monotonic`` is ``time.monotonic()``: meaningless as an
     # absolute instant (its epoch is arbitrary and process-local) but
     # guaranteed non-decreasing, so START/END deltas computed from it are
-    # trustworthy.  Recording both costs 16 bytes and removes the choice
-    # between "correlatable" and "correct".
+    # trustworthy.  Both are recorded so a consumer never has to choose between
+    # "correlatable" and "correct".
     wall_time: float = field(default_factory=time.time)
     monotonic: float = field(default_factory=time.monotonic)
     # Emits arrive from proposal-worker threads (``run_evaluator`` emits
@@ -213,9 +227,9 @@ def _helix_version() -> str:
 def _event_to_dict(event: Event) -> dict[str, Any]:
     """JSON-ready mapping for *event*, omitting fields left at ``None``.
 
-    Dropping the unset optionals matters: ``Event`` carries ~25 mostly-None
-    fields and a long run emits a lot of them.  Consumers should treat a
-    missing key as None.
+    A consumer must read a missing key as ``None``: 25 of ``Event``'s 29 fields
+    are optional and most are unset on any given event, so emitting them would
+    be almost all of the file.
     """
     out: dict[str, Any] = {}
     for f in dataclass_fields(event):
@@ -246,8 +260,8 @@ class TraceBus:
         self._written = 0
         # Set by whichever thread first fails to record an event -- a write
         # error, a malformed emit -- and read at close to decide whether the
-        # run may be stamped complete.  Guarded rather than left to attribute
-        # atomicity so "first error wins" is actually first-error-wins.
+        # run may be stamped complete.  Keep the lock: bare attribute
+        # assignment would let a later, less informative error win the race.
         self._error_lock = threading.Lock()
         self._writer_error: TraceWriteError | None = None
         self._repo_root = Path(__file__).resolve().parents[2]
@@ -266,7 +280,12 @@ class TraceBus:
             return self._writer_error
 
     def _source_for_caller(self) -> str | None:
-        """Return a stable repository-relative caller location, if known."""
+        """Return a stable repository-relative caller location, if known.
+
+        Called only from :meth:`emit`, and the frame depth below is counted
+        from there: a helper inserted between the two would silently start
+        reporting the wrong line.
+        """
         frame = sys._getframe(2)
         code = frame.f_code
         source_base = self._source_bases.get(code)
@@ -275,8 +294,10 @@ class TraceBus:
                 filename = Path(code.co_filename).resolve()
                 source_base = filename.relative_to(self._repo_root).as_posix()
             except (OSError, ValueError):
-                # Never serialize a machine-local path from a plugin or an
-                # ad-hoc evaluator.  The source field is optional provenance.
+                # A caller outside the repository -- a plugin, an ad-hoc
+                # evaluator -- would only resolve to a machine-local absolute
+                # path, which must not reach a file operators share.  Provenance
+                # is optional; leaking someone's home directory is not.
                 source_base = None
             self._source_bases[code] = source_base
         if source_base is None:
@@ -286,11 +307,9 @@ class TraceBus:
     def _write_record(self, sink: IO[str], payload: dict[str, Any]) -> bool:
         """Write one whole line and push it to the OS.  True if it landed.
 
-        The ``flush()`` is per record, deliberately: a SIGKILL cannot leave a
-        half-written line behind, and cannot swallow a batch of records that a
-        consumer would then never know were missing.  ``flush()`` reaches the
-        OS, not the platter: this survives the process dying, not the machine
-        dying.  Callers hold ``_sink_lock``.
+        Flushing per record is what bounds the loss from an abrupt kill to the
+        one record still in flight; everything ``emit`` has already returned
+        from is on disk.  Callers hold ``_sink_lock``.
         """
         try:
             sink.write(json.dumps(payload, default=str) + "\n")
@@ -306,18 +325,13 @@ class TraceBus:
     def emit(self, type: EventType, **fields: Any) -> None:
         """Record one event.  Never raises while a JSONL sink is attached.
 
-        Instrumentation must not be able to end a real run, so with a sink
-        attached any failure here — an unknown field name, a full disk — is
-        turned into a recorded error: the run continues, and the trace is
+        Instrumentation must not be able to end a run it is only observing, so
+        with a sink attached any failure here — an unknown field name, a full
+        disk — becomes a recorded error: the run carries on, and the trace is
         denied its ``RUN_COMPLETE`` footer so nobody can time from it.  With no
-        sink (the in-memory :meth:`record` path used by the differential
-        harness and the unit tests) the exception is left to propagate, because
-        there is no file to reject and a silently dropped event would only show
-        up as a mysterious assertion failure.
-
-        Returning from this method with a sink attached means the event is on
-        disk, whole.  That is what makes the surviving prefix of a killed run
-        trustworthy as far as it goes.
+        sink (the in-memory :meth:`record` path) the exception propagates
+        instead: there is no file to reject, and a silently dropped event would
+        surface only as a mysterious assertion failure.
         """
         if not self.enabled:
             return
@@ -363,18 +377,13 @@ class TraceBus:
     def write_jsonl(self, path: str | Path) -> Iterator[Path]:
         """Enable the bus and stream events to *path* as JSON Lines.
 
-        Each emitting thread writes and flushes its own record under one lock,
-        so an event that ``emit`` has accepted is already on disk.  A write
-        failure marks the stream incomplete and raises :class:`TraceWriteError`
-        at close.  Yields the requested path.
+        Writes the header, then the events, then a ``RUN_COMPLETE`` footer —
+        the last only if no write failed.  A write failure raises
+        :class:`TraceWriteError` at close.  Yields the requested path.
 
-        The file is framed: a header record first, then the events, then a
-        ``RUN_COMPLETE`` footer written only when nothing failed.  If this
-        context manager never runs its exit — the process is killed, the
-        machine goes down — the footer is simply absent, and
-        :func:`load_jsonl_trace` refuses the file.  That is the whole point:
-        the failure mode being designed against is a truncated trace that still
-        *looks* complete.
+        The footer is written on the way out, so it is absent whenever this
+        exit does not run at all: a killed process, a downed machine.
+        :func:`load_jsonl_trace` refuses such a file.
         """
         target = Path(path)
         try:
@@ -446,8 +455,7 @@ def load_jsonl_trace(path: str | Path) -> tuple[dict[str, Any], list[dict[str, A
     ``RUN_COMPLETE`` footer.  Raises :class:`TraceIncompleteError` if the file
     is empty, does not begin with a header record, does not end with a
     ``RUN_COMPLETE`` footer, carries a schema version this code does not
-    understand, or contains a line that is not valid JSON — every way a run
-    that was killed mid-write shows up on disk.
+    understand, or contains a line that is not valid JSON.
 
     A consumer that wants a *usable* trace should call this rather than reading
     the lines itself: a killed run leaves a prefix of perfectly well-formed
@@ -476,8 +484,8 @@ def load_jsonl_trace(path: str | Path) -> tuple[dict[str, Any], list[dict[str, A
     header = records[0]
     if header.get("record") != HEADER_RECORD:
         raise TraceIncompleteError(
-            f"Trace {target} does not start with a {HEADER_RECORD!r} record; it "
-            "was not written by this version of HELIX and cannot be trusted."
+            f"Trace {target} does not start with a {HEADER_RECORD!r} record, "
+            "so it cannot be read as a HELIX trace."
         )
     if header.get("schema_version") != TRACE_SCHEMA_VERSION:
         raise TraceIncompleteError(
@@ -490,7 +498,7 @@ def load_jsonl_trace(path: str | Path) -> tuple[dict[str, Any], list[dict[str, A
         raise TraceIncompleteError(
             f"Trace {target} has no {RUN_COMPLETE_RECORD!r} footer: the run was "
             "killed or its trace writer failed, so an unknown number of events "
-            "is missing. Timings taken from it would be wrong."
+            "is missing. Discard it rather than totalling the prefix."
         )
     if footer.get("run_id") != header.get("run_id"):
         raise TraceIncompleteError(

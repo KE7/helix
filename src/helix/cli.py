@@ -611,17 +611,10 @@ def sandbox_logout(
     default=None,
     type=click.Path(dir_okay=False, path_type=Path),
     help=(
-        "Write a JSON Lines trace of the run to this path (one event per "
-        "line, all timestamps in seconds). Every record is written and "
-        "flushed before the emitting call returns, so a killed run leaves "
-        "whole lines behind. The file opens with a header "
-        "record and ends with a run_complete record written only on a clean "
-        "drain; a trace missing that footer must be discarded rather than "
-        "trimmed. Every event carries a wall-clock timestamp, a monotonic "
-        "timestamp, and the id of the emitting thread, so MUTATE_START/"
-        "MUTATE_END, EVAL_START/EVAL_END, PROPOSAL_START/PROPOSAL_END and "
-        "VALIDATE_START/VALIDATE_END pairs can be matched per worker. Off by "
-        "default."
+        "Write a JSON Lines trace of the run to this path: one event per "
+        "line, all timestamps in seconds. A complete trace ends with a "
+        "run_complete record; one without that footer is missing an unknown "
+        "number of events and must be discarded, not trimmed. Off by default."
     ),
 )
 def evolve(
@@ -700,16 +693,15 @@ def evolve(
     try:
         with ExitStack() as stack:
             if trace_path is not None:
-                # Enabling the bus for the whole run is the only thing that
-                # turns the existing instrumentation into an audit trail;
-                # without --trace it stays off and emit() short-circuits.
+                # --trace is the only thing that enables the bus for a real
+                # run; without it every emit() short-circuits.
                 target = stack.enter_context(TRACE.write_jsonl(trace_path))
                 logger.info("Tracing enabled — writing JSONL events to %s", target)
             run_evolution(config, project_root, base_dir)
     except TraceWriteError as exc:
-        # A partial trace must never be presented as timing evidence.  This
-        # covers an invalid destination before evolution starts and an
-        # asynchronous writer failure discovered while closing the stream.
+        # Fail loudly rather than leave a partial trace to be mistaken for
+        # timing evidence.  Covers both an unusable destination, before
+        # evolution starts, and a write failure discovered while closing.
         logger.error("Trace unavailable: %s", exc)
         print_error(str(exc))
         raise SystemExit(2)
