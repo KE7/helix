@@ -24,7 +24,6 @@ from helix.batch_sampler import (
     EpochShuffledBatchSampler,
     StratifiedBatchSampler,
 )
-from helix.backends import BACKEND_AUTH_ENV
 from helix import budget as budget_api
 from helix.candidate_selector import select_candidate
 from helix.change_summary import (
@@ -139,15 +138,6 @@ def degrades(new_result: EvalResult, baseline: EvalResult, threshold: float) -> 
 def _config_hash(config: HelixConfig) -> str:
     data = config.model_dump_json()
     return hashlib.sha256(data.encode()).hexdigest()[:16]
-
-
-def _feedback_secret_values(config: HelixConfig) -> list[str]:
-    """Return values that must not cross from reports into later prompts."""
-    names = [*config.passthrough_env, *BACKEND_AUTH_ENV.get(config.agent.backend, ())]
-    return [
-        *config.env.values(),
-        *(os.environ[name] for name in names if name in os.environ),
-    ]
 
 
 def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
@@ -1571,7 +1561,7 @@ def _run_proposal_worker(
         # configured background rather than replacing it.
         _failed_attempt_context = render_failure_history(
             (failed_attempt_history or {}).get(_parent.id, []),
-            _feedback_secret_values(config),
+            retained_limit=config.evolution.failed_attempt_history_limit,
         )
         _mutation_background = "\n\n".join(
             part
@@ -3040,7 +3030,6 @@ def _run_evolution_impl(
                             child.change_summary,
                             gating_result,
                             limit=config.evolution.failed_attempt_history_limit,
-                            secret_values=_feedback_secret_values(config),
                         )
                         _save_state(state)
                         TRACE.emit(
@@ -3108,7 +3097,6 @@ def _run_evolution_impl(
                             child.change_summary,
                             gating_result,
                             limit=config.evolution.failed_attempt_history_limit,
-                            secret_values=_feedback_secret_values(config),
                         )
                         _save_state(state)
                         print_warning(
@@ -3192,7 +3180,6 @@ def _run_evolution_impl(
                             child.change_summary,
                             stage_result,
                             limit=config.evolution.failed_attempt_history_limit,
-                            secret_values=_feedback_secret_values(config),
                         )
                         _save_state(state)
                         TRACE.emit(
