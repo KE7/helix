@@ -626,8 +626,7 @@ class TestCandidateSelectionConfig:
     )
     def test_strategy_epsilon_top_k_matrix(self, strategy, epsilon, top_k, error_match):
         """Full strategy x epsilon-presence x top_k-presence matrix,
-        including both-knobs-set cases for every strategy (not just the
-        owning ones — see the individual tests above for those)."""
+        including the cases where both knobs are set."""
         kwargs: dict[str, object] = {"candidate_selection_strategy": strategy}
         if epsilon is not None:
             kwargs["candidate_selection_epsilon"] = epsilon

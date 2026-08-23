@@ -501,17 +501,17 @@ class EvolutionConfig(BaseModel):
         default="pareto",
         description=(
             "How to pick the parent candidate for each mutation proposal. "
-            "Naming credit: GEPA's ``gepa.strategies.candidate_selector`` "
-            "(gepa-ai/gepa) implements the same four strategies.\n\n"
-            '- ``"pareto"`` (default): today\'s HELIX behaviour, unchanged '
-            "— frequency-weighted draw over the dominated-stripped per-key "
-            "Pareto frontier (``ParetoFrontier.select_parent``).\n"
+            "The same four strategies GEPA provides in "
+            "``gepa.strategies.candidate_selector`` (gepa-ai/gepa).\n\n"
+            '- ``"pareto"`` (default): frequency-weighted draw over the '
+            "dominated-stripped per-key Pareto frontier "
+            "(``ParetoFrontier.select_parent``).\n"
             '- ``"current_best"``: deterministic argmax over each '
             "candidate's aggregate validation score; ties resolve to the "
             "earliest-discovered candidate.\n"
             '- ``"epsilon_greedy"``: with probability '
             "``candidate_selection_epsilon``, pick uniformly at random from "
-            "the WHOLE evaluated pool (not just the frontier); otherwise "
+            "the whole evaluated pool, not just the frontier; otherwise "
             'fall back to ``"current_best"``.\n'
             '- ``"top_k_pareto"``: restrict the Pareto frontier draw to the '
             "top ``candidate_selection_top_k`` candidates by score; falls "
@@ -525,10 +525,9 @@ class EvolutionConfig(BaseModel):
             "Random-exploration probability for "
             "``candidate_selection_strategy=\"epsilon_greedy\"``; must be "
             "in [0.0, 1.0]. Required for that strategy and rejected for the "
-            "others, where it would have no effect. HELIX requires this to "
-            "be set explicitly rather than silently defaulting — GEPA's "
-            "own ``EpsilonGreedyCandidateSelector`` default is 0.1, noted "
-            "here for reference only."
+            "others, where it would have no effect. There is no default: "
+            "the exploration rate is a search-budget decision and is stated "
+            "per run. GEPA's ``EpsilonGreedyCandidateSelector`` uses 0.1."
         ),
     )
     candidate_selection_top_k: int | None = Field(
@@ -538,10 +537,10 @@ class EvolutionConfig(BaseModel):
             "``candidate_selection_strategy=\"top_k_pareto\"``: only the "
             "top-K candidates by score are eligible for the Pareto "
             "frontier draw. Required for that strategy (must be >= 1) and "
-            "rejected for the others, where it would have no effect. HELIX "
-            "requires this to be set explicitly rather than silently "
-            "defaulting — GEPA's own ``TopKParetoCandidateSelector`` "
-            "default is 5, noted here for reference only."
+            "rejected for the others, where it would have no effect. There "
+            "is no default: K trades exploration against exploitation and "
+            "is stated per run. GEPA's ``TopKParetoCandidateSelector`` "
+            "uses 5."
         ),
     )
 
