@@ -22,8 +22,9 @@ jobs:
   docker-integration:
     # Real-Docker proof that per-candidate auth volumes actually isolate
     # credentials. Every credential used is synthetic, so this job needs no
-    # backend secrets; the runner images are anonymously pullable from GHCR
-    # and the seeding helper runs in the agent's own backend runner image.
+    # backend secrets: the runner images are anonymously pullable from GHCR,
+    # and the seeding helper runs in the backend's own runner image rather
+    # than introducing a third-party one.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

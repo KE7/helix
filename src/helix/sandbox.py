@@ -230,8 +230,8 @@ def _create_candidate_auth_volume(agent_backend: str) -> CandidateAuthVolume:
         raise ValueError(f"No credential manifest for backend: {agent_backend}")
     name = _candidate_auth_volume_name(agent_backend)
     existing = _run_docker(["docker", "volume", "inspect", name], check=False)
-    # Docker prints a JSON object on a real successful inspect.  The non-empty
-    # condition keeps lightweight command fakes from masquerading as a daemon.
+    # Only a real inspect payload counts as proof the name is taken: a zero
+    # exit code with no JSON object is not evidence a volume exists.
     if existing.returncode == 0 and '"Name"' in (existing.stdout or ""):
         raise RuntimeError(f"refusing to reuse existing candidate auth volume {name}")
     labels = ((_CANDIDATE_AUTH_LABEL, "true"), ("helix.auth.backend", agent_backend))
@@ -284,8 +284,12 @@ def _seed_command(agent_backend: str) -> str:
 
 
 def _seed_candidate_auth_volume(volume: CandidateAuthVolume, image: str) -> None:
-    """Copy declared credential files from the login volume to *volume*, using
-    the caller-resolved, in-trust-boundary backend runner *image*."""
+    """Copy the manifest's credential files from the login volume to *volume*.
+
+    *image* is the backend's own runner image, resolved by the caller. The seed
+    helper must run inside the trust boundary HELIX already accepts for that
+    backend; it must never introduce a third-party image of its own.
+    """
     args = [
         "docker",
         "run",

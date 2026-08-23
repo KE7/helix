@@ -106,9 +106,9 @@ The backend result JSON includes normalized usage metadata and, for Claude Code,
 Docker sandbox mode HELIX bind-mounts a candidate-local host directory over
 Claude's in-container transcript path
 (`/home/node/.claude/projects/-workspace/<session_id>.jsonl`), so the agent
-container writes the transcript straight to that bind instead of to the
-persistent backend auth volume; HELIX then syncs it from the bind into the
-candidate worktree along with the rest of the workspace. Codex structured
+container writes the transcript straight to that bind; HELIX then syncs it
+into the candidate worktree along with the rest of the workspace. No
+credential volume is involved. Codex structured
 stdout is preserved in `.helix_backend_stdout.txt`; durable Codex transcript
 copying is an extension point because HELIX does not currently know a stable
 Codex transcript path.

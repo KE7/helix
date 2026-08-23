@@ -64,12 +64,14 @@ DEFAULT_BACKEND_IMAGES: dict[str, str] = {
 AGENT_LOGIN_IDENTITY_ENV: tuple[str, ...] = ("USER", "LOGNAME")
 """Non-secret identity variables preserved for host/unsandboxed agent CLIs.
 
-Agent CLIs resolve stored interactive credentials independently. Claude Code
-on macOS, for example, needs ``USER`` to locate its Keychain entry even when
-``HOME`` is present. ``LOGNAME`` is harmless, conventional on Unix-like
-systems, and provides compatibility for CLIs that use that spelling instead.
-Keep this narrowly scoped to agent subprocesses: evaluator environments retain
-their existing strict allowlist.
+Agent CLIs resolve stored interactive credentials on their own, and some need
+to know who the host user is to do it: Claude Code on macOS, for example, uses
+``USER`` to locate its Keychain entry even when ``HOME`` is set. ``LOGNAME`` is
+the conventional Unix spelling of the same thing and costs nothing to include.
+
+Host path only. A sandboxed agent gets neither name: its credential is a file
+under a tmpfs ``HOME``, so there is no keychain for an identity to unlock.
+Evaluator environments keep their existing strict allowlist.
 """
 
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {

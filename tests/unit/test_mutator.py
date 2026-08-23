@@ -1310,16 +1310,13 @@ class TestInvokeClaudeCode:
 
     # -- Positive sandbox-path coverage -----------------------------------
     #
-    # The tests above (and every other sandbox test in this class) assert
-    # what must NOT reach a sandboxed agent. None of them exercise the
-    # SANDBOXED path with a configured ``[env]``/``passthrough_env`` value
-    # and assert it actually arrives — the exact promise documented in
-    # config.py's ``HelixConfig.env``/``passthrough_env`` docstrings ("...
-    # into evaluator and agent subprocesses") and in the ``helix init``
-    # template. These four tests close that gap: fixed_env and
-    # passthrough_env, under both sandbox.auth = "volume" and
-    # sandbox.auth = "env". They use the init template's own documented
-    # example value, ANTHROPIC_BASE_URL = "https://model-service.example.invalid/v1".
+    # The tests above pin what must NOT reach a sandboxed agent. The four
+    # below pin the other half of the contract: a value the configuration
+    # declares MUST arrive, which is what ``HelixConfig.env`` /
+    # ``passthrough_env`` promise ("into evaluator and agent subprocesses")
+    # and what the ``helix init`` template tells users to expect. Both
+    # transports (fixed_env, passthrough_env) under both auth modes, using
+    # the init template's own example value.
 
     def test_sandbox_volume_auth_forwards_configured_fixed_env(self, mocker):
         """[env]-configured values must reach the sandboxed agent under auth='volume'."""

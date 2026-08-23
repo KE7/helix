@@ -209,10 +209,10 @@ def test_volume_auth_seeds_a_private_allowlisted_volume_and_never_mounts_source(
         agent_backend="codex",
     )
 
-    # The seed helper is the container that mounts the login volume
-    # read-only at /source; it now runs in the same backend runner image as
-    # the agent it is seeding for, so the mount (not the image) identifies
-    # it uniquely.
+    # The seed helper runs in the same backend runner image as the agent it
+    # seeds for, so the image cannot distinguish the two containers. What
+    # identifies the helper is its read-only /source mount of the login
+    # volume -- the one mount no agent container is ever allowed to have.
     seed = next(
         call for call in calls if any(item.endswith(":/source:ro") for item in call)
     )

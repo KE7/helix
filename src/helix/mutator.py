@@ -721,15 +721,13 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
 
 
 def _agent_passthrough_env(passthrough_env: list[str] | None) -> list[str]:
-    """Return configured passthrough values plus safe login identity values.
+    """Return configured passthrough values plus the login-identity names.
 
-    Host/unsandboxed agents only: the login-identity names are keychain-shaped,
-    and a sandboxed agent has a tmpfs ``HOME`` and no keychain to unlock.
-
-    Stored-login resolution is a first-class agent authentication path, not a
-    feature users should have to repair by discovering an OS-specific variable.
-    Values named here are non-secret and apply only to agent CLIs; evaluator
-    subprocesses still receive their original strict environment.
+    Host and unsandboxed agents only. Those names are non-secret, and they
+    exist so that a stored interactive login resolves without the user having
+    to discover an OS-specific variable. A sandboxed agent needs neither: its
+    credential is a file under a tmpfs ``HOME``, not a keychain entry to
+    unlock. Evaluator subprocesses keep their original strict environment.
     """
     return list(dict.fromkeys([*AGENT_LOGIN_IDENTITY_ENV, *(passthrough_env or [])]))
 
@@ -769,21 +767,19 @@ def _sandbox_agent_environment(
 ) -> dict[str, str]:
     """Build the deliberately small environment for a sandboxed agent.
 
-    The config-declared ``[env]`` (``fixed_env``) and ``passthrough_env``
-    values are applied in both auth modes — this is the same "read what the
-    config declares" transport the evaluator sidecar and the unsandboxed
-    agent already use, and it is what config.py's ``HelixConfig.env`` /
-    ``passthrough_env`` docstrings promise ("evaluator and agent
-    subprocesses"). Nothing here is inferred from ambient host state: a
-    value only reaches the agent because the caller explicitly named it in
-    ``passthrough_env`` or gave it a value in ``fixed_env``.
+    Config-declared ``[env]`` (``fixed_env``) and ``passthrough_env`` values
+    apply in both auth modes, matching what those settings promise everywhere
+    else. Nothing here is inferred from ambient host state: a value reaches the
+    agent only because the caller named it in ``passthrough_env`` or gave it a
+    value in ``fixed_env``.
 
-    ``auth_env_allow`` is a separate, additional gate that applies only
-    under ``auth = "env"``: for names listed there, an ambient host value
-    may also be pulled in as the credential HELIX otherwise gets from the
-    login volume. It does not restrict the general ``fixed_env`` /
-    ``passthrough_env`` transport above — it only widens what a
-    caller-declared credential name is allowed to resolve to.
+    ``auth_env_allow`` is a separate, additional gate that applies only under
+    ``auth = "env"``. For a name listed there, an ambient host value may also
+    resolve as the credential that ``auth = "volume"`` would otherwise seed
+    from the login volume. It does not restrict the general ``fixed_env`` /
+    ``passthrough_env`` transport above; it only widens what an
+    already-declared credential name is allowed to resolve to. A name listed
+    in ``auth_env_allow`` alone never reaches the agent.
     """
     env = _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
     if sandbox.auth != "env":

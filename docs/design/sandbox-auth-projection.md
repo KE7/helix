@@ -35,28 +35,43 @@ candidate can mount that volume and it is destroyed at cleanup.
 - It is not a mechanism for returning a refreshed credential to the login
   volume.  That limitation is stated in [Rotation](#rotation-and-its-open-question).
 
-## Why a shared writable auth directory is retired
+## Why the agent auth store must be per-candidate
 
-A writable auth directory cannot be made candidate-independent with a denylist:
-OAuth rotation requires write and rename authority in the credential directory,
-so an agent can create an unenumerated file which a later agent reads.
-Resetting a *single* shared directory between samples can address sequential
-residue, but cannot address P×N candidates that run at the same time.
+This is the constraint the rest of the document follows from.
 
-Per-backend constraints under the retired shared-store design:
+An auth directory shared by more than one candidate cannot be made
+candidate-independent by enumerating what to clear between candidates.  OAuth
+rotation needs write and rename authority in the credential directory, so a
+candidate can leave behind a file the clearing list does not know about, and
+the next candidate to mount that directory reads it.  Clearing a *single*
+shared directory between samples addresses sequential residue at best; it
+cannot address P×N candidates that run at the same time.
 
-| Backend | Finding under the retired shared-store design |
+Mounting one shared login volume into every agent container is removed as of
+this document, not merely discouraged.  Anyone running a configuration where
+agent containers still mount `helix-auth-<backend>` should move to the
+per-candidate mechanism below.
+
+Keeping a shared store and relocating the per-run state away from the
+credential was investigated as the alternative.  It does not survive contact
+with any of the five backends: either the knob that moves the state moves the
+credential with it, or the split was never demonstrated.
+
+| Backend | Can the credential be split from the state written beside it? |
 | --- | --- |
-| Claude | Per-run state lives beside the credential; it cannot be relocated as a split store. |
-| Gemini | Per-run state lives beside the credential; its available home knob moves the credential too. |
-| Cursor | A config/data split looks plausible but was not verified. Plausible is not an isolation proof. |
-| OpenCode | Its session DB shares the only relocation knob with the credential. |
-| Codex | Agent-memory databases do isolate: `CODEX_SQLITE_HOME` redirects them and leaves the shared directory untouched. Codex nevertheless fails on `models_cache.json` alone; it must not be described as leaking agent memory. |
+| Claude | No knob found that moves the per-run state without also moving the credential. |
+| Gemini | Same: the home knob available to us moves the credential too. |
+| Cursor | A config/data split looks plausible, but we did not demonstrate one. |
+| OpenCode | The relocation knob we found moves the session database and the credential together. |
+| Codex | Closest: its agent-memory databases *can* be redirected out of the shared directory.  `models_cache.json` is still written there, which is enough to defeat the split. |
 
-`models_cache.json` is carrying state: its presence and version change later
-control flow by skipping or refetching network work.  That result, and the
-structural writable-directory argument above, are sufficient reasons never to
-mount the login volume in an agent container again.
+State the Codex row precisely, because it is easy to repeat as something
+sharper than it is.  `models_cache.json` is a cache — not agent memory, not a
+credential.  It counts here only because it carries state whose presence and
+version change later control flow by skipping or refetching network work, and
+because it lands in the directory the split was supposed to leave empty.  That,
+plus the structural argument above, is why no agent container mounts the login
+volume.
 
 ## Credential-transfer options considered
 
@@ -65,7 +80,7 @@ the login volume visible to that candidate.
 
 | Option | Secret in agent env / Docker metadata | Agent-image requirement | Runtime-path impact | Rotation and isolation | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| (a) Base64 environment variable plus entrypoint | Yes: visible in `docker inspect`, PID 1 environment, and process listings until the entrypoint unsets it | Yes, per backend | Small | Per-candidate tmpfs gives good isolation; refreshed state dies with the container | Not a HELIX mechanism. An operator may arrange this inside their own image over an allowlisted `auth = "env"` variable; HELIX does not encode, name, decode, select, or document that arrangement as a path. |
+| (a) Base64 environment variable plus entrypoint | Yes: visible in `docker inspect`, PID 1 environment, and process listings until the entrypoint unsets it | Yes, per backend | Small | Per-candidate tmpfs gives good isolation; refreshed state dies with the container | Not a HELIX mechanism; see [Operator-owned image auth is outside the contract](#operator-owned-image-auth-is-outside-the-contract). |
 | (b) `docker create` → `docker cp` → `docker start` | No | No | High: replaces one `docker run` with create/copy/start, including stdin, output capture, timeout, and cleanup paths | Can isolate, but needs a helper/source copy and a short-lived host file | Do not choose |
 | (c) Candidate auth volume seeded from login volume | No secret in env or container metadata | No per-backend runner image | Moderate, localized to agent launch and cleanup | Writable private auth store; no shared mount; rotation is candidate-local | **Recommended** |
 | (d) Read-only bind of the credential file | No | No | Low only in the happy path | Cannot preserve credential-file rotation; parent-path ownership is also problematic | Reject |
@@ -94,17 +109,14 @@ meet normal CLI semantics even where a command tolerates it before expiry.
 
 ### Option (e): local credential image
 
-This option genuinely satisfies the isolation requirement.  Every candidate
-would start from the same read-only credential layer and can write only to its
-own container overlay; it receives no shared writable store.  Isolation is not
-the reason to reject it.
+Option (e) satisfies the isolation requirement: every candidate starts from the
+same read-only credential layer and can write only to its own container
+overlay, so it receives no shared writable store.  Nor is it slower — every
+candidate-time credential path in this table (image rebuild, container copy,
+volume seed) costs milliseconds against a mutation budget measured in tens of
+seconds.
 
-Latency is not the reason either.  Every candidate-time credential path in this
-table — image rebuild, container copy, volume seed — costs milliseconds against
-a mutation budget measured in tens of seconds, so avoiding candidate-time
-plumbing saves no meaningful mutation time.
-
-The baked design loses on lifecycle and at-rest exposure, not latency:
+It is rejected as the default on lifecycle and at-rest exposure:
 
 - The credential is recoverable from a local image layer by exporting or
   extracting layers.  `docker history` identifies the credential-bearing
@@ -136,7 +148,7 @@ current default:
 | --- | --- |
 | Per-user local derived image | This is option (e): no candidate-time copy, but local secret layers, cache retention, and a rotation/image-identity lifecycle. |
 | Long-lived credential sidecar | No supported common CLI protocol lets Claude, Codex, Cursor, Gemini, and OpenCode delegate their local credential lookup to a broker.  A new HTTPS/token proxy would be backend-specific, network-visible, and itself a long-lived shared stateful service.  It is a new auth product, not a smaller projection mechanism. |
-| Each candidate logs itself in | Not viable for interactive OAuth.  The installed Claude login help offers subscription/console, email, and SSO choices but no headless token input.  Codex offers `--device-auth` (user-mediated) and `--with-api-key` (a distinct explicit API-key path).  Cursor exposes `NO_OPEN_BROWSER`, which suppresses browser opening rather than supplying a credential.  Gemini's `-p` is headless prompting, not login; HELIX's login command remains interactive.  OpenCode exposes provider management but no verified generic non-interactive OAuth import. |
+| Each candidate logs itself in | Not viable for interactive OAuth.  At the CLI versions pinned by HELIX's runner images, Claude's login help offered subscription/console, email, and SSO choices but no headless token input; Codex offered `--device-auth` (user-mediated) and `--with-api-key` (a distinct explicit API-key path); Cursor's `NO_OPEN_BROWSER` suppresses browser opening rather than supplying a credential; Gemini's `-p` is headless prompting, not login; and OpenCode exposes provider management, but we found no generic non-interactive OAuth import.  Re-check against a current CLI before relying on this row. |
 
 The one non-interactive path found is Codex `--with-api-key`; it is an explicit
 environment/API-key workflow and remains covered by `auth = "env"`.  It does
@@ -191,11 +203,12 @@ uses relative paths only.  Initial candidates are:
 
 The mechanism is common; its manifest is backend-specific.  No backend needs a
 custom agent image merely to receive the credential.  The helper is one generic
-HELIX utility action, not five entrypoints; it must be pinned and tested like
-other runtime tooling.  A backend is not enabled
-for `auth = "volume"` until its manifest is confirmed by an authenticated
-candidate test.  In particular, Cursor's unverified split must not be promoted
-to a claim of readiness merely because a candidate volume would isolate it.
+HELIX utility action, not five entrypoints; it runs in the backend's own runner
+image, and must be pinned and tested like other runtime tooling.  A backend is
+not enabled for `auth = "volume"` until its manifest is confirmed by an
+authenticated candidate test.  Candidate-volume isolation is not itself
+evidence that a manifest is correct: a backend whose Readiness column above is
+not `Ready` still needs that test, however well the volume would isolate it.
 
 ## Operator-owned image auth is outside the contract
 
@@ -237,23 +250,18 @@ for named values already declared in `[env]`/`passthrough_env`.  It does not
 use that key as hidden plumbing for volume credentials.  Backend manifests and
 runtime cleanup are implementation details, not new user knobs.
 
-## Deletions and documentation to retain
+## What HELIX does not do to the agent environment
 
-The implementation removes:
+HELIX must not forbid, rename, or otherwise manipulate an environment variable
+it does not itself set.  There is accordingly no denylist of credential
+variable names and no per-variable policy branch: a name reaches the agent
+because the configuration named it, or it does not reach the agent at all.
+Warning when two credential forms are configured at once remains the right
+diagnostic for an ambiguous explicit-env configuration; refusing the run is
+not.
 
-- `VolumeModeUnsupportedError` and its long retired-mode remediation text;
-- the agent-execution paths that mount `helix-auth-<backend>`, including any
-  post-run transcript copy that remounts it;
-- `OAUTH_SUPPRESSING_ENV`;
-- `FORBIDDEN_AUTH_ENV_NAMES` and every policy branch that specially handles
-  `CLAUDE_CODE_OAUTH_TOKEN`.
-
-HELIX must not forbid or otherwise manipulate a variable it does not set.  The
-existing warning for both credential forms being present remains the right
-diagnostic for an ambiguous explicit-env configuration.
-
-Delete the retirement code, not the reason for structural isolation recorded in
-[Why a shared writable auth directory is retired](#why-a-shared-writable-auth-directory-is-retired).
+No agent-execution path mounts `helix-auth-<backend>` — including the post-run
+transcript path, which uses a per-candidate bind instead.
 
 ## Rotation and its open question
 
@@ -301,9 +309,8 @@ final Docker argv and live Docker objects, not merely on a helper function.
    changed record reaches the source volume.  Do not run the observer against
    the same grant.
 
-The value `auth = "volume"` names the credential source, not the old shared
-mount behavior. It still selects the projection above: HELIX copies the
-allowlisted credential files from the operator login volume into a fresh,
-per-candidate volume, and never mounts `helix-auth-<backend>` in an agent
-container. `auth = "env"` remains the separate explicit API-key mechanism and
-requires a non-empty `auth_env_allow`.
+`auth = "volume"` names the credential *source*: HELIX copies the allowlisted
+credential files from the operator login volume into a fresh per-candidate
+volume, and never mounts `helix-auth-<backend>` in an agent container.
+`auth = "env"` is the separate explicit API-key mechanism and requires a
+non-empty `auth_env_allow`.  There is no third mode.
