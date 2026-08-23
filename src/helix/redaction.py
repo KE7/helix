@@ -43,5 +43,5 @@ class DiagnosticRedactor:
 
 
 def redact_diagnostics(value: Any, secret_values: Iterable[object]) -> Any:
-    """Return a recursively redacted copy of diagnostic content."""
+    """Return a copy with each of ``secret_values`` replaced wherever it appears."""
     return DiagnosticRedactor.from_values(secret_values).redact(value)

@@ -1567,10 +1567,8 @@ def _run_proposal_worker(
 
     # ---- Step W4: LLM mutation ----
     try:
-        # Feed back what this parent already tried and had rejected.  Without a
-        # report, the next mutation from that parent loses feedback precisely
-        # when the agent was flakiest, so the retained reports are appended to
-        # the configured background rather than replacing it.
+        # What this parent already tried and had rejected, appended to the
+        # configured background rather than replacing it.
         _failed_attempt_context = render_failure_history(
             (failed_attempt_history or {}).get(_parent.id, []),
             _feedback_secret_values(config),

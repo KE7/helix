@@ -298,9 +298,10 @@ class EvolutionConfig(BaseModel):
     failed_attempt_history_limit: int = Field(
         default=3,
         description=(
-            "Maximum rejected mutation reports retained per parent. Three keeps "
-            "recent alternatives visible without crowding out current evaluation feedback; "
-            "set 0 to disable retention."
+            "Maximum rejected attempts retained per parent and replayed into "
+            "that parent's next mutation prompt. Set 0 to disable retention; "
+            "the maximum is 20. Larger values give the next agent more history "
+            "at the cost of prompt length."
         ),
     )
     perfect_score_threshold: float | None = None

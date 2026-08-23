@@ -54,8 +54,9 @@ class Candidate:
     parent_ids: list[str]
     operation: str
     usage: UsageStats = field(default_factory=UsageStats)
-    # A validated, untracked self-report captured after the mutation backend exits.
-    # It is deliberately not part of the candidate's git snapshot.
+    # The agent's validated self-report for this mutation, captured after the
+    # backend exits.  The artifact is ignored, so it never enters the
+    # candidate's git snapshot and never becomes candidate code.
     change_summary: dict[str, str] | None = None
 
 

@@ -1,20 +1,25 @@
-"""Bounded feedback from rejected mutation attempts.
+"""Per-parent memory of rejected mutation attempts.
 
-An agent may leave a small self-report in its worktree.  The report is useful
-only beside the evaluator's result, so invalid or incomplete records are kept
-out of later prompts rather than being guessed at or rendered alone.
+A mutating agent may leave a short self-report in its worktree.  When that
+attempt is rejected, the report is stored against the parent it came from,
+paired with the evaluator output that rejected it, and appended to the
+background of that parent's next mutation prompt.  A report reaches only its
+own parent, and only the most recent few are kept.
 
-Per-parent memory of rejected proposals, threaded informationally (not as a
-tabu list) into the next mutation prompt and bounded to the last N attempts,
-follows the design published by the GEPA project's maintainer in upstream
-issue gepa-ai/gepa#379 ("GEPA doesn't remember rejected proposals --
-re-sampling the same parent repeats the same failed mutation"), 2026-06-17,
-with a draft (unmerged, unreviewed) implementation in gepa-ai/gepa#384. This
-module is not the origin of that idea; see the module docstring's sibling
-functions below for where HELIX's implementation diverges (real evaluator
-output instead of a canned reject reason, store-side bounding in addition to
-render-side, secret redaction, and validation of untrusted persisted
-records).
+The pairing is load-bearing.  A self-report is an agent's account of what it
+meant to do, not a verified description of what it changed, so it carries
+weight only beside the evaluator result that judged it.  Records missing
+either half stay out of prompts rather than being rendered alone or guessed
+at.
+
+This is informational context, not a tabu list.  A rejected approach is not
+forbidden -- a candidate that lost on one minibatch can win on another -- so
+the history is shown to the next agent and never used to filter its choices.
+
+The design is the GEPA maintainer's, published on 2026-06-17 in gepa-ai/gepa
+issue #379 ("GEPA doesn't remember rejected proposals -- re-sampling the same
+parent repeats the same failed mutation"), with a draft implementation in
+gepa-ai/gepa#384.  The implementation here is independent.
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ _SUMMARY_FIELDS = ("intent", "approach", "expected_effect")
 
 
 def summary_file_instruction() -> str:
-    """Return the fixed, small protocol requested from mutation agents."""
+    """Return the prompt section asking the agent to write the summary artifact."""
     return (
         "\n\n## Change Summary\n"
         f"Before finishing, write `{CHANGE_SUMMARY_ARTIFACT_NAME}` in the workspace root. "
@@ -72,7 +77,7 @@ def _valid_summary(value: object) -> dict[str, str] | None:
 
 
 def capture_change_summary(worktree_path: str | Path) -> dict[str, str] | None:
-    """Read a valid bounded self-report, treating any problem as absence."""
+    """Return a validated self-report, treating any problem as its absence."""
     path = Path(worktree_path) / CHANGE_SUMMARY_ARTIFACT_NAME
     try:
         if not path.is_file() or path.stat().st_size > MAX_CHANGE_SUMMARY_BYTES:
@@ -145,7 +150,7 @@ def _valid_attempt(value: object) -> dict[str, Any] | None:
 def normalize_failure_history(
     value: object, limit: int
 ) -> dict[str, list[dict[str, Any]]]:
-    """Validate loaded/written history, dropping untrusted malformed records."""
+    """Keep only well-formed, within-limit records; persisted history is untrusted."""
     if not isinstance(value, dict) or limit < 0:
         return {}
     limit = min(limit, MAX_HISTORY_PER_PARENT)
@@ -194,40 +199,30 @@ def append_rejected_attempt(
         }
     )
     if attempt is None:
-        # Worst-case no-op: the rejection happened but nothing at all is
-        # kept for it -- make that loud rather than silent, since a reader
-        # of ``failed_attempt_history`` cannot otherwise tell the difference
-        # between "this parent has never been rejected" and "it has, but
-        # every record was unusable."
+        # Nothing is retained for this rejection, so this line is the only
+        # record that it happened.
         logger.warning(
-            "append_rejected_attempt: rejected attempt for parent %s produced "
-            "no usable record (summary and/or evaluator output failed "
-            "validation) -- this rejection leaves no trace in "
-            "failed_attempt_history and will not inform a future mutation "
+            "Rejected attempt for parent %s produced no usable record: the "
+            "aggregate score was not a finite number. Nothing about this "
+            "rejection is retained, and it will not inform a future mutation "
             "prompt for this parent.",
             parent_id,
         )
         return sanitized
     if attempt["summary"] is None or attempt["evaluator_output"] is None:
-        # Stored, but only half (or none) of the pair render_failure_history
-        # requires -- the record will sit in state.json forever without
-        # ever reaching a mutation prompt. Most commonly: the mutating
-        # agent did not write .agent_change_summary.json at all, which is
-        # normal for a backend that ignores the artifact instruction --
-        # but an operator asking "is this feature doing anything?" needs
-        # this surfaced, not swallowed.
+        # Stored, but unrenderable: a prompt needs both halves of the pair,
+        # so this record will sit in state.json without ever being used.
         logger.warning(
-            "append_rejected_attempt: rejected attempt for parent %s recorded "
-            "without a usable %s -- stored, but render_failure_history will "
-            "skip it.",
+            "Rejected attempt for parent %s stored without a usable %s, so it "
+            "will not reach a mutation prompt. Missing change summaries are "
+            "normal for a backend that does not write the summary artifact.",
             parent_id,
             "change summary" if attempt["summary"] is None else "evaluator output",
         )
     else:
         logger.info(
-            "append_rejected_attempt: rejected attempt for parent %s recorded "
-            "with a usable change summary and evaluator output "
-            "(score=%.6g).",
+            "Rejected attempt for parent %s recorded with both a change "
+            "summary and evaluator output (score=%.6g).",
             parent_id,
             attempt["score"],
         )
@@ -278,30 +273,25 @@ def render_failure_history(
             break
         blocks.append(block)
     if not blocks:
-        # An empty ``entries`` list (no rejections recorded for this parent
-        # yet) is normal and not logged. A *non-empty* list that renders to
-        # nothing is the no-op this instrumentation exists to catch: the
-        # feature has data but the mutation prompt gets none of it, and
-        # without this line nothing in the codebase would say so.
+        # Only a non-empty ``entries`` is worth warning about: a parent with
+        # no rejections recorded yet is the normal starting state.
         if total:
             logger.warning(
-                "render_failure_history: %d stored attempt(s) exist for this "
-                "parent but none were renderable (missing change summary or "
-                "evaluator output) -- the mutation prompt will carry no "
-                "failure-history context this turn.",
+                "%d stored attempt(s) were all unusable (each missing a "
+                "change summary or an evaluator output); this mutation "
+                "prompt will carry no failure-history context.",
                 total,
             )
         return ""
     if incomplete or truncated:
         logger.info(
-            "render_failure_history: rendered %d of %d stored attempt(s) "
-            "into the mutation prompt (%d unusable, byte-cap truncated=%s).",
+            "Rendered %d of %d stored attempt(s) into the mutation prompt "
+            "(%d unusable, size cap reached=%s).",
             len(blocks), total, incomplete, truncated,
         )
     else:
         logger.info(
-            "render_failure_history: rendered %d attempt(s) into the "
-            "mutation prompt.",
+            "Rendered %d attempt(s) into the mutation prompt.",
             len(blocks),
         )
     return header + "\n\n".join(reversed(blocks))

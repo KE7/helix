@@ -580,7 +580,7 @@ class TestGatingInEvolutionLoop:
     def test_second_mutation_from_different_parent_does_not_see_others_history(
         self, mocker, tmp_path, all_mocks
     ):
-        """End-to-end proof of the per-parent memory hand-off (audit A3):
+        """End-to-end proof of the per-parent memory hand-off.
 
         gen1: seed g0-s0 is mutated into g1-s1, which is REJECTED (its
         change summary and evaluator output are recorded against g0-s0).
