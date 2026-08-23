@@ -1158,7 +1158,12 @@ def _merge_partitioned_evaluations(
     fresh: EvalResult,
     fresh_ids: list[str],
 ) -> EvalResult:
-    """Merge stage and tail results from one live candidate lifecycle."""
+    """Compose staged and tail results into one result over *requested_ids*.
+
+    Per-id scores are carried across unchanged, so both halves must come from
+    the same candidate and the evaluator's per-id scores must not depend on
+    which ids were requested.
+    """
     assert set(carried_ids).isdisjoint(fresh_ids)
     assert set(requested_ids) == set(carried_ids) | set(fresh_ids)
 

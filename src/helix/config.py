@@ -409,20 +409,14 @@ class EvolutionConfig(BaseModel):
     retain_rejected_worktrees: bool = Field(
         default=False,
         description=(
-            "Whether to retain candidates rejected by the validation-stage "
-            "gate. Regardless of this setting, their identity, lineage, and "
-            "scores are saved in .helix/lineage.json and .helix/attempts/, "
-            "so the run can be reconstructed without candidate worktrees. "
-            "When enabled, each rejected candidate's complete worktree at "
-            "the point of rejection and its live "
-            "helix/<id> ref are kept; that ref keeps its snapshot commit "
-            "reachable. When disabled (the default), HELIX removes the "
-            "worktree and ref, making the commit eventually garbage-collectable, "
-            "so the rejected candidate's contents cannot be inspected even "
-            "though its rejection and scores remain. Retaining consumes one "
-            "full candidate repository per validation-stage rejection; size "
-            "depends on the project and evaluator. Run helix clean to reclaim "
-            "retained worktrees."
+            "Whether to keep the worktree of a candidate rejected by the "
+            "validation-stage gate, for inspecting what it changed. Either "
+            "way its identity, lineage, and scores are recorded in "
+            ".helix/lineage.json and .helix/attempts/. When disabled (the "
+            "default), the worktree and its helix/<id> ref are removed and "
+            "the candidate's contents become unrecoverable. Retaining costs "
+            "one full candidate repository per rejection; run helix clean to "
+            "reclaim them."
         ),
     )
     batch_sampler: Literal["epoch_shuffled", "stratified"] = Field(
