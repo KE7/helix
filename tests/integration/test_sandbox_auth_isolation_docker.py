@@ -38,7 +38,7 @@ of ``codex``'s ``auth.json``, ``cursor``'s ``cli-config.json``, ``gemini``'s
 ``oauth_creds.json``, and ``opencode``'s ``auth.json`` are deliberately not
 reproduced, because determining them would mean reading an operator's real
 credential file -- which the paragraph above forbids. Those four backends get a
-minimal, valid, non-empty JSON object (``_GENERIC_SYNTHETIC_SHAPE`` below)
+minimal, valid, non-empty JSON object (see ``_fake_credential`` below)
 instead. Everything these tests assert -- byte-for-byte isolation across
 candidate volumes, mode and ownership, manifest-only contents, and that a write
 to one candidate reaches neither another candidate nor the login volume --
