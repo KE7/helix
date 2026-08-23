@@ -104,9 +104,8 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "gemini": {
         "login": ["gemini", "--skip-trust"],
         "status": ["gemini", "--version"],
-        # The auth volume is mounted at /home/node and is shared across
-        # backends, so logout must scrub only Gemini's state directory rather
-        # than the whole home tree.
+        # The auth volume is mounted at /home/node, so logout must scrub
+        # only Gemini's state directory rather than the whole home tree.
         "logout": [
             "sh",
             "-lc",
