@@ -207,7 +207,9 @@ Sandbox behavior:
   call the sidecar, and exit.
 - The sidecar sees only what the runner sends over the endpoint.
 - Evaluator-runner changes are discarded.
-- Agent auth volume mounts at `/home/node`.
+- `/home/node` is a private tmpfs; the candidate credential volume mounts at
+  the backend's own auth directory beneath it (e.g. `/home/node/.claude` for
+  Claude), not at `/home/node` itself.
 - Evaluator containers do not get agent auth volumes.
 - `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX artifacts are excluded
   from sandbox workspace copies/sync-back.

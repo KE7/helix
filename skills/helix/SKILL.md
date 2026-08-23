@@ -48,9 +48,10 @@ evaluator-side changes are discarded. HELIX also starts a warm evaluator
 sidecar once per `helix evolve` on a private Docker network. Mutation agents
 run on the normal agent network and cannot reach the sidecar. Evaluator-runner
 containers run only during evaluation, join the private network, call the
-sidecar, print `HELIX_RESULT`, and exit. Agent containers get a persistent
-backend auth volume such as `helix-auth-claude`; candidate workspaces do not
-persist between mutations except through HELIX's accepted worktree sync.
+sidecar, print `HELIX_RESULT`, and exit. Agent containers get a private
+per-candidate credential volume seeded from the operator's `helix-auth-claude`
+login volume, which they never mount; candidate workspaces do not persist
+between mutations except through HELIX's accepted worktree sync.
 
 ## Security Boundary
 
