@@ -247,6 +247,7 @@ def _seed_command(agent_backend: str) -> str:
     """Return a fixed allowlist-only copy command for the seed helper."""
     statements = ["set -eu", "umask 077"]
     source_paths: list[str] = []
+    copy_statements: list[str] = []
     for source, target in AUTH_CREDENTIAL_MANIFEST[agent_backend]:
         source_path = f"/source/{source}"
         target_path = f"/destination/{target}"
@@ -258,13 +259,18 @@ def _seed_command(agent_backend: str) -> str:
                 f"test -s {shlex.quote(source_path)}",
                 f"test $(wc -c < {shlex.quote(source_path)}) -le 1048576",
                 f"test $(stat -c %a {shlex.quote(source_path)}) = 600",
+            ]
+        )
+        copy_statements.extend(
+            [
                 f"mkdir -p {shlex.quote(str(Path(target_path).parent))}",
                 f"cp {shlex.quote(source_path)} {shlex.quote(target_path)}",
                 f"chmod 600 {shlex.quote(target_path)}",
             ]
         )
     # Every manifest entry is a JSON credential record. Parsing before copying
-    # fails closed on a malformed source without exposing its contents.
+    # fails closed on a malformed source without exposing its contents, and
+    # without ever writing it into the candidate volume.
     statements.append(
         "python -c "
         + shlex.quote(
@@ -275,6 +281,7 @@ def _seed_command(agent_backend: str) -> str:
         + " "
         + " ".join(shlex.quote(path) for path in source_paths)
     )
+    statements.extend(copy_statements)
     # Claude's transcript bind is deliberately nested below the auth mount.
     # Pre-creating it as node avoids Docker synthesising a root-owned parent.
     if agent_backend == "claude":
