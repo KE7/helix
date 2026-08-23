@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,57 +39,167 @@ logger = logging.getLogger(__name__)
 # excludes that internal namespace, whereas this ignored agent artifact must
 # return from the sandbox after the backend exits.
 CHANGE_SUMMARY_ARTIFACT_NAME = ".agent_change_summary.json"
+# Whole-artifact size cap. A few short paragraphs of plain text fit easily in
+# 4 KiB; this is a round number picked to bound how much untrusted,
+# agent-authored JSON gets parsed per attempt, not a measured budget.
 MAX_CHANGE_SUMMARY_BYTES = 4 * 1024
+# Cap on the rendered evaluator-output JSON stored per attempt. Round number
+# sized to hold a few KB of stdout/stderr from a failing test without one
+# unusually verbose evaluator run dominating the stored history.
 MAX_EVALUATOR_OUTPUT_BYTES = 12 * 1024
+# Per-field cap on intent/approach/expected_effect, applied after whitespace
+# normalization. Round number for "a short paragraph", not a measured value.
 MAX_FIELD_CHARS = 1_200
+# Hard ceiling on `evolution.failed_attempt_history_limit` (see config.py).
+# Round number chosen to bound how many attempts are ever retained per
+# parent; MAX_RENDERED_HISTORY_CHARS below is what actually limits how many
+# of them reach a prompt in practice.
 MAX_HISTORY_PER_PARENT = 20
+# Ceiling on the rendered failure-history block injected into a mutation
+# prompt. Round number chosen to bound prompt growth. Worth knowing: at
+# MAX_FIELD_CHARS and MAX_EVALUATOR_OUTPUT_BYTES, one entry can run to
+# roughly 3 * MAX_FIELD_CHARS + MAX_EVALUATOR_OUTPUT_BYTES chars, so with
+# verbose evaluator output this cap -- not MAX_HISTORY_PER_PARENT -- is what
+# decides how many entries actually reach the prompt (in practice, only a
+# handful even when many more are stored).
 MAX_RENDERED_HISTORY_CHARS = 48 * 1024
 _SUMMARY_FIELDS = ("intent", "approach", "expected_effect")
+_EXAMPLE_SUMMARY = {
+    "intent": "Fix the parser's off-by-one error.",
+    "approach": "Adjust the final-token boundary check.",
+    "expected_effect": "The last token is accepted without weakening validation.",
+}
+# Collapsed to a single space before validation: an agent's most natural way
+# to write a longer field is a multi-line paragraph or a bulleted list, and
+# the rendered block is JSON-escaped before it lands in a prompt (see
+# render_failure_history), so a literal newline or tab is not dangerous --
+# only ugly. Normalizing it here means that natural writing style is
+# accepted instead of silently discarded.
+_COLLAPSIBLE_WHITESPACE_RE = re.compile(r"[\t\n\r ]+")
 
 
 def summary_file_instruction() -> str:
     """Return the prompt section asking the agent to write the summary artifact."""
+    example = json.dumps(_EXAMPLE_SUMMARY, indent=2, sort_keys=True)
+    fields = "`, `".join(_SUMMARY_FIELDS)
     return (
         "\n\n## Change Summary\n"
         f"Before finishing, write `{CHANGE_SUMMARY_ARTIFACT_NAME}` in the workspace root. "
-        "It must be a JSON object with exactly these short, plain-text fields: "
-        "`intent`, `approach`, and `expected_effect`. Describe what you changed, "
-        "why, and what improvement you expected. This artifact is not candidate code.\n"
+        f"It must be a JSON object with exactly these three fields and no others -- "
+        f"`{fields}` -- for example:\n"
+        f"```json\n{example}\n```\n"
+        "Each value is a plain string (not a list, number, or nested object) describing "
+        "what you changed, why, and what improvement you expected. Write each as one "
+        "line or a short paragraph: newlines and tabs are collapsed to a single space "
+        "before the value is used, so bullet points or line breaks will not be "
+        "preserved as written, and any other control character makes the whole field "
+        "rejected outright. "
+        f"Keep each value under {MAX_FIELD_CHARS} characters after that collapsing, and "
+        f"the whole file under {MAX_CHANGE_SUMMARY_BYTES} bytes -- either limit being "
+        "exceeded means the field, or the whole artifact, is silently discarded rather "
+        "than truncated. This artifact is not candidate code.\n"
     )
 
 
-def _valid_summary(value: object) -> dict[str, str] | None:
-    if not isinstance(value, dict) or set(value) != set(_SUMMARY_FIELDS):
-        return None
+def _validate_summary(value: object) -> tuple[dict[str, str] | None, str | None]:
+    """Validate a parsed change-summary payload.
+
+    Returns ``(fields, None)`` on success or ``(None, reason)`` on failure.
+    ``reason`` names the rule that was broken -- field *names* where useful,
+    never a field's actual text -- so it is safe to put in a log line.
+    """
+    if not isinstance(value, dict):
+        return None, "top-level JSON value is not an object"
+    extra = sorted(set(value) - set(_SUMMARY_FIELDS))
+    missing = sorted(set(_SUMMARY_FIELDS) - set(value))
+    if extra or missing:
+        detail = "; ".join(
+            part
+            for part in (
+                f"unexpected key(s) {extra}" if extra else "",
+                f"missing key(s) {missing}" if missing else "",
+            )
+            if part
+        )
+        return None, f"keys do not match the required set {_SUMMARY_FIELDS} ({detail})"
     validated: dict[str, str] = {}
     for field in _SUMMARY_FIELDS:
         text = value[field]
-        if (
-            not isinstance(text, str)
-            or not text.strip()
-            or len(text) > MAX_FIELD_CHARS
-            or any(ord(char) < 32 or ord(char) == 127 for char in text)
-        ):
-            return None
-        validated[field] = text.strip()
+        if not isinstance(text, str):
+            return None, f"field '{field}' is not a string"
+        normalized = _COLLAPSIBLE_WHITESPACE_RE.sub(" ", text).strip()
+        if not normalized:
+            return None, f"field '{field}' is empty"
+        if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+            return None, f"field '{field}' contains a control character other than newline/tab/space"
+        if len(normalized) > MAX_FIELD_CHARS:
+            return (
+                None,
+                f"field '{field}' is longer than {MAX_FIELD_CHARS} characters "
+                "after whitespace normalization",
+            )
+        validated[field] = normalized
+    return validated, None
+
+
+def _valid_summary(value: object) -> dict[str, str] | None:
+    validated, _ = _validate_summary(value)
     return validated
 
 
 def capture_change_summary(worktree_path: str | Path) -> dict[str, str] | None:
-    """Return a validated self-report, treating any problem as its absence."""
+    """Return a validated self-report, treating any problem as its absence.
+
+    A missing artifact is normal -- not every backend writes one -- and stays
+    quiet. An artifact that exists but fails validation is logged at WARNING
+    with the rule it broke (never its contents): without that, this is a
+    silent no-op and nobody would ever notice the whole feature had stopped
+    doing anything.
+    """
     path = Path(worktree_path) / CHANGE_SUMMARY_ARTIFACT_NAME
     try:
-        if not path.is_file() or path.stat().st_size > MAX_CHANGE_SUMMARY_BYTES:
+        if not path.is_file():
             return None
-        payload = path.read_bytes()
+        size = path.stat().st_size
     except OSError:
         return None
-    if not payload or len(payload) > MAX_CHANGE_SUMMARY_BYTES:
+    if size > MAX_CHANGE_SUMMARY_BYTES:
+        logger.warning(
+            "Ignoring %s: %d bytes exceeds the %d-byte size cap.",
+            CHANGE_SUMMARY_ARTIFACT_NAME,
+            size,
+            MAX_CHANGE_SUMMARY_BYTES,
+        )
         return None
     try:
-        return _valid_summary(json.loads(payload.decode("utf-8")))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = path.read_bytes()
+    except OSError:
+        logger.warning("Ignoring %s: could not be read.", CHANGE_SUMMARY_ARTIFACT_NAME)
         return None
+    if not payload:
+        logger.warning("Ignoring %s: file is empty.", CHANGE_SUMMARY_ARTIFACT_NAME)
+        return None
+    if len(payload) > MAX_CHANGE_SUMMARY_BYTES:
+        logger.warning(
+            "Ignoring %s: %d bytes exceeds the %d-byte size cap.",
+            CHANGE_SUMMARY_ARTIFACT_NAME,
+            len(payload),
+            MAX_CHANGE_SUMMARY_BYTES,
+        )
+        return None
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Ignoring %s: not valid UTF-8 JSON (%s).",
+            CHANGE_SUMMARY_ARTIFACT_NAME,
+            type(exc).__name__,
+        )
+        return None
+    validated, reason = _validate_summary(parsed)
+    if reason is not None:
+        logger.warning("Ignoring %s: %s.", CHANGE_SUMMARY_ARTIFACT_NAME, reason)
+    return validated
 
 
 def _evaluator_output(evaluation: EvalResult) -> str | None:

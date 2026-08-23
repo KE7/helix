@@ -300,8 +300,11 @@ class EvolutionConfig(BaseModel):
         description=(
             "Maximum rejected attempts retained per parent and replayed into "
             "that parent's next mutation prompt. Set 0 to disable retention; "
-            "the maximum is 20. Larger values give the next agent more history "
-            "at the cost of prompt length."
+            "the maximum is 20. Larger values give the next agent more history, "
+            "but the rendered block injected into the prompt is separately "
+            "capped by total size: with verbose evaluator output, only a "
+            "handful of the most recent entries may actually reach the prompt "
+            "even when more than that are stored."
         ),
     )
     perfect_score_threshold: float | None = None

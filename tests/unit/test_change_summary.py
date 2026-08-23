@@ -61,6 +61,52 @@ def test_oversized_or_malformed_summary_is_absent(tmp_path):
     assert capture_change_summary(tmp_path) is None
 
 
+def test_multiline_and_tab_fields_are_normalized_and_accepted(tmp_path):
+    # The single most natural thing an agent writes -- a multi-line or
+    # bulleted "approach" -- must not be a silent no-op.
+    payload = _summary() | {"approach": "- Adjust boundary check\n- Update tests\tverify"}
+    (tmp_path / CHANGE_SUMMARY_ARTIFACT_NAME).write_text(json.dumps(payload))
+
+    summary = capture_change_summary(tmp_path)
+
+    assert summary is not None
+    assert "\n" not in summary["approach"]
+    assert "\t" not in summary["approach"]
+    assert "Adjust boundary check" in summary["approach"]
+    assert "Update tests" in summary["approach"]
+
+
+def test_other_control_characters_are_still_rejected(tmp_path):
+    payload = _summary() | {"approach": "Adjust the boundary check.\x00"}
+    (tmp_path / CHANGE_SUMMARY_ARTIFACT_NAME).write_text(json.dumps(payload))
+
+    assert capture_change_summary(tmp_path) is None
+
+
+def test_malformed_but_present_artifact_warns_and_names_the_rule(tmp_path, caplog):
+    payload = _summary() | {"notes": "extra field the agent added"}
+    (tmp_path / CHANGE_SUMMARY_ARTIFACT_NAME).write_text(json.dumps(payload))
+
+    with caplog.at_level("WARNING", logger="helix.change_summary"):
+        summary = capture_change_summary(tmp_path)
+
+    assert summary is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "notes" in message
+    # Name the rule, never the field's actual content.
+    assert "extra field the agent added" not in message
+
+
+def test_missing_artifact_stays_quiet(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="helix.change_summary"):
+        summary = capture_change_summary(tmp_path)
+
+    assert summary is None
+    assert caplog.records == []
+
+
 def test_history_cap_evicts_oldest_attempt_first():
     history: dict[str, list[dict[str, object]]] = {}
     for index in range(4):
