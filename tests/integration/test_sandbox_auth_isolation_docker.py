@@ -216,14 +216,23 @@ def _diagnostic_docker_args(
 
 
 def _make_synthetic_login_volume(
-    backend: str, credential_json: str, source_rel: str, *, image: str
+    backend: str,
+    credential_json: str,
+    source_rel: str,
+    *,
+    image: str,
+    mode: str = "600",
 ) -> str:
     """Create a throwaway, HELIX-shaped login volume holding a fake credential.
 
     This mimics the *shape* the real login volume has after a real login (a
-    manifest-declared relative path, mode 0600, uid/gid 1000) but is a
-    brand-new randomly-named volume -- it is never ``helix-auth-<backend>``
-    and never derived from any real credential.
+    manifest-declared relative path, mode 0600 by default, uid/gid 1000) but
+    is a brand-new randomly-named volume -- it is never
+    ``helix-auth-<backend>`` and never derived from any real credential.
+
+    *mode* defaults to the real login volume's own mode, ``600``. Tests
+    exercising ``_seed_command``'s wrong-mode guard (ADR verification
+    requirement 4) pass a different value deliberately.
     """
     name = f"helix-test-synthetic-login-{backend}-{uuid.uuid4().hex}"
     _run_docker(["docker", "volume", "create", name])
@@ -232,7 +241,7 @@ def _make_synthetic_login_volume(
     script = (
         f"set -eu; mkdir -p {shlex.quote(parent)}; "
         f"printf '%s' {shlex.quote(credential_json)} > {shlex.quote(container_path)}; "
-        f"chmod 600 {shlex.quote(container_path)}; "
+        f"chmod {shlex.quote(mode)} {shlex.quote(container_path)}; "
         "chown -R 1000:1000 /home/node"
     )
     _run_docker(
@@ -533,5 +542,152 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
             "the login volume was mutated by a write made inside the agent "
             "container -- credentials are not isolated"
         )
+    finally:
+        _force_remove_volume(login_volume)
+
+
+# --------------------------------------------------------------------------
+# TEST 3 & 4 -- fail-closed guards on malformed source material
+#
+# ADR verification requirement 4: "Missing, malformed, oversized, or
+# wrong-mode source material must prevent the agent from starting with a
+# stable, redacted error. This is mandatory." Neither guard has real-Docker
+# coverage: `_seed_command`'s checks run inside the seed helper container, so
+# a unit test that only inspects argv (as `tests/unit/test_sandbox.py` does
+# for the rest of this module) never actually exercises them.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_wrong_mode_credential_fails_closed_before_any_agent_container(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential source at the wrong mode must fail closed, not silently.
+
+    ADR verification requirement 4 names "wrong-mode source material" as one
+    of the cases that "must prevent the agent from starting with a stable,
+    redacted error. This is mandatory." `_seed_command` enforces this with
+    ``test $(stat -c %a <source>) = 600``; this test proves that guard
+    actually runs against a real Docker daemon, not just that the argv
+    contains the check.
+    """
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
+
+    source_rel, _target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    secret_marker = f"SECRET-MARKER-{uuid.uuid4().hex}"
+    credential = json.dumps({"marker": secret_marker, "backend": backend})
+
+    # 0644, not the required 0600 -- the guard `_seed_command` enforces.
+    login_volume = _make_synthetic_login_volume(
+        backend, credential, source_rel, image=fixture_image, mode="644"
+    )
+    monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
+
+    observed_docker_args: list[list[str]] = []
+    original_docker_args = sandbox_module._docker_args
+
+    def _spy(*args: object, **kwargs: object) -> list[str]:
+        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
+        observed_docker_args.append(built)
+        return built
+
+    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
+
+    source = tmp_path / "candidate"
+    source.mkdir()
+
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            run_sandboxed_command(
+                ["sh", "-c", "echo should-not-run"],
+                cwd=source,
+                env={},
+                sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
+                scope="agent",
+                sync_back=False,
+                image=fixture_image,
+                agent_backend=backend,
+            )
+
+        assert "credential seed failed" in str(excinfo.value)
+        assert secret_marker not in str(excinfo.value)
+        assert secret_marker not in repr(excinfo.value)
+        cause = excinfo.value.__cause__
+        if isinstance(cause, subprocess.CalledProcessError):
+            assert secret_marker not in (cause.stdout or "")
+            assert secret_marker not in (cause.stderr or "")
+
+        # The seed step raised before `run_sandboxed_commands`'s command loop
+        # ever reaches `_docker_args` -- no agent container was created.
+        assert observed_docker_args == []
+    finally:
+        _force_remove_volume(login_volume)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_malformed_json_credential_fails_closed_before_any_agent_container(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-JSON credential content must fail closed, not silently.
+
+    ADR verification requirement 4 names "malformed source material" as one
+    of the cases that "must prevent the agent from starting with a stable,
+    redacted error. This is mandatory." `_seed_command` enforces this with a
+    ``python -c`` step that parses every manifest entry as JSON; this test
+    proves that guard actually runs against a real Docker daemon.
+    """
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
+
+    source_rel, _target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    secret_marker = f"SECRET-MARKER-{uuid.uuid4().hex}"
+    non_json_content = f"not-json-at-all::{secret_marker}"
+
+    # Correct mode, but content that fails `python -c ... json.loads(...)`.
+    login_volume = _make_synthetic_login_volume(
+        backend, non_json_content, source_rel, image=fixture_image, mode="600"
+    )
+    monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
+
+    observed_docker_args: list[list[str]] = []
+    original_docker_args = sandbox_module._docker_args
+
+    def _spy(*args: object, **kwargs: object) -> list[str]:
+        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
+        observed_docker_args.append(built)
+        return built
+
+    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
+
+    source = tmp_path / "candidate"
+    source.mkdir()
+
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            run_sandboxed_command(
+                ["sh", "-c", "echo should-not-run"],
+                cwd=source,
+                env={},
+                sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
+                scope="agent",
+                sync_back=False,
+                image=fixture_image,
+                agent_backend=backend,
+            )
+
+        assert "credential seed failed" in str(excinfo.value)
+        assert secret_marker not in str(excinfo.value)
+        assert secret_marker not in repr(excinfo.value)
+        cause = excinfo.value.__cause__
+        if isinstance(cause, subprocess.CalledProcessError):
+            assert secret_marker not in (cause.stdout or "")
+            assert secret_marker not in (cause.stderr or "")
+
+        assert observed_docker_args == []
     finally:
         _force_remove_volume(login_volume)

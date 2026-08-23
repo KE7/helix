@@ -629,6 +629,62 @@ def test_agent_transcript_bind_does_not_remount_login_volume(tmp_path: Path, moc
     assert not any("helix-auth-claude" in item for call in agent_calls for item in call)
 
 
+def test_transcript_bind_dir_exists_before_first_node_chown(tmp_path: Path, mocker):
+    """Pins the ordering fixed by b3a2352: the transcript bind dir must exist
+    before the first ``node:node`` chown, or the chown never covers it.
+
+    ``_transcript_bind_dir``'s docstring explains why -- creating the
+    directory afterwards fails on native Linux whenever the host UID is not
+    1000, and silently produces a bind directory the container user cannot
+    write when the host is root. Nothing before this test asserted the call
+    sequence: a refactor moving ``transcript_dir.mkdir()`` back into
+    ``_docker_args`` leaves every other unit test green.
+    """
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("print('hi')\n")
+
+    call_sequence: list[str] = []
+    transcript_dir_existed_at_first_node_chown: list[bool] = []
+
+    def fake_run(args, **kwargs):
+        if _is_workspace_chown_only(args) and "node:node" in args:
+            call_sequence.append("node_chown")
+            if len(call_sequence) == 1:
+                workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+                transcript_dir = (
+                    workspace / ".helix_artifacts" / "backend_transcripts" / "claude"
+                )
+                transcript_dir_existed_at_first_node_chown.append(
+                    transcript_dir.exists()
+                )
+        elif _is_agent_container(args):
+            call_sequence.append("agent")
+        return subprocess.CompletedProcess(
+            args, 0, stdout='{"type":"result","session_id":"sess_1"}\n', stderr=""
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=False,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    # The first node:node chown ran (proves the ordering was actually
+    # exercised, not vacuously skipped), and the transcript dir already
+    # existed on disk at that exact moment.
+    assert call_sequence[0] == "node_chown"
+    assert transcript_dir_existed_at_first_node_chown == [True]
+
+
 def test_agent_sync_tolerates_inaccessible_backend_transcripts(
     tmp_path: Path, mocker, monkeypatch
 ):
