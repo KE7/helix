@@ -1285,3 +1285,78 @@ class TestDockerEnvRedaction:
         result = sandbox_module._run_docker(args, check=False)
 
         assert result.stderr == traceback_text
+
+
+# --------------------------------------------------------------------------
+# Seed helper: named failure causes
+# --------------------------------------------------------------------------
+
+
+def test_seed_command_gives_each_refusal_its_own_exit_code() -> None:
+    """Distinct causes must be distinguishable from outside the container.
+
+    The seed helper runs where its stderr cannot be shown to the operator
+    without risking rendering credential content, so the cause travels out as
+    an exit code and is turned into a sentence on this side.
+    """
+    command = sandbox_module._seed_command("cursor")
+    for exit_code in (
+        sandbox_module._SEED_EXIT_NO_CREDENTIAL,
+        sandbox_module._SEED_EXIT_UNSAFE_CREDENTIAL,
+        sandbox_module._SEED_EXIT_UNREADABLE_CREDENTIAL,
+    ):
+        assert f"|| exit {exit_code}" in command
+    assert set(sandbox_module._SEED_FAILURE_CAUSES) == {
+        sandbox_module._SEED_EXIT_NO_CREDENTIAL,
+        sandbox_module._SEED_EXIT_UNSAFE_CREDENTIAL,
+        sandbox_module._SEED_EXIT_UNREADABLE_CREDENTIAL,
+    }
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected"),
+    [
+        (10, "holds no credential"),
+        (11, "not a private, regular"),
+        (12, "not a readable credential record"),
+    ],
+)
+def test_seed_failure_names_its_cause_and_the_command_that_fixes_it(
+    exit_code: int, expected: str, mocker
+) -> None:
+    mocker.patch.object(
+        sandbox_module,
+        "_run_docker",
+        side_effect=subprocess.CalledProcessError(exit_code, ["docker", "run"]),
+    )
+    volume = sandbox_module.CandidateAuthVolume(
+        name="helix-candidate-auth-gemini-deadbeef",
+        backend="gemini",
+        labels=(("helix.auth.candidate", "true"),),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        sandbox_module._seed_candidate_auth_volume(volume, "helix-test:latest")
+    message = str(excinfo.value)
+    assert "credential seed failed for backend gemini" in message
+    assert expected in message
+    assert "helix sandbox login gemini" in message
+
+
+def test_unrecognised_seed_failure_still_says_the_agent_did_not_start(mocker) -> None:
+    """A failure that is not one of the named guards must not claim to be one."""
+    mocker.patch.object(
+        sandbox_module,
+        "_run_docker",
+        side_effect=subprocess.CalledProcessError(125, ["docker", "run"]),
+    )
+    volume = sandbox_module.CandidateAuthVolume(
+        name="helix-candidate-auth-codex-deadbeef",
+        backend="codex",
+        labels=(("helix.auth.candidate", "true"),),
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        sandbox_module._seed_candidate_auth_volume(volume, "helix-test:latest")
+    message = str(excinfo.value)
+    assert "agent was not started" in message
+    assert "without naming a cause" in message
+    assert "helix sandbox login" not in message

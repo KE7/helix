@@ -251,6 +251,37 @@ def _create_candidate_auth_volume(agent_backend: str) -> CandidateAuthVolume:
     return CandidateAuthVolume(name=name, backend=agent_backend, labels=labels)
 
 
+# Exit codes the seed helper uses to name *why* it refused, so the operator
+# gets a cause instead of a bare failure. They are chosen above the range a
+# shell uses for its own errors and are never surfaced to the operator
+# directly -- ``_SEED_FAILURE_CAUSES`` turns them into a sentence.
+_SEED_EXIT_NO_CREDENTIAL = 10
+_SEED_EXIT_UNSAFE_CREDENTIAL = 11
+_SEED_EXIT_UNREADABLE_CREDENTIAL = 12
+
+_SEED_FAILURE_CAUSES: dict[int, str] = {
+    _SEED_EXIT_NO_CREDENTIAL: (
+        "the {backend} login volume holds no credential -- signing in on the "
+        "host does not sign the sandbox in. Run: helix sandbox login {backend}"
+    ),
+    _SEED_EXIT_UNSAFE_CREDENTIAL: (
+        "the credential in the {backend} login volume is not a private, "
+        "regular, reasonably sized file, so HELIX refused to copy it. Sign "
+        "the sandbox in again: helix sandbox login {backend}"
+    ),
+    _SEED_EXIT_UNREADABLE_CREDENTIAL: (
+        "the credential in the {backend} login volume is not a readable "
+        "credential record. Sign the sandbox in again: "
+        "helix sandbox login {backend}"
+    ),
+}
+
+
+def _guarded(condition: str, exit_code: int) -> str:
+    """A shell statement that exits with *exit_code* when *condition* fails."""
+    return f"{{ {condition}; }} || exit {exit_code}"
+
+
 def _seed_command(agent_backend: str) -> str:
     """Return a fixed allowlist-only copy command for the seed helper."""
     statements = ["set -eu", "umask 077"]
@@ -260,19 +291,29 @@ def _seed_command(agent_backend: str) -> str:
         source_path = f"/source/{source}"
         target_path = f"/destination/{target}"
         source_paths.append(source_path)
+        quoted = shlex.quote(source_path)
         statements.extend(
             [
-                f"test -f {shlex.quote(source_path)}",
-                f"test ! -L {shlex.quote(source_path)}",
-                f"test -s {shlex.quote(source_path)}",
-                f"test $(wc -c < {shlex.quote(source_path)}) -le 1048576",
-                f"test $(stat -c %a {shlex.quote(source_path)}) = 600",
+                # An absent or empty source is the everyday case: nobody has
+                # signed this backend's sandbox in yet, or it was signed out.
+                _guarded(
+                    f"test -f {quoted} && test -s {quoted}",
+                    _SEED_EXIT_NO_CREDENTIAL,
+                ),
+                # A source that exists but fails a safety guard is a different
+                # problem, and needs a different sentence.
+                _guarded(
+                    f"test ! -L {quoted} "
+                    f"&& test $(wc -c < {quoted}) -le 1048576 "
+                    f"&& test $(stat -c %a {quoted}) = 600",
+                    _SEED_EXIT_UNSAFE_CREDENTIAL,
+                ),
             ]
         )
         copy_statements.extend(
             [
                 f"mkdir -p {shlex.quote(str(Path(target_path).parent))}",
-                f"cp {shlex.quote(source_path)} {shlex.quote(target_path)}",
+                f"cp {quoted} {shlex.quote(target_path)}",
                 f"chmod 600 {shlex.quote(target_path)}",
             ]
         )
@@ -280,14 +321,17 @@ def _seed_command(agent_backend: str) -> str:
     # fails closed on a malformed source without exposing its contents, and
     # without ever writing it into the candidate volume.
     statements.append(
-        "python -c "
-        + shlex.quote(
-            "import json, pathlib, sys; "
-            "records=[json.loads(pathlib.Path(item).read_text()) for item in sys.argv[1:]]; "
-            "assert all(isinstance(record, dict) and record for record in records)"
+        _guarded(
+            "python -c "
+            + shlex.quote(
+                "import json, pathlib, sys; "
+                "records=[json.loads(pathlib.Path(item).read_text()) for item in sys.argv[1:]]; "
+                "assert all(isinstance(record, dict) and record for record in records)"
+            )
+            + " "
+            + " ".join(shlex.quote(path) for path in source_paths),
+            _SEED_EXIT_UNREADABLE_CREDENTIAL,
         )
-        + " "
-        + " ".join(shlex.quote(path) for path in source_paths)
     )
     statements.extend(copy_statements)
     # Claude's transcript bind is deliberately nested below the auth mount.
@@ -327,8 +371,15 @@ def _seed_candidate_auth_volume(volume: CandidateAuthVolume, image: str) -> None
     try:
         _run_docker(args)
     except subprocess.CalledProcessError as exc:
+        cause = _SEED_FAILURE_CAUSES.get(exc.returncode)
+        detail = (
+            cause.format(backend=volume.backend)
+            if cause is not None
+            else "the seed helper exited without naming a cause"
+        )
         raise RuntimeError(
-            f"credential seed failed for backend {volume.backend}; agent was not started"
+            f"credential seed failed for backend {volume.backend}; "
+            f"agent was not started: {detail}"
         ) from exc
 
 

@@ -612,8 +612,13 @@ def test_wrong_mode_credential_fails_closed_before_any_agent_container(
                 agent_backend=backend,
             )
 
-        assert "credential seed failed" in str(excinfo.value)
-        assert secret_marker not in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "credential seed failed" in message
+        # The message names *this* cause, not the generic one and not the
+        # cause of a different guard.
+        assert "not a private, regular" in message
+        assert "holds no credential" not in message
+        assert secret_marker not in message
         assert secret_marker not in repr(excinfo.value)
         cause = excinfo.value.__cause__
         if isinstance(cause, subprocess.CalledProcessError):
@@ -680,14 +685,83 @@ def test_malformed_json_credential_fails_closed_before_any_agent_container(
                 agent_backend=backend,
             )
 
-        assert "credential seed failed" in str(excinfo.value)
-        assert secret_marker not in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "credential seed failed" in message
+        assert "not a readable credential record" in message
+        assert "holds no credential" not in message
+        assert secret_marker not in message
         assert secret_marker not in repr(excinfo.value)
         cause = excinfo.value.__cause__
         if isinstance(cause, subprocess.CalledProcessError):
             assert secret_marker not in (cause.stdout or "")
             assert secret_marker not in (cause.stderr or "")
 
+        assert observed_docker_args == []
+    finally:
+        _force_remove_volume(login_volume)
+
+
+# --------------------------------------------------------------------------
+# TEST 5 -- an empty login volume names itself
+#
+# The most likely real-world seeding failure is not a corrupt credential: it
+# is a login volume nobody has signed in yet. Signing in on the host does not
+# sign the sandbox in, and the two are easy to confuse, so the error has to
+# say which one is missing and how to fix it.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_empty_login_volume_names_its_cause_and_the_command_that_fixes_it(
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
+
+    # A login volume that exists but holds no credential at all -- exactly
+    # what a never-signed-in or signed-out backend looks like.
+    login_volume = f"helix-test-synthetic-login-{backend}-{uuid.uuid4().hex}"
+    _run_docker(["docker", "volume", "create", login_volume])
+    monkeypatch.setattr(
+        sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume
+    )
+
+    observed_docker_args: list[list[str]] = []
+    original_docker_args = sandbox_module._docker_args
+
+    def _spy(*args: object, **kwargs: object) -> list[str]:
+        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
+        observed_docker_args.append(built)
+        return built
+
+    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
+
+    source = tmp_path / "candidate"
+    source.mkdir()
+
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            run_sandboxed_command(
+                ["sh", "-c", "echo should-not-run"],
+                cwd=source,
+                env={},
+                sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
+                scope="agent",
+                sync_back=False,
+                image=fixture_image,
+                agent_backend=backend,
+            )
+
+        message = str(excinfo.value)
+        # The failure must name *this* cause, and must not be confusable with
+        # the malformed or wrong-mode cases the tests above cover.
+        assert "holds no credential" in message
+        assert f"helix sandbox login {backend}" in message
+        assert "not a readable credential record" not in message
+        assert "not a private, regular" not in message
+        # No agent container was created.
         assert observed_docker_args == []
     finally:
         _force_remove_volume(login_volume)
