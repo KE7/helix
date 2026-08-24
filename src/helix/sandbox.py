@@ -78,6 +78,24 @@ AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
     "opencode": "/home/node/.local/share/opencode",
 }
 
+# Non-credential files HELIX writes into the candidate volume itself.
+#
+# A candidate mount replaces the whole directory the CLI reads its credential
+# from, so any sibling file that lives in that same directory disappears with
+# it. Where a CLI refuses to start without such a sibling, HELIX synthesises a
+# minimal one rather than copying the operator's own: the sibling is settings,
+# not a secret, it carries no grant, and copying it would drag unrelated
+# operator preferences into every candidate.
+AUTH_SYNTHESIZED_SIBLINGS: dict[str, tuple[tuple[str, str], ...]] = {
+    # Gemini stores its OAuth credential and its settings side by side in one
+    # directory. Without a selected auth method in that settings file the CLI
+    # refuses before it ever looks at the credential, so the candidate needs a
+    # settings file naming the method the copied credential was issued under.
+    "gemini": (
+        ("settings.json", '{"security": {"auth": {"selectedType": "oauth-personal"}}}'),
+    ),
+}
+
 _AGENT_HOME = "/home/node"
 _AGENT_UID, _AGENT_GID = _RUNNER_UID_GID.split(":")
 
@@ -343,6 +361,16 @@ def _seed_command(agent_backend: str) -> str:
         )
     )
     statements.extend(copy_statements)
+    # Siblings the candidate mount would otherwise shadow. Written before the
+    # chown below so the agent -- not root -- ends up owning them.
+    for name, contents in AUTH_SYNTHESIZED_SIBLINGS.get(agent_backend, ()):
+        destination = f"/destination/{name}"
+        statements.extend(
+            [
+                f"printf %s {shlex.quote(contents)} > {shlex.quote(destination)}",
+                f"chmod 600 {shlex.quote(destination)}",
+            ]
+        )
     # Claude's transcript bind is deliberately nested below the auth mount.
     # Pre-creating it as node avoids Docker synthesising a root-owned parent.
     if agent_backend == "claude":

@@ -1308,6 +1308,22 @@ def test_cursor_manifest_points_at_the_credential_not_the_settings_file() -> Non
     assert sandbox_module.AUTH_MOUNT_DESTINATIONS["cursor"] == "/home/node/.config/cursor"
 
 
+def test_every_synthesized_sibling_belongs_to_a_manifest_backend() -> None:
+    """A sibling for a backend with no manifest entry would never be written."""
+    assert set(sandbox_module.AUTH_SYNTHESIZED_SIBLINGS) <= set(
+        sandbox_module.AUTH_CREDENTIAL_MANIFEST
+    )
+
+
+def test_synthesized_siblings_never_collide_with_a_manifest_target() -> None:
+    """A sibling must not overwrite the credential the seed helper just copied."""
+    for backend, siblings in sandbox_module.AUTH_SYNTHESIZED_SIBLINGS.items():
+        targets = {
+            target for _, target in sandbox_module.AUTH_CREDENTIAL_MANIFEST[backend]
+        }
+        assert not targets & {name for name, _ in siblings}
+
+
 # --------------------------------------------------------------------------
 # Ancestor pre-ownership
 # --------------------------------------------------------------------------
@@ -1381,9 +1397,32 @@ def test_cursor_volume_auth_argv_pre_owns_the_credential_directory_parent(
     )
     assert parent_index < mount_index
 
+
 # --------------------------------------------------------------------------
-# Seed helper: named failure causes
+# Seed helper: synthesized siblings and named failure causes
 # --------------------------------------------------------------------------
+
+
+def test_seed_command_writes_synthesized_siblings_before_the_chown() -> None:
+    """A sibling written after the chown stays root-owned and unreadable.
+
+    The agent runs as uid 1000; the seed helper runs as root. Anything it
+    creates after ``chown -R`` never gets handed over, and the CLI then fails
+    on a permission error instead of starting.
+    """
+    command = sandbox_module._seed_command("gemini")
+    name, contents = sandbox_module.AUTH_SYNTHESIZED_SIBLINGS["gemini"][0]
+    assert f"/destination/{name}" in command
+    assert contents in command
+    assert command.index(f"/destination/{name}") < command.index("chown -R")
+    assert command.rstrip().endswith("chown -R 1000:1000 /destination")
+
+
+def test_seed_command_omits_sibling_synthesis_for_backends_without_one() -> None:
+    for backend in sandbox_module.AUTH_CREDENTIAL_MANIFEST:
+        if backend in sandbox_module.AUTH_SYNTHESIZED_SIBLINGS:
+            continue
+        assert "settings.json" not in sandbox_module._seed_command(backend)
 
 
 def test_seed_command_gives_each_refusal_its_own_exit_code() -> None:

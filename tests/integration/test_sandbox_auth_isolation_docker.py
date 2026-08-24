@@ -33,21 +33,21 @@ is monkeypatched for the duration of each test to point at a throwaway
 touched; every other code path under test runs unmodified.
 
 Credential shape: ``claude``'s login-volume shape (``claudeAiOauth`` with an
-OAuth token pair) and ``cursor``'s (an access/refresh token pair) are
-reflected in the fake fixtures below. Neither was obtained by reading an
-operator's credential file -- which the paragraph above forbids; each was read
-out of the shipped runner image's own CLI bundle, where the code that writes
-the file states the shape directly. The on-disk shapes of ``codex``'s
-``auth.json``, ``gemini``'s ``oauth_creds.json``, and ``opencode``'s
-``auth.json`` are deliberately not reproduced; those three get a minimal,
-valid, non-empty JSON object (see ``_fake_credential`` below) instead.
-Everything the isolation tests assert -- byte-for-byte isolation across
-candidate volumes, mode and ownership, manifest-only contents, and that a
-write to one candidate reaches neither another candidate nor the login volume
--- depends on the manifest's source/target *paths* and on file *bytes*
-surviving unchanged, not on any credential's internal schema. The shape
-matters only to the backend-specific test at the end of this module, which
-hands a real CLI the seeded record and reads what it says about it.
+OAuth token pair), ``cursor``'s (an access/refresh token pair), and
+``gemini``'s (an OAuth token record) are reflected in the fake fixtures below.
+None was obtained by reading an operator's credential file -- which the
+paragraph above forbids; each was read out of the shipped runner image's own
+CLI bundle, where the code that writes the file states the shape directly. The
+on-disk shapes of ``codex``'s ``auth.json`` and ``opencode``'s ``auth.json``
+are deliberately not reproduced; those two get a minimal, valid, non-empty
+JSON object (see ``_fake_credential`` below) instead. Everything the isolation
+tests assert -- byte-for-byte isolation across candidate volumes, mode and
+ownership, manifest-only contents, and that a write to one candidate reaches
+neither another candidate nor the login volume -- depends on the manifest's
+source/target *paths* and on file *bytes* surviving unchanged, not on any
+credential's internal schema. The shape matters only to the two
+backend-specific tests at the end of this module, which hand a real CLI the
+seeded record and read what it says about it.
 
 These tests carry the ``docker_integration`` marker (see ``pyproject.toml``)
 and skip when the daemon or a fixture image is unavailable, so a machine
@@ -72,6 +72,7 @@ from helix.config import SandboxConfig
 from helix.sandbox import (
     AUTH_CREDENTIAL_MANIFEST,
     AUTH_MOUNT_DESTINATIONS,
+    AUTH_SYNTHESIZED_SIBLINGS,
     CandidateAuthVolume,
     _create_candidate_auth_volume,
     _remove_candidate_auth_volume,
@@ -124,6 +125,17 @@ def _fake_credential(backend: str) -> str:
                 "apiKey": None,
             }
         )
+    if backend == "gemini":
+        # The CLI's credential cache stores an OAuth token record.
+        return json.dumps(
+            {
+                "access_token": _SYNTHETIC_TOKEN,
+                "refresh_token": f"{_SYNTHETIC_TOKEN}-refresh",
+                "scope": "https://www.googleapis.com/auth/cloud-platform",
+                "token_type": "Bearer",
+                "expiry_date": 4102444800000,
+            }
+        )
     return json.dumps(
         {
             "synthetic_credential": True,
@@ -136,9 +148,10 @@ def _fake_credential(backend: str) -> str:
 
 def _rotated_credential(backend: str) -> str:
     """A synthetic "rotated" value simulating an in-place token refresh."""
-    if backend == "cursor":
+    if backend in {"cursor", "gemini"}:
         rotated = json.loads(_fake_credential(backend))
-        rotated["accessToken"] = f"{_SYNTHETIC_TOKEN}-rotated-by-candidate-a"
+        key = "accessToken" if backend == "cursor" else "access_token"
+        rotated[key] = f"{_SYNTHETIC_TOKEN}-rotated-by-candidate-a"
         return json.dumps(rotated)
     if backend == "claude":
         return json.dumps(
@@ -431,9 +444,15 @@ def test_candidate_auth_volumes_isolate_synthetic_credential_under_rotation(
         assert source_top_component not in top_level_a  # source's directory name, not the target's
         assert source_top_component not in top_level_b
         expected_top_level = {target for _, target in AUTH_CREDENTIAL_MANIFEST[backend]}
+        # Siblings the seed helper writes itself, because the candidate mount
+        # would otherwise shadow them (gemini's settings file today).
+        expected_top_level |= {
+            name for name, _ in AUTH_SYNTHESIZED_SIBLINGS.get(backend, ())
+        }
         # claude's transcript bind is deliberately pre-created by the seed
         # helper (see `_seed_command`'s claude special case in sandbox.py);
-        # every other backend's candidate volume holds only its credential.
+        # every other backend's candidate volume holds only its credential
+        # and whatever sibling the line above accounts for.
         if backend == "claude":
             expected_top_level.add("projects")
         assert top_level_a == expected_top_level
@@ -913,5 +932,112 @@ def test_cursor_cli_reads_the_credential_from_the_path_helix_mounts_it_at(
             )
         finally:
             _force_remove_volume(settings_login_volume)
+    finally:
+        _force_remove_volume(login_volume)
+
+
+# --------------------------------------------------------------------------
+# TEST 7 -- the gemini CLI gets past its auth-method gate
+#
+# Without a settings file naming an auth method, the CLI refuses before it
+# ever opens the credential. The candidate mount replaces the directory that
+# settings file lives in, so HELIX writes a minimal one into the candidate
+# volume; this proves it clears the gate.
+#
+# "The refusal is absent" is not on its own evidence of anything -- an empty
+# candidate volume would satisfy it too. So this asserts the CLI got far
+# enough to *read* the credential from the mounted path, using the line the
+# CLI emits only from inside the branch it takes when a cached credential was
+# found and parsed, and pairs that with a control run that suppresses the
+# synthesized sibling and shows the refusal returning.
+# --------------------------------------------------------------------------
+
+
+_GEMINI_AUTH_METHOD_REFUSAL = "Please set an Auth method"
+# Emitted only from the branch the CLI takes when it has loaded a cached
+# credential and is trying to use it; absent when no credential was found.
+_GEMINI_CREDENTIAL_WAS_READ = "Cached credentials are not valid"
+
+
+def test_gemini_cli_clears_its_auth_method_gate_and_reads_the_seeded_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = "gemini"
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
+
+    source_rel, target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    destination = AUTH_MOUNT_DESTINATIONS[backend]
+    sibling_name, sibling_contents = AUTH_SYNTHESIZED_SIBLINGS[backend][0]
+    credential = _fake_credential(backend)
+
+    def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        workspace = tmp_path / f"candidate-{uuid.uuid4().hex[:8]}"
+        workspace.mkdir()
+        return run_sandboxed_command(
+            command,
+            cwd=workspace,
+            env={},
+            sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
+            scope="agent",
+            sync_back=False,
+            image=fixture_image,
+            agent_backend=backend,
+        )
+
+    login_volume = _make_synthetic_login_volume(
+        backend, credential, source_rel, image=fixture_image
+    )
+    monkeypatch.setattr(
+        sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume
+    )
+
+    try:
+        # 1. Credential and sibling are both at the exact paths the CLI reads,
+        #    private and owned by the agent.
+        credential_path = f"{destination}/{target_rel}"
+        sibling_path = f"{destination}/{sibling_name}"
+        probe = _run(
+            [
+                "sh",
+                "-c",
+                (
+                    f"cat {shlex.quote(credential_path)}; echo; "
+                    f"echo MODE:$(stat -c '%a %u:%g' {shlex.quote(credential_path)}); "
+                    f"cat {shlex.quote(sibling_path)}; echo; "
+                    f"echo SIBLING_MODE:$(stat -c '%a %u:%g' {shlex.quote(sibling_path)})"
+                ),
+            ]
+        )
+        assert probe.returncode == 0, probe.stderr
+        probe_lines = probe.stdout.splitlines()
+        assert probe_lines[0] == credential
+        assert probe_lines[1] == "MODE:600 1000:1000"
+        assert probe_lines[2] == sibling_contents
+        assert probe_lines[3] == "SIBLING_MODE:600 1000:1000"
+
+        # 2. The CLI clears the gate and goes on to read the credential.
+        run = _run(["gemini", "--debug", "-p", "hello"])
+        combined = f"{run.stdout}\n{run.stderr}"
+        assert _GEMINI_AUTH_METHOD_REFUSAL not in combined, (
+            f"the auth-method gate is still closed: {combined!r}"
+        )
+        assert _GEMINI_CREDENTIAL_WAS_READ in combined, (
+            "the CLI never got as far as loading a credential -- clearing the "
+            f"gate alone proves nothing: {combined!r}"
+        )
+
+        # 3. The control. With the sibling suppressed, the same command hits
+        #    the refusal again and never reaches the credential, so step 2 is
+        #    not satisfied by an empty candidate volume.
+        monkeypatch.setitem(sandbox_module.AUTH_SYNTHESIZED_SIBLINGS, backend, ())
+        control = _run(["gemini", "--debug", "-p", "hello"])
+        control_combined = f"{control.stdout}\n{control.stderr}"
+        assert _GEMINI_AUTH_METHOD_REFUSAL in control_combined, (
+            "the auth-method refusal did not return without the synthesized "
+            f"settings sibling: {control_combined!r}"
+        )
+        assert _GEMINI_CREDENTIAL_WAS_READ not in control_combined
     finally:
         _force_remove_volume(login_volume)
