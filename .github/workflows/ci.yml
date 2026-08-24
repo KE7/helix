@@ -41,6 +41,12 @@ jobs:
       - run: uv sync --all-extras
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      # `docker buildx bake` talks to the GitHub Actions cache directly
+      # (rather than through an action that wraps it, like
+      # docker/build-push-action), so the cache's URL and token need to
+      # reach it as plain environment variables.
+      - name: Expose GitHub Actions cache to Buildx
+        uses: crazy-max/ghaction-github-runtime@v3
       # The tests skip when a fixture image is absent. A fresh runner has
       # none, so without this build the job would pass while running
       # nothing. `docker buildx bake` (see docker/docker-bake.hcl) builds
