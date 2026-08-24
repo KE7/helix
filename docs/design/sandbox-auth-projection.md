@@ -195,54 +195,81 @@ uses relative paths only.  Initial candidates are:
 
 | Backend | Login-volume source → candidate auth-volume destination | Readiness |
 | --- | --- | --- |
-| Claude | `.claude/.credentials.json` → `.credentials.json` mounted at `$HOME/.claude` | Ready, subject to real-grant end-to-end test |
-| Codex | `.codex/auth.json` → `auth.json` mounted at `$HOME/.codex` | Ready, subject to real-grant end-to-end test |
-| Cursor | `.config/cursor/auth.json` → `auth.json` mounted at `$HOME/.config/cursor` | Path and shape read out of the shipped runner image's CLI bundle and confirmed end to end with a synthetic record; not yet confirmed against a real grant |
-| Agy | `.gemini/antigravity-cli/antigravity-oauth-token` → `antigravity-oauth-token` mounted at `$HOME/.gemini/antigravity-cli` | Derived, not yet confirmed against a real grant: the path was traced with `strace` against a real, unauthenticated Linux binary, which is stronger evidence than the other rows' CLI-bundle reads, but no authenticated seed has been attempted. A synthetic file at that path also does not clear the CLI's auth-method gate the way the other rows' synthetic records do (see below) |
-| OpenCode | `.local/share/opencode/auth.json` → `auth.json` mounted at its XDG data auth directory | Needs live-login verification of the complete required file set |
+| Claude | `.claude/.credentials.json` → `.credentials.json` mounted at `$HOME/.claude` | Verified end to end against a real grant: seeded from the real login volume through HELIX's own candidate-volume path, `claude auth status --text` exited 0 inside the candidate and reported `Login method: Claude Max account`. |
+| Codex | `.codex/auth.json` → `auth.json` mounted at `$HOME/.codex` | Verified end to end against a real grant: `codex login status` exited 0 inside the candidate and reported `Logged in using ChatGPT`. |
+| Cursor | `.config/cursor/auth.json` → `auth.json` mounted at `$HOME/.config/cursor` | Verified end to end against a real grant: `cursor-agent status` exited 0 inside the candidate and reported a signed-in confirmation naming the authenticated account. |
+| Agy | `.gemini/antigravity-cli/antigravity-oauth-token` → `antigravity-oauth-token` mounted at `$HOME/.gemini/antigravity-cli` | Derived, not yet confirmed against a real grant: the path was traced with `strace` against a real, unauthenticated Linux binary. Agy's login volume holds no credential yet, so there has been nothing to seed a candidate from or probe, and the credential file's JSON shape remains unknown. |
+| OpenCode | `.local/share/opencode/auth.json` → `auth.json` mounted at its XDG data auth directory | Verified end to end against a real grant: `auth list` exited 0 inside the candidate and reported `1 credentials`. |
 
-Two manifest entries carry evidence worth stating precisely, because the
-Readiness column above claims less than "Ready" for both.
+Four of the five manifest entries are now confirmed end to end against a real
+grant, not a synthetic record.  The fifth, Agy, is not, and the difference is
+worth recording precisely rather than folded into one word.
 
-*Cursor keeps its settings and its credential in different directories,* which
-is why its row names `.config/cursor/auth.json` rather than the settings file
-in the settings directory.  The two resolvers are recorded beside the entry
-they explain, in `AUTH_CREDENTIAL_MANIFEST` in `src/helix/sandbox.py`.  A
-candidate seeded from the settings file reports itself signed out; a candidate
-seeded from the credential path reports itself signed in. Both halves of the
-correction are load-bearing: changing only the source path or only the mount
-destination still reports signed out. That end-to-end check used a
-synthetic record, and the CLI's status command grades a local parse, so it
-establishes that the path is right — not that any grant is valid. It cannot yet
-be raised to a real-grant test on macOS, where the same CLI stores its
-credential in the system keychain rather than in any file.
+**Claude, Codex, Cursor, and OpenCode were each probed through HELIX's own
+candidate-volume path** — `run_sandboxed_command(..., scope="agent",
+auth="volume")` → `_create_candidate_auth_volume` → `_seed_candidate_auth_volume`
+→ the agent's own Docker argv → cleanup — seeded from that backend's real,
+already-authenticated login volume, and checked from inside the candidate
+container with the backend's own free, no-spend status command (the four
+status lines quoted in the table above). None of the four spends a token,
+starts a generation, or calls a model; each is a local, read-only status
+check. The build host used for this check has no arm64 runner image yet, so
+all four containers ran under Docker's amd64-on-arm64 emulation. All four
+still passed, which means the emulation did not manufacture a false result —
+and HELIX's CI already builds and runs these images as amd64, so the
+confirmed path is the one that ships.
+
+*Cursor keeps its settings and its credential in different directories,*
+which is why its row names `.config/cursor/auth.json` rather than the
+settings file in the settings directory.  The two resolvers are recorded
+beside the entry they explain, in `AUTH_CREDENTIAL_MANIFEST` in
+`src/helix/sandbox.py`.  A candidate seeded from the settings file reports
+itself signed out; a candidate seeded from the credential path reports itself
+signed in.  Both halves of the correction are load-bearing: changing only the
+source path or only the mount destination still reports signed out.  The
+real-grant check above confirms this reading holds for an authenticated
+account, not only for the synthetic record this row was first checked
+against.
 
 *Agy's manifest entry is derived, not yet confirmed against a real grant.*
-The credential path was obtained by `strace`-ing a real, unauthenticated Linux
-build of the CLI — the same rigor class as Cursor's row above. What it does
-not yet do is clear the CLI's own auth-method gate: placing a synthetic
-OAuth-token-shaped file at that path makes the CLI open it and then fail with
-`unknown auth method:` rather than `not logged in`, meaning the real file
-likely carries, or is paired with a settings field naming, an explicit
-auth-method discriminator — the same kind of requirement HELIX's previous
-Gemini CLI backend needed a synthesized settings sibling to satisfy, before
-it was removed in favor of agy. HELIX's seed
-mechanism only ever copies the credential file opaquely (see `_seed_command`
-in `src/helix/sandbox.py`), so the manifest entry above is safe to ship
-without knowing that discriminator's shape: `AUTH_SYNTHESIZED_SIBLINGS`
-deliberately carries no `agy` entry yet. The first real
-`helix sandbox login agy` run inside the runner image is what will confirm
-the manifest end to end and reveal whether a sibling entry turns out to be
-needed.
+The credential path was obtained by `strace`-ing a real, unauthenticated
+Linux build of the CLI — the same technique that first established Cursor's
+credential path, before Cursor's row above was raised to a real-grant
+confirmation. There is no credential in Agy's login volume yet, so no
+candidate has been seeded and no status command has been run against one.
+Separately, a synthetic OAuth-token-shaped file placed at that path makes the
+CLI open it and then fail with `unknown auth method:` rather than
+`not logged in`, meaning the real file likely carries, or is paired with a
+settings field naming, an explicit auth-method discriminator — the kind of
+requirement `AUTH_SYNTHESIZED_SIBLINGS` exists to hold entries for; a prior
+backend HELIX no longer ships once needed exactly such an entry, which is why
+the dict exists at all. HELIX's seed mechanism only ever copies the
+credential file opaquely (see `_seed_command` in `src/helix/sandbox.py`), so
+the manifest entry above is safe to ship without knowing that discriminator's
+shape: `AUTH_SYNTHESIZED_SIBLINGS` deliberately carries no `agy` entry yet. A
+real `helix sandbox login agy` run, once there is a credential to seed from,
+is what will confirm the manifest end to end and reveal whether a sibling
+entry turns out to be needed.
 
 The mechanism is common; its manifest is backend-specific.  No backend needs a
 custom agent image merely to receive the credential.  The helper is one generic
 HELIX utility action, not five entrypoints; it runs in the backend's own runner
-image, and must be pinned and tested like other runtime tooling.  A backend is
-not enabled for `auth = "volume"` until its manifest is confirmed by an
-authenticated candidate test.  Candidate-volume isolation is not itself
-evidence that a manifest is correct: a backend whose Readiness column above is
-not `Ready` still needs that test, however well the volume would isolate it.
+image, and must be pinned and tested like other runtime tooling.  Nothing in
+`src/helix/` gates which backends may use `auth = "volume"` on whether their
+manifest is confirmed — every backend in the manifest is enabled today, Agy
+included.  "Verified end to end against a real grant" above is this project's own
+publication standard for what it has actually checked, not a runtime switch:
+Agy is published, and enabled, ahead of that bar because its path evidence is
+real even though its credential shape is not, and because there is not yet a
+credential to run that check against. What an operator experiences when a
+backend's login volume is missing or unusable is not silence and not a
+code-level refusal to run that backend at all: the seed step fails closed
+before any agent container starts, with a message naming the specific
+cause — an empty login volume, an unsafe credential file, or one that fails
+to parse — and pointing at `helix sandbox login <backend>`.  Candidate-volume
+isolation is not itself evidence that a manifest is correct: a backend whose
+credential path is not yet confirmed against a real grant still needs that
+confirmation, however well the volume would isolate it.
 
 ## Operator-owned image auth is outside the contract
 

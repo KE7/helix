@@ -452,12 +452,12 @@ class TestSandboxConfig:
             # Inline comment after unquoted value (POSIX/foreman convention).
             "OPENAI_API_KEY=plain-key   # this is a trailing comment\n"
             # Hash inside a quoted value must be preserved verbatim.
-            'GEMINI_API_KEY="gem#key#with#hashes"\n'
+            'SERVICE_API_KEY="quoted#key#with#hashes"\n'
         )
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("SERVICE_API_KEY", raising=False)
         monkeypatch.setenv("EXISTING", "from-shell")
 
         load_config(toml)
@@ -468,7 +468,7 @@ class TestSandboxConfig:
         # Trailing inline comment must be stripped from unquoted values.
         assert os.environ["OPENAI_API_KEY"] == "plain-key"
         # Embedded ``#`` inside a quoted value must be preserved.
-        assert os.environ["GEMINI_API_KEY"] == "gem#key#with#hashes"
+        assert os.environ["SERVICE_API_KEY"] == "quoted#key#with#hashes"
 
 
 # ---------------------------------------------------------------------------
