@@ -32,22 +32,12 @@ is monkeypatched for the duration of each test to point at a throwaway
 ``helix-test-synthetic-login-*`` volume instead. That is the sole seam
 touched; every other code path under test runs unmodified.
 
-Credential shape: ``claude``'s login-volume shape (``claudeAiOauth`` with an
-OAuth token pair), ``cursor``'s (an access/refresh token pair), and
-``gemini``'s (an OAuth token record) are reflected in the fake fixtures below.
-None was obtained by reading an operator's credential file -- which the
-paragraph above forbids; each was read out of the shipped runner image's own
-CLI bundle, where the code that writes the file states the shape directly. The
-on-disk shapes of ``codex``'s ``auth.json`` and ``opencode``'s ``auth.json``
-are deliberately not reproduced; those two get a minimal, valid, non-empty
-JSON object (see ``_fake_credential`` below) instead. Everything the isolation
-tests assert -- byte-for-byte isolation across candidate volumes, mode and
-ownership, manifest-only contents, and that a write to one candidate reaches
-neither another candidate nor the login volume -- depends on the manifest's
-source/target *paths* and on file *bytes* surviving unchanged, not on any
-credential's internal schema. The shape matters only to the two
-backend-specific tests at the end of this module, which hand a real CLI the
-seeded record and read what it says about it.
+Credential shape: ``claude``, ``cursor``, and ``gemini`` get shape-accurate
+fixtures; ``codex`` and ``opencode`` deliberately get a minimal valid JSON
+object instead (see ``_fake_credential``). The isolation tests assert only
+paths, bytes, mode, and ownership, so they need no schema at all -- the shape
+matters solely to the two backend-specific tests at the end of this module,
+which hand a real CLI the seeded record and read what it says about it.
 
 These tests carry the ``docker_integration`` marker (see ``pyproject.toml``)
 and skip when the daemon or a fixture image is unavailable, so a machine
@@ -62,6 +52,7 @@ import os
 import shlex
 import subprocess
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -175,16 +166,9 @@ def _rotated_credential(backend: str) -> str:
 
 
 def _fixture_image(backend: str) -> str:
-    """Resolve the runner image for *backend*, honoring test-only overrides."""
-    per_backend_override = os.environ.get(f"HELIX_DOCKER_TEST_IMAGE_{backend.upper()}")
-    if per_backend_override:
-        return per_backend_override
-    # Legacy single-backend override, kept for anyone still setting it locally.
-    if backend == "claude":
-        legacy_override = os.environ.get("HELIX_DOCKER_TEST_IMAGE")
-        if legacy_override:
-            return legacy_override
-    return DEFAULT_BACKEND_IMAGES[backend]
+    """Resolve the runner image for *backend*, honoring a test-only override."""
+    override = os.environ.get(f"HELIX_DOCKER_TEST_IMAGE_{backend.upper()}")
+    return override or DEFAULT_BACKEND_IMAGES[backend]
 
 
 def _docker(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -318,6 +302,25 @@ def _list_top_level(volume_name: str, *, mount: str = "/check", image: str) -> s
         )
     )
     return {entry for entry in result.stdout.split() if entry not in {".", ".."}}
+
+
+def _spy_on_docker_args(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Record every argv ``_docker_args`` builds, without changing what it builds.
+
+    An empty list afterwards means no container was ever described, let alone
+    created -- which is how the fail-closed tests prove the seed step aborted
+    before the agent.
+    """
+    observed: list[list[str]] = []
+    original = sandbox_module._docker_args
+
+    def _spy(*args: object, **kwargs: object) -> list[str]:
+        built = original(*args, **kwargs)  # type: ignore[arg-type]
+        observed.append(built)
+        return built
+
+    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
+    return observed
 
 
 def _volume_exists(name: str) -> bool:
@@ -503,15 +506,7 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
     )
     monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
 
-    observed_docker_args: list[list[str]] = []
-    original_docker_args = sandbox_module._docker_args
-
-    def _spy(*args: object, **kwargs: object) -> list[str]:
-        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
-        observed_docker_args.append(built)
-        return built
-
-    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
+    observed_docker_args = _spy_on_docker_args(monkeypatch)
 
     source = tmp_path / "candidate"
     source.mkdir()
@@ -587,196 +582,93 @@ def test_e2e_sandboxed_agent_command_sees_isolated_seeded_credential(
 
 
 # --------------------------------------------------------------------------
-# TEST 3 & 4 -- fail-closed guards on malformed source material
+# TESTS 3-5 -- fail-closed guards, one arm per refusal cause
 #
 # ADR verification requirement 4: "Missing, malformed, oversized, or
 # wrong-mode source material must prevent the agent from starting with a
-# stable, redacted error. This is mandatory." Neither guard has real-Docker
-# coverage: `_seed_command`'s checks run inside the seed helper container, so
-# a unit test that only inspects argv (as `tests/unit/test_sandbox.py` does
-# for the rest of this module) never actually exercises them.
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("backend", _BACKENDS)
-def test_wrong_mode_credential_fails_closed_before_any_agent_container(
-    backend: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A credential source at the wrong mode must fail closed, not silently.
-
-    ADR verification requirement 4 names "wrong-mode source material" as one
-    of the cases that "must prevent the agent from starting with a stable,
-    redacted error. This is mandatory." `_seed_command` enforces this with
-    ``test $(stat -c %a <source>) = 600``; this test proves that guard
-    actually runs against a real Docker daemon, not just that the argv
-    contains the check.
-    """
-    fixture_image = _fixture_image(backend)
-    _require_docker_fixture(fixture_image)
-
-    source_rel, _target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
-    secret_marker = f"SECRET-MARKER-{uuid.uuid4().hex}"
-    credential = json.dumps({"marker": secret_marker, "backend": backend})
-
-    # 0644, not the required 0600 -- the guard `_seed_command` enforces.
-    login_volume = _make_synthetic_login_volume(
-        backend, credential, source_rel, image=fixture_image, mode="644"
-    )
-    monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
-
-    observed_docker_args: list[list[str]] = []
-    original_docker_args = sandbox_module._docker_args
-
-    def _spy(*args: object, **kwargs: object) -> list[str]:
-        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
-        observed_docker_args.append(built)
-        return built
-
-    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
-
-    source = tmp_path / "candidate"
-    source.mkdir()
-
-    try:
-        with pytest.raises(RuntimeError) as excinfo:
-            run_sandboxed_command(
-                ["sh", "-c", "echo should-not-run"],
-                cwd=source,
-                env={},
-                sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
-                scope="agent",
-                sync_back=False,
-                image=fixture_image,
-                agent_backend=backend,
-            )
-
-        message = str(excinfo.value)
-        assert "credential seed failed" in message
-        # The message names *this* cause, not the generic one and not the
-        # cause of a different guard.
-        assert "not a private, regular" in message
-        assert "holds no credential" not in message
-        assert secret_marker not in message
-        assert secret_marker not in repr(excinfo.value)
-        cause = excinfo.value.__cause__
-        if isinstance(cause, subprocess.CalledProcessError):
-            assert secret_marker not in (cause.stdout or "")
-            assert secret_marker not in (cause.stderr or "")
-
-        # The seed step raised before `run_sandboxed_commands`'s command loop
-        # ever reaches `_docker_args` -- no agent container was created.
-        assert observed_docker_args == []
-    finally:
-        _force_remove_volume(login_volume)
-
-
-@pytest.mark.parametrize("backend", _BACKENDS)
-def test_malformed_json_credential_fails_closed_before_any_agent_container(
-    backend: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-JSON credential content must fail closed, not silently.
-
-    ADR verification requirement 4 names "malformed source material" as one
-    of the cases that "must prevent the agent from starting with a stable,
-    redacted error. This is mandatory." `_seed_command` enforces this with a
-    ``python -c`` step that parses every manifest entry as JSON; this test
-    proves that guard actually runs against a real Docker daemon.
-    """
-    fixture_image = _fixture_image(backend)
-    _require_docker_fixture(fixture_image)
-
-    source_rel, _target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
-    secret_marker = f"SECRET-MARKER-{uuid.uuid4().hex}"
-    non_json_content = f"not-json-at-all::{secret_marker}"
-
-    # Correct mode, but content that fails `python -c ... json.loads(...)`.
-    login_volume = _make_synthetic_login_volume(
-        backend, non_json_content, source_rel, image=fixture_image, mode="600"
-    )
-    monkeypatch.setattr(sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume)
-
-    observed_docker_args: list[list[str]] = []
-    original_docker_args = sandbox_module._docker_args
-
-    def _spy(*args: object, **kwargs: object) -> list[str]:
-        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
-        observed_docker_args.append(built)
-        return built
-
-    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
-
-    source = tmp_path / "candidate"
-    source.mkdir()
-
-    try:
-        with pytest.raises(RuntimeError) as excinfo:
-            run_sandboxed_command(
-                ["sh", "-c", "echo should-not-run"],
-                cwd=source,
-                env={},
-                sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
-                scope="agent",
-                sync_back=False,
-                image=fixture_image,
-                agent_backend=backend,
-            )
-
-        message = str(excinfo.value)
-        assert "credential seed failed" in message
-        assert "not a readable credential record" in message
-        assert "holds no credential" not in message
-        assert secret_marker not in message
-        assert secret_marker not in repr(excinfo.value)
-        cause = excinfo.value.__cause__
-        if isinstance(cause, subprocess.CalledProcessError):
-            assert secret_marker not in (cause.stdout or "")
-            assert secret_marker not in (cause.stderr or "")
-
-        assert observed_docker_args == []
-    finally:
-        _force_remove_volume(login_volume)
-
-
-# --------------------------------------------------------------------------
-# TEST 5 -- an empty login volume names itself
+# stable, redacted error. This is mandatory." None of these guards has any
+# other real-Docker coverage: `_seed_command`'s checks run inside the seed
+# helper container, so a unit test that only inspects argv (as
+# `tests/unit/test_sandbox.py` does for the rest of this module) proves the
+# check is in the script, never that it fires.
 #
-# The most likely real-world seeding failure is not a corrupt credential: it
-# is a login volume nobody has signed in yet. Signing in on the host does not
-# sign the sandbox in, and the two are easy to confuse, so the error has to
-# say which one is missing and how to fix it.
+# The most likely real-world failure is not a corrupt credential but a login
+# volume nobody has signed in yet. Signing in on the host does not sign the
+# sandbox in, and the two are easy to confuse, so each arm asserts that the
+# message names *its own* cause and none of the others.
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("backend", _BACKENDS)
-def test_empty_login_volume_names_its_cause_and_the_command_that_fixes_it(
-    backend: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fixture_image = _fixture_image(backend)
-    _require_docker_fixture(fixture_image)
+@dataclass(frozen=True)
+class _SeedRefusal:
+    """One way the seed step must refuse, and the sentence it must produce."""
 
+    mode: str
+    content: str | None  # None -> no credential file at all
+    says: str
+    never_says: tuple[str, ...]
+    names_the_fix: bool
+
+
+_SEED_REFUSALS: dict[str, _SeedRefusal] = {
+    # 0644, not the required 0600 -- `_seed_command`'s stat guard.
+    "wrong_mode": _SeedRefusal(
+        mode="644",
+        content='{"marker": "%s"}',
+        says="not a private, regular",
+        never_says=("holds no credential", "not a readable credential record"),
+        names_the_fix=True,
+    ),
+    # Correct mode, content that fails `_seed_command`'s json.loads step.
+    "malformed_json": _SeedRefusal(
+        mode="600",
+        content="not-json-at-all::%s",
+        says="not a readable credential record",
+        never_says=("holds no credential", "not a private, regular"),
+        names_the_fix=True,
+    ),
     # A login volume that exists but holds no credential at all -- exactly
     # what a never-signed-in or signed-out backend looks like.
-    login_volume = f"helix-test-synthetic-login-{backend}-{uuid.uuid4().hex}"
-    _run_docker(["docker", "volume", "create", login_volume])
+    "empty_login_volume": _SeedRefusal(
+        mode="600",
+        content=None,
+        says="holds no credential",
+        never_says=("not a readable credential record", "not a private, regular"),
+        names_the_fix=True,
+    ),
+}
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("cause", sorted(_SEED_REFUSALS), ids=sorted(_SEED_REFUSALS))
+def test_seed_refusal_fails_closed_and_names_its_own_cause(
+    backend: str,
+    cause: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = _SEED_REFUSALS[cause]
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
+
+    source_rel, _target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    secret_marker = f"SECRET-MARKER-{uuid.uuid4().hex}"
+
+    if refusal.content is None:
+        login_volume = f"helix-test-synthetic-login-{backend}-{uuid.uuid4().hex}"
+        _run_docker(["docker", "volume", "create", login_volume])
+    else:
+        login_volume = _make_synthetic_login_volume(
+            backend,
+            refusal.content % secret_marker,
+            source_rel,
+            image=fixture_image,
+            mode=refusal.mode,
+        )
     monkeypatch.setattr(
         sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume
     )
-
-    observed_docker_args: list[list[str]] = []
-    original_docker_args = sandbox_module._docker_args
-
-    def _spy(*args: object, **kwargs: object) -> list[str]:
-        built = original_docker_args(*args, **kwargs)  # type: ignore[arg-type]
-        observed_docker_args.append(built)
-        return built
-
-    monkeypatch.setattr(sandbox_module, "_docker_args", _spy)
+    observed_docker_args = _spy_on_docker_args(monkeypatch)
 
     source = tmp_path / "candidate"
     source.mkdir()
@@ -795,13 +687,27 @@ def test_empty_login_volume_names_its_cause_and_the_command_that_fixes_it(
             )
 
         message = str(excinfo.value)
-        # The failure must name *this* cause, and must not be confusable with
-        # the malformed or wrong-mode cases the tests above cover.
-        assert "holds no credential" in message
-        assert f"helix sandbox login {backend}" in message
-        assert "not a readable credential record" not in message
-        assert "not a private, regular" not in message
-        # No agent container was created.
+        assert "credential seed failed" in message
+        # The message names *this* cause, and cannot be confused with any of
+        # the other refusals this matrix covers.
+        assert refusal.says in message
+        for other in refusal.never_says:
+            assert other not in message
+        if refusal.names_the_fix:
+            assert f"helix sandbox login {backend}" in message
+
+        # Nothing that touched the credential may echo it back, on the
+        # exception or on the CalledProcessError it wraps.
+        if refusal.content is not None:
+            assert secret_marker not in message
+            assert secret_marker not in repr(excinfo.value)
+            inner = excinfo.value.__cause__
+            if isinstance(inner, subprocess.CalledProcessError):
+                assert secret_marker not in (inner.stdout or "")
+                assert secret_marker not in (inner.stderr or "")
+
+        # The seed step raised before `run_sandboxed_commands`'s command loop
+        # ever reaches `_docker_args` -- no agent container was created.
         assert observed_docker_args == []
     finally:
         _force_remove_volume(login_volume)

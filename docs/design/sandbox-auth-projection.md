@@ -204,18 +204,14 @@ uses relative paths only.  Initial candidates are:
 Two manifest entries carry evidence worth stating precisely, because the
 Readiness column above claims less than "Ready" for both.
 
-*Cursor keeps its settings and its credential in different directories.* The
-CLI resolves its settings directory as `$CURSOR_CONFIG_DIR`, else
-`$XDG_CONFIG_HOME/cursor`, else `$HOME/.cursor`; `cli-config.json` lives there
-and holds editor, display, permission, and model preferences and no credential
-at all. The credential goes through a separate resolver that on Linux always
-joins `$XDG_CONFIG_HOME` (else `$HOME/.config`) with the application name, so
-with neither variable set the CLI reads and writes exactly
-`$HOME/.config/cursor/auth.json`, at mode 0600, holding an access/refresh token
-pair. A candidate seeded from the settings file reports itself signed out; a
-candidate seeded from the credential path reports itself signed in. Both halves
-of the correction are load-bearing: changing only the source path or only the
-mount destination still reports signed out. That end-to-end check used a
+*Cursor keeps its settings and its credential in different directories,* which
+is why its row names `.config/cursor/auth.json` rather than the settings file
+in the settings directory.  The two resolvers are recorded beside the entry
+they explain, in `AUTH_CREDENTIAL_MANIFEST` in `src/helix/sandbox.py`.  A
+candidate seeded from the settings file reports itself signed out; a candidate
+seeded from the credential path reports itself signed in. Both halves of the
+correction are load-bearing: changing only the source path or only the mount
+destination still reports signed out. That end-to-end check used a
 synthetic record, and the CLI's status command grades a local parse, so it
 establishes that the path is right — not that any grant is valid. It cannot yet
 be raised to a real-grant test on macOS, where the same CLI stores its
@@ -283,12 +279,8 @@ auth_env_allow = []
   transport key is exposed in configuration.  Those would make a small source
   choice into a second configuration language.
 
-This keeps `auth_env_allow` as a declared, validated statement of intent, not
-as a second, parallel transport gate.  Making it an actual runtime filter
-would mean `auth = "env"` resolves `[env]`/`passthrough_env` differently from
-every other HELIX code path -- exactly the second configuration language the
-previous paragraph rules out.  Backend manifests and runtime cleanup are
-implementation details, not new user knobs.
+Backend manifests and runtime cleanup are implementation details, not new user
+knobs.
 
 ## What HELIX does not do to the agent environment
 
@@ -349,8 +341,3 @@ final Docker argv and live Docker objects, not merely on a helper function.
    changed record reaches the source volume.  Do not run the observer against
    the same grant.
 
-`auth = "volume"` names the credential *source*: HELIX copies the allowlisted
-credential files from the operator login volume into a fresh per-candidate
-volume, and never mounts `helix-auth-<backend>` in an agent container.
-`auth = "env"` is the separate explicit API-key mechanism and requires a
-non-empty `auth_env_allow`.  There is no third mode.

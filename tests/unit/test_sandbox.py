@@ -630,15 +630,12 @@ def test_agent_transcript_bind_does_not_remount_login_volume(tmp_path: Path, moc
 
 
 def test_transcript_bind_dir_exists_before_first_node_chown(tmp_path: Path, mocker):
-    """Pins the ordering fixed by b3a2352: the transcript bind dir must exist
-    before the first ``node:node`` chown, or the chown never covers it.
+    """The transcript bind dir must exist before the first ``node:node`` chown.
 
-    ``_transcript_bind_dir``'s docstring explains why -- creating the
-    directory afterwards fails on native Linux whenever the host UID is not
-    1000, and silently produces a bind directory the container user cannot
-    write when the host is root. Nothing before this test asserted the call
-    sequence: a refactor moving ``transcript_dir.mkdir()`` back into
-    ``_docker_args`` leaves every other unit test green.
+    ``_transcript_bind_dir``'s docstring says what breaks otherwise. Nothing
+    else asserts the call *sequence*: a refactor moving
+    ``transcript_dir.mkdir()`` back into ``_docker_args`` leaves every other
+    unit test green.
     """
     source = tmp_path / "candidate"
     source.mkdir()
@@ -1295,12 +1292,9 @@ class TestDockerEnvRedaction:
 def test_cursor_manifest_points_at_the_credential_not_the_settings_file() -> None:
     """Cursor's settings directory and its credential directory differ.
 
-    The CLI resolves its settings directory (holding ``cli-config.json``:
-    editor, display, permission, and model preferences, and no credential)
-    separately from its credential path, which on Linux is always
-    ``$XDG_CONFIG_HOME``, else ``$HOME/.config``, joined with the application
-    name. Seeding a candidate from the settings file leaves the CLI reporting
-    itself signed out, which is what this manifest previously did.
+    ``AUTH_CREDENTIAL_MANIFEST``'s own comment records the two resolvers.
+    Seeding a candidate from the settings file leaves the CLI reporting itself
+    signed out, so both halves of this pair are load-bearing.
     """
     assert sandbox_module.AUTH_CREDENTIAL_MANIFEST["cursor"] == (
         (".config/cursor/auth.json", "auth.json"),

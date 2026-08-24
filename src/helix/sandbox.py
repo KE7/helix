@@ -255,15 +255,11 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
     return None
 
 
-def _candidate_auth_volume_name(agent_backend: str) -> str:
-    return f"{_CANDIDATE_AUTH_PREFIX}{agent_backend}-{uuid.uuid4().hex}"
-
-
 def _create_candidate_auth_volume(agent_backend: str) -> CandidateAuthVolume:
     """Create a never-reused, labelled candidate credential volume."""
     if agent_backend not in AUTH_CREDENTIAL_MANIFEST:
         raise ValueError(f"No credential manifest for backend: {agent_backend}")
-    name = _candidate_auth_volume_name(agent_backend)
+    name = f"{_CANDIDATE_AUTH_PREFIX}{agent_backend}-{uuid.uuid4().hex}"
     existing = _run_docker(["docker", "volume", "inspect", name], check=False)
     # Only a real inspect payload counts as proof the name is taken: a zero
     # exit code with no JSON object is not evidence a volume exists.
@@ -1240,10 +1236,10 @@ def _docker_args(
         )
 
         # Pre-own whatever ancestor directories the mounts below would
-        # otherwise leave root-owned -- see F2/F3: under `auth = "env"` with
-        # transcripts on, nothing mounts at AUTH_MOUNT_DESTINATIONS["claude"]
-        # itself; under the default volume mode, opencode's destination is
-        # three levels deep and its own parents are never mounted at all.
+        # otherwise leave root-owned. Under `auth = "env"` with transcripts
+        # on, nothing mounts at AUTH_MOUNT_DESTINATIONS["claude"] itself;
+        # under the default volume mode, opencode's destination is three
+        # levels deep and its own parents are never mounted at all.
         args.extend(
             _synthesized_ancestor_tmpfs_args(
                 [d for d in (candidate_destination, transcript_destination) if d is not None]

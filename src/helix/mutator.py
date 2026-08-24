@@ -772,16 +772,10 @@ def _sandbox_agent_environment(
     agent only because the caller named it in ``passthrough_env`` or gave it a
     value in ``fixed_env``.
 
-    ``auth_env_allow`` does not run through this function at all, and no code
-    path here checks membership in it. It is a declaration of intent, not an
-    enforcement mechanism: it exists so an operator can name, in one place,
-    which credential(s) ``auth = "env"`` is expected to supply, and so
-    :class:`~helix.config.SandboxConfig`'s ``model_post_init`` and
-    :class:`~helix.config.HelixConfig`'s disjointness check (against
-    ``evaluator.sidecar.passthrough_env``) have something to validate against.
-    Whether a name in ``auth_env_allow`` actually reaches the agent is decided
-    entirely by whether that same name also appears in ``passthrough_env`` or
-    ``[env]`` — the transport this docstring already describes above.
+    ``auth_env_allow`` is deliberately absent: no code path here checks
+    membership in it. It is validated by :class:`~helix.config.SandboxConfig`
+    and :class:`~helix.config.HelixConfig` as a declaration of intent, and it
+    gates nothing at runtime.
     """
     return _scrub_environment(passthrough_env=passthrough_env, fixed_env=fixed_env)
 
