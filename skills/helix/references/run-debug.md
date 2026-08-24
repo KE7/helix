@@ -189,10 +189,10 @@ helix sandbox logout claude
 
 Backend login behavior:
 
+- Agy: full interactive `agy` launch (no dedicated login subcommand)
 - Claude: `claude setup-token`
 - Codex: `codex login --device-auth`
 - Cursor: `cursor-agent login`
-- Gemini: `gemini --skip-trust`
 - OpenCode: full `opencode` TUI for provider/model/login setup
 
 Network:

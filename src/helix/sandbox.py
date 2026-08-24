@@ -54,6 +54,14 @@ _RUNNER_UID_GID = "1000:1000"
 # Source paths are relative to the operator-facing login volume; targets are
 # relative to the candidate-owned volume mounted at the destination below.
 AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
+    # Traced with ``strace -f -e trace=openat`` on a real, unauthenticated
+    # Linux binary: the CLI falls back to a plaintext token file at this path
+    # whenever no OS keyring is reachable (always true inside a container),
+    # logging "Using file-based token storage because no D-Bus session bus
+    # detected". Distinct from ``~/.gemini/config``, which the CLI's own
+    # embedded docs describe as shared with the separate, legacy gemini-cli
+    # tooling.
+    "agy": ((".gemini/antigravity-cli/antigravity-oauth-token", "antigravity-oauth-token"),),
     "claude": ((".claude/.credentials.json", ".credentials.json"),),
     "codex": ((".codex/auth.json", "auth.json"),),
     # Cursor's credential store and its settings store are different
@@ -66,15 +74,19 @@ AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
     # so with neither variable set the CLI reads and writes exactly
     # ``$HOME/.config/cursor/auth.json``.
     "cursor": ((".config/cursor/auth.json", "auth.json"),),
-    "gemini": ((".gemini/oauth_creds.json", "oauth_creds.json"),),
     "opencode": ((".local/share/opencode/auth.json", "auth.json"),),
 }
 
 AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
+    # One path component deeper than a bare ``~/.gemini`` -- the CLI's own
+    # private state directory sits under the shared ``.gemini`` root.
+    # ``_synthesized_ancestor_tmpfs_args`` walks ancestors between $HOME and
+    # this destination and pre-owns ``/home/node/.gemini`` automatically; see
+    # its docstring and the confirmation in this backend's tests.
+    "agy": "/home/node/.gemini/antigravity-cli",
     "claude": "/home/node/.claude",
     "codex": "/home/node/.codex",
     "cursor": "/home/node/.config/cursor",
-    "gemini": "/home/node/.gemini",
     "opencode": "/home/node/.local/share/opencode",
 }
 
@@ -87,13 +99,20 @@ AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
 # not a secret, it carries no grant, and copying it would drag unrelated
 # operator preferences into every candidate.
 AUTH_SYNTHESIZED_SIBLINGS: dict[str, tuple[tuple[str, str], ...]] = {
-    # Gemini stores its OAuth credential and its settings side by side in one
-    # directory. Without a selected auth method in that settings file the CLI
-    # refuses before it ever looks at the credential, so the candidate needs a
-    # settings file naming the method the copied credential was issued under.
-    "gemini": (
-        ("settings.json", '{"security": {"auth": {"selectedType": "oauth-personal"}}}'),
-    ),
+    # No backend currently needs a synthesized sibling.
+    #
+    # ``agy``'s credential file is known (see AUTH_CREDENTIAL_MANIFEST above)
+    # but its exact JSON shape is not: probing the traced path with a
+    # synthetic blob shows the CLI opens it and then fails with
+    # "unknown auth method:" rather than "not logged in", meaning the file
+    # likely carries (or is paired with a settings field naming) an explicit
+    # auth-method discriminator -- the same shape of requirement gemini's own
+    # credential had, previously handled by an entry here. HELIX's seed
+    # mechanism only ever copies the credential file opaquely (see
+    # ``_seed_command`` below), so this is safe to leave unresolved: the
+    # first real ``helix sandbox login agy`` will reveal the exact shape and
+    # whether an entry here turns out to be needed. This dict already
+    # defaults to ``()`` for any backend not listed, so omitting one is safe.
 }
 
 _AGENT_HOME = "/home/node"

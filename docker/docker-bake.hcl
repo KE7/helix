@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["base", "claude", "codex", "cursor", "gemini", "opencode"]
+  targets = ["base", "agy", "claude", "codex", "cursor", "opencode"]
 }
 
 # Tagged distinctly from the `:latest` every backend Dockerfile's `ARG
@@ -30,6 +30,15 @@ target "backend" {
   }
 }
 
+target "agy" {
+  inherits   = ["backend"]
+  context    = "."
+  dockerfile = "docker/agy.Dockerfile"
+  tags       = ["ghcr.io/ke7/helix-evo-runner-agy:latest"]
+  cache-from = ["type=gha,scope=fixture-agy"]
+  cache-to   = ["type=gha,mode=max,scope=fixture-agy"]
+}
+
 target "claude" {
   inherits   = ["backend"]
   context    = "."
@@ -55,15 +64,6 @@ target "cursor" {
   tags       = ["ghcr.io/ke7/helix-evo-runner-cursor:latest"]
   cache-from = ["type=gha,scope=fixture-cursor"]
   cache-to   = ["type=gha,mode=max,scope=fixture-cursor"]
-}
-
-target "gemini" {
-  inherits   = ["backend"]
-  context    = "."
-  dockerfile = "docker/gemini.Dockerfile"
-  tags       = ["ghcr.io/ke7/helix-evo-runner-gemini:latest"]
-  cache-from = ["type=gha,scope=fixture-gemini"]
-  cache-to   = ["type=gha,mode=max,scope=fixture-gemini"]
 }
 
 target "opencode" {

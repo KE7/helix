@@ -74,12 +74,12 @@ def test_resolve_sandbox_image_defaults_from_backend():
         == "ghcr.io/ke7/helix-evo-runner-cursor:latest"
     )
     assert (
-        resolve_sandbox_image(cfg, "gemini")
-        == "ghcr.io/ke7/helix-evo-runner-gemini:latest"
-    )
-    assert (
         resolve_sandbox_image(cfg, "opencode")
         == "ghcr.io/ke7/helix-evo-runner-opencode:latest"
+    )
+    assert (
+        resolve_sandbox_image(cfg, "agy")
+        == "ghcr.io/ke7/helix-evo-runner-agy:latest"
     )
 
 
@@ -1141,16 +1141,51 @@ def test_sandbox_auth_codex_login_uses_device_auth_flow():
     assert args[-3:] == ["codex", "login", "--device-auth"]
 
 
-def test_sandbox_auth_gemini_login_skips_workspace_trust_prompt():
+def test_sandbox_auth_agy_login_uses_bare_interactive_launch():
+    # agy has no dedicated login subcommand; the login flow is the same bare
+    # interactive launch as opencode's below.
     args = sandbox_auth_docker_args(
-        "gemini",
-        image="helix-gemini:latest",
+        "agy",
+        image="helix-agy:latest",
         action="login",
         interactive=True,
     )
 
-    assert "helix-auth-gemini:/home/node:rw" in args
-    assert args[-2:] == ["gemini", "--skip-trust"]
+    assert "helix-auth-agy:/home/node:rw" in args
+    assert args[-1:] == ["agy"]
+
+
+def test_sandbox_auth_agy_status_uses_credential_file_probe():
+    # ``agy models`` exits 0 even when logged out, so status is a file probe
+    # against the traced credential path, matching claude's pattern above.
+    args = sandbox_auth_docker_args(
+        "agy",
+        image="helix-agy:latest",
+        action="status",
+    )
+
+    assert "helix-auth-agy:/home/node:rw" in args
+    assert args[-3:-1] == ["sh", "-lc"]
+    script = args[-1]
+    assert (
+        'test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"'
+        in script
+    )
+
+
+def test_sandbox_auth_agy_logout_only_removes_its_own_state_directory():
+    # ~/.gemini is shared with legacy gemini-cli state; logout must not
+    # blanket-remove it.
+    args = sandbox_auth_docker_args(
+        "agy",
+        image="helix-agy:latest",
+        action="logout",
+    )
+
+    assert args[-3:-1] == ["sh", "-lc"]
+    script = args[-1]
+    assert '"${HOME:-/home/node}/.gemini/antigravity-cli"' in script
+    assert script.count(".gemini") == 1
 
 
 def test_sandbox_auth_opencode_login_uses_full_setup_tui():
@@ -1337,12 +1372,19 @@ def test_ancestor_tmpfs_pre_owns_the_cursor_credential_directory_parent() -> Non
     # A destination one component below $HOME needs nothing -- $HOME's own
     # tmpfs already owns it.
     assert sandbox_module._synthesized_ancestor_tmpfs_args(["/home/node/.cursor"]) == []
-    assert (
-        sandbox_module._synthesized_ancestor_tmpfs_args(
-            [sandbox_module.AUTH_MOUNT_DESTINATIONS["gemini"]]
-        )
-        == []
-    )
+
+
+def test_ancestor_tmpfs_pre_owns_the_agy_credential_directory_parent() -> None:
+    """Agy's destination is two components below $HOME, same shape as Cursor's.
+
+    ``AUTH_MOUNT_DESTINATIONS["agy"]`` is one level deeper than a bare
+    ``~/.gemini`` (it is ``~/.gemini/antigravity-cli``), so the generic
+    ancestor helper must pre-own ``/home/node/.gemini`` itself -- no
+    agy-specific tmpfs rule is needed.
+    """
+    assert sandbox_module._synthesized_ancestor_tmpfs_args(
+        [sandbox_module.AUTH_MOUNT_DESTINATIONS["agy"]]
+    ) == ["--tmpfs", "/home/node/.gemini:rw,uid=1000,gid=1000,mode=700"]
 
 
 def test_cursor_volume_auth_argv_pre_owns_the_credential_directory_parent(
@@ -1397,15 +1439,25 @@ def test_cursor_volume_auth_argv_pre_owns_the_credential_directory_parent(
 # --------------------------------------------------------------------------
 
 
-def test_seed_command_writes_synthesized_siblings_before_the_chown() -> None:
+def test_seed_command_writes_synthesized_siblings_before_the_chown(monkeypatch) -> None:
     """A sibling written after the chown stays root-owned and unreadable.
 
     The agent runs as uid 1000; the seed helper runs as root. Anything it
     creates after ``chown -R`` never gets handed over, and the CLI then fails
     on a permission error instead of starting.
+
+    No current backend needs a synthesized sibling (see
+    ``AUTH_SYNTHESIZED_SIBLINGS``), so this test exercises the generic
+    mechanism directly via monkeypatch rather than depending on a real
+    backend having one.
     """
-    command = sandbox_module._seed_command("gemini")
-    name, contents = sandbox_module.AUTH_SYNTHESIZED_SIBLINGS["gemini"][0]
+    monkeypatch.setitem(
+        sandbox_module.AUTH_SYNTHESIZED_SIBLINGS,
+        "cursor",
+        (("settings.json", '{"auth": "test-only"}'),),
+    )
+    command = sandbox_module._seed_command("cursor")
+    name, contents = sandbox_module.AUTH_SYNTHESIZED_SIBLINGS["cursor"][0]
     assert f"/destination/{name}" in command
     assert contents in command
     assert command.index(f"/destination/{name}") < command.index("chown -R")
@@ -1457,16 +1509,16 @@ def test_seed_failure_names_its_cause_and_the_command_that_fixes_it(
         side_effect=subprocess.CalledProcessError(exit_code, ["docker", "run"]),
     )
     volume = sandbox_module.CandidateAuthVolume(
-        name="helix-candidate-auth-gemini-deadbeef",
-        backend="gemini",
+        name="helix-candidate-auth-agy-deadbeef",
+        backend="agy",
         labels=(("helix.auth.candidate", "true"),),
     )
     with pytest.raises(RuntimeError) as excinfo:
         sandbox_module._seed_candidate_auth_volume(volume, "helix-test:latest")
     message = str(excinfo.value)
-    assert "credential seed failed for backend gemini" in message
+    assert "credential seed failed for backend agy" in message
     assert expected in message
-    assert "helix sandbox login gemini" in message
+    assert "helix sandbox login agy" in message
 
 
 def test_unrecognised_seed_failure_still_says_the_agent_did_not_start(mocker) -> None:

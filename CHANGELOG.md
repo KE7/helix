@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **BREAKING**: Removed the `gemini` mutation backend and replaced it with
+  `agy` (Google's Antigravity CLI). Configs with `agent.backend = "gemini"`
+  are rejected; migrate to `"agy"`. `helix-auth-gemini` sandbox volumes are
+  no longer read; run `helix sandbox login agy` to create `helix-auth-agy`.
+  Unlike `gemini`, `agy` propagates `agent.effort` to its CLI (`--effort`,
+  same `low`/`medium`/`high` values as `claude`) instead of silently
+  ignoring it.
 - **BREAKING**: Removed the `evaluator.score_parser` configuration field. The built-in
   `helix_result` parser is now implicit; configurations that still provide the
   removed field are rejected by Pydantic's `extra="forbid"` validation.

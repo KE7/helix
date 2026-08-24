@@ -60,7 +60,7 @@ credential with it, or the split was never demonstrated.
 | Backend | Can the credential be split from the state written beside it? |
 | --- | --- |
 | Claude | No knob found that moves the per-run state without also moving the credential. |
-| Gemini | Same: the home knob available to us moves the credential too. |
+| Agy | Same: the traced credential sits inside its own per-install state directory (settings, cache, logs) with no separate relocation knob found; the whole directory moves together by construction. |
 | Cursor | A config/data split looks plausible, but we did not demonstrate one. |
 | OpenCode | The relocation knob we found moves the session database and the credential together. |
 | Codex | Closest: its agent-memory databases *can* be redirected out of the shared directory.  `models_cache.json` is still written there, which is enough to defeat the split. |
@@ -147,8 +147,8 @@ current default:
 | Alternative | Assessment |
 | --- | --- |
 | Per-user local derived image | This is option (e): no candidate-time copy, but local secret layers, cache retention, and a rotation/image-identity lifecycle. |
-| Long-lived credential sidecar | No supported common CLI protocol lets Claude, Codex, Cursor, Gemini, and OpenCode delegate their local credential lookup to a broker.  A new HTTPS/token proxy would be backend-specific, network-visible, and itself a long-lived shared stateful service.  It is a new auth product, not a smaller projection mechanism. |
-| Each candidate logs itself in | Not viable for interactive OAuth.  At the CLI versions pinned by HELIX's runner images, Claude's login help offered subscription/console, email, and SSO choices but no headless token input; Codex offered `--device-auth` (user-mediated) and `--with-api-key` (a distinct explicit API-key path); Cursor's `NO_OPEN_BROWSER` suppresses browser opening rather than supplying a credential; Gemini's `-p` is headless prompting, not login; and OpenCode exposes provider management, but we found no generic non-interactive OAuth import.  Re-check against a current CLI before relying on this row. |
+| Long-lived credential sidecar | No supported common CLI protocol lets Claude, Codex, Cursor, Agy, and OpenCode delegate their local credential lookup to a broker.  A new HTTPS/token proxy would be backend-specific, network-visible, and itself a long-lived shared stateful service.  It is a new auth product, not a smaller projection mechanism. |
+| Each candidate logs itself in | Not viable for interactive OAuth.  At the CLI versions pinned by HELIX's runner images, Claude's login help offered subscription/console, email, and SSO choices but no headless token input; Codex offered `--device-auth` (user-mediated) and `--with-api-key` (a distinct explicit API-key path); Cursor's `NO_OPEN_BROWSER` suppresses browser opening rather than supplying a credential; Agy's `--print` is headless prompting, not login; and OpenCode exposes provider management, but we found no generic non-interactive OAuth import.  Re-check against a current CLI before relying on this row. |
 
 The one non-interactive path found is Codex `--with-api-key`; it is an explicit
 environment/API-key workflow and remains covered by `auth = "env"`.  It does
@@ -198,7 +198,7 @@ uses relative paths only.  Initial candidates are:
 | Claude | `.claude/.credentials.json` → `.credentials.json` mounted at `$HOME/.claude` | Ready, subject to real-grant end-to-end test |
 | Codex | `.codex/auth.json` → `auth.json` mounted at `$HOME/.codex` | Ready, subject to real-grant end-to-end test |
 | Cursor | `.config/cursor/auth.json` → `auth.json` mounted at `$HOME/.config/cursor` | Path and shape read out of the shipped runner image's CLI bundle and confirmed end to end with a synthetic record; not yet confirmed against a real grant |
-| Gemini | `.gemini/oauth_creds.json` → `oauth_creds.json` mounted at `$HOME/.gemini`, plus a synthesized `settings.json` naming the auth method | Auth-method gate confirmed cleared end to end with a synthetic record; not yet confirmed against a real grant |
+| Agy | `.gemini/antigravity-cli/antigravity-oauth-token` → `antigravity-oauth-token` mounted at `$HOME/.gemini/antigravity-cli` | Derived, not yet confirmed against a real grant: the path was traced with `strace` against a real, unauthenticated Linux binary, which is stronger evidence than the other rows' CLI-bundle reads, but no authenticated seed has been attempted. A synthetic file at that path also does not clear the CLI's auth-method gate the way the other rows' synthetic records do (see below) |
 | OpenCode | `.local/share/opencode/auth.json` → `auth.json` mounted at its XDG data auth directory | Needs live-login verification of the complete required file set |
 
 Two manifest entries carry evidence worth stating precisely, because the
@@ -217,17 +217,23 @@ establishes that the path is right — not that any grant is valid. It cannot ye
 be raised to a real-grant test on macOS, where the same CLI stores its
 credential in the system keychain rather than in any file.
 
-*Gemini keeps its credential and its settings side by side in one directory.*
-Because the candidate mount replaces that whole directory, the settings file an
-interactive login leaves behind disappears with it, and the CLI refuses before
-it ever looks at the credential: it reports that no auth method is set. HELIX
-therefore writes a minimal settings file into the candidate volume naming the
-method the copied credential was issued under. That file is settings, not a
-secret, so HELIX synthesizes it rather than copying the operator's own — which
-would also drag unrelated operator preferences into every candidate, and would
-fail the seed helper's mode guard, since the CLI writes its settings file
-world-readable and its credential private. With the sibling in place the
-refusal is gone and the CLI proceeds to load the credential from the mount.
+*Agy's manifest entry is derived, not yet confirmed against a real grant.*
+The credential path was obtained by `strace`-ing a real, unauthenticated Linux
+build of the CLI — the same rigor class as Cursor's row above. What it does
+not yet do is clear the CLI's own auth-method gate: placing a synthetic
+OAuth-token-shaped file at that path makes the CLI open it and then fail with
+`unknown auth method:` rather than `not logged in`, meaning the real file
+likely carries, or is paired with a settings field naming, an explicit
+auth-method discriminator — the same kind of requirement HELIX's previous
+Gemini CLI backend needed a synthesized settings sibling to satisfy, before
+it was removed in favor of agy. HELIX's seed
+mechanism only ever copies the credential file opaquely (see `_seed_command`
+in `src/helix/sandbox.py`), so the manifest entry above is safe to ship
+without knowing that discriminator's shape: `AUTH_SYNTHESIZED_SIBLINGS`
+deliberately carries no `agy` entry yet. The first real
+`helix sandbox login agy` run inside the runner image is what will confirm
+the manifest end to end and reveal whether a sibling entry turns out to be
+needed.
 
 The mechanism is common; its manifest is backend-specific.  No backend needs a
 custom agent image merely to receive the credential.  The helper is one generic
