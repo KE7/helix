@@ -22,11 +22,11 @@ including one with a negative mean.
 
 Determinism
 -----------
-Selection draws from the caller's seeded ``random.Random``, so a run repeats
-within a process. It does not repeat across processes: the ``pareto`` and
-``top_k_pareto`` paths iterate ``set[str]`` fronts and CPython salts ``str``
-hashing per process, so ties can break differently under a different
-``PYTHONHASHSEED``. ``current_best`` draws no randomness and is unaffected.
+Selection draws from the caller's seeded ``random.Random``. The
+``top_k_pareto`` path orders its frontier ids before ties reach that RNG, so
+it repeats across processes. The legacy ``pareto`` path is unchanged and can
+iterate ``set[str]`` fronts whose string hashes are salted per process.
+``current_best`` draws no randomness and is unaffected.
 
 Limits
 ------
@@ -37,7 +37,7 @@ proposal may draw the same parent.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Literal
 
 from helix.population import Candidate, EvalResult, ParetoFrontier
@@ -45,6 +45,19 @@ from helix.population import Candidate, EvalResult, ParetoFrontier
 CandidateSelectionStrategy = Literal[
     "pareto", "current_best", "epsilon_greedy", "top_k_pareto"
 ]
+
+
+class _SortedCandidateIds(set[str]):
+    """Set with deterministic iteration for the selector-only Pareto path.
+
+    ``ParetoFrontier._remove_dominated_programs`` accepts sets and iterates
+    them while resolving score ties. Keeping this ordered-set behavior local
+    lets ``top_k_pareto`` be reproducible without changing the legacy
+    ``pareto`` selection path in :mod:`helix.population`.
+    """
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(sorted(super().__iter__()))
 
 
 def _aggregate_score_or_floor(result: EvalResult | None) -> float:
@@ -161,7 +174,7 @@ def select_top_k_pareto(
 
     filtered_mapping: dict[str, set[str]] = {}
     for key, ids in frontier.active_frontier_snapshot().items():
-        filtered = set(ids) & top_k_ids
+        filtered = _SortedCandidateIds(cid for cid in ids if cid in top_k_ids)
         if filtered:
             filtered_mapping[key] = filtered
 
@@ -171,7 +184,7 @@ def select_top_k_pareto(
     _, cleaned = ParetoFrontier._remove_dominated_programs(filtered_mapping, scores)
     program_frequency: dict[str, int] = {}
     for front in cleaned.values():
-        for cid in front:
+        for cid in sorted(front):
             program_frequency[cid] = program_frequency.get(cid, 0) + 1
     sampling_list = [
         cid for cid, freq in program_frequency.items() for _ in range(freq)

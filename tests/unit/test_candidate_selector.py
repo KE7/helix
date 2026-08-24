@@ -6,7 +6,11 @@ strategy through ``ParetoFrontier.select_parent`` directly.
 
 from __future__ import annotations
 
+import os
 import random
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -409,3 +413,48 @@ class TestSeededReproducibility:
         # A different seed must diverge on this pool; otherwise the test
         # would pass even if the rng were ignored entirely.
         assert run(999) != seq_a
+
+    def test_top_k_pareto_same_seed_across_processes(self):
+        """String-hash randomization cannot alter a seeded top-k draw."""
+        selection_script = textwrap.dedent(
+            """
+            import random
+
+            from helix.candidate_selector import select_top_k_pareto
+            from helix.population import Candidate, EvalResult, ParetoFrontier
+
+            frontier = ParetoFrontier()
+            for candidate_id in ("alpha", "bravo", "charlie", "delta"):
+                frontier.add(
+                    Candidate(
+                        id=candidate_id,
+                        worktree_path="",
+                        branch_name="",
+                        generation=0,
+                        parent_id=None,
+                        parent_ids=[],
+                        operation="mutation",
+                    ),
+                    EvalResult(
+                        candidate_id=candidate_id,
+                        scores={},
+                        asi={},
+                        instance_scores={"instance": 1.0},
+                    ),
+                )
+
+            print(select_top_k_pareto(frontier, random.Random(2024), 4).id)
+            """
+        )
+        selections = {
+            subprocess.run(
+                [sys.executable, "-c", selection_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
+            ).stdout.strip()
+            for hash_seed in range(1, 9)
+        }
+
+        assert len(selections) == 1
