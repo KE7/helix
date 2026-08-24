@@ -103,6 +103,24 @@ class TestNonZeroExitClassification:
         assert exc_info.value.exit_code == 1
         assert exc_info.value.stderr == "unrelated warning emitted on stderr"
 
+    def test_structured_api_status_529_is_an_overload_rate_limit(self, tmp_path, mocker):
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=_completed(
+                stdout=json.dumps({"api_error_status": 529, "error": "server overloaded"}),
+                stderr="unrelated warning emitted on stderr",
+            ),
+        )
+
+        with pytest.raises(RateLimitError) as exc_info:
+            mutator.invoke_claude_code(
+                str(tmp_path), "prompt", AgentConfig(backend="claude")
+            )
+
+        assert exc_info.value.phase == "structured backend result"
+        assert exc_info.value.exit_code == 1
+        assert exc_info.value.stderr == "unrelated warning emitted on stderr"
+
     def test_stdout_rate_limit_is_seen_when_stderr_is_non_empty(self, tmp_path, mocker):
         """An unstructured status on stdout must not be hidden by stderr."""
         mocker.patch(
@@ -239,3 +257,4 @@ class TestNonZeroExitClassification:
             )
 
         assert not isinstance(exc_info.value, RateLimitError)
+        assert "worker HTTP 429 restart id logged" in exc_info.value.stdout

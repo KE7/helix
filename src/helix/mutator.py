@@ -637,6 +637,8 @@ def _has_structured_failure_signal(parsed: dict[str, Any]) -> bool:
     says what happened, and searching the rest of it only risks matching an
     unrelated field such as a session id.
     """
+    # Structured JSON type names (for example, ``overloaded_error``) are
+    # backend-defined, so only the typed API status is used for classification.
     return isinstance(parsed.get("subtype"), str) or _api_error_status(parsed) is not None
 
 
@@ -1713,9 +1715,10 @@ def invoke_claude_code(
 
     def _rate_limit_from_envelope(envelope: dict[str, Any]) -> RateLimitError | None:
         """Rate-limit verdict for a parsed backend envelope, if it carries one."""
-        if _api_error_status(envelope) == 429:
+        api_status = _api_error_status(envelope)
+        if api_status in (429, 529):
             return _rate_limit_error(
-                f"{backend_name} hit a rate/usage limit (HTTP 429)",
+                f"{backend_name} hit a rate/usage limit (HTTP {api_status})",
                 "structured backend result",
             )
         # The error field is a bounded fallback, consulted only when the
