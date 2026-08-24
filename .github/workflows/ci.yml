@@ -22,9 +22,16 @@ jobs:
   docker-integration:
     # Real-Docker proof that per-candidate auth volumes actually isolate
     # credentials. Every credential used is synthetic, so this job needs no
-    # backend secrets: the runner images are anonymously pullable from GHCR,
-    # and the seeding helper runs in the backend's own runner image rather
-    # than introducing a third-party one.
+    # backend secrets.
+    #
+    # The fixture images are built from this checkout's own Dockerfiles
+    # rather than pulled from GHCR: a pulled image only reflects the last
+    # *published* build, so a PR that edits a Dockerfile would be tested
+    # against code it isn't changing, and a PR that adds a new backend could
+    # never go green -- its image can't exist on GHCR until after it merges.
+    # Building locally means every PR is validated against exactly the
+    # images its own diff produces. The seeding helper still runs in the
+    # backend's own runner image rather than introducing a third-party one.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -32,13 +39,23 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --all-extras
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       # The tests skip when a fixture image is absent. A fresh runner has
-      # none, so without this pull the job would pass while running nothing.
-      - name: Pull fixture images
-        run: |
-          for b in claude codex cursor gemini opencode; do
-            docker pull -q "ghcr.io/ke7/helix-evo-runner-$b:latest"
-          done
+      # none, so without this build the job would pass while running
+      # nothing. `docker buildx bake` (see docker/docker-bake.hcl) builds
+      # the base image once, then every backend's Dockerfile against it in
+      # parallel, using Buildx's named-context feature to point each
+      # backend's `FROM` straight at the base build's own output instead of
+      # a registry -- so build order only matters between the base and the
+      # backends, never among the backends themselves. Each target loads
+      # into the local Docker engine (`--load`, no registry push) under the
+      # exact tag `DEFAULT_BACKEND_IMAGES` in `src/helix/backends.py`
+      # resolves, and each caches independently through the GitHub Actions
+      # cache so an unrelated change doesn't invalidate every other image's
+      # layers.
+      - name: Build fixture images
+        run: docker buildx bake -f docker/docker-bake.hcl --load
       # STRICT=1 turns any remaining skip into a failure, so this job can
       # never be green without actually exercising the isolation tests.
       - run: uv run pytest tests/integration/ -m docker_integration -q -rs
