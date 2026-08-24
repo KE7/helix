@@ -197,9 +197,41 @@ uses relative paths only.  Initial candidates are:
 | --- | --- | --- |
 | Claude | `.claude/.credentials.json` → `.credentials.json` mounted at `$HOME/.claude` | Ready, subject to real-grant end-to-end test |
 | Codex | `.codex/auth.json` → `auth.json` mounted at `$HOME/.codex` | Ready, subject to real-grant end-to-end test |
-| Cursor | `.cursor/cli-config.json` → `cli-config.json` mounted at `$HOME/.cursor` | Needs credential-shape and live-login verification |
-| Gemini | `.gemini/oauth_creds.json` plus any login-required account record | Needs a measured login-volume manifest; current observed source was not OAuth-backed |
+| Cursor | `.config/cursor/auth.json` → `auth.json` mounted at `$HOME/.config/cursor` | Path and shape read out of the shipped runner image's CLI bundle and confirmed end to end with a synthetic record; not yet confirmed against a real grant |
+| Gemini | `.gemini/oauth_creds.json` → `oauth_creds.json` mounted at `$HOME/.gemini`, plus a synthesized `settings.json` naming the auth method | Auth-method gate confirmed cleared end to end with a synthetic record; not yet confirmed against a real grant |
 | OpenCode | `.local/share/opencode/auth.json` → `auth.json` mounted at its XDG data auth directory | Needs live-login verification of the complete required file set |
+
+Two manifest entries carry evidence worth stating precisely, because the
+Readiness column above claims less than "Ready" for both.
+
+*Cursor keeps its settings and its credential in different directories.* The
+CLI resolves its settings directory as `$CURSOR_CONFIG_DIR`, else
+`$XDG_CONFIG_HOME/cursor`, else `$HOME/.cursor`; `cli-config.json` lives there
+and holds editor, display, permission, and model preferences and no credential
+at all. The credential goes through a separate resolver that on Linux always
+joins `$XDG_CONFIG_HOME` (else `$HOME/.config`) with the application name, so
+with neither variable set the CLI reads and writes exactly
+`$HOME/.config/cursor/auth.json`, at mode 0600, holding an access/refresh token
+pair. A candidate seeded from the settings file reports itself signed out; a
+candidate seeded from the credential path reports itself signed in. Both halves
+of the correction are load-bearing: changing only the source path or only the
+mount destination still reports signed out. That end-to-end check used a
+synthetic record, and the CLI's status command grades a local parse, so it
+establishes that the path is right — not that any grant is valid. It cannot yet
+be raised to a real-grant test on macOS, where the same CLI stores its
+credential in the system keychain rather than in any file.
+
+*Gemini keeps its credential and its settings side by side in one directory.*
+Because the candidate mount replaces that whole directory, the settings file an
+interactive login leaves behind disappears with it, and the CLI refuses before
+it ever looks at the credential: it reports that no auth method is set. HELIX
+therefore writes a minimal settings file into the candidate volume naming the
+method the copied credential was issued under. That file is settings, not a
+secret, so HELIX synthesizes it rather than copying the operator's own — which
+would also drag unrelated operator preferences into every candidate, and would
+fail the seed helper's mode guard, since the CLI writes its settings file
+world-readable and its credential private. With the sibling in place the
+refusal is gone and the CLI proceeds to load the credential from the mount.
 
 The mechanism is common; its manifest is backend-specific.  No backend needs a
 custom agent image merely to receive the credential.  The helper is one generic
