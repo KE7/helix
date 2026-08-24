@@ -32,20 +32,22 @@ is monkeypatched for the duration of each test to point at a throwaway
 ``helix-test-synthetic-login-*`` volume instead. That is the sole seam
 touched; every other code path under test runs unmodified.
 
-Credential shape: only ``claude``'s login-volume shape (``claudeAiOauth`` with
-an OAuth token pair) is reflected in the fake fixture below. The on-disk shapes
-of ``codex``'s ``auth.json``, ``cursor``'s ``cli-config.json``, ``gemini``'s
-``oauth_creds.json``, and ``opencode``'s ``auth.json`` are deliberately not
-reproduced, because determining them would mean reading an operator's real
-credential file -- which the paragraph above forbids. Those four backends get a
-minimal, valid, non-empty JSON object (see ``_fake_credential`` below)
-instead. Everything these tests assert -- byte-for-byte isolation across
-candidate volumes, mode and ownership, manifest-only contents, and that a write
-to one candidate reaches neither another candidate nor the login volume --
-depends on the manifest's source/target *paths* and on file *bytes* surviving
-unchanged, not on any credential's internal schema. A schema-accurate fixture
-would only matter for a test that also validated backend-specific JSON
-semantics, which none of these do.
+Credential shape: ``claude``'s login-volume shape (``claudeAiOauth`` with an
+OAuth token pair) and ``cursor``'s (an access/refresh token pair) are
+reflected in the fake fixtures below. Neither was obtained by reading an
+operator's credential file -- which the paragraph above forbids; each was read
+out of the shipped runner image's own CLI bundle, where the code that writes
+the file states the shape directly. The on-disk shapes of ``codex``'s
+``auth.json``, ``gemini``'s ``oauth_creds.json``, and ``opencode``'s
+``auth.json`` are deliberately not reproduced; those three get a minimal,
+valid, non-empty JSON object (see ``_fake_credential`` below) instead.
+Everything the isolation tests assert -- byte-for-byte isolation across
+candidate volumes, mode and ownership, manifest-only contents, and that a
+write to one candidate reaches neither another candidate nor the login volume
+-- depends on the manifest's source/target *paths* and on file *bytes*
+surviving unchanged, not on any credential's internal schema. The shape
+matters only to the backend-specific test at the end of this module, which
+hands a real CLI the seeded record and reads what it says about it.
 
 These tests carry the ``docker_integration`` marker (see ``pyproject.toml``)
 and skip when the daemon or a fixture image is unavailable, so a machine
@@ -94,8 +96,14 @@ _GENERIC_SYNTHETIC_SHAPE_NOTE = (
 )
 
 
+# Shapes taken from the code inside each shipped runner image's CLI bundle
+# that writes the file, never from an operator's credential. Every token value
+# below is a fixed placeholder that no service ever issued.
+_SYNTHETIC_TOKEN = "synthetic-not-a-real-token"
+
+
 def _fake_credential(backend: str) -> str:
-    """A synthetic seed credential -- backend-shaped only for ``claude``."""
+    """A synthetic seed credential, backend-shaped where the shape is known."""
     if backend == "claude":
         return json.dumps(
             {
@@ -105,6 +113,15 @@ def _fake_credential(backend: str) -> str:
                     "expiresAt": 9999999999,
                     "scopes": ["user:inference"],
                 }
+            }
+        )
+    if backend == "cursor":
+        # The CLI's credential writer stores exactly these keys.
+        return json.dumps(
+            {
+                "accessToken": _SYNTHETIC_TOKEN,
+                "refreshToken": f"{_SYNTHETIC_TOKEN}-refresh",
+                "apiKey": None,
             }
         )
     return json.dumps(
@@ -119,6 +136,10 @@ def _fake_credential(backend: str) -> str:
 
 def _rotated_credential(backend: str) -> str:
     """A synthetic "rotated" value simulating an in-place token refresh."""
+    if backend == "cursor":
+        rotated = json.loads(_fake_credential(backend))
+        rotated["accessToken"] = f"{_SYNTHETIC_TOKEN}-rotated-by-candidate-a"
+        return json.dumps(rotated)
     if backend == "claude":
         return json.dumps(
             {
@@ -763,5 +784,134 @@ def test_empty_login_volume_names_its_cause_and_the_command_that_fixes_it(
         assert "not a private, regular" not in message
         # No agent container was created.
         assert observed_docker_args == []
+    finally:
+        _force_remove_volume(login_volume)
+
+
+# --------------------------------------------------------------------------
+# TEST 6 -- the cursor CLI reads the credential from the path we mount it at
+#
+# `cursor-agent status` grades a *local parse*: it reads the credential the
+# CLI's own resolver points at and reports whether an access/refresh pair is
+# there. Under `--network none` it cannot and does not check the grant with
+# any service, so this test establishes that HELIX mounts the credential
+# where the CLI looks -- not that any grant is valid.
+#
+# The negative half matters as much as the positive half. A test that only
+# asserted "the signed-out message is absent" would pass just as well if no
+# credential reached the container at all, so this asserts the credential is
+# present at the exact path the CLI reads, asserts the CLI reports the
+# signed-in message positively, and runs the CLI a second time against the
+# directory the manifest used to point at to show the check can tell the two
+# apart.
+# --------------------------------------------------------------------------
+
+
+_CURSOR_SIGNED_IN = "Login successful!"
+_CURSOR_SIGNED_OUT = "Not logged in"
+
+# What the manifest said before it was read out of the CLI bundle: the
+# settings file, in the settings directory. Kept here only as the control
+# arm of the test below.
+_CURSOR_SETTINGS_ENTRY = (".cursor/cli-config.json", "cli-config.json")
+_CURSOR_SETTINGS_DESTINATION = "/home/node/.cursor"
+
+
+def test_cursor_cli_reads_the_credential_from_the_path_helix_mounts_it_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = "cursor"
+    fixture_image = _fixture_image(backend)
+    _require_docker_fixture(fixture_image)
+
+    source_rel, target_rel = AUTH_CREDENTIAL_MANIFEST[backend][0]
+    destination = AUTH_MOUNT_DESTINATIONS[backend]
+    credential = _fake_credential(backend)
+
+    def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        workspace = tmp_path / f"candidate-{uuid.uuid4().hex[:8]}"
+        workspace.mkdir()
+        return run_sandboxed_command(
+            command,
+            cwd=workspace,
+            env={},
+            sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
+            scope="agent",
+            sync_back=False,
+            image=fixture_image,
+            agent_backend=backend,
+        )
+
+    login_volume = _make_synthetic_login_volume(
+        backend, credential, source_rel, image=fixture_image
+    )
+    monkeypatch.setattr(
+        sandbox_module, "sandbox_auth_volume_name", lambda _backend: login_volume
+    )
+
+    try:
+        # 1. The credential is at the exact path, mode, and ownership the CLI
+        #    needs -- asserted directly, not inferred from the CLI's verdict.
+        credential_path = f"{destination}/{target_rel}"
+        probe = _run(
+            [
+                "sh",
+                "-c",
+                (
+                    f"cat {shlex.quote(credential_path)}; echo; "
+                    f"echo MODE:$(stat -c '%a %u:%g' {shlex.quote(credential_path)}); "
+                    # The corrected destination sits two components below the
+                    # tmpfs $HOME, so Docker would synthesise its parent as
+                    # root-owned unless HELIX pre-owns it.
+                    "echo PARENT:$(stat -c '%a %u:%g' /home/node/.config)"
+                ),
+            ]
+        )
+        assert probe.returncode == 0, probe.stderr
+        probe_lines = probe.stdout.splitlines()
+        assert probe_lines[0] == credential, "credential is not readable at the mount destination"
+        assert probe_lines[1] == "MODE:600 1000:1000"
+        assert probe_lines[2] == "PARENT:700 1000:1000", (
+            "the credential directory's parent is not owned by the agent -- "
+            "Docker synthesised it as root"
+        )
+
+        # 2. The CLI itself, handed that credential, reports signed in.
+        status = _run(["cursor-agent", "status"])
+        assert _CURSOR_SIGNED_IN in status.stdout, (
+            f"cursor-agent did not find the seeded credential: {status.stdout!r} "
+            f"{status.stderr!r}"
+        )
+        assert _CURSOR_SIGNED_OUT not in status.stdout
+
+        # 3. The control. Point HELIX at the CLI's *settings* file in the
+        #    settings directory -- the pre-correction manifest -- and the same
+        #    check reports signed out, so step 2 is not vacuous.
+        settings_login_volume = _make_synthetic_login_volume(
+            backend,
+            json.dumps({"version": 1, "editor": {"vimMode": False}}),
+            _CURSOR_SETTINGS_ENTRY[0],
+            image=fixture_image,
+        )
+        monkeypatch.setattr(
+            sandbox_module,
+            "sandbox_auth_volume_name",
+            lambda _backend: settings_login_volume,
+        )
+        monkeypatch.setitem(
+            sandbox_module.AUTH_CREDENTIAL_MANIFEST, backend, (_CURSOR_SETTINGS_ENTRY,)
+        )
+        monkeypatch.setitem(
+            sandbox_module.AUTH_MOUNT_DESTINATIONS, backend, _CURSOR_SETTINGS_DESTINATION
+        )
+        try:
+            control = _run(["cursor-agent", "status"])
+            assert _CURSOR_SIGNED_OUT in control.stdout, (
+                "the settings file was accepted as a credential -- this check "
+                f"cannot tell the two apart: {control.stdout!r}"
+            )
+        finally:
+            _force_remove_volume(settings_login_volume)
     finally:
         _force_remove_volume(login_volume)

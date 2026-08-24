@@ -56,7 +56,16 @@ _RUNNER_UID_GID = "1000:1000"
 AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
     "claude": ((".claude/.credentials.json", ".credentials.json"),),
     "codex": ((".codex/auth.json", "auth.json"),),
-    "cursor": ((".cursor/cli-config.json", "cli-config.json"),),
+    # Cursor's credential store and its settings store are different
+    # directories on Linux. The CLI resolves its settings directory as
+    # ``$CURSOR_CONFIG_DIR``, else ``$XDG_CONFIG_HOME/cursor``, else
+    # ``$HOME/.cursor`` -- that is where ``cli-config.json`` (editor, display,
+    # permissions, model) lives, and it holds no credential. The credential
+    # goes through a separate resolver that on Linux always joins
+    # ``$XDG_CONFIG_HOME`` (else ``$HOME/.config``) with the application name,
+    # so with neither variable set the CLI reads and writes exactly
+    # ``$HOME/.config/cursor/auth.json``.
+    "cursor": ((".config/cursor/auth.json", "auth.json"),),
     "gemini": ((".gemini/oauth_creds.json", "oauth_creds.json"),),
     "opencode": ((".local/share/opencode/auth.json", "auth.json"),),
 }
@@ -64,7 +73,7 @@ AUTH_CREDENTIAL_MANIFEST: dict[str, tuple[tuple[str, str], ...]] = {
 AUTH_MOUNT_DESTINATIONS: dict[str, str] = {
     "claude": "/home/node/.claude",
     "codex": "/home/node/.codex",
-    "cursor": "/home/node/.cursor",
+    "cursor": "/home/node/.config/cursor",
     "gemini": "/home/node/.gemini",
     "opencode": "/home/node/.local/share/opencode",
 }

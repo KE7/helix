@@ -1288,6 +1288,100 @@ class TestDockerEnvRedaction:
 
 
 # --------------------------------------------------------------------------
+# Credential manifest shape
+# --------------------------------------------------------------------------
+
+
+def test_cursor_manifest_points_at_the_credential_not_the_settings_file() -> None:
+    """Cursor's settings directory and its credential directory differ.
+
+    The CLI resolves its settings directory (holding ``cli-config.json``:
+    editor, display, permission, and model preferences, and no credential)
+    separately from its credential path, which on Linux is always
+    ``$XDG_CONFIG_HOME``, else ``$HOME/.config``, joined with the application
+    name. Seeding a candidate from the settings file leaves the CLI reporting
+    itself signed out, which is what this manifest previously did.
+    """
+    assert sandbox_module.AUTH_CREDENTIAL_MANIFEST["cursor"] == (
+        (".config/cursor/auth.json", "auth.json"),
+    )
+    assert sandbox_module.AUTH_MOUNT_DESTINATIONS["cursor"] == "/home/node/.config/cursor"
+
+
+# --------------------------------------------------------------------------
+# Ancestor pre-ownership
+# --------------------------------------------------------------------------
+
+
+def test_ancestor_tmpfs_pre_owns_the_cursor_credential_directory_parent() -> None:
+    """Cursor's destination is two components below $HOME, so its parent needs owning.
+
+    Docker synthesises every directory between the agent's tmpfs ``$HOME`` and
+    a deeper ``-v`` destination as ``root:root``, whatever ``$HOME`` itself is
+    owned by. The generic ancestor helper derives that from the destination
+    alone, so no backend needs a rule of its own.
+    """
+    assert sandbox_module._synthesized_ancestor_tmpfs_args(
+        [sandbox_module.AUTH_MOUNT_DESTINATIONS["cursor"]]
+    ) == ["--tmpfs", "/home/node/.config:rw,uid=1000,gid=1000,mode=700"]
+    # A destination one component below $HOME needs nothing -- $HOME's own
+    # tmpfs already owns it.
+    assert sandbox_module._synthesized_ancestor_tmpfs_args(["/home/node/.cursor"]) == []
+    assert (
+        sandbox_module._synthesized_ancestor_tmpfs_args(
+            [sandbox_module.AUTH_MOUNT_DESTINATIONS["gemini"]]
+        )
+        == []
+    )
+
+
+def test_cursor_volume_auth_argv_pre_owns_the_credential_directory_parent(
+    tmp_path: Path, mocker
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch.object(sandbox_module.subprocess, "run", side_effect=fake_run)
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "file.txt").write_text("x")
+
+    run_sandboxed_command(
+        ["cursor-agent", "status"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True, auth="volume", network="none"),
+        scope="agent",
+        sync_back=False,
+        image="helix-test:latest",
+        agent_backend="cursor",
+    )
+
+    agent_call = next(
+        call
+        for call in calls
+        if call[:2] == ["docker", "run"]
+        and any(item.endswith(":/home/node/.config/cursor:rw") for item in call)
+    )
+    tmpfs_values = [
+        agent_call[index + 1]
+        for index, item in enumerate(agent_call)
+        if item == "--tmpfs"
+    ]
+    assert "/home/node/.config:rw,uid=1000,gid=1000,mode=700" in tmpfs_values
+    # The parent tmpfs must be declared before the volume that lands inside it.
+    parent_index = agent_call.index("/home/node/.config:rw,uid=1000,gid=1000,mode=700")
+    mount_index = next(
+        index
+        for index, item in enumerate(agent_call)
+        if item.endswith(":/home/node/.config/cursor:rw")
+    )
+    assert parent_index < mount_index
+
+# --------------------------------------------------------------------------
 # Seed helper: named failure causes
 # --------------------------------------------------------------------------
 
