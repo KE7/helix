@@ -239,9 +239,37 @@ def capture_change_summary(worktree_path: str | Path) -> dict[str, str] | None:
     return validated
 
 
+def _trim_evaluator_output(raw: dict[str, Any]) -> dict[str, Any]:
+    """Drop fields of ``EvalResult.to_dict()`` that only restate the prose line.
+
+    ``render_failure_history`` already prints ``attempt["score"]`` (the
+    aggregate) directly above this JSON, so ``candidate_id`` (an id the next
+    agent has no lever to act on) and ``scores`` (the same aggregate,
+    renamed and re-keyed) are pure restatement and are dropped. ``asi`` is
+    dropped only when empty -- it is often unset, but when populated (e.g.
+    captured stdout) it is diagnostic content, not restatement.
+
+    ``instance_scores`` is kept deliberately: per-example numbers show
+    *which* examples regressed, which the single aggregate above cannot.
+    Everything else -- ``side_info``, ``per_example_side_info``,
+    ``objective_scores`` -- is the feedback/diagnostic payload this whole
+    history exists to carry and is passed through untouched.
+    """
+    trimmed = dict(raw)
+    trimmed.pop("candidate_id", None)
+    trimmed.pop("scores", None)
+    if not trimmed.get("asi"):
+        trimmed.pop("asi", None)
+    return trimmed
+
+
 def _evaluator_output(evaluation: EvalResult) -> str | None:
     try:
-        rendered = json.dumps(evaluation.to_dict(), ensure_ascii=False, sort_keys=True)
+        rendered = json.dumps(
+            _trim_evaluator_output(evaluation.to_dict()),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     except (TypeError, ValueError):
         return None
     if len(rendered.encode("utf-8")) > MAX_EVALUATOR_OUTPUT_BYTES:
