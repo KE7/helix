@@ -50,6 +50,9 @@ No Sonnet, no Opus, no extended thinking — just Haiku with low effort and a ha
 - `solve.py` — the evolving solver (this is what HELIX mutates).
 - `evaluate.py` — scorer that checks validity and emits one
   `HELIX_RESULT=[[score, side_info], ...]` pair per id in `helix_batch.json`.
+  `side_info` carries actionable feedback (which circles overlap or escape
+  the square and by how much, radius spread, gap to the best known packing)
+  so the next mutation has something to act on beyond a bare number.
 - `helix.toml` — project configuration.
 - `solve_optimized.py` — a hand-tuned reference implementation that scores **2.635982**. It is not used during evolution; it is provided as a sanity check / target for comparison.
 
@@ -68,7 +71,7 @@ tmp_dir=$(mktemp -d) && cp "$(git rev-parse --show-toplevel)/examples/circle_pac
   && printf '["reference"]\n' > "$tmp_dir/helix_batch.json" \
   && cd "$tmp_dir" \
   && uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py
-# HELIX_RESULT=[[2.635982, {"scores": {"sum_radii": 2.635982}, "violations": 0, "arrangement": "26 circles in 6x5 grid, avg_r=0.1014, violations=0"}]]
+# HELIX_RESULT=[[2.635982, {"scores": {"sum_radii": 2.635982}, "feedback": "All 26 circles are valid: inside the square, no overlaps. Radii range 0.0692-0.1370 (mean 0.1014) across 26 circles. Sum of radii has reached the best known packing for 26 circles (2.635982).", "bounds_violations": {"count": 0, "worst": []}, "overlap_violations": {"count": 0, "total_overlap_depth": 0.0, "worst": []}, "radius_stats": {"n_circles": 26, "min": 0.069181, "max": 0.13701, "mean": 0.101384}}]]
 ```
 
 A score of `0.0` with `"ERROR: Could not import solve.py"` means the evaluator

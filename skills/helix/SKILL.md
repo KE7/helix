@@ -206,6 +206,25 @@ HELIX_RESULT=[[0.8, 1.0, 0.5], {"details": "..."}]
 
 Those shapes are intentionally rejected. Emit one entry per example instead.
 
+`side_info` is the channel the *next* mutation actually reasons from: HELIX
+renders it into the mutation prompt's `## Diagnostics` section, which the
+agent reads before the score. An evaluator that emits only a score gives
+that agent nothing to act on beyond "better" or "worse" — put in `side_info`
+what a human reviewing a bad output would want to know: why the score was
+low and which specific things were wrong.
+
+```python
+# Good -- actionable: says what was wrong and why.
+side_info = {
+    "scores": {"accuracy": 0.0},
+    "feedback": "Expected '3.13.2', got '3.12.0' -- agent read a cached "
+                "version list instead of fetching the live one.",
+}
+
+# Bad -- score only, no signal about *why*; the next mutation is guessing.
+side_info = {"scores": {"accuracy": 0.0}}
+```
+
 ## Running And Monitoring
 
 Common commands:
