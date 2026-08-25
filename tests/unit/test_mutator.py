@@ -363,6 +363,28 @@ class TestPerExampleDiagnostics:
         # Per-example markers must NOT appear on the legacy path.
         assert "# Example" not in prompt
 
+    def test_flat_path_scores_label_matches_per_example_path(self):
+        """Same reserved ``scores`` key, rendered through either Diagnostics
+        path, must carry the same "Scores (Higher is Better)" label."""
+        per_example_er = self._make(
+            per_example_side_info=[{"scores": {"acc": 0.5}}],
+            instance_scores={"ex_0": 1.0},
+        )
+        flat_er = self._make(
+            per_example_side_info=None,
+            side_info={"scores": {"acc": 0.5}},
+        )
+        per_example_prompt = build_mutation_prompt("goal", per_example_er)
+        flat_prompt = build_mutation_prompt("goal", flat_er)
+
+        assert "Scores (Higher is Better)" in per_example_prompt
+        assert "Scores (Higher is Better)" in flat_prompt
+        # Flat path keeps its existing ``  label: value`` line shape
+        # rather than growing a markdown header.
+        assert "  Scores (Higher is Better): {'acc': 0.5}" in flat_prompt
+        # The raw reserved key must not leak into the rendered prompt.
+        assert "scores:" not in flat_prompt
+
     def test_no_diagnostics_when_both_absent(self):
         er = self._make(per_example_side_info=None, side_info=None)
         prompt = build_mutation_prompt("goal", er)
