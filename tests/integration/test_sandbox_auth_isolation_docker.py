@@ -333,20 +333,66 @@ def _force_remove_volume(name: str) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_leaked_test_volumes():
-    """Belt-and-braces cleanup: remove any stray test-created volumes.
+def _no_leaked_test_volumes(monkeypatch: pytest.MonkeyPatch):
+    """Belt-and-braces cleanup: remove exactly the volumes this test process created.
 
-    Scoped to prefixes HELIX itself only ever assigns to throwaway
-    credential volumes (``helix-candidate-auth-``) or that this test module
-    invents for its synthetic login fixture (``helix-test-synthetic-login-``).
-    Neither prefix can collide with a real ``helix-auth-<backend>`` volume.
+    ``helix-candidate-auth-`` is not a test-only prefix -- it is the real
+    production prefix ``_create_candidate_auth_volume`` in
+    ``src/helix/sandbox.py`` assigns to *every* live candidate's credential
+    volume, test-made or not. (An earlier version of this docstring reasoned
+    that neither cleanup prefix "can collide with a real
+    ``helix-auth-<backend>`` volume" -- true, but irrelevant: the volume this
+    fixture must not touch is a real *candidate* volume, i.e. one sharing
+    this exact prefix, not a real *login* volume under a different one.) A
+    sweep that force-removes anything starting with that prefix after every
+    test would delete another, concurrently running HELIX process's
+    in-flight candidate volumes right along with this test's own -- pulling
+    a live run's credentials out from under it mid-mutation, not just
+    cleaning up a leaked test artifact. So cleanup here never sweeps that
+    namespace by prefix. Instead it wraps ``_create_candidate_auth_volume``
+    at both places this suite calls it -- this test module's own direct
+    calls, and the internal call ``run_sandboxed_command`` makes inside
+    ``helix.sandbox`` -- to record the exact name of every candidate volume
+    this test process itself asked Docker to create, and removes only those
+    names.
+
+    ``helix-test-synthetic-login-`` is different: production code never
+    assigns that prefix to anything, so no real HELIX workload can ever hold
+    a volume under it -- only this test module's own fixtures do, always
+    with a random uuid suffix. A prefix sweep there cannot delete a live
+    run's credentials, so it stays a sweep: a cheap, robust fallback for a
+    login volume some other test in this process leaked, without needing
+    name-for-name tracking for it too.
     """
+    created_candidate_volumes: list[str] = []
+    original_create_candidate_auth_volume = sandbox_module._create_candidate_auth_volume
+
+    def _tracking_create_candidate_auth_volume(agent_backend: str) -> CandidateAuthVolume:
+        volume = original_create_candidate_auth_volume(agent_backend)
+        created_candidate_volumes.append(volume.name)
+        return volume
+
+    # Patched in two places on purpose -- see the docstring. Both bindings
+    # point at the same underlying function; either call path left
+    # unpatched would create a real, untracked candidate volume.
+    monkeypatch.setattr(
+        sandbox_module,
+        "_create_candidate_auth_volume",
+        _tracking_create_candidate_auth_volume,
+    )
+    monkeypatch.setitem(
+        globals(), "_create_candidate_auth_volume", _tracking_create_candidate_auth_volume
+    )
+
     yield
+
+    for name in created_candidate_volumes:
+        if _volume_exists(name):
+            _force_remove_volume(name)
+
     listing = _docker("volume", "ls", "--format", "{{.Name}}")
     for name in listing.stdout.splitlines():
-        if name.startswith("helix-candidate-auth-") or name.startswith(
-            "helix-test-synthetic-login-"
-        ):
+        if name.startswith("helix-test-synthetic-login-"):
             _force_remove_volume(name)
 
 
