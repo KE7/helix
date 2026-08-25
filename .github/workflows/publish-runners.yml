@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*"
+  schedule:
+    # Weekly rebuild so the images pick up whatever the unpinned agent CLI
+    # installs (npm latest / curl-installer latest) resolve to, without
+    # waiting on a release tag. 12:00 UTC Monday is before 6am in
+    # America/Los_Angeles year-round (04:00 PST / 05:00 PDT), matching the
+    # cadence and timezone this repo's Renovate config already uses
+    # ("before 6am on monday", "timezone": "America/Los_Angeles").
+    - cron: "0 12 * * 1"
   workflow_dispatch:
 
 env:
