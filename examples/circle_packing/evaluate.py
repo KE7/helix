@@ -10,24 +10,21 @@ GEPA blog: https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-a
 
 ``side_info`` carries the feedback the *next* mutation actually reasons from
 (see the "Evaluator Contract" note in skills/helix/SKILL.md): which circles
-overlap and by how much, which escape the unit square and by how much, the
-radius spread, and the gap to the best known packing — the kind of thing a
-human reviewing a bad arrangement would ask for, derived only from data this
-evaluator already computes. It stays bounded regardless of instance size by
-listing only the worst few offenders (see MAX_OFFENDERS_LISTED) rather than
-enumerating every circle or every pair.
+overlap and by how much, which escape the unit square and by how much, radius
+spread, which circle has the most room left to grow and what stops it, and
+where the largest remaining empty gap is — the kind of thing a human
+reviewing an arrangement would point at, derived only from data this
+evaluator already computes about THIS candidate. None of it is a target to
+match: every measure keeps producing a concrete next move no matter how good
+the packing gets, because it describes the candidate's own geometry rather
+than a distance to an external number. It stays bounded regardless of
+instance size by listing only the worst few offenders (see
+MAX_OFFENDERS_LISTED) rather than enumerating every circle or every pair.
 """
 import json
 import math
 from pathlib import Path
 
-# Best published sum-of-radii for 26 circles in a unit square: matches
-# solve_optimized.py's reference score and the figures already quoted in
-# README.md / helix.toml (GEPA optimize_anything blog: 2.63598+; AlphaEvolve:
-# 2.6358). Used only to report a distance-to-target in side_info -- it does
-# not affect the score and is only meaningful for the N_CIRCLES instance
-# actually evaluated here.
-BEST_KNOWN_SUM_RADII = 2.635982
 N_CIRCLES = 26
 
 # Cap how many individual offenders (overlapping pairs, out-of-bounds
@@ -37,6 +34,11 @@ N_CIRCLES = 26
 # under the 32 KiB retained-evaluator-output cap (MAX_EVALUATOR_OUTPUT_BYTES
 # in src/helix/change_summary.py).
 MAX_OFFENDERS_LISTED = 5
+
+# Resolution of the grid search used to locate the largest still-empty gap
+# (see _largest_gap). Fixed and independent of n, so cost stays O(GRID^2)
+# instead of growing with instance size.
+GRID_STEPS = 40
 
 
 def _read_batch_ids() -> list[str]:
@@ -50,6 +52,81 @@ def _read_batch_ids() -> list[str]:
 def _bounds_escape(x: float, y: float, r: float) -> float:
     """How far a circle pokes outside [0, 1] x [0, 1]; 0.0 if fully inside."""
     return max(0.0, r - x, r - y, x + r - 1.0, y + r - 1.0)
+
+
+def _wall_gap(x: float, y: float, r: float) -> tuple[float, str]:
+    """Distance from a circle's edge to its nearest wall, and which wall."""
+    gaps = {"left": x - r, "right": 1.0 - x - r, "bottom": y - r, "top": 1.0 - y - r}
+    side = min(gaps, key=lambda k: gaps[k])
+    return gaps[side], side
+
+
+def _headroom_stats(circles: list[tuple[float, float, float]]) -> list[dict]:
+    """How much each circle could grow before it touches something.
+
+    For every circle, take the smaller of (a) its clearance to the nearest
+    wall and (b) its clearance to its nearest neighbour. That is exactly how
+    much its radius could increase in isolation before something has to
+    give. Clamped at 0 for a circle that already overlaps or escapes the
+    square -- that circle needs to move before it can grow, which the
+    bounds/overlap violations already say. This is unbounded in the useful
+    direction: it is strictly positive for any candidate that is not
+    already a local optimum, so it never runs dry the way a fixed target
+    would.
+    """
+    n = len(circles)
+    stats = []
+    for i, (x, y, r) in enumerate(circles):
+        wall_val, wall_side = _wall_gap(x, y, r)
+        nb_val = math.inf
+        nb_idx = None
+        for j, (xj, yj, rj) in enumerate(circles):
+            if j == i:
+                continue
+            gap = math.hypot(x - xj, y - yj) - r - rj
+            if gap < nb_val:
+                nb_val, nb_idx = gap, j
+        if n == 1 or wall_val <= nb_val:
+            binder = f"the {wall_side} wall"
+        else:
+            binder = f"circle {nb_idx}"
+        stats.append(
+            {
+                "circle": i,
+                "headroom": max(0.0, min(wall_val, nb_val)),
+                "binder": binder,
+            }
+        )
+    return stats
+
+
+def _largest_gap(
+    circles: list[tuple[float, float, float]],
+) -> tuple[float, float, float]:
+    """Approximate radius and location of the largest still-empty region.
+
+    Grid search over the unit square: at each point, the largest circle
+    that could be centered there without touching a wall or an existing
+    circle. Fixed grid resolution (GRID_STEPS), so cost does not grow with
+    n. Like headroom, this stays positive for any candidate short of a
+    perfect covering, so it keeps giving the agent somewhere to push
+    circles toward instead of going silent once some milestone is passed.
+    """
+    best_r, best_x, best_y = -math.inf, 0.5, 0.5
+    for gi in range(GRID_STEPS + 1):
+        gx = gi / GRID_STEPS
+        for gj in range(GRID_STEPS + 1):
+            gy = gj / GRID_STEPS
+            clearance = min(gx, gy, 1.0 - gx, 1.0 - gy)
+            for x, y, r in circles:
+                if clearance <= 0.0:
+                    break
+                d = math.hypot(gx - x, gy - y) - r
+                if d < clearance:
+                    clearance = d
+            if clearance > best_r:
+                best_r, best_x, best_y = clearance, gx, gy
+    return max(0.0, best_r), best_x, best_y
 
 
 def _analyze(circles: list[tuple[float, float, float]]) -> dict:
@@ -108,23 +185,25 @@ def _analyze(circles: list[tuple[float, float, float]]) -> dict:
                 f"{worst['overlap_by']:.4f}) -- push those centers apart or shrink "
                 "one of each pair."
             )
+    min_r, max_r = min(radii), max(radii)
+    spread = f"{max_r / min_r:.2f}" if min_r > 1e-9 else "inf"
     feedback.append(
-        f"Radii range {min(radii):.4f}-{max(radii):.4f} (mean "
-        f"{sum_radii / n:.4f}) across {n} circles."
+        f"Radii range {min_r:.4f}-{max_r:.4f} (mean {sum_radii / n:.4f}, "
+        f"spread ratio {spread}) across {n} circles."
     )
-    if n == N_CIRCLES:
-        # Round before comparing: the score itself is reported rounded to 6
-        # decimals, so a candidate that lands on the published best must not
-        # read as "0.0000 below" (true float sum) instead of "reached".
-        gap = round(BEST_KNOWN_SUM_RADII - round(sum_radii, 6), 6)
-        feedback.append(
-            f"Sum of radii is {gap:.4f} below the best known packing for "
-            f"{n} circles ({BEST_KNOWN_SUM_RADII}), "
-            f"{100.0 * gap / BEST_KNOWN_SUM_RADII:.2f}% short."
-            if gap > 1e-9
-            else "Sum of radii has reached the best known packing for "
-            f"{n} circles ({BEST_KNOWN_SUM_RADII})."
-        )
+
+    headroom = _headroom_stats(circles)
+    total_headroom = sum(h["headroom"] for h in headroom)
+    loosest = max(headroom, key=lambda h: h["headroom"])
+    feedback.append(
+        f"Circle {loosest['circle']} could grow {loosest['headroom']:.4f} "
+        f"before {loosest['binder']} (total headroom {total_headroom:.4f})."
+    )
+
+    gap_r, gap_x, gap_y = _largest_gap(circles)
+    feedback.append(
+        f"Largest empty gap: r{gap_r:.4f} near ({gap_x:.2f}, {gap_y:.2f})."
+    )
 
     # Render the itemized "worst" lists as plain strings rather than nested
     # dicts: HELIX's diagnostics renderer (mutator._render_side_info_value,
