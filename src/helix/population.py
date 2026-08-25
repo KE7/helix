@@ -73,12 +73,13 @@ class EvalResult:
       evaluators never type a HELIX-internal id.
     - ``per_example_side_info`` is positional to ``instance_scores``
       by id order (same order as ``helix_batch.json``).  GEPA analogue:
-      ``EvaluationBatch.trajectories`` (``src/gepa/core/adapter.py:25``).
+      ``EvaluationBatch.trajectories``
+      (``src/gepa/core/adapter.py::EvaluationBatch.trajectories``).
       Carries freeform per-example diagnostics; rendered into the
       mutation prompt's Diagnostics section by
       :func:`helix.mutator._render_per_example_diagnostics` (GEPA
       ``format_samples`` parity at
-      ``src/gepa/strategies/instruction_proposal.py:54-95``).
+      ``src/gepa/strategies/instruction_proposal.py::format_samples``).
     """
     candidate_id: str
     scores: dict[str, float]          # aggregate/summary scores

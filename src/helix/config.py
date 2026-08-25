@@ -306,10 +306,11 @@ class EvolutionConfig(BaseModel):
     # Total cap on merge invocations across the entire run (not per-gen).
     max_merge_invocations: int = 5
     # Minimum val-set overlap floor for merge candidates. Must be > 0
-    # (GEPA parity: merge.py:243-244 rejects val_overlap_floor <= 0).
+    # (GEPA parity: merge.py::MergeProposer.__init__ rejects val_overlap_floor <= 0).
     merge_val_overlap_floor: int = 5
     # Number of val ids sampled for merge acceptance. Default 5 matches
-    # GEPA (merge.py:262 num_subsample_ids=5). Must be >= 1.
+    # GEPA (merge.py::MergeProposer.select_eval_subsample_for_merged_program
+    # num_subsample_ids=5). Must be >= 1.
     merge_subsample_size: int = 5
     # HELIX's own P: the number of parents sampled per iteration for
     # parallel mutation proposals. Upstream expresses the same idea via
@@ -522,7 +523,7 @@ class EvolutionConfig(BaseModel):
             raise ValueError(
                 f"evolution.val_stage_size must be >= 0 (got {self.val_stage_size})"
             )
-        # GEPA parity (merge.py:243-244): reject non-positive overlap floors.
+        # GEPA parity (merge.py::MergeProposer.__init__): reject non-positive overlap floors.
         if self.merge_val_overlap_floor <= 0:
             raise ValueError(
                 "evolution.merge_val_overlap_floor must be > 0 "

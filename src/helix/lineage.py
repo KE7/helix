@@ -117,24 +117,25 @@ def find_merge_triplet(
     common ancestor, and neither may be an ancestor of the other.
 
     GEPA parity (M3): uses random sampling with *max_attempts* retries
-    instead of exhaustive O(n²) search.  Mirrors GEPA merge.py:87-90.
+    instead of exhaustive O(n²) search.  Mirrors GEPA merge.py::find_common_ancestor_pair.
 
     GEPA parity (M4): ancestor selection is weighted random by ancestor
-    score, not deterministic best.  Mirrors GEPA merge.py:108-112.
+    score, not deterministic best.  Mirrors GEPA merge.py::find_common_ancestor_pair.
 
     GEPA parity (L1): improvement filter is non-strict (``>``) matching
-    GEPA merge.py:59 — ancestor score must not exceed either candidate.
+    GEPA merge.py::filter_ancestors — ancestor score must not exceed either candidate.
 
     GEPA parity (merge-pairing audit B1/B2/C3):
     - Canonicalize ``(i, j)`` inside the sampling loop so downstream
       consumers (the merge subprocess, the attempted-pair ledger) always
-      see a lex-sorted tuple.  Mirrors GEPA ``merge.py:94-95``
+      see a lex-sorted tuple.  Mirrors GEPA ``merge.py::find_common_ancestor_pair``
       (``if j < i: i, j = j, i``).
     - Filter already-attempted pairs (``attempted_pairs``) and pairs
       that fail the val-support overlap floor (``has_val_support_overlap``)
       *inside* the retry loop, so a blocked sample triggers resampling
       rather than bailing out of the iteration.  Mirrors GEPA
-      ``merge.py:147-148, 199-201`` (inside ``sample_and_attempt_...``).
+      ``merge.py::sample_and_attempt_merge_programs_by_common_predictors``
+      (inside ``sample_and_attempt_...``).
 
     Parameters
     ----------
@@ -149,7 +150,9 @@ def find_merge_triplet(
         Seeded RNG instance.  Falls back to ``random.Random(0)`` if None.
     max_attempts:
         Maximum random sampling attempts before giving up.  Defaults to 10
-        to match GEPA ``merge.py:76,126`` (``max_attempts=10``).
+        to match GEPA ``merge.py::find_common_ancestor_pair`` and
+        ``merge.py::sample_and_attempt_merge_programs_by_common_predictors``
+        (``max_attempts=10``).
     attempted_pairs:
         Optional set of canonical ``(i, j)`` tuples (lex-sorted) that have
         already been attempted in earlier iterations.  Sampled pairs matching
@@ -159,7 +162,7 @@ def find_merge_triplet(
         ``has_val_support_overlap(i, j)`` returns ``False``.  Mirrors the
         ``has_val_support_overlap`` parameter in
         ``sample_and_attempt_merge_programs_by_common_predictors`` at
-        GEPA ``merge.py:125,199-201``.
+        GEPA ``merge.py::sample_and_attempt_merge_programs_by_common_predictors``.
 
     Returns
     -------
@@ -179,12 +182,12 @@ def find_merge_triplet(
     }
 
     for _ in range(max_attempts):
-        # GEPA parity (M3): random pair sampling (merge.py:87-90)
+        # GEPA parity (M3): random pair sampling (merge.py::find_common_ancestor_pair)
         i, j = rng.sample(frontier_ids, 2)
         if i == j:
             continue
 
-        # GEPA parity (merge-pairing audit C3, merge.py:94-95): canonicalize
+        # GEPA parity (merge-pairing audit C3, merge.py::find_common_ancestor_pair): canonicalize
         # pair so (i, j) and (j, i) land on the same (i, j) tuple for all
         # downstream consumers (merge subprocess arg order, attempted-pair
         # ledger, description-triplet dedup).  HELIX ids are strings, so
@@ -192,13 +195,15 @@ def find_merge_triplet(
         if j < i:
             i, j = j, i
 
-        # GEPA parity (merge-pairing audit B2, merge.py:147-148): skip
+        # GEPA parity (merge-pairing audit B2,
+        # merge.py::sample_and_attempt_merge_programs_by_common_predictors): skip
         # already-attempted pairs inside the retry loop instead of burning
         # the whole propose() call.
         if attempted_pairs is not None and (i, j) in attempted_pairs:
             continue
 
-        # GEPA parity (merge-pairing audit B1, merge.py:199-201): skip
+        # GEPA parity (merge-pairing audit B1,
+        # merge.py::sample_and_attempt_merge_programs_by_common_predictors): skip
         # pairs with insufficient val-support overlap inside the retry
         # loop.  This lets the next sample win instead of consuming the
         # whole generation on the first unlucky draw.
@@ -228,7 +233,7 @@ def find_merge_triplet(
             if i_score is None or j_score is None:
                 continue
             # GEPA parity (L1): non-strict improvement filter.
-            # GEPA merge.py:59 uses ``agg_scores[ancestor] > agg_scores[i]``
+            # GEPA merge.py::filter_ancestors uses ``agg_scores[ancestor] > agg_scores[i]``
             # to SKIP — meaning both must be >= ancestor (non-strict).
             if ca_score > i_score or ca_score > j_score:
                 continue
@@ -238,7 +243,7 @@ def find_merge_triplet(
             continue
 
         # GEPA parity (M4): weighted random ancestor selection.
-        # Mirrors GEPA merge.py:108-112 — rng.choices() with score weights.
+        # Mirrors GEPA merge.py::find_common_ancestor_pair — rng.choices() with score weights.
         ancestor_weights = [
             max(frontier_scores.get(ca, 0.0), 1e-9)
             for ca in valid_ancestors

@@ -253,7 +253,7 @@ class TestPerExampleDiagnostics:
     as the Diagnostics section under the new GEPA O.A. contract
     (``OptimizeAnythingAdapter.make_reflective_dataset`` in
     ``optimize_anything_adapter.py`` + ``format_samples``
-    at ``gepa/strategies/instruction_proposal.py:54-95``).  The legacy
+    at ``gepa/strategies/instruction_proposal.py::format_samples``).  The legacy
     batch-level ``side_info`` rendering is used only when
     ``per_example_side_info`` is absent.
     """

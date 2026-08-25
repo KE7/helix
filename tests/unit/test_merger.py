@@ -118,7 +118,8 @@ class TestBuildMergePromptTwoDiff:
     """GEPA-parity two-diff form: when ``ancestor_id`` and both
     ancestor-relative diffs are supplied, the prompt emits two labelled
     sections instead of the single A↔B diff.  Mirrors GEPA's
-    three-way attribution reasoning (``gepa/proposer/merge.py:163-191``)
+    three-way attribution reasoning
+    (``gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors``)
     at the file-hunk level — agent reads off A's contribution and B's
     contribution directly instead of inferring three-way info from a
     two-way comparison.
@@ -465,7 +466,8 @@ class TestMerge:
 class TestSelectEvalSubsample:
     """Pure-function tests for the GEPA-parity subsample helper.
 
-    Mirrors gepa/src/gepa/proposer/merge.py:258-288 — stratifies across
+    Mirrors gepa/src/gepa/proposer/merge.py::MergeProposer.select_eval_subsample_for_merged_program
+    — stratifies across
     p1_wins / p2_wins / ties buckets, tops up from unused common ids, and
     falls back to rng.choices (with replacement) when common ids are
     exhausted.
@@ -512,7 +514,9 @@ class TestSelectEvalSubsample:
 
     def test_subsample_fewer_than_size(self):
         # 2 common ids, all in p1 bucket, size 5 → returns 5 entries via the
-        # rng.choices top-up (GEPA merge.py:285-286) drawn from the 2 ids.
+        # rng.choices top-up
+        # (GEPA merge.py::MergeProposer.select_eval_subsample_for_merged_program)
+        # drawn from the 2 ids.
         scores1 = {"a": 1.0, "b": 1.0}
         scores2 = {"a": 0.0, "b": 0.0}
         rng = random.Random(0)

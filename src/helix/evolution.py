@@ -2177,7 +2177,9 @@ def _run_evolution_impl(
             # the effective mutation count by the merge-gate failure rate.
             # GEPA-parity note: the *merge operator itself* (helix.merger.merge,
             # invoked below) deliberately diverges from GEPA's deterministic
-            # text-component splicing (gepa/proposer/merge.py:155-203).  GEPA
+            # text-component splicing
+            # (gepa/proposer/merge.py::
+            # sample_and_attempt_merge_programs_by_common_predictors).  GEPA
             # candidates are dict[str, str], so a syntactic per-component swap
             # is well-defined; helix candidates are full git worktrees, where
             # LLM-mediated file editing is the only viable approach.  Every
@@ -2209,7 +2211,7 @@ def _run_evolution_impl(
                         score_map[cid] = sum(inst_scores.values()) / len(inst_scores)
 
                 # GEPA parity (M2): merge candidates must be non-dominated.
-                # GEPA merge.py:299-304 uses find_dominator_programs() to filter.
+                # GEPA merge.py::MergeProposer.propose uses find_dominator_programs() to filter.
                 non_dominated = frontier.get_non_dominated()
                 merge_candidate_ids = [
                     cid for cid in frontier._candidates if cid in non_dominated
@@ -2224,7 +2226,9 @@ def _run_evolution_impl(
                 # ``MergeProposer.propose`` returns ``None``.
                 #
                 # GEPA parity (merge-pairing audit D1):
-                # mirror GEPA ``merge.py:130-131`` — you need two siblings plus
+                # mirror GEPA
+                # ``merge.py::sample_and_attempt_merge_programs_by_common_predictors``
+                # — you need two siblings plus
                 # one ancestor, so fewer than 3 total candidates can never
                 # yield a valid triplet.  Kept as an explicit guard for
                 # clarity; functionally equivalent to ``find_merge_triplet``
@@ -2241,7 +2245,8 @@ def _run_evolution_impl(
                     # blocked sample triggers resampling rather than bailing
                     # the iteration.  Mirrors GEPA
                     # ``sample_and_attempt_merge_programs_by_common_predictors``
-                    # (merge.py:118-207) where the same filters are inside the
+                    # (merge.py::sample_and_attempt_merge_programs_by_common_predictors)
+                    # where the same filters are inside the
                     # ``for _ in range(max_attempts)`` loop.
                     _attempted_pairs: set[tuple[str, str]] = {
                         (p[0], p[1]) for p in state.merge_attempted_pairs if len(p) >= 2
@@ -2267,7 +2272,7 @@ def _run_evolution_impl(
                     )
 
                 if triplet is not None:
-                    # GEPA parity (merge.py:94-95): ``find_merge_triplet``
+                    # GEPA parity (merge.py::find_common_ancestor_pair): ``find_merge_triplet``
                     # now returns the canonical ``(i, j)`` (lex-sorted),
                     # so ``cid_i <= cid_j`` always — the merge subprocess,
                     # attempted-pair ledger and the description-triplet
@@ -2295,7 +2300,9 @@ def _run_evolution_impl(
                     # prompt (GEPA parity at the file-hunk level: feed the
                     # agent the same three-way structure GEPA's algorithm
                     # uses to attribute changes —
-                    # ``gepa/proposer/merge.py:163-191``).  The ancestor
+                    # ``gepa/proposer/merge.py::
+                    # sample_and_attempt_merge_programs_by_common_predictors``).
+                    # The ancestor
                     # came from ``find_merge_triplet``; resolve it through
                     # the frontier's append-only candidate map.  ``None``
                     # is tolerated downstream — ``merge()`` falls back to
@@ -2381,7 +2388,8 @@ def _run_evolution_impl(
                             _save_state(state)
                             # GEPA parity (merge-pairing audit C1): the
                             # HEAD SHA of the snapshotted worktree is HELIX's
-                            # port of GEPA's ``new_prog_desc`` (merge.py:195-203);
+                            # port of GEPA's ``new_prog_desc``
+                            # (merge.py::sample_and_attempt_merge_programs_by_common_predictors);
                             # content-addressed so two different triplets that
                             # land on the same merged output hash once and skip
                             # the eval on the duplicate, while the same pair
@@ -2406,10 +2414,11 @@ def _run_evolution_impl(
                             # GEPA parity (M5): merge acceptance evaluates merged on a
                             # size-bounded stratified subsample of ids both parents have
                             # val-scored. Subsample selection ported from GEPA
-                            # merge.py:258-288 (select_eval_subsample_for_merged_program);
+                            # merge.py::MergeProposer.select_eval_subsample_for_merged_program;
                             # default size 5 matches GEPA's hardcoded constant, overridable
                             # via evolution.merge_subsample_size. Required score is
-                            # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
+                            # max(parent subsample sums); mirrors GEPA
+                            # merge.py::MergeProposer.propose.
                             merge_subsample_ids = sorted(
                                 select_eval_subsample_for_merged_program(
                                     era.instance_scores,
@@ -2453,13 +2462,13 @@ def _run_evolution_impl(
                                 break
 
                             # Merged subsample sum must be >= max of parent
-                            # subsample sums (GEPA merge.py:344-345, 394-395).
+                            # subsample sums (GEPA merge.py::MergeProposer.propose).
                             # merge_subsample_ids is sorted(select_eval_subsample_for_merged_program(
                             #   era.instance_scores, erb.instance_scores, ...))
                             # — every sampled id is drawn from the intersection
                             # of era.instance_scores and erb.instance_scores
                             # (common_val_ids above).  The asserts keep the
-                            # invariant loud (GEPA merge.py:342-343).
+                            # invariant loud (GEPA merge.py::MergeProposer.propose).
                             assert set(merge_subsample_ids).issubset(
                                 era.instance_scores
                             ), (
@@ -2757,8 +2766,9 @@ def _run_evolution_impl(
                         "reason": "perfect_subsample",
                         "parent_eval": wr.parent_eval_result.to_dict(),
                     })
-                    # GEPA parity: reflective_mutation.py:308-327 skips a
-                    # proposal when every parent subsample score is perfect.
+                    # GEPA parity:
+                    # reflective_mutation.py::ReflectiveMutationProposer.propose
+                    # skips a proposal when every parent subsample score is perfect.
                     print_info(
                         f"Iteration {gen}: all subsample scores perfect for parent "
                         f"{_parent.id}; skipping proposal."
