@@ -741,13 +741,23 @@ from `helix_batch.json` and emit one `[score, side_info]` pair per id:
 
 ```python
 print("HELIX_RESULT=" + json.dumps([
-    [2.63, {"scores": {"sum_radii": 2.63}}],
+    [2.63, {"scores": {"sum_radii": 2.63}, "feedback": "..."}],
 ]))
 ```
 
 For a batch, the payload must have the same length and order as
 `helix_batch.json`. `side_info` is retained for reflection; its optional
 `scores` dictionary supplies named objective axes.
+
+`side_info` — not the score — is what the *next* mutation actually reasons
+from: HELIX renders it into the mutation prompt's Diagnostics section, which
+the agent reads before the number. `{"scores": {"accuracy": 0.0}}` alone
+tells the next mutation only that it failed, not why; `{"scores": {"accuracy":
+0.0}, "feedback": "expected '3.13.2', got '3.12.0' -- used a cached version
+list"}` gives it something to act on. See
+[`examples/web_researcher/evaluate.py`](examples/web_researcher/evaluate.py)
+and [`examples/circle_packing/evaluate.py`](examples/circle_packing/evaluate.py)
+for evaluators that emit this shape.
 
 For GEPA-style reflective feedback, prefer structured per-example
 `side_info` with the built-in result parser. For additional
