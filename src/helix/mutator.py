@@ -21,6 +21,7 @@ from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
+    CredentialRefreshError,
     MutationError,
     PromptArtifactCollisionError,
     RateLimitError,
@@ -600,6 +601,145 @@ def _looks_like_rate_limit(text: str) -> bool:
     """Return True if *text* contains a rate-limit / overload keyword."""
     lower = text.lower()
     return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Credential / refresh-exhaustion detection
+# ---------------------------------------------------------------------------
+#
+# Distinct from the rate-limit detection above.  A rate limit means "come back
+# later on the same credential"; these markers mean "the credential itself can
+# no longer be used", which is what a lost refresh race looks like from inside
+# a candidate.  Telling them apart matters because only the second one is
+# unrecoverable without operator action, and neither is a code failure.
+#
+# Every marker below is a phrase read out of the shipped CLI it belongs to, not
+# a guess at the wording.  They are deliberately whole distinctive sentences or
+# clauses: matching a bare number or a single common word ("401", "token",
+# "auth") is the false-positive trap this repo has already paid for once --
+# a candidate whose own diff or test output mentions tokens must never be
+# reported to the operator as a broken login.
+_CREDENTIAL_FAILURE_MARKERS: tuple[str, ...] = (
+    # Codex CLI (codex-cli 0.130.0).  One prefix covers every suffix the CLI
+    # appends: "... because your refresh token was already used." / "... has
+    # expired." / "... was revoked." / "... because you have since logged out
+    # or signed in to another account." / the bare
+    # "Your access token could not be refreshed. Please log out and sign in
+    # again."  The already-used variant is the one a lost refresh race
+    # produces.
+    "your access token could not be refreshed",
+    "failed to refresh token while getting account",
+    "chatgpt account id not available, please re-run `codex login`",
+    # OpenCode (opencode-ai 1.14.24) -- thrown by the provider fetch wrapper
+    # when the OAuth token exchange is rejected, e.g. "Token refresh failed:
+    # 400".  The colon is kept so the phrase cannot match narrative prose.
+    "token refresh failed:",
+    # Claude Code (2.1.138).
+    "user oauth refresh failed",
+    "api error: 401 invalid api key",
+)
+
+
+def credential_failure_marker(text: str) -> str | None:
+    """Return the credential-failure marker *text* contains, or ``None``.
+
+    Returns the matched marker rather than a bool so callers can name the
+    evidence in the operator-facing message instead of asserting a verdict
+    with nothing behind it.
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    for marker in _CREDENTIAL_FAILURE_MARKERS:
+        if marker in lower:
+            return marker
+    return None
+
+
+def _errored_envelope_texts(parsed: dict[str, Any]) -> list[str]:
+    """Return the message text of every envelope node flagged ``is_error``.
+
+    ``is_error`` is the backends' own "this node reports a failure" flag: it is
+    top-level on Claude Code's JSON result envelope and per-event inside the
+    JSONL streams the other backends emit.  Reading it is what lets a
+    credential failure be recognised on a *zero* exit, where there is no exit
+    code to key off.
+
+    The flag alone never classifies anything.  A ``tool_result`` carrying
+    ``is_error`` is usually just the agent's own failing shell command -- an
+    ordinary code failure.  It only narrows the text that
+    :func:`credential_failure_marker` is then asked about, so a classification
+    still needs the backend to have said, in its own words, that the
+    credential is unusable.
+    """
+    texts: list[str] = []
+    for node in _walk_json(parsed):
+        flag = node.get("is_error")
+        if flag is not True:
+            continue
+        for key in ("error", "message", "result", "error_message", "text", "content"):
+            value = node.get(key)
+            if isinstance(value, str) and value:
+                texts.append(value)
+    return texts
+
+
+def _credential_failure_evidence(
+    parsed: dict[str, Any] | None,
+    result: subprocess.CompletedProcess[str],
+) -> tuple[str, str] | None:
+    """Return ``(marker, where)`` when this invocation is a credential failure.
+
+    On a **zero** exit only ``is_error``-flagged envelope text is considered.
+    The run reported success, so the raw streams are full of the agent's own
+    work; scanning them would let a candidate that merely *edited* an OAuth
+    code path talk HELIX into declaring the operator's login broken.
+
+    On a **non-zero** exit the raw streams are read too.  The invocation has
+    already failed, so the only question left is which kind of failure it was,
+    and CLIs routinely report an unusable credential on stderr without ever
+    emitting a structured event.
+    """
+    for text in _errored_envelope_texts(parsed or {}):
+        marker = credential_failure_marker(text)
+        if marker is not None:
+            return marker, "structured result envelope (is_error)"
+    if result.returncode == 0:
+        return None
+    for where, text in (("stderr", result.stderr), ("stdout", result.stdout)):
+        marker = credential_failure_marker(text or "")
+        if marker is not None:
+            return marker, where
+    return None
+
+
+def _credential_refresh_error(
+    *,
+    backend: str,
+    backend_name: str,
+    marker: str,
+    where: str,
+    cmd_str: str,
+    worktree_path: str,
+    result: subprocess.CompletedProcess[str],
+) -> CredentialRefreshError:
+    return CredentialRefreshError(
+        f"{backend_name} could not use its stored credential "
+        f"(matched {marker!r} in {where})",
+        operation=f"{backend_name} invocation",
+        phase="credential check",
+        command=cmd_str,
+        cwd=str(worktree_path),
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.returncode,
+        suggestion=(
+            f"This is a credential failure, not a failed mutation: {backend_name} "
+            "reported that its stored login could not be used or refreshed. "
+            f"Re-authenticate with `helix sandbox login {backend}`, then resume "
+            "the run; nothing is wrong with the candidate's code."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1685,6 +1825,30 @@ def invoke_claude_code(
                 worktree_path=worktree_path,
             )
             usage = _normalise_usage_stats(parsed)
+            # A backend can report an unusable credential and still exit 0 --
+            # measured on codex-cli 0.130.0, whose refresh failure is swallowed
+            # entirely (exit 0, empty stderr, even at RUST_LOG=info).  The
+            # envelope's own ``is_error`` flag is the only signal left on this
+            # path, so read it here rather than letting the failure pass as a
+            # successful-but-useless mutation.
+            evidence = _credential_failure_evidence(parsed, result)
+            if evidence is not None:
+                marker, where = evidence
+                logger.error(
+                    "Credential failure detected for %s in %s: matched %r",
+                    backend_name,
+                    where,
+                    marker,
+                )
+                raise _credential_refresh_error(
+                    backend=backend,
+                    backend_name=backend_name,
+                    marker=marker,
+                    where=where,
+                    cmd_str=cmd_str,
+                    worktree_path=worktree_path,
+                    result=result,
+                )
             if backend == "claude":
                 error_text = str(parsed.get("error", ""))
                 if _looks_like_rate_limit(error_text):
@@ -1706,6 +1870,30 @@ def invoke_claude_code(
                         ),
                     )
             return parsed, usage
+
+        # Classify a credential failure ahead of the rate-limit and generic
+        # paths.  The markers are disjoint from the rate-limit keywords, and
+        # "the login is unusable" is a strictly more actionable verdict than
+        # "the backend exited non-zero".
+        evidence = _credential_failure_evidence(parsed, result)
+        if evidence is not None:
+            marker, where = evidence
+            logger.error(
+                "Credential failure detected for %s (exit %d) in %s: matched %r",
+                backend_name,
+                result.returncode,
+                where,
+                marker,
+            )
+            raise _credential_refresh_error(
+                backend=backend,
+                backend_name=backend_name,
+                marker=marker,
+                where=where,
+                cmd_str=cmd_str,
+                worktree_path=worktree_path,
+                result=result,
+            )
 
         rate_limit_source = result.stderr or result.stdout
         if _looks_like_rate_limit(rate_limit_source):
@@ -1863,6 +2051,16 @@ def mutate(
         # Rate limit — clean up orphaned worktree, then re-raise so the parallel
         # futures handler in evolution.py can log it and continue with a smaller
         # proposal set.
+        try:
+            remove_worktree(child)
+        except Exception:
+            pass
+        raise
+    except CredentialRefreshError:
+        # The stored login, not this candidate, is what failed.  Clean up the
+        # orphaned worktree and re-raise so evolution.py can count it and name
+        # it as a credential failure instead of filing it under "the agent
+        # wrote bad code".
         try:
             remove_worktree(child)
         except Exception:

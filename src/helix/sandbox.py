@@ -24,7 +24,11 @@ from helix.agent_state import (
     agent_state_env,
     agent_state_subdirs,
 )
-from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
+from helix.backends import (
+    BACKEND_AUTH_COMMANDS,
+    DEFAULT_BACKEND_IMAGES,
+    backend_credential_warm_skip_reason,
+)
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 
 
@@ -1154,7 +1158,7 @@ def sandbox_auth_docker_args(
     agent_backend: str,
     *,
     image: str,
-    action: Literal["login", "status", "logout"],
+    action: Literal["login", "status", "logout", "warm"],
     network: str = "bridge",
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
@@ -1199,7 +1203,7 @@ def sandbox_auth_docker_args(
 def run_sandbox_auth_command(
     agent_backend: str,
     *,
-    action: Literal["login", "status", "logout"],
+    action: Literal["login", "status", "logout", "warm"],
     image: str | None = None,
     network: str = "bridge",
     add_host_gateway: bool = False,
@@ -1221,6 +1225,93 @@ def run_sandbox_auth_command(
     if interactive:
         return subprocess.run(args, text=True)
     return subprocess.run(args, capture_output=True, text=True)
+
+
+@dataclass(frozen=True)
+class CredentialWarmResult:
+    """Outcome of one per-generation credential warm.
+
+    ``warmed`` is True only when the warm container ran and exited cleanly.
+    ``skip_reason`` is set when the backend is deliberately not warmed;
+    ``detail`` carries the diagnosis when a warm was attempted and failed.
+    """
+
+    backend: str
+    warmed: bool
+    skip_reason: str | None = None
+    returncode: int | None = None
+    detail: str = ""
+
+    @property
+    def skipped(self) -> bool:
+        return self.skip_reason is not None
+
+    @property
+    def failed(self) -> bool:
+        return not self.warmed and self.skip_reason is None
+
+
+#: Tail of the warm command's stderr kept for diagnosis.  Backend CLIs report
+#: refresh failures in prose, not by echoing the credential, but the cap keeps
+#: an unexpectedly chatty CLI from pasting its whole state into the run log.
+_WARM_DETAIL_CHARS = 400
+
+
+def warm_backend_credential(
+    agent_backend: str, *, sandbox: SandboxConfig
+) -> CredentialWarmResult:
+    """Refresh *agent_backend*'s shared credential once, under a single writer.
+
+    Runs the backend's registered ``warm`` command through the same sandboxed
+    auth container that ``helix sandbox status`` uses: one container, the
+    shared login volume mounted read-write, nothing else running against it.
+    Any refresh the CLI decides is due therefore happens exactly once and is
+    written back before candidates start, instead of N candidates racing to
+    spend the same single-use refresh token.
+
+    The call is a no-op whenever the credential is already fresh -- the warm
+    command is chosen so the CLI does no work in that case (see
+    ``helix.backends``).  Backends that need no warm return a skipped result
+    rather than starting a container.
+
+    Never raises: a warm that cannot run is reported, not fatal.  Candidates
+    may still succeed on the credential that is already there, so the run
+    continues either way and the caller decides how loudly to say so.
+    """
+    skip_reason = backend_credential_warm_skip_reason(agent_backend)
+    if skip_reason is not None:
+        return CredentialWarmResult(
+            backend=agent_backend, warmed=False, skip_reason=skip_reason
+        )
+
+    try:
+        image = resolve_sandbox_image(sandbox, agent_backend)
+        result = run_sandbox_auth_command(
+            agent_backend,
+            action="warm",
+            image=image,
+            network=sandbox.network,
+            add_host_gateway=sandbox.add_host_gateway,
+            extra_hosts=sandbox.extra_hosts,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return CredentialWarmResult(
+            backend=agent_backend,
+            warmed=False,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+
+    if result.returncode == 0:
+        return CredentialWarmResult(
+            backend=agent_backend, warmed=True, returncode=0
+        )
+    stderr = (result.stderr or "").strip()
+    return CredentialWarmResult(
+        backend=agent_backend,
+        warmed=False,
+        returncode=result.returncode,
+        detail=stderr[-_WARM_DETAIL_CHARS:],
+    )
 
 
 def run_command(
