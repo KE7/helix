@@ -177,21 +177,32 @@ class TestTopKPareto:
         # k larger than the pool must degrade cleanly too.
         assert select_top_k_pareto(frontier, random.Random(0), 99).id == "only"
 
-    def test_k_greater_equal_pool_uses_mean_pareto_not_legacy_sum_pareto(self):
-        """k >= pool size is not equivalent to the legacy ``pareto`` strategy.
+    def test_k_greater_equal_pool_still_ranks_by_mean_not_sum(self):
+        """``k >= len(frontier)`` makes the top-k membership filter a no-op,
+        so this pins that the ranking step itself — separate from that
+        filter — stays mean-based even when it is the only thing left doing
+        any work.
 
-        The top-k membership filter becomes a no-op, but ``select_parent``
-        feeds ``sum_score()`` into dominance removal while this function reads
-        ``aggregate_score()`` throughout. The pool is built so they disagree:
+        This no longer distinguishes this function from
+        ``ParetoFrontier.select_parent``: that method has also ranked by
+        ``aggregate_score()`` since ``fix/default-parent-selection``, and
+        with the membership filter a no-op the two run dominance removal
+        over the identical mapping with the identical scores, producing an
+        identical eligible set with identical frequency weights (verified
+        directly, not just by matching outcomes over repeated draws;
+        ``select_parent`` draws from its own internal RNG rather than the
+        one passed here, so exact draw sequences do not compare). This test
+        now only guards against a regression to sum-based ranking within
+        this function's own ranking step.
 
             a  {i1: 1.0}                agg=1.00  sum=1.00  (wins i1)
             b  {i1: 1.0, i2: 0.9}       agg=0.95  sum=1.90  (wins nothing)
             c  {i2: 1.0}                agg=1.00  sum=1.00  (wins i2)
 
         By mean, "b" is dominated by "a" on i1's front and never survives
-        dominance removal, leaving only "a" and "c". By sum, "b" survives and
-        even displaces "a" from i1's cleaned front. So "b" appearing in the
-        draw means a sum-based path ran.
+        dominance removal, leaving only "a" and "c". By sum, "b" would
+        survive and even displace "a" from i1's cleaned front, so "b"
+        appearing in the draw would mean the ranking regressed to sum.
         """
         frontier = ParetoFrontier()
         add(frontier, "a", {"i1": 1.0})
@@ -212,15 +223,16 @@ class TestTopKPareto:
         assert seen2 == {"a", "c"}
         assert "b" not in seen2
 
-    def test_k_greater_equal_pool_mean_path_holds_under_seed_1(self):
-        """Seed-specific guard against a ``k >= len(frontier)`` shortcut to
-        ``ParetoFrontier.select_parent()``.
+    def test_k_greater_equal_pool_mean_ranking_holds_under_seed_1(self):
+        """Seed-specific companion to
+        ``test_k_greater_equal_pool_still_ranks_by_mean_not_sum``.
 
-        Under ``Random(1)`` that sum-based shortcut selects "b" at ``k=3``,
-        which the mean path cannot (see
-        ``test_k_greater_equal_pool_uses_mean_pareto_not_legacy_sum_pareto``
-        for the dominance trace). Pinned separately because the seed is what
-        makes the difference observable.
+        "b" is dominated out of the sampling list under mean ranking
+        regardless of RNG seed — a sum-based ranking would instead let "b"
+        survive and become drawable — so this pins that guarantee under a
+        second, independently chosen seed. Pinned separately because a
+        single seed's draws could coincidentally avoid "b" even if a
+        sum-based regression made it selectable again.
         """
         frontier = ParetoFrontier()
         add(frontier, "a", {"i1": 1.0})

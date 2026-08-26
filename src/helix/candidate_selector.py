@@ -5,12 +5,15 @@ Ports the three strategies GEPA implements as ``CurrentBestCandidateSelector``,
 ``gepa.strategies.candidate_selector`` (gepa-ai/gepa). HELIX's own ``"pareto"``
 strategy is unchanged: :func:`select_candidate` delegates it to
 :meth:`helix.population.ParetoFrontier.select_parent`, which ranks by
-``sum_score()``. Which strategy runs is set by
-``config.evolution.candidate_selection_strategy``.
+``aggregate_score()`` — the mean, same as the three ported strategies below.
+What still sets it apart from ``top_k_pareto`` is scope, not ranking metric:
+it runs dominance removal over the whole active frontier, with no top-k
+membership filter narrowing the field first (see :func:`select_top_k_pareto`).
+Which strategy runs is set by ``config.evolution.candidate_selection_strategy``.
 
 Ranking
 -------
-The three ported strategies rank by ``EvalResult.aggregate_score()`` — the mean
+All four strategies rank by ``EvalResult.aggregate_score()`` — the mean
 of a candidate's instance scores — never ``sum_score()``. Both per-program score
 arrays upstream ranks on are means, so the mean is the faithful analogue
 everywhere here. The two quantities disagree whenever candidates carry unequal
@@ -156,9 +159,11 @@ def select_top_k_pareto(
 
     ``k >= len(frontier)`` makes step 2 a no-op on membership, but the full
     path still runs. :meth:`ParetoFrontier.select_parent` is the tempting
-    shortcut and is not equivalent: it feeds ``sum_score()`` into dominance
-    removal, which selects a different candidate whenever candidates carry
-    unequal numbers of scored instances.
+    shortcut and is not equivalent: it runs dominance removal over the whole
+    active frontier with no top-k membership filter, whereas this function
+    first restricts to the top-``k`` candidates by score and intersects that
+    set with the per-key fronts before removing dominated candidates. The two
+    only coincide when that restriction is a no-op, i.e. ``k >= len(frontier)``.
     """
     if len(frontier) == 0:
         raise ValueError(
