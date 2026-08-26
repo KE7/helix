@@ -542,11 +542,10 @@ class TestGatingInEvolutionLoop:
     ):
         seed = make_candidate("g0-s0")
         first = make_candidate("g1-s1", generation=1)
-        first.change_summary = {
-            "intent": "repair parser boundary",
-            "approach": "change final-token check",
-            "expected_effect": "raise the pass rate",
-        }
+        first.change_summary = (
+            "repair parser boundary\n\nChanged the final-token check.\n\n"
+            "I expected this to raise the pass rate."
+        )
         second = make_candidate("g2-s2", generation=2)
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].side_effect = [first, second]
@@ -600,11 +599,10 @@ class TestGatingInEvolutionLoop:
         """
         seed = make_candidate("g0-s0")
         rejected_child = make_candidate("g1-s1", generation=1)
-        rejected_child.change_summary = {
-            "intent": "repair parser boundary",
-            "approach": "change final-token check",
-            "expected_effect": "raise the pass rate",
-        }
+        rejected_child.change_summary = (
+            "repair parser boundary\n\nChanged the final-token check.\n\n"
+            "I expected this to raise the pass rate."
+        )
         accepted_child = make_candidate("g2-s2", generation=2)
         grandchild = make_candidate("g3-s3", generation=3)
         all_mocks["create_seed_worktree"].return_value = seed
@@ -681,11 +679,9 @@ class TestGatingInEvolutionLoop:
     ):
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
-        child.change_summary = {
-            "intent": "an improvement",
-            "approach": "make it better",
-            "expected_effect": "pass",
-        }
+        child.change_summary = (
+            "An improvement.\n\nMade it better.\n\nI expected it to pass."
+        )
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = child
 

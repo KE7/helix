@@ -301,13 +301,16 @@ class EvolutionConfig(BaseModel):
         description=(
             "Maximum rejected attempts retained per parent and replayed into "
             "that parent's next mutation prompt. Set 0 to disable retention; "
-            "the maximum is 3, which is also the default. That ceiling is what "
-            "the prompt's separate size cap on the rendered block can actually "
-            "deliver at the entry sizes seen in real runs, so it is not an "
-            "advertised depth the renderer would quietly fall short of. An "
-            "evaluator markedly more verbose than that still makes entries too "
-            "large to fit, and fewer than the retained number reach the prompt; "
-            "entries are shown whole or not at all, never half."
+            "the maximum is 3, which is also the default. Every retained "
+            "attempt is rendered, whatever the evaluator's verbosity: each is "
+            "already bounded on the way in (a self-report of at most 4096 "
+            "characters and an evaluator output of at most 20480, either one "
+            "cut with a note in the text rather than discarded), so this "
+            "number times those bounds is the whole block -- at most 74600 "
+            "characters, and about 53000 at the entry sizes seen in real "
+            "runs. An attempt whose evaluator output could not be recorded at "
+            "all is still not shown, because a self-report without the result "
+            "that judged it is not evidence of anything."
         ),
     )
     perfect_score_threshold: float | None = None

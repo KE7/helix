@@ -31,8 +31,9 @@ N_CIRCLES = 26
 # circles) side_info enumerates. Counts and aggregate totals are always
 # exact; only the itemized "worst" lists are truncated, so side_info stays
 # O(1) in n instead of O(n^2) pairs for a much larger instance -- well
-# under the 32 KiB retained-evaluator-output cap (MAX_EVALUATOR_OUTPUT_BYTES
-# in src/helix/change_summary.py).
+# under the retained-evaluator-output cap
+# (src/helix/change_summary.py::MAX_EVALUATOR_OUTPUT_CHARS), above which the
+# output is shortened with a note in the text.
 MAX_OFFENDERS_LISTED = 5
 
 # Resolution of the grid search used to locate the largest still-empty gap
