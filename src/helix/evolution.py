@@ -874,12 +874,14 @@ def _cached_evaluate_batch(
     config: HelixConfig,
     split: str,
     project_root: Path,
+    evaluation_phase: str | None = None,
 ) -> tuple[EvalResult, int]:
     """Evaluate ``candidate`` on ``example_ids`` with per-example caching.
 
     GEPA parity: line-for-line mirror of GEPA's ``cached_evaluate_full`` in
     ``core/state.py``, which delegates to
     ``EvaluationCache.evaluate_with_cache_full`` (also ``core/state.py``).
+
     Flow:
 
       1. ``cache.get_batch(candidate, example_ids)`` partitions into
@@ -909,6 +911,7 @@ def _cached_evaluate_batch(
                 config,
                 split=split,
                 instance_ids=example_ids,
+                evaluation_phase=evaluation_phase,
             )
         return result, len(example_ids)
 
@@ -956,6 +959,7 @@ def _cached_evaluate_batch(
                 config,
                 split=split,
                 instance_ids=batch,
+                evaluation_phase=evaluation_phase,
             )
         # HELIX does not track rollout outputs per-example; store ``None``
         # per slot (the cache's ``RolloutOutput`` type parameter is
@@ -1144,6 +1148,47 @@ def _stage_val_example_ids(
 def _scores_for_example_ids(result: EvalResult, example_ids: list[str]) -> list[float]:
     """Return per-id scores in a stable order for acceptance comparisons."""
     return [float(result.instance_scores.get(eid, 0.0)) for eid in example_ids]
+
+
+def _merge_partitioned_evaluations(
+    candidate: Candidate,
+    requested_ids: list[str],
+    carried: EvalResult,
+    carried_ids: list[str],
+    fresh: EvalResult,
+    fresh_ids: list[str],
+) -> EvalResult:
+    """Compose staged and tail results into one result over *requested_ids*.
+
+    Per-id scores are carried across unchanged, so both halves must come from
+    the same candidate and the evaluator's per-id scores must not depend on
+    which ids were requested.
+    """
+    assert set(carried_ids).isdisjoint(fresh_ids)
+    assert set(requested_ids) == set(carried_ids) | set(fresh_ids)
+
+    def by_id(result: EvalResult, ids: list[str], attr: str) -> dict[str, dict[str, Any]]:
+        values = getattr(result, attr)
+        if values is None:
+            return {}
+        assert len(values) == len(ids)
+        return dict(zip(ids, values, strict=True))
+
+    carried_obj = by_id(carried, carried_ids, "objective_scores")
+    fresh_obj = by_id(fresh, fresh_ids, "objective_scores")
+    carried_side = by_id(carried, carried_ids, "per_example_side_info")
+    fresh_side = by_id(fresh, fresh_ids, "per_example_side_info")
+    all_scores = carried.instance_scores | fresh.instance_scores
+    all_obj = carried_obj | fresh_obj
+    all_side = carried_side | fresh_side
+    return EvalResult(
+        candidate_id=candidate.id,
+        scores={},
+        asi={},
+        instance_scores={eid: all_scores[eid] for eid in requested_ids},
+        objective_scores=[all_obj.get(eid, {}) for eid in requested_ids] if all_obj else None,
+        per_example_side_info=[all_side.get(eid, {}) for eid in requested_ids] if all_side else None,
+    )
 
 
 def _has_example_scores(result: EvalResult | None, example_ids: list[str]) -> bool:
@@ -1647,7 +1692,16 @@ def run_evolution(
     project_root: Path,
     base_dir: Path,
 ) -> HelixResult:
-    """Run the HELIX evolutionary loop."""
+    """Run the HELIX evolutionary loop.
+
+    When ``config.evolution.val_stage_size`` is positive, an accepted staged
+    validation result is carried into final validation: the evaluator receives
+    only the remaining validation ids and HELIX composes both per-id results.
+    Enable it only for evaluators whose per-id scores and objectives do not
+    depend on the complete id set (for example, no batch-relative metric,
+    cross-example normalization, shared warm-up, or an aggregate metric used
+    as an objective).
+    """
     # Mirror GEPA's ``optimize`` (``api.py``): at least one stopping condition is required.
     # Without this, perfect-skip + always-perfect data + no effective bound =
     # a run that terminates only by the OS.  In HELIX, max_generations (loop
@@ -3020,11 +3074,12 @@ def _run_evolution_impl(
                 use_val_stage_gate = _has_example_scores(
                     _parent_frontier_result, stage_val_example_ids
                 )
+                stage_result: EvalResult | None = None
                 if stage_val_example_ids and use_val_stage_gate:
                     set_phase(HelixPhase.VAL_EVALUATION)
                     stage_result, _n = _cached_evaluate_batch(
-                        child, list(stage_val_example_ids), minibatch_cache,
-                        config, "val", project_root,
+                        child, list(stage_val_example_ids), None,
+                        config, "val", project_root, evaluation_phase="val_stage",
                     )
                     stage_result.candidate_id = child.id
                     _last_eval_result = stage_result
@@ -3065,13 +3120,24 @@ def _run_evolution_impl(
                             decision="reject_stage", example_ids=list(stage_val_example_ids),
                             score=float(sum(_stage_after)),
                         )
-                        print_warning(
-                            f"Val stage: {child.id} rejected on first "
-                            f"{len(stage_val_example_ids)} val ids "
-                            f"(sum {sum(_stage_after):.4f} vs parent "
-                            f"{sum(_stage_before):.4f}) -- removing."
-                        )
-                        _safe_remove_worktree(child, label="val-stage-rejected candidate")
+                        if config.evolution.retain_rejected_worktrees:
+                            print_warning(
+                                f"Val stage: {child.id} rejected on first "
+                                f"{len(stage_val_example_ids)} val ids "
+                                f"(sum {sum(_stage_after):.4f} vs parent "
+                                f"{sum(_stage_before):.4f}) -- retaining worktree "
+                                f"for review."
+                            )
+                        else:
+                            print_warning(
+                                f"Val stage: {child.id} rejected on first "
+                                f"{len(stage_val_example_ids)} val ids "
+                                f"(sum {sum(_stage_after):.4f} vs parent "
+                                f"{sum(_stage_before):.4f}) -- removing."
+                            )
+                            _safe_remove_worktree(
+                                child, label="val-stage-rejected candidate"
+                            )
                         del candidates[child.id]
                         return
 
@@ -3087,19 +3153,37 @@ def _run_evolution_impl(
                     )
 
                 # --- Val evaluation -------------------------------------------
-                # UNCHANGED: run full val eval sequentially after gating.
                 set_phase(HelixPhase.VAL_EVALUATION)
-                val_result = _run_full_val_eval(
-                    child,
-                    state,
-                    full_val_example_ids=full_val_example_ids,
-                    minibatch_cache=minibatch_cache,
-                    eval_cache=eval_cache,
-                    config=config,
-                    project_root=project_root,
-                    source_batch="mutation_full_val_batch",
-                    source_single="mutation_full_val",
-                )
+                if stage_result is not None:
+                    stage_ids = list(stage_val_example_ids)
+                    stage_id_set = set(stage_ids)
+                    tail_ids = [eid for eid in full_val_example_ids if eid not in stage_id_set]
+                    if not tail_ids:
+                        val_result = stage_result
+                    else:
+                        tail_result, tail_evals = _cached_evaluate_batch(
+                            child, tail_ids, None, config, "val", project_root,
+                        )
+                        budget_api.charge_evaluation(
+                            state, num_actual_examples=tail_evals, candidate_id=child.id,
+                            split="val", source="mutation_full_val_batch",
+                        )
+                        val_result = _merge_partitioned_evaluations(
+                            child, list(full_val_example_ids), stage_result, stage_ids,
+                            tail_result, tail_ids,
+                        )
+                else:
+                    val_result = _run_full_val_eval(
+                        child,
+                        state,
+                        full_val_example_ids=full_val_example_ids,
+                        minibatch_cache=minibatch_cache,
+                        eval_cache=eval_cache,
+                        config=config,
+                        project_root=project_root,
+                        source_batch="mutation_full_val_batch",
+                        source_single="mutation_full_val",
+                    )
                 _last_eval_result = val_result
 
                 if budget_api.budget_exhausted(state, config):

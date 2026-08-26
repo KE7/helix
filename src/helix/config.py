@@ -399,8 +399,25 @@ class EvolutionConfig(BaseModel):
         default=None,
         description=(
             "Optional deterministic first-N validation stage that runs after "
-            "the train minibatch gate and before full validation. Disabled "
-            "when unset or 0."
+            "the train minibatch gate and before full validation. A passing "
+            "stage is composed with a later call for the remaining ids. Use "
+            "only when per-id scores/objectives are independent of the id "
+            "set; do not use with batch-relative scores, cross-example "
+            "normalization, shared warm-up, or an aggregate metric used as "
+            "an objective. Disabled when unset or 0."
+        ),
+    )
+    retain_rejected_worktrees: bool = Field(
+        default=False,
+        description=(
+            "Whether to keep the worktree of a candidate rejected by the "
+            "validation-stage gate, for inspecting what it changed. Either "
+            "way its identity, lineage, and scores are recorded in "
+            ".helix/lineage.json and .helix/attempts/. When disabled (the "
+            "default), the worktree and its helix/<id> ref are removed and "
+            "the candidate's contents become unrecoverable. Retaining costs "
+            "one full candidate repository per rejection; run helix clean to "
+            "reclaim them."
         ),
     )
     batch_sampler: Literal["epoch_shuffled", "stratified"] = Field(

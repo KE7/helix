@@ -395,7 +395,7 @@ num_parallel_proposals = 1       # parallel mutations per generation
 minibatch_size = 3               # train-set minibatch size for reflective mutation
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
-val_stage_size = 0               # optional first-N val gate before full val
+val_stage_size = 0               # optional first-N val gate; passing results carry into the tail
 frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType parity):
                                  # "instance" | "objective" | "hybrid" | "cartesian".
                                  # The four modes mirror GEPA optimize_anything;
@@ -683,7 +683,7 @@ the source of truth. During evolution HELIX sets `HELIX_SPLIT` (`train` or `val`
 so evaluator-owned datasets can switch behavior by phase, mirroring GEPA's
 `trainset` / `valset` duality.
 
-When `evolution.val_stage_size` is set to a positive value and `dataset.val_size` is also set, accepted mutation proposals run a deterministic first-N validation stage before the full validation sweep. Stage-only results are never added to the frontier; HELIX still persists only full-val results for Pareto ranking and resume stability.
+When `evolution.val_stage_size` is positive and `dataset.val_size` is set, accepted mutation proposals first evaluate the deterministic first-N validation ids, then evaluate only the remaining ids and compose the per-id results. This is valid only when each per-id score and objective is independent of the requested id set; do not enable it for batch-relative metrics, cross-example normalization, shared warm-up, or objectives derived from an aggregate metric. Stage-only results are never added to the frontier; HELIX persists only the composed full-val result for Pareto ranking and resume stability. An evaluator may treat `HELIX_EVALUATION_PHASE=val_stage` as a score-only call and defer feedback or other non-score side effects until the promoted tail/full call.
 
 ### Evaluator Integrity
 
