@@ -29,10 +29,10 @@ from helix.trace import TRACE, EventType
 # ``invoke_claude_code`` actually dispatched to the requested backend CLI
 # (rather than short-circuiting via the differential-testing override).
 _BACKEND_EXECUTABLE = {
+    "agy": "agy",
     "claude": "claude",
     "codex": "codex",
     "cursor": "cursor",
-    "gemini": "gemini",
     "opencode": "opencode",
 }
 
@@ -196,21 +196,6 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
             id="cursor",
         ),
         pytest.param(
-            "gemini",
-            "\n".join(
-                [
-                    "MCP advisory preamble tolerated by the Gemini parser.",
-                    '{"type":"init","session_id":"gemini-session"}',
-                    (
-                        '{"type":"result","usageMetadata":{"prompt_tokens":14,'
-                        '"completion_tokens":10},"cost":0.34}'
-                    ),
-                ]
-            ),
-            (14, 10, 0.34),
-            id="gemini",
-        ),
-        pytest.param(
             "opencode",
             "\n".join(
                 [
@@ -223,6 +208,24 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
             ),
             (15, 11, 0.35),
             id="opencode",
+        ),
+        pytest.param(
+            # agy's confirmed dispatch is the same single-JSON-object branch
+            # claude uses (see _parse_backend_output); its real field names
+            # are not yet confirmed (needs a real --print run, out of scope
+            # for this migration), so this envelope is illustrative -- it
+            # exercises the generic _normalise_usage_stats walk, not a
+            # verified agy transcript shape.
+            "agy",
+            json.dumps(
+                {
+                    "session_id": "agy-session",
+                    "usage": {"input_tokens": 16, "output_tokens": 12},
+                    "total_cost_usd": 0.36,
+                }
+            ),
+            (16, 12, 0.36),
+            id="agy",
         ),
     ],
 )
@@ -345,26 +348,6 @@ def test_backend_usage_parsing_charges_llm_budget(
             id="cursor",
         ),
         pytest.param(
-            "gemini",
-            "\n".join(
-                [
-                    '{"type":"init","session_id":"gemini-session"}',
-                    (
-                        '{"type":"result","usageMetadata":{"prompt_tokens":14,'
-                        '"completion_tokens":10,"cachedTokens":23},'
-                        '"thoughts":8,"cost":0.34}'
-                    ),
-                ]
-            ),
-            {
-                "input_tokens": 14,
-                "output_tokens": 10,
-                "cached_input_tokens": 23,
-                "reasoning_tokens": 8,
-            },
-            id="gemini",
-        ),
-        pytest.param(
             "opencode",
             "\n".join(
                 [
@@ -382,6 +365,30 @@ def test_backend_usage_parsing_charges_llm_budget(
                 "reasoning_tokens": 9,
             },
             id="opencode",
+        ),
+        pytest.param(
+            # Illustrative envelope on agy's confirmed dispatch path (the
+            # same single-JSON-object branch claude uses); real field names
+            # are not yet confirmed, see the "agy" case above.
+            "agy",
+            json.dumps(
+                {
+                    "session_id": "agy-session",
+                    "usage": {
+                        "input_tokens": 16,
+                        "output_tokens": 12,
+                        "cached_input_tokens": 25,
+                        "reasoning_tokens": 10,
+                    },
+                }
+            ),
+            {
+                "input_tokens": 16,
+                "output_tokens": 12,
+                "cached_input_tokens": 25,
+                "reasoning_tokens": 10,
+            },
+            id="agy",
         ),
     ],
 )

@@ -116,14 +116,14 @@ jobs:
       fail-fast: false
       matrix:
         image:
+          - name: agy
+            dockerfile: docker/agy.Dockerfile
           - name: claude
             dockerfile: docker/claude.Dockerfile
           - name: codex
             dockerfile: docker/codex.Dockerfile
           - name: cursor
             dockerfile: docker/cursor.Dockerfile
-          - name: gemini
-            dockerfile: docker/gemini.Dockerfile
           - name: opencode
             dockerfile: docker/opencode.Dockerfile
         platform:
@@ -195,10 +195,10 @@ jobs:
       fail-fast: false
       matrix:
         image:
+          - name: agy
           - name: claude
           - name: codex
           - name: cursor
-          - name: gemini
           - name: opencode
     steps:
       - name: Download digests
@@ -248,14 +248,14 @@ jobs:
         image:
           - name: base
             command: "python --version && uv --version && git --version"
+          - name: agy
+            command: "agy --version"
           - name: claude
             command: "claude --version"
           - name: codex
             command: "codex --version"
           - name: cursor
             command: "cursor agent --version"
-          - name: gemini
-            command: "gemini --version"
           - name: opencode
             command: "opencode --version"
 
