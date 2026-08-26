@@ -1873,18 +1873,22 @@ class TestTranscriptToolPatchesUsageInArtifact:
 
 
 # ---------------------------------------------------------------------------
-# Tests: OpenCode per-candidate SQLite isolation (XDG_DATA_HOME)
+# Tests: OpenCode per-candidate SQLite isolation (OPENCODE_DB)
 # ---------------------------------------------------------------------------
 
 
 class TestOpenCodeSubprocessIsolation:
-    """Verify that concurrent opencode subprocesses receive isolated XDG_DATA_HOME
+    """Verify that concurrent opencode subprocesses receive isolated OPENCODE_DB
     values so each worker opens its own SQLite database and the shared-database
     'PRAGMA journal_mode = WAL' contention observed in PR #34 cannot recur.
+
+    OPENCODE_DB rather than XDG_DATA_HOME: the latter relocates opencode's
+    ``auth.json`` along with the database, which makes an existing login
+    invisible to the CLI.
     """
 
     def test_opencode_subprocess_isolation_env_set(self, tmp_path: Path, mocker):
-        """invoke_claude_code sets XDG_DATA_HOME for opencode backend."""
+        """invoke_claude_code sets OPENCODE_DB for opencode backend."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
@@ -1898,20 +1902,25 @@ class TestOpenCodeSubprocessIsolation:
 
         call_kwargs = mock_run.call_args[1]
         env = call_kwargs["env"]
-        assert "XDG_DATA_HOME" in env, (
-            "XDG_DATA_HOME must be set for opencode to isolate its SQLite database "
+        assert "OPENCODE_DB" in env, (
+            "OPENCODE_DB must be set for opencode to isolate its SQLite database "
             "from other concurrent opencode workers"
         )
         # Must point inside the candidate worktree so cleanup is automatic
-        xdg = env["XDG_DATA_HOME"]
-        assert xdg.startswith(str(tmp_path)), (
-            f"XDG_DATA_HOME={xdg!r} should be under the candidate worktree {tmp_path}"
+        db_path = env["OPENCODE_DB"]
+        assert db_path.startswith(str(tmp_path)), (
+            f"OPENCODE_DB={db_path!r} should be under the candidate worktree {tmp_path}"
+        )
+        # The credential knob must stay untouched: relocating XDG_DATA_HOME
+        # would move auth.json with the database and hide an existing login.
+        assert "XDG_DATA_HOME" not in env, (
+            "XDG_DATA_HOME must not be set for opencode; it moves auth.json too"
         )
 
     def test_opencode_subprocess_isolation_unique_per_candidate(
         self, tmp_path: Path, mocker
     ):
-        """Two different candidates get different XDG_DATA_HOME values."""
+        """Two different candidates get different OPENCODE_DB values."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
@@ -1925,18 +1934,18 @@ class TestOpenCodeSubprocessIsolation:
         wt_b.mkdir()
 
         invoke_claude_code(str(wt_a), "prompt", AgentConfig(backend="opencode"))
-        env_a = mock_run.call_args[1]["env"]["XDG_DATA_HOME"]
+        env_a = mock_run.call_args[1]["env"]["OPENCODE_DB"]
 
         invoke_claude_code(str(wt_b), "prompt", AgentConfig(backend="opencode"))
-        env_b = mock_run.call_args[1]["env"]["XDG_DATA_HOME"]
+        env_b = mock_run.call_args[1]["env"]["OPENCODE_DB"]
 
         assert env_a != env_b, (
-            "Each candidate worktree must produce a distinct XDG_DATA_HOME so their "
+            "Each candidate worktree must produce a distinct OPENCODE_DB so their "
             "opencode SQLite databases don't collide"
         )
 
     def test_opencode_subprocess_inherits_other_env(self, tmp_path: Path, mocker):
-        """Non-isolation env vars (PATH, HOME) are still present after XDG injection."""
+        """Non-isolation env vars (PATH, HOME) survive the OPENCODE_DB injection."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
@@ -1956,13 +1965,13 @@ class TestOpenCodeSubprocessIsolation:
             assert "PATH" in env, "PATH must survive the env scrub for opencode"
         if "HOME" in os.environ:
             assert "HOME" in env, "HOME must survive the env scrub for opencode"
-        # And XDG_DATA_HOME is the *only* new opencode-specific addition
-        assert "XDG_DATA_HOME" in env
+        # And OPENCODE_DB is the *only* new opencode-specific addition
+        assert "OPENCODE_DB" in env
 
     def test_opencode_isolation_not_applied_to_other_backends(
         self, tmp_path: Path, mocker
     ):
-        """XDG_DATA_HOME must NOT be injected for claude/codex/cursor/gemini."""
+        """OPENCODE_DB must NOT be injected for claude/codex/cursor/gemini."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
 
@@ -1971,8 +1980,8 @@ class TestOpenCodeSubprocessIsolation:
                 str(tmp_path), "prompt", AgentConfig(backend=backend)
             )
             env = mock_run.call_args[1]["env"]
-            assert "XDG_DATA_HOME" not in env, (
-                f"XDG_DATA_HOME must not be injected for {backend} backend"
+            assert "OPENCODE_DB" not in env, (
+                f"OPENCODE_DB must not be injected for {backend} backend"
             )
 
     def test_opencode_isolation_dir_gitignored(self, tmp_path: Path, mocker):

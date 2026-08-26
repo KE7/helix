@@ -121,6 +121,29 @@ class RateLimitError(HelixError):
     """
 
 
+class CredentialRefreshError(HelixError):
+    """Raised when a backend CLI could not use or refresh its stored credential.
+
+    This is a *credential* failure, not a code failure and not a quota failure.
+    It fires when the agent CLI reports that its OAuth refresh token was
+    already used, expired, revoked, or is missing -- the state HELIX reaches
+    when several candidates sharing one login volume all try to spend the same
+    single-use refresh token at once, or when the operator's login has simply
+    lapsed.
+
+    It exists so a run that dies this way says so.  Without it the failure is
+    indistinguishable from "the agent wrote bad code": the mutation is
+    abandoned, the proposal slot is dropped, and the operator sees a generation
+    that produced nothing with no reason attached.
+
+    Inherits from :class:`HelixError` (not :class:`MutationError`) so the
+    proposal worker in ``evolution.py`` can route it separately -- the run
+    continues, but every credential-classified failure is counted and named in
+    the end-of-run summary.  Detection is anchored on distinctive wording read
+    out of the shipped backend CLIs; see ``helix.mutator``.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Formatted error printing
 # ---------------------------------------------------------------------------

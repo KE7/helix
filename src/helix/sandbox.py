@@ -19,7 +19,16 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
+from helix.agent_state import (
+    AGENT_STATE_CONTAINER_ROOT,
+    agent_state_env,
+    agent_state_subdirs,
+)
+from helix.backends import (
+    BACKEND_AUTH_COMMANDS,
+    DEFAULT_BACKEND_IMAGES,
+    backend_credential_warm_skip_reason,
+)
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 
 
@@ -914,6 +923,33 @@ def sandbox_auth_volume_name(agent_backend: str) -> str:
     return f"helix-auth-{agent_backend}"
 
 
+def _prepare_agent_state_dir(
+    tmp_path: Path,
+    *,
+    scope: Literal["agent", "evaluator"],
+    agent_backend: str | None,
+    image: str,
+) -> Path | None:
+    """Create the per-candidate agent-state directory, or return ``None``.
+
+    The directory lives inside the same temporary tree as the workspace copy,
+    so it inherits the sandbox's existing per-candidate scratch lifetime and is
+    removed by the ``_safe_rmtree`` in :func:`run_sandboxed_commands`.  It is
+    chowned to ``node`` because the container runs as that user, matching how
+    the workspace copy is handed over.
+    """
+    if scope != "agent" or agent_backend is None:
+        return None
+    subdirs = agent_state_subdirs(agent_backend)
+    if not subdirs:
+        return None
+    state_dir = tmp_path / "agent-state"
+    for name in subdirs:
+        (state_dir / name).mkdir(parents=True, exist_ok=True)
+    _docker_chown_workspace(state_dir, image, "node:node")
+    return state_dir
+
+
 def _docker_args(
     command: list[str],
     env: dict[str, str],
@@ -924,6 +960,7 @@ def _docker_args(
     agent_backend: str | None,
     network: str | None = None,
     container_name: str | None = None,
+    agent_state_dir: Path | None = None,
 ) -> list[str]:
     args = [
         "docker",
@@ -946,6 +983,14 @@ def _docker_args(
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
         args.extend(["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"])
+        # The auth volume above is shared across candidates on purpose: it is
+        # what keeps token refresh and the CLIs' refresh locks working.  The
+        # state mount below is per-candidate and lives outside /home/node, so
+        # nothing here changes how the credential is shared.
+        if agent_state_dir is not None:
+            args.extend(
+                ["-v", f"{agent_state_dir}:{AGENT_STATE_CONTAINER_ROOT}:rw"]
+            )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])
@@ -967,6 +1012,10 @@ def _docker_args(
     container_env["PATH"] = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
+    if agent_state_dir is not None and agent_backend is not None:
+        container_env.update(
+            agent_state_env(agent_backend, state_root=AGENT_STATE_CONTAINER_ROOT)
+        )
 
     for key, value in container_env.items():
         args.extend(["-e", f"{key}={value}"])
@@ -1013,6 +1062,12 @@ def run_sandboxed_commands(
         )
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
+        agent_state_dir = _prepare_agent_state_dir(
+            tmp_path,
+            scope=scope,
+            agent_backend=agent_backend,
+            image=docker_image,
+        )
         sidecar_runtime = (
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None
         )
@@ -1033,6 +1088,7 @@ def run_sandboxed_commands(
                     agent_backend,
                     sidecar_runtime.network if sidecar_runtime is not None else None,
                     container_name=container_name,
+                    agent_state_dir=agent_state_dir,
                 )
                 try:
                     results.append(
@@ -1102,7 +1158,7 @@ def sandbox_auth_docker_args(
     agent_backend: str,
     *,
     image: str,
-    action: Literal["login", "status", "logout"],
+    action: Literal["login", "status", "logout", "warm"],
     network: str = "bridge",
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
@@ -1147,7 +1203,7 @@ def sandbox_auth_docker_args(
 def run_sandbox_auth_command(
     agent_backend: str,
     *,
-    action: Literal["login", "status", "logout"],
+    action: Literal["login", "status", "logout", "warm"],
     image: str | None = None,
     network: str = "bridge",
     add_host_gateway: bool = False,
@@ -1169,6 +1225,93 @@ def run_sandbox_auth_command(
     if interactive:
         return subprocess.run(args, text=True)
     return subprocess.run(args, capture_output=True, text=True)
+
+
+@dataclass(frozen=True)
+class CredentialWarmResult:
+    """Outcome of one per-generation credential warm.
+
+    ``warmed`` is True only when the warm container ran and exited cleanly.
+    ``skip_reason`` is set when the backend is deliberately not warmed;
+    ``detail`` carries the diagnosis when a warm was attempted and failed.
+    """
+
+    backend: str
+    warmed: bool
+    skip_reason: str | None = None
+    returncode: int | None = None
+    detail: str = ""
+
+    @property
+    def skipped(self) -> bool:
+        return self.skip_reason is not None
+
+    @property
+    def failed(self) -> bool:
+        return not self.warmed and self.skip_reason is None
+
+
+#: Tail of the warm command's stderr kept for diagnosis.  Backend CLIs report
+#: refresh failures in prose, not by echoing the credential, but the cap keeps
+#: an unexpectedly chatty CLI from pasting its whole state into the run log.
+_WARM_DETAIL_CHARS = 400
+
+
+def warm_backend_credential(
+    agent_backend: str, *, sandbox: SandboxConfig
+) -> CredentialWarmResult:
+    """Refresh *agent_backend*'s shared credential once, under a single writer.
+
+    Runs the backend's registered ``warm`` command through the same sandboxed
+    auth container that ``helix sandbox status`` uses: one container, the
+    shared login volume mounted read-write, nothing else running against it.
+    Any refresh the CLI decides is due therefore happens exactly once and is
+    written back before candidates start, instead of N candidates racing to
+    spend the same single-use refresh token.
+
+    The call is a no-op whenever the credential is already fresh -- the warm
+    command is chosen so the CLI does no work in that case (see
+    ``helix.backends``).  Backends that need no warm return a skipped result
+    rather than starting a container.
+
+    Never raises: a warm that cannot run is reported, not fatal.  Candidates
+    may still succeed on the credential that is already there, so the run
+    continues either way and the caller decides how loudly to say so.
+    """
+    skip_reason = backend_credential_warm_skip_reason(agent_backend)
+    if skip_reason is not None:
+        return CredentialWarmResult(
+            backend=agent_backend, warmed=False, skip_reason=skip_reason
+        )
+
+    try:
+        image = resolve_sandbox_image(sandbox, agent_backend)
+        result = run_sandbox_auth_command(
+            agent_backend,
+            action="warm",
+            image=image,
+            network=sandbox.network,
+            add_host_gateway=sandbox.add_host_gateway,
+            extra_hosts=sandbox.extra_hosts,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return CredentialWarmResult(
+            backend=agent_backend,
+            warmed=False,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+
+    if result.returncode == 0:
+        return CredentialWarmResult(
+            backend=agent_backend, warmed=True, returncode=0
+        )
+    stderr = (result.stderr or "").strip()
+    return CredentialWarmResult(
+        backend=agent_backend,
+        warmed=False,
+        returncode=result.returncode,
+        detail=stderr[-_WARM_DETAIL_CHARS:],
+    )
 
 
 def run_command(

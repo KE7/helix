@@ -83,4 +83,5 @@ timeout = 60
 timeout_method = "thread"
 markers = [
     "diff_harness: differential-testing harness (phases 2-4)",
+    "docker_integration: runs real containers; needs a Docker daemon and the backend images",
 ]
