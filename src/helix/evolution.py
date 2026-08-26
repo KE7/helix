@@ -25,6 +25,7 @@ from helix.batch_sampler import (
     StratifiedBatchSampler,
 )
 from helix import budget as budget_api
+from helix.candidate_selector import select_candidate
 from helix.config import HelixConfig, load_dataset_examples
 from helix.eval_cache import EvaluationCache as MinibatchEvalCache
 from helix.eval_policy import (
@@ -1301,6 +1302,7 @@ def _plan_proposals(
     config: HelixConfig,
     state: EvolutionState,
     frontier: ParetoFrontier,
+    rng: _random.Random,
     batch_sampler: "BatchSampler[str] | None",
     train_loader: "HelixDataLoader | _RangeDataLoader | None",
     use_minibatch_gate: bool,
@@ -1382,7 +1384,13 @@ def _plan_proposals(
                 )
 
             if parent is None:
-                parent = frontier.select_parent()
+                parent = select_candidate(
+                    config.evolution.candidate_selection_strategy,
+                    frontier,
+                    rng,
+                    epsilon=config.evolution.candidate_selection_epsilon,
+                    top_k=config.evolution.candidate_selection_top_k,
+                )
                 parent_frontier_result = frontier._results.get(parent.id)
 
             # --- Minibatch gate pre-sampling -----------------------------
@@ -2674,6 +2682,7 @@ def _run_evolution_impl(
             presample_contexts, _budget_break = _plan_proposals(
                 config=config,
                 state=state,
+                rng=rng,
                 frontier=frontier,
                 batch_sampler=batch_sampler,
                 train_loader=train_loader,

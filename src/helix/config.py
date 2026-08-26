@@ -495,6 +495,54 @@ class EvolutionConfig(BaseModel):
             "falling back to scalar semantics."
         ),
     )
+    candidate_selection_strategy: Literal[
+        "pareto", "current_best", "epsilon_greedy", "top_k_pareto"
+    ] = Field(
+        default="pareto",
+        description=(
+            "How to pick the parent candidate for each mutation proposal. "
+            "The same four strategies GEPA provides in "
+            "``gepa.strategies.candidate_selector`` (gepa-ai/gepa).\n\n"
+            '- ``"pareto"`` (default): frequency-weighted draw over the '
+            "dominated-stripped per-key Pareto frontier "
+            "(``ParetoFrontier.select_parent``).\n"
+            '- ``"current_best"``: deterministic argmax over each '
+            "candidate's aggregate validation score; ties resolve to the "
+            "earliest-discovered candidate.\n"
+            '- ``"epsilon_greedy"``: with probability '
+            "``candidate_selection_epsilon``, pick uniformly at random from "
+            "the whole evaluated pool, not just the frontier; otherwise "
+            'fall back to ``"current_best"``.\n'
+            '- ``"top_k_pareto"``: restrict the Pareto frontier draw to the '
+            "top ``candidate_selection_top_k`` candidates by score; falls "
+            "back to a direct argmax when that restriction empties every "
+            "frontier key."
+        ),
+    )
+    candidate_selection_epsilon: float | None = Field(
+        default=None,
+        description=(
+            "Random-exploration probability for "
+            "``candidate_selection_strategy=\"epsilon_greedy\"``; must be "
+            "in [0.0, 1.0]. Required for that strategy and rejected for the "
+            "others, where it would have no effect. There is no default: "
+            "the exploration rate is a search-budget decision and is stated "
+            "per run. GEPA's ``EpsilonGreedyCandidateSelector`` uses 0.1."
+        ),
+    )
+    candidate_selection_top_k: int | None = Field(
+        default=None,
+        description=(
+            "Pool size for "
+            "``candidate_selection_strategy=\"top_k_pareto\"``: only the "
+            "top-K candidates by score are eligible for the Pareto "
+            "frontier draw. Required for that strategy (must be >= 1) and "
+            "rejected for the others, where it would have no effect. There "
+            "is no default: K trades exploration against exploitation and "
+            "is stated per run. GEPA's ``TopKParetoCandidateSelector`` "
+            "uses 5."
+        ),
+    )
 
     def model_post_init(self, __context: object) -> None:
         if self.max_workers < 1:
@@ -564,6 +612,43 @@ class EvolutionConfig(BaseModel):
             raise ValueError(
                 "evolution.num_sampled_groups and evolution.num_examples_per_group "
                 "must be set together"
+            )
+        if self.candidate_selection_strategy == "epsilon_greedy":
+            if self.candidate_selection_epsilon is None:
+                raise ValueError(
+                    "evolution.candidate_selection_epsilon is required when "
+                    "evolution.candidate_selection_strategy='epsilon_greedy'"
+                )
+            if not 0.0 <= self.candidate_selection_epsilon <= 1.0:
+                raise ValueError(
+                    "evolution.candidate_selection_epsilon must be between "
+                    "0.0 and 1.0 "
+                    f"(got {self.candidate_selection_epsilon})"
+                )
+        elif self.candidate_selection_epsilon is not None:
+            raise ValueError(
+                "evolution.candidate_selection_epsilon is only valid when "
+                "evolution.candidate_selection_strategy='epsilon_greedy' "
+                "(got candidate_selection_strategy="
+                f"{self.candidate_selection_strategy!r})"
+            )
+        if self.candidate_selection_strategy == "top_k_pareto":
+            if self.candidate_selection_top_k is None:
+                raise ValueError(
+                    "evolution.candidate_selection_top_k is required when "
+                    "evolution.candidate_selection_strategy='top_k_pareto'"
+                )
+            if self.candidate_selection_top_k < 1:
+                raise ValueError(
+                    "evolution.candidate_selection_top_k must be >= 1 "
+                    f"(got {self.candidate_selection_top_k})"
+                )
+        elif self.candidate_selection_top_k is not None:
+            raise ValueError(
+                "evolution.candidate_selection_top_k is only valid when "
+                "evolution.candidate_selection_strategy='top_k_pareto' "
+                "(got candidate_selection_strategy="
+                f"{self.candidate_selection_strategy!r})"
             )
         if self.num_sampled_groups is not None and self.batch_sampler != "stratified":
             raise ValueError(
