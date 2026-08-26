@@ -1,4 +1,4 @@
-"""HELIX mutator: applies code mutations via agentic coding backends (claude, codex, cursor, gemini, opencode)."""
+"""HELIX mutator: applies code mutations via agentic coding backends (agy, claude, codex, cursor, opencode)."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ def _turn_budget_section(max_turns: int | None) -> str:
       limit, and the resulting ``subtype="error_max_turns"`` response is
       detected at :func:`invoke_claude_code` and treated as partial
       success.
-    * ``codex`` / ``cursor`` / ``gemini`` / ``opencode`` — soft hint only.
+    * ``agy`` / ``codex`` / ``cursor`` / ``opencode`` — soft hint only.
       None of these CLIs expose an equivalent flag (verified against
       ``--help`` for the installed binaries), so the in-prompt request is
       the only signal the agent receives.  Whether the agent self-honors
@@ -736,6 +736,27 @@ def _build_backend_args(
     prompt_artifact_name: str,
 ) -> list[str]:
     backend = config.backend
+    if backend == "agy":
+        args = [
+            "agy",
+            "--dangerously-skip-permissions",
+            "--print",
+            "--output-format",
+            "json",
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["--effort", config.effort])
+        # Every other HELIX backend takes its prompt as a trailing positional
+        # argument (see the ``claude`` / ``codex`` / ``cursor`` / ``opencode``
+        # branches below); ``agy --help`` documents ``-p``/``--print`` and a
+        # ``--prompt`` alias but not the exact invocation grammar. This follows
+        # the established convention; the first real run against the CLI must
+        # confirm it before it is relied on.
+        args.append(_prompt_file_instruction(prompt_artifact_name))
+        return args
+
     if backend == "claude":
         args = [
             "claude",
@@ -791,18 +812,6 @@ def _build_backend_args(
             "--trust",
             "--workspace",
             worktree_path,
-        ]
-        if config.model:
-            args.extend(["--model", config.model])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
-        return args
-
-    if backend == "gemini":
-        args = [
-            "gemini",
-            "--yolo",
-            "--output-format",
-            "stream-json",
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -897,12 +906,6 @@ def _parse_jsonl_output(
             parsed = json.loads(line)
         except json.JSONDecodeError:
             if strict:
-                # Gemini CLI may prepend advisory text such as MCP-health
-                # warnings before the JSON stream even when
-                # `--output-format stream-json` is requested.
-                if backend == "gemini":
-                    unparsable.append(line)
-                    continue
                 raise MutationError(
                     f"Failed to parse {backend_display_name(backend)} JSONL output line",
                     operation=f"{backend_display_name(backend)} invocation",
@@ -934,7 +937,7 @@ def _parse_backend_output(
     cmd_str: str,
     worktree_path: str,
 ) -> dict[str, Any]:
-    if backend == "claude":
+    if backend in {"agy", "claude"}:
         return _parse_json_object_output(
             result.stdout,
             backend=backend,
@@ -943,7 +946,7 @@ def _parse_backend_output(
             stderr=result.stderr,
             exit_code=result.returncode,
         )
-    if backend in {"codex", "cursor", "gemini", "opencode"}:
+    if backend in {"codex", "cursor", "opencode"}:
         return _parse_jsonl_output(
             result.stdout,
             backend=backend,
@@ -1290,36 +1293,6 @@ def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     return count, names
 
 
-def _count_gemini_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
-    """Count tool invocations from a Gemini stream-json stdout artifact.
-
-    Gemini emits ``tool_use`` events (correctly counted by
-    ``_normalise_usage_stats``) but stores the tool name in ``tool_name``
-    rather than ``name``, so ``tool_names`` remains empty after the initial
-    parse.  This function provides both the count and the names.
-    """
-    count = 0
-    names: list[str] = []
-    try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                event = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(event, dict) or event.get("type") != "tool_use":
-                continue
-            count += 1
-            name = event.get("tool_name")
-            if isinstance(name, str) and name:
-                names.append(name)
-    except OSError:
-        return 0, []
-    return count, names
-
-
 def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     """Count tool invocations from an OpenCode ``--format json`` stdout artifact.
 
@@ -1352,11 +1325,15 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
 
 
 # Dispatcher: maps backend name → per-backend counter function.
+#
+# ``agy`` has no entry yet: writing one correctly needs a real
+# ``--output-format json`` transcript sample, which this project does not have.
+# Until then it falls back to ``_normalise_usage_stats``'s generic walk below,
+# same as any backend without a dedicated counter.
 _TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = {
     "claude": _count_claude_transcript_tool_events,
     "codex": _count_codex_stdout_tool_events,
     "cursor": _count_cursor_stdout_tool_events,
-    "gemini": _count_gemini_stdout_tool_events,
     "opencode": _count_opencode_stdout_tool_events,
 }
 
@@ -1602,8 +1579,6 @@ def invoke_claude_code(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
-    if backend == "gemini":
-        backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
     if backend == "opencode" and (sandbox is None or not sandbox.enabled):
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #

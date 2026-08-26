@@ -18,3 +18,46 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run pytest tests/unit/ -q
       - run: uv run mypy --strict src/helix/
+
+  runner-images:
+    # Every runner image is built from this checkout's own Dockerfiles rather
+    # than pulled from GHCR, then smoke-tested. A pulled image only reflects
+    # the last *published* build, so a PR that edits a Dockerfile would be
+    # validated against code it is not changing, and a PR that adds a backend
+    # could never go green -- its image cannot exist on GHCR until after it
+    # merges. Building locally means every PR is checked against exactly the
+    # images its own diff produces.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      # `docker buildx bake` talks to the GitHub Actions cache directly
+      # (rather than through an action that wraps it, like
+      # docker/build-push-action), so the cache's URL and token need to reach
+      # it as plain environment variables.
+      - name: Expose GitHub Actions cache to Buildx
+        uses: crazy-max/ghaction-github-runtime@v3
+      # The tests skip when a fixture image is absent. A fresh runner has
+      # none, so without this build the job would pass while running nothing.
+      # `docker buildx bake` (see docker/docker-bake.hcl) builds the base
+      # image once, then every backend's Dockerfile against it in parallel,
+      # using Buildx's named-context feature to point each backend's `FROM`
+      # straight at the base build's own output instead of a registry -- so
+      # build order only matters between the base and the backends, never
+      # among the backends themselves. Each target loads into the local
+      # Docker engine (`--load`, no registry push) under the exact tag
+      # `DEFAULT_BACKEND_IMAGES` in `src/helix/backends.py` resolves, and each
+      # caches independently through the GitHub Actions cache so an unrelated
+      # change does not invalidate every other image's layers.
+      - name: Build runner images
+        run: docker buildx bake -f docker/docker-bake.hcl --load
+      # STRICT=1 turns any remaining skip into a failure, so this job can
+      # never be green without actually exercising the images it just built.
+      - run: uv run pytest tests/integration/ -m docker_integration -q -rs
+        env:
+          HELIX_DOCKER_TESTS_STRICT: "1"

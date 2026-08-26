@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Literal, TypeAlias
 
 
-BackendName: TypeAlias = Literal["claude", "codex", "cursor", "gemini", "opencode"]
+BackendName: TypeAlias = Literal["agy", "claude", "codex", "cursor", "opencode"]
 
-BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "opencode")
+BACKENDS: tuple[BackendName, ...] = ("agy", "claude", "codex", "cursor", "opencode")
 
 
 # ---------------------------------------------------------------------------
@@ -18,6 +18,7 @@ BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "ope
 # budget" on backends that expose one.  The string value is forwarded to a
 # backend-native CLI flag in ``helix.mutator``:
 #
+#   - ``agy``:       ``--effort <value>``   (Antigravity CLI reasoning effort)
 #   - ``claude``:    ``--effort <value>``   (Claude Code thinking budget)
 #   - ``codex``:     ``-c model_reasoning_effort=<value>`` (Codex CLI config)
 #   - ``opencode``:  ``--variant <value>``  (model variant selector)
@@ -27,7 +28,7 @@ BACKENDS: tuple[BackendName, ...] = ("claude", "codex", "cursor", "gemini", "ope
 # without hard-coding backend knowledge into ``HelixConfig``.
 
 EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset(
-    {"claude", "codex", "opencode"}
+    {"agy", "claude", "codex", "opencode"}
 )
 """Backends that propagate ``agent.effort`` to their underlying CLI."""
 
@@ -40,35 +41,62 @@ EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset(
 # surfaces), users will see a non-fatal "not a recognized value" warning
 # until this map is updated; the value still passes through to the CLI.
 EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
+    "agy": frozenset({"low", "medium", "high"}),
     "claude": frozenset({"low", "medium", "high"}),
     "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
     "opencode": None,  # variant strings are model-specific; opencode validates them.
 }
 
 BACKEND_DISPLAY_NAMES: dict[str, str] = {
+    "agy": "Antigravity CLI",
     "claude": "Claude Code",
     "codex": "Codex CLI",
     "cursor": "Cursor Agent",
-    "gemini": "Gemini CLI",
     "opencode": "OpenCode",
 }
 
 DEFAULT_BACKEND_IMAGES: dict[str, str] = {
+    "agy": "ghcr.io/ke7/helix-evo-runner-agy:latest",
     "claude": "ghcr.io/ke7/helix-evo-runner-claude:latest",
     "codex": "ghcr.io/ke7/helix-evo-runner-codex:latest",
     "cursor": "ghcr.io/ke7/helix-evo-runner-cursor:latest",
-    "gemini": "ghcr.io/ke7/helix-evo-runner-gemini:latest",
     "opencode": "ghcr.io/ke7/helix-evo-runner-opencode:latest",
 }
 
+# Ambient credential variable names forwarded to a backend when the operator
+# has them set. A backend with no entry here (``agy``, ``codex``) authenticates
+# only through its sandbox login volume; naming a variable for it would be
+# claiming a credential path this project has not established.
 BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
     "cursor": ("CURSOR_API_KEY",),
-    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
 }
 
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
+    "agy": {
+        # No dedicated non-interactive login subcommand; the bare interactive
+        # launch is the login flow, same pattern as ``opencode`` below.
+        "login": ["agy"],
+        # ``agy models`` returns exit 0 even when logged out, so it cannot be
+        # used as the status signal. Probe the credential file directly
+        # instead, mirroring claude's file-probe pattern below. The path was
+        # derived by tracing the CLI's own file opens and has not yet been
+        # confirmed against a completed sign-in.
+        "status": [
+            "sh",
+            "-lc",
+            'set -eu; test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"',
+        ],
+        # Surgical: only remove agy's own state directory. ``~/.gemini`` also
+        # holds unrelated Google CLI state, so a blanket ``rm -rf ~/.gemini``
+        # would destroy state this backend does not own.
+        "logout": [
+            "sh",
+            "-lc",
+            'set -eu; rm -rf "${HOME:-/home/node}/.gemini/antigravity-cli"',
+        ],
+    },
     "claude": {
         "login": ["claude", "auth", "login", "--claudeai"],
         # ``claude auth status --text`` returns 0 even when there are no
@@ -94,18 +122,6 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         "login": ["cursor-agent", "login"],
         "status": ["cursor-agent", "status"],
         "logout": ["cursor-agent", "logout"],
-    },
-    "gemini": {
-        "login": ["gemini", "--skip-trust"],
-        "status": ["gemini", "--version"],
-        # The auth volume is mounted at /home/node and is shared across
-        # backends, so logout must scrub only Gemini's state directory rather
-        # than the whole home tree.
-        "logout": [
-            "sh",
-            "-lc",
-            'set -eu; rm -rf "/home/node/.gemini" "/home/node/.config/google-gemini"',
-        ],
     },
     "opencode": {
         "login": ["opencode"],

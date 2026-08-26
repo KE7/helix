@@ -726,6 +726,42 @@ class TestInvokeClaudeCode:
         assert ".agent_task_prompt.md" in args_list[-1]
         assert "input" not in call_args[1]
 
+    def test_agy_cli_args_include_required_flags(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"session_id":"sess_123"}', stderr="", returncode=0
+        )
+        config = AgentConfig(backend="agy", model="test-model", effort="high")
+
+        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+
+        args_list = mock_run.call_args[0][0]
+        assert args_list[0] == "agy"
+        assert "--dangerously-skip-permissions" in args_list
+        assert "--print" in args_list
+        assert "--output-format" in args_list
+        assert "json" in args_list
+        assert "--model" in args_list
+        assert "test-model" in args_list
+        assert "--effort" in args_list
+        assert "high" in args_list
+        assert "--sandbox" not in args_list
+        assert "the prompt" not in args_list
+        assert ".agent_task_prompt.md" in args_list[-1]
+        assert "input" not in mock_run.call_args[1]
+        assert result["session_id"] == "sess_123"
+
+    def test_agy_cli_args_omit_optional_flags_when_unset(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        config = AgentConfig(backend="agy")
+
+        invoke_claude_code("/tmp/wt", "the prompt", config)
+
+        args_list = mock_run.call_args[0][0]
+        assert "--model" not in args_list
+        assert "--effort" not in args_list
+
     def test_uses_correct_cwd(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
@@ -914,29 +950,6 @@ class TestInvokeClaudeCode:
                 id="cursor",
             ),
             pytest.param(
-                "gemini",
-                "\n".join(
-                    [
-                        "MCP advisory preamble tolerated by the Gemini parser.",
-                        '{"type":"init","session_id":"gemini-session"}',
-                        (
-                            '{"type":"result","stats":{"input_tokens":14,'
-                            '"output_tokens":10,"cached":23,"input":14,'
-                            '"models":{"gemini":{"total_tokens":47,'
-                            '"input_tokens":14,"output_tokens":10,'
-                            '"cached":23,"input":14}}}}'
-                        ),
-                    ]
-                ),
-                {
-                    "input_tokens": 14,
-                    "output_tokens": 10,
-                    "cached_input_tokens": 23,
-                    "session_id": "gemini-session",
-                },
-                id="gemini",
-            ),
-            pytest.param(
                 "opencode",
                 "\n".join(
                     [
@@ -1069,30 +1082,9 @@ class TestInvokeClaudeCode:
         assert payload["transcript_artifacts"][0]["available"] is False
         assert payload["transcript_artifacts"][0]["reason"] == "transcript_not_found"
 
-    def test_gemini_tolerates_text_preamble_before_json_stream(self, mocker):
-        mock_run = mocker.patch("helix.mutator.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout=(
-                "MCP issues detected. Run /mcp list for status.\n"
-                '{"type":"init","session_id":"sess_123"}\n'
-                '{"type":"result","status":"success","stats":{"input_tokens":10,"output_tokens":2}}\n'
-            ),
-            stderr="",
-            returncode=0,
-        )
-        config = AgentConfig(backend="gemini")
-
-        result, _ = invoke_claude_code("/tmp/wt", "prompt", config)
-
-        assert result["events"][0]["type"] == "init"
-        assert result["unparsable_lines"] == [
-            "MCP issues detected. Run /mcp list for status."
-        ]
-
     @pytest.mark.parametrize(
         ("backend", "expected_prefix", "expected_flags"),
         [
-            ("gemini", ["gemini"], ["--yolo", "--output-format", "stream-json"]),
             (
                 "opencode",
                 ["opencode", "run"],
@@ -1100,7 +1092,7 @@ class TestInvokeClaudeCode:
             ),
         ],
     )
-    def test_gemini_and_opencode_cli_args(
+    def test_opencode_cli_args(
         self, mocker, backend, expected_prefix, expected_flags
     ):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
@@ -1662,54 +1654,6 @@ class TestCountCursorStdoutToolEvents:
         assert names == []
 
 
-class TestCountGeminiStdoutToolEvents:
-    """Tests for ``_count_gemini_stdout_tool_events``."""
-
-    def test_counts_tool_use_and_extracts_tool_name(self, tmp_path: Path) -> None:
-        from helix.mutator import _count_gemini_stdout_tool_events
-
-        stdout = tmp_path / "stdout.jsonl"
-        stdout.write_text(
-            json.dumps(
-                {
-                    "type": "tool_use",
-                    "tool_name": "read_file",
-                    "tool_id": "t1",
-                }
-            )
-            + "\n"
-            + json.dumps(
-                {
-                    "type": "tool_result",
-                    "tool_id": "t1",
-                    "content": "...",
-                }
-            )
-            + "\n"  # tool_result → skip (not tool_use)
-            + json.dumps(
-                {
-                    "type": "tool_use",
-                    "tool_name": "write_file",
-                    "tool_id": "t2",
-                }
-            )
-            + "\n"
-        )
-
-        count, names = _count_gemini_stdout_tool_events(stdout)
-
-        assert count == 2
-        assert names == ["read_file", "write_file"]
-
-    def test_missing_file_returns_zero(self, tmp_path: Path) -> None:
-        from helix.mutator import _count_gemini_stdout_tool_events
-
-        count, names = _count_gemini_stdout_tool_events(tmp_path / "nope.jsonl")
-
-        assert count == 0
-        assert names == []
-
-
 class TestCountOpencodeStdoutToolEvents:
     """Tests for ``_count_opencode_stdout_tool_events``."""
 
@@ -1800,18 +1744,22 @@ class TestCountTranscriptToolEventsDispatcher:
         assert count == 1
         assert names == ["Read"]
 
-    def test_dispatches_to_gemini_counter(self, tmp_path: Path) -> None:
+    def test_agy_has_no_dedicated_counter_yet(self, tmp_path: Path) -> None:
+        """agy has no dedicated per-field counter (needs a real transcript sample
+        to write correctly, see ``_TRANSCRIPT_TOOL_COUNTERS``), so it falls back
+        to the dispatcher's unknown-backend behavior even for an existing file.
+        ``_normalise_usage_stats``'s generic walk still produces best-effort
+        stats independently of this counter.
+        """
         from helix.mutator import _count_transcript_tool_events
 
-        stdout = tmp_path / "stdout.jsonl"
-        stdout.write_text(
-            json.dumps({"type": "tool_use", "tool_name": "grep"}) + "\n"
-        )
+        stdout = tmp_path / "stdout.json"
+        stdout.write_text(json.dumps({"type": "tool_use", "tool_name": "grep"}))
 
-        count, names = _count_transcript_tool_events(stdout, "gemini")
+        count, names = _count_transcript_tool_events(stdout, "agy")
 
-        assert count == 1
-        assert names == ["grep"]
+        assert count == 0
+        assert names == []
 
 
 class TestTranscriptToolPatchesUsageInArtifact:
@@ -1962,11 +1910,11 @@ class TestOpenCodeSubprocessIsolation:
     def test_opencode_isolation_not_applied_to_other_backends(
         self, tmp_path: Path, mocker
     ):
-        """XDG_DATA_HOME must NOT be injected for claude/codex/cursor/gemini."""
+        """XDG_DATA_HOME must NOT be injected for agy/claude/codex/cursor."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
 
-        for backend in ("claude", "codex", "cursor", "gemini"):
+        for backend in ("agy", "claude", "codex", "cursor"):
             invoke_claude_code(
                 str(tmp_path), "prompt", AgentConfig(backend=backend)
             )
