@@ -341,7 +341,7 @@ def _render_side_info_value(value: Any, level: int) -> str:
 
     Line-for-line port of GEPA's ``render_value`` closure inside
     ``format_samples`` at
-    ``src/gepa/strategies/instruction_proposal.py:63-85``:
+    ``src/gepa/strategies/instruction_proposal.py::format_samples.render_value``:
 
       * ``dict`` → ``{'#' * level} {key}`` for each item, recursing
         at ``level + 1`` (capped at ``#_MAX_MARKDOWN_HEADER_LEVEL``
@@ -394,7 +394,7 @@ def _render_per_example_diagnostics(
     Mirrors GEPA's ``OptimizeAnythingAdapter.make_reflective_dataset`` +
     ``format_samples`` in
     ``adapters/optimize_anything_adapter/optimize_anything_adapter.py``
-    and ``src/gepa/strategies/instruction_proposal.py:54-95``:
+    and ``src/gepa/strategies/instruction_proposal.py::format_samples``:
 
       * each example gets an ``{'#' * example_header_level} Example <id>``
         header (id recovered from ``helix_batch.json`` via
@@ -493,7 +493,7 @@ def _render_diagnostics(eval_result: EvalResult) -> str:
          populated; mirrors GEPA's
          ``OptimizeAnythingAdapter.make_reflective_dataset`` combined
          with ``format_samples`` at
-         ``gepa/strategies/instruction_proposal.py:54-95``.
+         ``gepa/strategies/instruction_proposal.py::format_samples``.
       2. ``eval_result.side_info`` (legacy batch-level dict) when
          per-example data is absent.
       3. Empty string when neither is present.

@@ -89,7 +89,8 @@ class EvolutionState:
     # circuit already-seen pairs (merge-pairing audit B2).
     merge_attempted_pairs: list[list[str]] = field(default_factory=list)
     # GEPA parity (merge-pairing audit C1):
-    # mirrors GEPA ``merges_performed[1]`` at gepa/proposer/merge.py:195-203.
+    # mirrors GEPA ``merges_performed[1]`` at
+    # gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors.
     # Each entry is [cid_i, cid_j, desc_hash] with cid_i <= cid_j
     # lexicographically and desc_hash = post-snapshot git SHA of the
     # merged worktree.  Blocks only the *same* (pair, output) triplet,

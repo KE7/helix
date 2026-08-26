@@ -1,13 +1,14 @@
 """Unit tests for helix.lineage.find_merge_triplet.
 
 Ported from GEPA's merge pair-selection behavior
-(gepa/proposer/merge.py:87-115, 118-207).  Covers the post-align-merge
-changes spelled out below:
+(gepa/proposer/merge.py::find_common_ancestor_pair,
+gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors).
+Covers the post-align-merge changes spelled out below:
 
 - B1: overlap-floor filter moved INTO the retry loop.
 - B2: attempted-pair filter moved INTO the retry loop.
 - C3: canonical (lex-sorted) pair returned, mirroring GEPA
-  ``merge.py:94-95`` ``if j < i: i, j = j, i``.
+  ``merge.py::find_common_ancestor_pair`` ``if j < i: i, j = j, i``.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ def _build_lineage(parents_by_id: dict[str, list[str]]) -> dict[str, LineageEntr
 
 
 class TestFindMergeTripletCanonicalization:
-    """GEPA parity (merge-pairing audit C3, merge.py:94-95).
+    """GEPA parity (merge-pairing audit C3, merge.py::find_common_ancestor_pair).
 
     The sampled pair is lex-sorted inside ``find_merge_triplet`` so that
     ``(A, B)`` and ``(B, A)`` both surface as ``(A, B)`` regardless of the
@@ -67,7 +68,8 @@ class TestFindMergeTripletCanonicalization:
 
 
 class TestFindMergeTripletWithinRetryFilters:
-    """GEPA parity (merge-pairing audit B1+B2, merge.py:147-148, 199-201).
+    """GEPA parity (merge-pairing audit B1+B2,
+    merge.py::sample_and_attempt_merge_programs_by_common_predictors).
 
     The attempted-pair and val-overlap filters live INSIDE the retry loop
     (``for _ in range(max_attempts)``).  A blocked sample resamples within
@@ -170,7 +172,7 @@ class TestFindMergeTripletWithinRetryFilters:
 
 
 class TestFindMergeTripletBackwardCompat:
-    """GEPA parity (merge.py:87-115): without the new optional filters, the
+    """GEPA parity (merge.py::find_common_ancestor_pair): without the new optional filters, the
     behavior is unchanged — attempted_pairs=None, has_val_support_overlap=None
     means "no filtering" and the canonical ``(i, j, ancestor)`` triplet is
     returned for any valid frontier.  The ``val_stage_size``-None invariant
