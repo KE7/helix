@@ -1694,10 +1694,11 @@ class TestMergeBehavior:
 
         Before this fix, the frontier entry for the merged candidate
         only carried scores for the 5 subsample ids, so
-        ``ParetoFrontier._update_per_key`` registered it on 5 keys and
-        ``sum_score()`` collapsed to a fraction of the full-val sum,
-        systematically under-representing merged candidates as dominators
-        and over-representing them as tiebreak-eliminated candidates.
+        ``ParetoFrontier._update_per_key`` registered it on 5 keys
+        instead of the full valset and its aggregate score was computed
+        over those 5 ids alone — systematically under-representing merged
+        candidates as dominators and giving the elimination scan an
+        unrepresentative position for them.
 
         Regression invariant: ``val_stage_size`` gates the mutation path
         only (consumed via ``_stage_val_example_ids()`` in the proposal's

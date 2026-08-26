@@ -2516,9 +2516,11 @@ def _run_evolution_impl(
                                 # itself backed by
                                 # ``_evaluate_programs_on_valset``.
                                 # Without this, the merged entry carries only
-                                # subsample coverage and Pareto dominance /
-                                # ``sum_score`` comparisons skew against the
-                                # merged candidate once it is picked as a parent.
+                                # subsample coverage, so its per-key frontier
+                                # membership and its ``aggregate_score()`` are
+                                # both computed over a handful of ids — skewing
+                                # Pareto dominance against the merged candidate
+                                # once it is picked as a parent.
                                 # Budget accounting charges the uncached
                                 # full-val example count; single-task/no-example
                                 # evals still charge 0/1 metric calls via _cached_eval.

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import random
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -341,3 +345,172 @@ class TestGetNonDominated:
         non_dom = frontier.get_non_dominated()
         assert "a" in non_dom
         assert "b" not in non_dom
+
+
+# ---------------------------------------------------------------------------
+# Elimination-scan ranking metric
+# ---------------------------------------------------------------------------
+
+class TestEliminationScanRanksByMean:
+    """Pin mean-based ranking for the dominance-elimination scan.
+
+    The aggregate score does not *define* dominance — ``_is_dominated``
+    decides that from per-key frontier membership.  It orders the
+    elimination scan, which stops at the first dominated candidate it
+    finds, so on a pool of mutually-eliminable candidates the ranking
+    metric decides which one survives.
+
+    This pool is built so mean and sum disagree.  ``a`` and ``b`` tie for
+    best on ``i1`` and appear in no other front (``c`` owns ``i2``), so
+    each is dominated by the other and exactly one survives:
+
+    ==========  ==========================  ======  ======
+    candidate   instance scores             sum     mean
+    ==========  ==========================  ======  ======
+    ``a``       ``{i1: 1.0}``               1.0     1.0
+    ``b``       ``{i1: 1.0, i2: 0.2}``      1.2     0.6
+    ``c``       ``{i2: 0.9}``               0.9     0.9
+    ==========  ==========================  ======  ======
+
+    Ranking by mean scans ``b`` first and drops it, leaving ``a``.
+    Ranking by sum scans ``a`` first and drops it, leaving ``b``.
+    """
+
+    @staticmethod
+    def _build_split_pool(frontier: ParetoFrontier) -> None:
+        frontier.add(make_candidate("a"), make_result("a", {"i1": 1.0}))
+        frontier.add(make_candidate("b"), make_result("b", {"i1": 1.0, "i2": 0.2}))
+        frontier.add(make_candidate("c"), make_result("c", {"i2": 0.9}))
+
+    def test_pool_actually_separates_mean_from_sum(self):
+        """Guard the fixture: if these rankings ever agree, the tests below go vacuous."""
+        frontier = ParetoFrontier()
+        self._build_split_pool(frontier)
+        results = frontier.results
+        by_mean = sorted(results, key=lambda cid: results[cid].aggregate_score())
+        by_sum = sorted(results, key=lambda cid: results[cid].sum_score())
+        assert by_mean == ["b", "c", "a"]
+        assert by_sum == ["c", "a", "b"]
+        # ``a`` and ``b`` must occupy the same fronts, or neither eliminates the other.
+        assert frontier._per_key_best["i1"] == {"a", "b"}
+        assert frontier._per_key_best["i2"] == {"c"}
+
+    def test_non_dominated_set_follows_mean_ranking(self):
+        frontier = ParetoFrontier()
+        self._build_split_pool(frontier)
+        # Mean ranking keeps ``a``; the superseded sum ranking kept ``b``.
+        assert frontier.get_non_dominated() == {"a", "c"}
+
+    def test_select_parent_never_draws_the_sum_ranked_survivor(self):
+        frontier = ParetoFrontier(rng=random.Random(11))
+        self._build_split_pool(frontier)
+        drawn = {frontier.select_parent().id for _ in range(50)}
+        assert drawn == {"a", "c"}
+
+    def test_equal_instance_counts_rank_identically_under_both_metrics(self):
+        """Mean and sum only diverge when instance counts differ."""
+        frontier = ParetoFrontier()
+        frontier.add(make_candidate("a"), make_result("a", {"i1": 0.9, "i2": 0.1}))
+        frontier.add(make_candidate("b"), make_result("b", {"i1": 0.1, "i2": 0.9}))
+        results = frontier.results
+        assert sorted(results, key=lambda cid: results[cid].aggregate_score()) == sorted(
+            results, key=lambda cid: results[cid].sum_score()
+        )
+
+    def test_sum_score_reporting_surfaces_survive(self):
+        """Selection stopped ranking by sum; the metric itself is still reported."""
+        result = make_result("a", {"i1": 1.0, "i2": 0.2})
+        assert result.sum_score() == pytest.approx(1.2)
+        assert result.aggregate_score() == pytest.approx(0.6)
+
+
+# ---------------------------------------------------------------------------
+# Cross-process reproducibility
+# ---------------------------------------------------------------------------
+
+class TestCrossProcessReproducibility:
+    """A seeded ``ParetoFrontier`` must pick the same parent in any process.
+
+    Candidate ids are ``str`` and the per-key fronts are ``set`` objects,
+    so anything that lets set iteration order reach a selection decision
+    becomes a function of ``PYTHONHASHSEED``.  Upstream GEPA keys
+    programs by ``int`` index and is not exposed to this; HELIX's port
+    changed the identifier type, so the ordering has to be imposed.
+    """
+
+    def _run_under_hash_seeds(self, script: str) -> set[str]:
+        source = textwrap.dedent(script)
+        return {
+            subprocess.run(
+                [sys.executable, "-c", source],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONHASHSEED": str(hash_seed)},
+            ).stdout.strip()
+            for hash_seed in range(1, 9)
+        }
+
+    def test_select_parent_is_stable_across_hash_seeds(self):
+        """All-tied pool: every candidate shares one front, so ordering alone decides."""
+        selections = self._run_under_hash_seeds(
+            """
+            import random
+
+            from helix.population import Candidate, EvalResult, ParetoFrontier
+
+            frontier = ParetoFrontier(rng=random.Random(7))
+            for candidate_id in ("alpha", "bravo", "charlie", "delta"):
+                frontier.add(
+                    Candidate(
+                        id=candidate_id,
+                        worktree_path="",
+                        branch_name="",
+                        generation=0,
+                        parent_id=None,
+                        parent_ids=[],
+                        operation="mutation",
+                    ),
+                    EvalResult(
+                        candidate_id=candidate_id,
+                        scores={},
+                        asi={},
+                        instance_scores={"instance": 1.0},
+                    ),
+                )
+
+            print(frontier.select_parent().id)
+            """
+        )
+        assert len(selections) == 1
+
+    def test_non_dominated_set_is_stable_across_hash_seeds(self):
+        """Equal-scoring, mutually-eliminable candidates must survive identically."""
+        survivors = self._run_under_hash_seeds(
+            """
+            from helix.population import Candidate, EvalResult, ParetoFrontier
+
+            frontier = ParetoFrontier()
+            for candidate_id in ("alpha", "bravo", "charlie", "delta"):
+                frontier.add(
+                    Candidate(
+                        id=candidate_id,
+                        worktree_path="",
+                        branch_name="",
+                        generation=0,
+                        parent_id=None,
+                        parent_ids=[],
+                        operation="mutation",
+                    ),
+                    EvalResult(
+                        candidate_id=candidate_id,
+                        scores={},
+                        asi={},
+                        instance_scores={"i1": 1.0, "i2": 1.0},
+                    ),
+                )
+
+            print(",".join(sorted(frontier.get_non_dominated())))
+            """
+        )
+        assert len(survivors) == 1

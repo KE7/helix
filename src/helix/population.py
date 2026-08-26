@@ -691,8 +691,12 @@ class ParetoFrontier:
 
         Iterative fixed-point elimination:
         1. Collect all programs appearing in any frontier key.
-        2. Sort by score ascending (worst first — lower-scoring programs are
-           checked first and more likely to be eliminated).
+        2. Sort by ``(score, candidate_id)`` ascending (worst first — lower-scoring
+           programs are checked first and more likely to be eliminated).  The id
+           is part of the sort key, not decoration: the programs are collected by
+           walking ``set`` fronts, so equal-scoring candidates would otherwise be
+           ordered by the per-process string-hash salt, and step 3 stops at the
+           *first* dominated candidate it finds.
         3. Repeatedly scan: for each non-eliminated candidate y, check if y is
            dominated by ``set(programs) - {y} - dominated``.  If dominated,
            mark and restart scan.  Repeat until a full pass finds nothing.
@@ -710,7 +714,7 @@ class ParetoFrontier:
         if scores is None:
             scores = dict.fromkeys(programs, 1.0)
 
-        programs = sorted(programs, key=lambda x: scores.get(x, 0.0), reverse=False)
+        programs = sorted(programs, key=lambda x: (scores.get(x, 0.0), x), reverse=False)
 
         found_to_remove = True
         while found_to_remove:
@@ -740,15 +744,21 @@ class ParetoFrontier:
         """Return the non-dominated set via GEPA's iterative fixed-point elimination.
 
         Dominance is computed against :meth:`_active_frontier`, which
-        dispatches on ``frontier_type``.  Uses each candidate's
-        ``sum_score()`` as the tiebreaker (lower-scoring candidates are
-        eliminated first, matching GEPA's
-        ``train_val_weighted_agg_scores_for_all_programs``).
+        dispatches on ``frontier_type``.  Membership in the per-key fronts
+        is what decides dominance (see :meth:`_is_dominated`); the
+        aggregate score passed here only *orders* the elimination scan,
+        so it selects which of several mutually-eliminable candidates is
+        dropped first, not what "dominated" means.
 
-        GEPA parity (W1): use sum_score() to match GEPA semantics, which
-        diverges from aggregate_score() when candidates have different instance counts.
+        GEPA parity: rank by ``aggregate_score()`` (the mean), not by
+        ``sum_score()``.  Upstream feeds
+        ``gepa.strategies.candidate_selector.ParetoCandidateSelector``
+        from ``gepa.core.state.GEPAState.per_program_tracked_scores``,
+        which returns ``get_program_average_val_subset(program_idx)[0]``
+        — an average, not a sum.  Sum and mean rank pools identically
+        only when every candidate carries the same instance count.
         """
-        scores = {cid: r.sum_score() for cid, r in self._results.items()}
+        scores = {cid: r.aggregate_score() for cid, r in self._results.items()}
         dominators, _ = self._remove_dominated_programs(
             self._active_frontier(), scores,
         )
@@ -790,17 +800,25 @@ class ParetoFrontier:
         """GEPA ``select_program_candidate_from_pareto_front()``.
 
         1. Run ``remove_dominated_programs()`` over :meth:`_active_frontier`
-           with sum scores (GEPA parity W1).
+           with mean aggregate scores, matching the ``scores`` argument
+           upstream's ``ParetoCandidateSelector`` passes to
+           ``gepa.gepa_utils.select_program_candidate_from_pareto_front``.
         2. Count per-key frequency of surviving programs in the *cleaned*
            frontier (dominated programs stripped from every front).
         3. Build a flat sampling list where each program appears *freq* times.
         4. Pick uniformly at random (``rng.choice(sampling_list)`` in GEPA).
+
+        The sampling list is built in sorted candidate-id order so a
+        seeded ``rng`` reproduces the same parent across processes; the
+        cleaned fronts are ``set`` objects and HELIX keys them by ``str``
+        ids, whose hashes are salted per interpreter.  (Upstream keys
+        programs by ``int`` index, so upstream never had this exposure.)
         """
         if not self._candidates:
             raise ValueError("Frontier is empty — cannot select parent.")
 
-        # GEPA parity (W1): use sum_score() to match GEPA semantics.
-        scores = {cid: r.sum_score() for cid, r in self._results.items()}
+        # GEPA parity: rank by mean, as GEPAState.per_program_tracked_scores does.
+        scores = {cid: r.aggregate_score() for cid, r in self._results.items()}
         _, cleaned_per_key_best = self._remove_dominated_programs(
             self._active_frontier(), scores,
         )
@@ -813,9 +831,15 @@ class ParetoFrontier:
                     program_frequency[cid] = 0
                 program_frequency[cid] += 1
 
-        # Build flat sampling list (GEPA: sampling_list)
+        # Build flat sampling list (GEPA: sampling_list).  Iterate in
+        # sorted id order: ``program_frequency`` is populated by walking
+        # ``set`` fronts, so its insertion order varies with the
+        # per-process string-hash salt and would otherwise reach
+        # ``rng.choice`` below.
         sampling_list = [
-            cid for cid, freq in program_frequency.items() for _ in range(freq)
+            cid
+            for cid in sorted(program_frequency)
+            for _ in range(program_frequency[cid])
         ]
 
         # Instance mode keeps HELIX's score-only fallback. Hybrid mode can

@@ -35,6 +35,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MissingObjectiveScoresError` when selection needs that axis; explicitly
   requesting `"hybrid"` warns and no-ops its objective axis, continuing on
   the instance axis.
+- **BEHAVIOUR**: `ParetoFrontier.get_non_dominated()` and
+  `ParetoFrontier.select_parent()` now rank candidates by
+  `EvalResult.aggregate_score()` (the mean instance score) instead of
+  `EvalResult.sum_score()`. This is the default parent-selection path, so
+  every run is affected. The aggregate score does not define dominance —
+  `ParetoFrontier._is_dominated` decides that from per-key frontier
+  membership, unchanged — it *orders* the dominance-elimination scan, which
+  stops at the first dominated candidate it finds. The change therefore
+  affects which candidate survives when several are mutually eliminable,
+  not what "dominated" means. Sum and mean rank a pool identically whenever
+  all candidates carry the same instance count, so runs where every
+  candidate was evaluated on the full valset see no difference. The
+  previous behaviour was justified in-code as GEPA parity; that
+  justification was incorrect. Upstream feeds
+  `gepa.strategies.candidate_selector.ParetoCandidateSelector` from
+  `gepa.core.state.GEPAState.per_program_tracked_scores`, which returns
+  `GEPAState.get_program_average_val_subset(program_idx)[0]` — an average.
+  `EvalResult.sum_score()`, `CandidateSummary.sum_score`, and the
+  `sum_scores` mapping in the result schema are unchanged and still
+  reported; sums also still drive the acceptance gate, which does match
+  upstream's `StrictImprovementAcceptance`.
+
+### Fixed
+- `ParetoFrontier.select_parent()` and `ParetoFrontier.get_non_dominated()`
+  are now reproducible across processes for a given seed. Candidate ids are
+  `str` and the per-key fronts are `set` objects, so set iteration order —
+  which varies with the per-process string-hash salt — reached both the
+  dominance-elimination scan order and the order of the selection sampling
+  list. Two orderings are now imposed: the elimination scan sorts by
+  `(score, candidate_id)`, and the sampling list is built in sorted
+  candidate-id order. Previously, a run pinned to `random.Random(7)` over
+  four identically-scored candidates returned a different parent under
+  different `PYTHONHASHSEED` values. Upstream GEPA indexes programs by
+  integer, so it was never exposed to this; HELIX's port changed the
+  identifier type.
 
 ## [0.2.2] - 2026-05-13
 
