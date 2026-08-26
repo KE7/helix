@@ -136,9 +136,18 @@ def test_docker_command_mounts_only_workspace_and_auth_volume(tmp_path: Path, mo
     assert "helix-auth-codex:/home/node:rw" in docker_call
     assert f"{tmp_path}:" not in joined
     assert "/workspace:rw" in joined
+    # codex relocates its state databases, so the agent container also gets a
+    # per-candidate state mount -- outside /home/node, leaving the shared auth
+    # mount asserted above untouched.
+    assert "/helix-state:rw" in joined
+    assert "/home/node/helix-state" not in joined
+    # Three housekeeping chowns: the workspace before the run, the
+    # per-candidate state directory before the run (it must be writable by the
+    # container's ``node`` user), and the workspace again afterwards.
     chown_calls = [call for call in calls if _is_workspace_chown(call)]
-    assert len(chown_calls) == 2
+    assert len(chown_calls) == 3
     assert "node:node" in chown_calls[0]
+    assert "node:node" in chown_calls[1]
 
 
 def test_evaluator_scope_does_not_mount_agent_auth(tmp_path: Path, mocker):

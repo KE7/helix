@@ -637,6 +637,57 @@ session.
 
 The volume names are `helix-auth-claude`, `helix-auth-codex`,
 `helix-auth-cursor`, `helix-auth-gemini`, and `helix-auth-opencode`.
+
+#### Per-candidate agent state
+
+The auth volume is shared by every candidate container on purpose: it is what
+lets a CLI refresh its token and take its cross-process refresh lock. But the
+CLIs also write their *working state* under `/home/node` — transcripts, session
+databases, memories, to-do lists — so without further work candidate N would
+start by reading candidate N-1's leftovers. For an optimizer whose candidates
+are meant to be independent samples, that contaminates the experiment; some of
+that state (opencode's `opencode.db`) also carries token columns.
+
+HELIX therefore mounts a second, per-candidate directory at `/helix-state` —
+deliberately outside `/home/node`, so the shared auth mount is unchanged — and
+points each backend's state at it. The directory lives in the same temporary
+tree as the sandbox workspace copy, so it is created and deleted with the
+candidate. `helix.agent_state` holds the knobs:
+
+| Backend | Knob | Moves | Credential |
+| --- | --- | --- | --- |
+| `codex` | `-c sqlite_home=…` | `state_5.sqlite`, `logs_2.sqlite` (+`-wal`/`-shm`) | `.codex/auth.json` stays shared |
+| `opencode` | `OPENCODE_DB=…` | `opencode.db` (+`-wal`/`-shm`) | `auth.json` and the lock dir stay shared |
+| `cursor` | `CURSOR_CONFIG_DIR=…` | the whole `~/.cursor` tree | `~/.config/cursor/auth.json` stays shared |
+| `claude` | none | — | see below |
+
+Picking the knob matters: the obvious environment variable is usually the wrong
+one because it relocates the credential too, which silently makes an existing
+login invisible. `XDG_DATA_HOME` does this to opencode (`opencode auth list`
+then reports `0 credentials`) and `XDG_CONFIG_HOME` does it to cursor
+(`cursor-agent status` then reports `Not logged in`). HELIX never sets either;
+if you route `XDG_CONFIG_HOME` through `passthrough_env` or `[env]`, the cursor
+backend logs a warning because it will break that backend's login.
+`helix.agent_state.REJECTED_AGENT_STATE_KNOBS` records these so they are not
+re-tried, and `tests/integration/test_agent_state_isolation.py` pins the
+behaviour against the real CLIs.
+
+**What still crosses candidates.** Relocation is partial, and the residue is
+listed per backend in `helix.agent_state.UNRELOCATED_AGENT_STATE`. The
+significant cases:
+
+- **codex** keeps writing its session rollout transcript to
+  `.codex/sessions/<date>/rollout-*.jsonl`, plus `shell_snapshots/` and
+  `memories/`, in the shared volume. `sqlite_home` does not cover these and the
+  CLI exposes no separate knob for them; only `CODEX_HOME` moves them, and that
+  moves `auth.json` with them.
+- **opencode** keeps `log/*.log` and `storage/session_diff/ses_*.json`.
+- **claude** is not relocated at all. `CLAUDE_CONFIG_DIR` is all-or-nothing —
+  it moves `.credentials.json` together with the transcripts — and the
+  alternative of mounting empty per-candidate volumes over
+  `.claude/projects`, `.claude/sessions`, `.claude/telemetry` and
+  `.claude/backups` was evaluated and rejected; see
+  `docs/agent-state-isolation.md`.
 This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
 browser-login tokens may live in Keychain; on Linux they may live in
 Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.

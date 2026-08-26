@@ -19,6 +19,11 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
+from helix.agent_state import (
+    AGENT_STATE_CONTAINER_ROOT,
+    agent_state_env,
+    agent_state_subdirs,
+)
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 
@@ -914,6 +919,33 @@ def sandbox_auth_volume_name(agent_backend: str) -> str:
     return f"helix-auth-{agent_backend}"
 
 
+def _prepare_agent_state_dir(
+    tmp_path: Path,
+    *,
+    scope: Literal["agent", "evaluator"],
+    agent_backend: str | None,
+    image: str,
+) -> Path | None:
+    """Create the per-candidate agent-state directory, or return ``None``.
+
+    The directory lives inside the same temporary tree as the workspace copy,
+    so it inherits the sandbox's existing per-candidate scratch lifetime and is
+    removed by the ``_safe_rmtree`` in :func:`run_sandboxed_commands`.  It is
+    chowned to ``node`` because the container runs as that user, matching how
+    the workspace copy is handed over.
+    """
+    if scope != "agent" or agent_backend is None:
+        return None
+    subdirs = agent_state_subdirs(agent_backend)
+    if not subdirs:
+        return None
+    state_dir = tmp_path / "agent-state"
+    for name in subdirs:
+        (state_dir / name).mkdir(parents=True, exist_ok=True)
+    _docker_chown_workspace(state_dir, image, "node:node")
+    return state_dir
+
+
 def _docker_args(
     command: list[str],
     env: dict[str, str],
@@ -924,6 +956,7 @@ def _docker_args(
     agent_backend: str | None,
     network: str | None = None,
     container_name: str | None = None,
+    agent_state_dir: Path | None = None,
 ) -> list[str]:
     args = [
         "docker",
@@ -946,6 +979,14 @@ def _docker_args(
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
         args.extend(["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"])
+        # The auth volume above is shared across candidates on purpose: it is
+        # what keeps token refresh and the CLIs' refresh locks working.  The
+        # state mount below is per-candidate and lives outside /home/node, so
+        # nothing here changes how the credential is shared.
+        if agent_state_dir is not None:
+            args.extend(
+                ["-v", f"{agent_state_dir}:{AGENT_STATE_CONTAINER_ROOT}:rw"]
+            )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])
@@ -967,6 +1008,10 @@ def _docker_args(
     container_env["PATH"] = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
+    if agent_state_dir is not None and agent_backend is not None:
+        container_env.update(
+            agent_state_env(agent_backend, state_root=AGENT_STATE_CONTAINER_ROOT)
+        )
 
     for key, value in container_env.items():
         args.extend(["-e", f"{key}={value}"])
@@ -1013,6 +1058,12 @@ def run_sandboxed_commands(
         )
         _init_synthetic_git_repo(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
+        agent_state_dir = _prepare_agent_state_dir(
+            tmp_path,
+            scope=scope,
+            agent_backend=agent_backend,
+            image=docker_image,
+        )
         sidecar_runtime = (
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None
         )
@@ -1033,6 +1084,7 @@ def run_sandboxed_commands(
                     agent_backend,
                     sidecar_runtime.network if sidecar_runtime is not None else None,
                     container_name=container_name,
+                    agent_state_dir=agent_state_dir,
                 )
                 try:
                     results.append(
