@@ -26,6 +26,11 @@ from helix.batch_sampler import (
 )
 from helix import budget as budget_api
 from helix.candidate_selector import select_candidate
+from helix.change_summary import (
+    append_rejected_attempt,
+    normalize_failure_history,
+    render_failure_history,
+)
 from helix.config import HelixConfig, load_dataset_examples
 from helix.eval_cache import EvaluationCache as MinibatchEvalCache
 from helix.eval_policy import (
@@ -1457,6 +1462,7 @@ def _run_proposal_worker(
     evaluator_manifest: dict[str, str],
     use_minibatch_gate: bool,
     gen: int,
+    failed_attempt_history: dict[str, list[dict[str, Any]]] | None = None,
 ) -> ProposalResult:
     """Atomic proposal worker — mirrors the sample/evaluate/mutate/evaluate
     shape of GEPA's ``ReflectiveMutationProposer.propose``.
@@ -1466,9 +1472,16 @@ def _run_proposal_worker(
     frontier, minibatch_cache, eval_cache, worktrees_dir,
     evaluator_manifest, use_minibatch_gate, gen).
 
+    ``failed_attempt_history`` is the run's rejected-report map, passed in
+    rather than read off ``EvolutionState`` so the worker keeps no handle on
+    mutable run state.  The caller normalizes it once, sequentially, before
+    dispatch; the worker only reads the entry for its own parent and folds it
+    into the mutation prompt's background (Step W4).
+
     Thread-safety:
     - Reads frontier (read-only during worker phase) ✓
     - Reads config, project_root (immutable) ✓
+    - Reads failed_attempt_history (normalized by the caller; read-only here) ✓
     - Writes to per-candidate worktree only (no shared mutable state) ✓
     - Budget mutations DEFERRED to sequential acceptance loop ✓
     """
@@ -1544,13 +1557,24 @@ def _run_proposal_worker(
 
     # ---- Step W4: LLM mutation ----
     try:
+        # What this parent already tried and had rejected, appended to the
+        # configured background rather than replacing it.
+        _failed_attempt_context = render_failure_history(
+            (failed_attempt_history or {}).get(_parent.id, []),
+            retained_limit=config.evolution.failed_attempt_history_limit,
+        )
+        _mutation_background = "\n\n".join(
+            part
+            for part in (config.agent.background, _failed_attempt_context)
+            if part
+        ) or None
         _child = mutate(
             parent=_parent,
             eval_result=_eval_for_mutate,
             new_id=_new_id,
             config=config,
             base_dir=worktrees_dir,
-            background=config.agent.background,
+            background=_mutation_background,
             prepare_worktree=lambda cand: (
                 _refresh_and_snapshot_protected_evaluator_files(
                     cand, config, project_root
@@ -2732,6 +2756,15 @@ def _run_evolution_impl(
                 max_in_flight_evaluations=_batch_in_flight_units,
             )
 
+            # Normalize the retained rejected-report map once, sequentially,
+            # before any worker starts: the workers read it concurrently and
+            # must not be the ones rewriting it.
+            state.failed_attempt_history = normalize_failure_history(
+                state.failed_attempt_history,
+                config.evolution.failed_attempt_history_limit,
+            )
+            _failed_attempt_history = state.failed_attempt_history
+
             worker_results = _dispatch_proposals(
                 presample_contexts,
                 lambda pre_ctx: _run_proposal_worker(
@@ -2741,6 +2774,7 @@ def _run_evolution_impl(
                     worktrees_dir=worktrees_dir,
                     minibatch_cache=minibatch_cache,
                     eval_cache=eval_cache,
+                    failed_attempt_history=_failed_attempt_history,
                     evaluator_manifest=evaluator_manifest,
                     use_minibatch_gate=use_minibatch_gate,
                     gen=gen,
@@ -2990,6 +3024,14 @@ def _run_evolution_impl(
                             parent_id=_parent.id, generation=gen,
                             stage="train_minibatch", example_ids=list(_subsample_ids),
                         )
+                        state.failed_attempt_history = append_rejected_attempt(
+                            state.failed_attempt_history,
+                            _parent.id,
+                            child.change_summary,
+                            gating_result,
+                            limit=config.evolution.failed_attempt_history_limit,
+                        )
+                        _save_state(state)
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
                             decision="reject", example_ids=list(_subsample_ids),
@@ -3049,6 +3091,14 @@ def _run_evolution_impl(
                             parent_id=_parent.id, generation=gen,
                             stage="train", example_ids=None,
                         )
+                        state.failed_attempt_history = append_rejected_attempt(
+                            state.failed_attempt_history,
+                            _parent.id,
+                            child.change_summary,
+                            gating_result,
+                            limit=config.evolution.failed_attempt_history_limit,
+                        )
+                        _save_state(state)
                         print_warning(
                             f"Acceptance: {child.id} does not improve "
                             f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
@@ -3124,6 +3174,14 @@ def _run_evolution_impl(
                             parent_id=_parent.id, generation=gen,
                             stage="val_stage", example_ids=list(stage_val_example_ids),
                         )
+                        state.failed_attempt_history = append_rejected_attempt(
+                            state.failed_attempt_history,
+                            _parent.id,
+                            child.change_summary,
+                            stage_result,
+                            limit=config.evolution.failed_attempt_history_limit,
+                        )
+                        _save_state(state)
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
                             decision="reject_stage", example_ids=list(stage_val_example_ids),

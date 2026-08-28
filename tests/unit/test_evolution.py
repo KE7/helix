@@ -537,6 +537,122 @@ class TestGatingInEvolutionLoop:
         removed_ids = [c[0][0].id for c in all_mocks["remove_worktree"].call_args_list]
         assert "g1-s1" in removed_ids
 
+    def test_rejection_attaches_summary_and_next_mutation_sees_its_evaluator(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        first = make_candidate("g1-s1", generation=1)
+        first.change_summary = (
+            "repair parser boundary\n\nChanged the final-token check.\n\n"
+            "I expected this to raise the pass rate."
+        )
+        second = make_candidate("g2-s2", generation=2)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].side_effect = [first, second]
+        backgrounds: list[str | None] = []
+
+        def capture_background(*_args, **kwargs):
+            backgrounds.append(kwargs["background"])
+            return [first, second][len(backgrounds) - 1]
+
+        all_mocks["mutate"].side_effect = capture_background
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id in {"g1-s1", "g2-s2"}:
+                return EvalResult(
+                    candidate_id=candidate.id,
+                    scores={},
+                    asi={"stdout": "expected 2, got 1"},
+                    instance_scores={"i1": 0.3},
+                    objective_scores=[{"quality": 0.3}],
+                )
+            return make_eval_result(candidate.id, {"i1": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        run_evolution(make_config(max_generations=2, max_evaluations=10000), tmp_path, tmp_path / ".helix")
+
+        assert backgrounds[0] is None
+        assert backgrounds[1] is not None
+        assert "repair parser boundary" in backgrounds[1]
+        assert "expected 2, got 1" in backgrounds[1]
+
+    def test_second_mutation_from_different_parent_does_not_see_others_history(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """End-to-end proof of the per-parent memory hand-off.
+
+        gen1: seed g0-s0 is mutated into g1-s1, which is REJECTED (its
+        change summary and evaluator output are recorded against g0-s0).
+        gen2: g0-s0 is mutated again into g2-s2, which is ACCEPTED with a
+        strictly higher score, so g2-s2 -- not g0-s0 -- becomes the sole
+        (non-dominated) frontier candidate.
+        gen3: the *new* parent g2-s2 is mutated into g3-s3.
+
+        This exercises the full production hand-off
+        (append_rejected_attempt -> normalize_failure_history ->
+        _run_proposal_worker -> render_failure_history -> mutation
+        background) for both claims at once: gen2's prompt (same parent,
+        g0-s0) MUST contain gen1's rejected summary and evaluator output;
+        gen3's prompt (a different parent, g2-s2, which has never been
+        rejected) MUST NOT -- even though state.failed_attempt_history
+        still holds g0-s0's entry, keyed away from g2-s2.
+        """
+        seed = make_candidate("g0-s0")
+        rejected_child = make_candidate("g1-s1", generation=1)
+        rejected_child.change_summary = (
+            "repair parser boundary\n\nChanged the final-token check.\n\n"
+            "I expected this to raise the pass rate."
+        )
+        accepted_child = make_candidate("g2-s2", generation=2)
+        grandchild = make_candidate("g3-s3", generation=3)
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        backgrounds: list[str | None] = []
+        mutation_order = [rejected_child, accepted_child, grandchild]
+
+        def capture_background(*_args, **kwargs):
+            backgrounds.append(kwargs["background"])
+            return mutation_order[len(backgrounds) - 1]
+
+        all_mocks["mutate"].side_effect = capture_background
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                # Rejected: scores below its parent (seed, 0.5).
+                return EvalResult(
+                    candidate_id=candidate.id,
+                    scores={},
+                    asi={"stdout": "ImportError: nonexistent_pkg"},
+                    instance_scores={"i1": 0.2},
+                    objective_scores=[{"quality": 0.2}],
+                )
+            if candidate.id == "g2-s2":
+                return make_eval_result(candidate.id, {"i1": 0.9})
+            if candidate.id == "g3-s3":
+                return make_eval_result(candidate.id, {"i1": 0.95})
+            # Seed baseline, evaluated fresh every generation.
+            return make_eval_result(candidate.id, {"i1": 0.5})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        run_evolution(
+            make_config(max_generations=3, max_evaluations=10000),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        assert len(backgrounds) == 3
+        assert backgrounds[0] is None  # gen1: g0-s0 has no history yet.
+        # gen2: same parent (g0-s0) -- must see gen1's rejected attempt.
+        assert backgrounds[1] is not None
+        assert "repair parser boundary" in backgrounds[1]
+        assert "ImportError: nonexistent_pkg" in backgrounds[1]
+        # gen3: a DIFFERENT parent (g2-s2) -- must NOT see g0-s0's history.
+        assert backgrounds[2] is None
+        assert not (backgrounds[2] and "repair parser boundary" in backgrounds[2])
+        assert not (
+            backgrounds[2] and "ImportError: nonexistent_pkg" in backgrounds[2]
+        )
+
     def test_accepted_mutation_updates_frontier(self, mocker, tmp_path, all_mocks):
         """Accepted mutation becomes the best candidate on the frontier."""
         seed = make_candidate("g0-s0")
@@ -557,6 +673,28 @@ class TestGatingInEvolutionLoop:
         )
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
         assert result.best_candidate.id == "g1-s1"
+
+    def test_accepted_mutation_does_not_add_its_summary_to_failure_history(
+        self, mocker, tmp_path, all_mocks
+    ):
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        child.change_summary = (
+            "An improvement.\n\nMade it better.\n\nI expected it to pass."
+        )
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            score = 0.9 if candidate.id == child.id else 0.3
+            return make_eval_result(candidate.id, {"i1": score})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        run_evolution(make_config(max_generations=1), tmp_path, tmp_path / ".helix")
+
+        saved_states = [call.args[0] for call in all_mocks["save_state"].call_args_list]
+        assert saved_states
+        assert saved_states[-1].failed_attempt_history == {}
 
     def test_returns_structured_helix_result(self, mocker, tmp_path, all_mocks):
         """run_evolution exposes GEPA-style structured result metadata."""
