@@ -236,7 +236,12 @@ def run_evaluator(
 
     evaluator = config.evaluator
     sandbox_image = None
-    if config.sandbox.enabled and config.sandbox.evaluator:
+    # Whether HELIX itself launched Docker for this evaluation.  Evaluator
+    # commands are arbitrary user commands, so neither the exit code nor the
+    # command text establishes that Docker was involved; only this branch
+    # does.
+    docker_invoked = config.sandbox.enabled and config.sandbox.evaluator
+    if docker_invoked:
         if evaluator.sidecar is None:
             raise ValueError("Sandboxed evaluation requires [evaluator.sidecar].")
         sandbox_image = evaluator.sidecar.resolved_runner_image
@@ -259,7 +264,7 @@ def run_evaluator(
     # assumption.
     helix_log_sandbox_path = f"/workspace/{helix_log_name}"
     cmd_tokens = _validate_and_split_command(evaluator.command)
-    if config.sandbox.enabled and config.sandbox.evaluator:
+    if docker_invoked:
         env[HELIX_ASI_LOG_ENV] = helix_log_sandbox_path
         if current_evaluator_sidecar_runtime() is None:
             raise ValueError(
@@ -347,6 +352,24 @@ def run_evaluator(
             candidate.id,
             split,
             error_ctx,
+        )
+
+    # Docker reserves exit 125 for failures before the container command
+    # starts (daemon, image, or invocation errors).  Check it ahead of the
+    # result parser, which would otherwise hide the Docker diagnostic behind
+    # "no HELIX_RESULT= line".  Guarded on ``docker_invoked``: for an
+    # evaluator HELIX ran directly, 125 is just the command's own exit code.
+    if returncode == 125 and docker_invoked:
+        raise EvaluatorError(
+            "Evaluator Docker invocation failed before the evaluator started.",
+            operation="run_evaluator",
+            phase="docker invocation",
+            command=evaluator.command,
+            cwd=str(candidate.worktree_path),
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=returncode,
+            suggestion="Check the Docker diagnostic in stderr above.",
         )
 
     # Collect ASI
