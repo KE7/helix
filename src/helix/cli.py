@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -30,6 +31,7 @@ from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_heli
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
+from helix.trace import TRACE, TraceWriteError
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
@@ -603,6 +605,18 @@ def sandbox_logout(
         "that does not support it)."
     ),
 )
+@click.option(
+    "--trace",
+    "trace_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help=(
+        "Write a JSON Lines trace of the run to this path: one event per "
+        "line, all timestamps in seconds. A complete trace ends with a "
+        "run_complete record; one without that footer is missing an unknown "
+        "number of events and must be discarded, not trimmed. Off by default."
+    ),
+)
 def evolve(
     config_path: str,
     project_dir: Path | None,
@@ -613,6 +627,7 @@ def evolve(
     backend: str | None,
     model: str | None,
     effort: str | None,
+    trace_path: Path | None,
 ) -> None:
     from helix.evolution import run_evolution
 
@@ -676,7 +691,20 @@ def evolve(
     base_dir = _helix_dir(project_root)
     setup_file_logging(base_dir)
     try:
-        run_evolution(config, project_root, base_dir)
+        with ExitStack() as stack:
+            if trace_path is not None:
+                # --trace is the only thing that enables the bus for a real
+                # run; without it every emit() short-circuits.
+                target = stack.enter_context(TRACE.write_jsonl(trace_path))
+                logger.info("Tracing enabled — writing JSONL events to %s", target)
+            run_evolution(config, project_root, base_dir)
+    except TraceWriteError as exc:
+        # Fail loudly rather than leave a partial trace to be mistaken for
+        # timing evidence.  Covers both an unusable destination, before
+        # evolution starts, and a write failure discovered while closing.
+        logger.error("Trace unavailable: %s", exc)
+        print_error(str(exc))
+        raise SystemExit(2)
     except ResumeIncompatibleError as exc:
         # The current config would reinterpret persisted state.  Show the
         # full Rich panel (with operation/phase/suggestion) instead of

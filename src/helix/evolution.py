@@ -88,7 +88,7 @@ from helix.state import (
     save_eval_cache,
     save_state,
 )
-from helix.trace import TRACE, EventType
+from helix.trace import TRACE, EventType, score_or_none
 from helix.worktree import (
     create_seed_worktree,
     create_empty_seed_worktree,
@@ -1076,7 +1076,86 @@ def _run_full_val_eval(
     duplication.  Callers are responsible for any pre-eval side effects (e.g.
     the seed-eval path calls ``_refresh_protected_evaluator_files`` before
     invoking this helper on the single-task branch).
+
+    This is the sequential full-validation stage, bracketed by
+    ``VALIDATE_START`` / ``VALIDATE_END`` so its wall clock can be totalled
+    apart from the concurrent proposal phase that ``PROPOSAL_BATCH_START`` /
+    ``PROPOSAL_BATCH_END`` brackets.  ``source_batch`` / ``source_single`` are
+    echoed into the events' ``reason`` field so the seed, merge and mutation
+    call sites stay distinguishable.
+
+    Keep the pair.  The stage is *not* recoverable from
+    ``ACCEPT_DECISION`` / ``FRONTIER_UPDATE``, on four independent counts:
+
+    * the seed and merge call sites emit neither event, so their full-val time
+      would be invisible rather than merely imprecise;
+    * the mutation ``ACCEPT_DECISION`` is emitted only inside the
+      ``stage_val_example_ids and use_val_stage_gate`` branch, so it is absent
+      whenever the val-stage gate is unconfigured or skipped;
+    * ``_save_evaluation`` and the frontier sync run between this call
+      returning and ``FRONTIER_UPDATE``, and their cost scales with the
+      evaluator's captured output, so the gap between the two is unbounded;
+    * ``FRONTIER_UPDATE`` never fires at all when the budget is found exhausted
+      in that same gap.
+
+    Each of the four turns an inferred stage duration into a confidently wrong
+    number rather than an obviously missing one.
     """
+    TRACE.emit(
+        EventType.VALIDATE_START,
+        candidate_id=candidate.id,
+        split="val",
+        reason=source_batch if full_val_example_ids else source_single,
+        example_ids=list(full_val_example_ids) if full_val_example_ids else None,
+    )
+    _validate_outcome = "error"
+    _validate_error: str | None = None
+    _validate_result: EvalResult | None = None
+    try:
+        _validate_result = _run_full_val_eval_impl(
+            candidate,
+            state,
+            full_val_example_ids=full_val_example_ids,
+            minibatch_cache=minibatch_cache,
+            eval_cache=eval_cache,
+            config=config,
+            project_root=project_root,
+            source_batch=source_batch,
+            source_single=source_single,
+        )
+        _validate_outcome = "ok"
+        return _validate_result
+    except BaseException as _validate_exc:
+        # The class only: message text can carry evaluator output (see trace.py).
+        _validate_error = type(_validate_exc).__name__
+        raise
+    finally:
+        TRACE.emit(
+            EventType.VALIDATE_END,
+            candidate_id=candidate.id,
+            split="val",
+            reason=source_batch if full_val_example_ids else source_single,
+            example_ids=list(full_val_example_ids) if full_val_example_ids else None,
+            score=score_or_none(_validate_result),
+            outcome=_validate_outcome,
+            error_type=_validate_error,
+        )
+
+
+def _run_full_val_eval_impl(
+    candidate: Candidate,
+    state: EvolutionState,
+    *,
+    full_val_example_ids: list[str] | tuple[str, ...],
+    minibatch_cache: "MinibatchEvalCache[object, str] | None",
+    eval_cache: EvaluationCache | None,
+    config: HelixConfig,
+    project_root: Path,
+    source_batch: str,
+    source_single: str,
+) -> EvalResult:
+    """Body of :func:`_run_full_val_eval`, split out so the timing span is
+    closed on every return path (batch, single-task, and any raise)."""
     if full_val_example_ids:
         result, n_uncached = _cached_evaluate_batch(
             candidate,
@@ -1650,6 +1729,15 @@ def _dispatch_proposals(
     proposal so its siblings still reach the apply phase;
     ``PromptArtifactCollisionError`` is fatal for the whole run and
     propagates.  A single slot keeps the historical in-thread path.
+
+    The trace emits must stay in this scope: it is the only one that knows
+    both the batch width (``len(presample_contexts)``) and each slot's index,
+    while :func:`_run_proposal_worker` receives a single context and cannot
+    name its own slot.  ``PROPOSAL_BATCH_START`` / ``PROPOSAL_BATCH_END``
+    bracket the concurrent phase as a whole; ``PROPOSAL_START`` /
+    ``PROPOSAL_END`` bracket one slot each and are emitted from inside the pool
+    thread that runs the slot, so ``thread_id`` attributes the span to its own
+    worker.
     """
 
     # One worker per proposal slot, all under a single bounded pool.  Budget
@@ -1658,12 +1746,80 @@ def _dispatch_proposals(
     set_phase(HelixPhase.MUTATION)
 
     worker_results: "list[ProposalResult | None]" = [None] * len(presample_contexts)
+    _n_slots = len(presample_contexts)
 
+    def _traced_worker(_slot: int, _pctx: ProposalContext) -> ProposalResult:
+        """Run one slot, always closing its ``PROPOSAL_START``/``END`` pair.
+
+        ``_slot`` is the index into ``presample_contexts`` — sampling order —
+        so a consumer can bind a span to a slot without relying on the order
+        the events happen to land in the file, which is completion order.
+        """
+        _cid = _pctx[3]
+        _outcome = "error"
+        _error_type: str | None = None
+        TRACE.emit(
+            EventType.PROPOSAL_START,
+            candidate_id=_cid,
+            generation=gen,
+            proposal_index=_slot,
+            n_proposals=_n_slots,
+        )
+        try:
+            _res = worker(_pctx)
+            _outcome = "ok"
+            return _res
+        except BaseException as _exc:
+            # The class only: message text is not trace data (see trace.py).
+            _error_type = type(_exc).__name__
+            raise
+        finally:
+            TRACE.emit(
+                EventType.PROPOSAL_END,
+                candidate_id=_cid,
+                generation=gen,
+                proposal_index=_slot,
+                n_proposals=_n_slots,
+                outcome=_outcome,
+                error_type=_error_type,
+            )
+
+    TRACE.emit(
+        EventType.PROPOSAL_BATCH_START,
+        generation=gen,
+        n_proposals=_n_slots,
+    )
+    try:
+        _run_proposal_batch(presample_contexts, _traced_worker, worker_results,
+                            max_workers=max_workers, gen=gen)
+    finally:
+        # This must close before sequential acceptance begins, so that a
+        # consumer can tell real worker concurrency apart from the ordered
+        # frontier and budget updates that follow.  In a ``finally`` so a fatal
+        # ``PromptArtifactCollisionError`` still closes the batch span.
+        TRACE.emit(
+            EventType.PROPOSAL_BATCH_END,
+            generation=gen,
+            n_proposals=_n_slots,
+        )
+
+    return worker_results
+
+
+def _run_proposal_batch(
+    presample_contexts: list[ProposalContext],
+    worker: Callable[[int, ProposalContext], ProposalResult],
+    worker_results: "list[ProposalResult | None]",
+    *,
+    max_workers: int,
+    gen: int,
+) -> None:
+    """Fill ``worker_results`` in sampled order — see :func:`_dispatch_proposals`."""
     _w_max = min(len(presample_contexts), max_workers)
     if len(presample_contexts) > 1:
         with ThreadPoolExecutor(max_workers=_w_max) as _wpool:
             _wfutures = {
-                _wpool.submit(worker, _pctx): _widx
+                _wpool.submit(worker, _widx, _pctx): _widx
                 for _widx, _pctx in enumerate(presample_contexts)
             }
             for _wf in as_completed(_wfutures):
@@ -1690,9 +1846,7 @@ def _dispatch_proposals(
     else:
         # n=1 sequential path (or single surviving slot after budget break)
         for _idx, _pctx in enumerate(presample_contexts):
-            worker_results[_idx] = worker(_pctx)
-
-    return worker_results
+            worker_results[_idx] = worker(_idx, _pctx)
 
 
 def run_evolution(

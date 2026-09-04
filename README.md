@@ -803,7 +803,99 @@ stderr as fallback debug context.
 --backend BACKEND   Override the mutation backend [claude|codex|cursor|gemini|opencode]
 --model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
+--trace PATH        Write a JSONL event trace of the run to PATH (off by default)
 ```
+
+#### Tracing a run
+
+`--trace` streams every internal HELIX event to a JSON Lines file, one object
+per line. Each event line carries `wall_time` (Unix epoch seconds, for lining
+events up against external logs), `monotonic` (for computing durations — unlike
+wall time it cannot jump backwards), and `thread_id`. **All timestamps are in
+seconds.**
+
+The file is framed, and the framing is the part that makes it safe to compute
+timings from:
+
+| line | content |
+| --- | --- |
+| first | `{"record": "helix.trace.header", "schema_version": 1, "run_id": …, "time_unit": "seconds", …}` |
+| middle | one event each |
+| last | `{"record": "helix.trace.run_complete", "run_id": …, "event_count": N, …}` |
+
+Every record is written and `flush()`ed inline, so a run killed at any instant
+leaves on disk exactly the whole records it had already written. The
+`run_complete` footer is written **only** after the writer has drained with no
+error, so a killed run — or one whose trace writer failed — leaves a file with
+no footer. **A trace without that footer must be discarded, not trimmed**: the
+prefix looks perfectly well-formed, and totalling it silently under-reports.
+`helix.trace.load_jsonl_trace(path)` enforces both ends and raises
+`TraceIncompleteError` rather than hand you a truncated trace:
+
+```python
+from helix.trace import load_jsonl_trace, TraceIncompleteError
+
+try:
+    header, events = load_jsonl_trace(".helix/trace.jsonl")
+except TraceIncompleteError as exc:
+    raise SystemExit(f"unusable trace: {exc}")
+```
+
+(`flush()` reaches the operating system, not the disk platter — this survives
+the process dying, not the machine dying. Either way the missing footer makes
+the loss detectable.)
+
+The main thing this buys you is a breakdown of where the wall clock actually
+went:
+
+| span | brackets |
+| --- | --- |
+| `MUTATE_START` / `MUTATE_END` | one agent-backend invocation |
+| `EVAL_START` / `EVAL_END` | one evaluator subprocess |
+| `PROPOSAL_START` / `PROPOSAL_END` | one proposal slot, end to end |
+| `PROPOSAL_BATCH_START` / `PROPOSAL_BATCH_END` | the whole concurrent proposal phase |
+| `VALIDATE_START` / `VALIDATE_END` | one sequential full-validation stage |
+
+Subtracting the `monotonic` values of a matched pair gives that span's cost:
+
+```console
+$ helix evolve --trace .helix/trace.jsonl
+$ jq -r 'select(.type|test("MUTATE|EVAL")) | [.type,.candidate_id,.thread_id,.monotonic] | @tsv' \
+    .helix/trace.jsonl
+```
+
+`PROPOSAL_BATCH_*` and `VALIDATE_*` answer "how much of a generation is the
+sequential full-validation stage?". The proposal batch is concurrent and the
+validation stages that follow it are not, and the two windows never overlap,
+so their totals partition the generation and can be compared directly:
+
+```console
+$ jq -r 'select(.type|test("PROPOSAL_BATCH|VALIDATE")) | [.type,.generation,.candidate_id,.monotonic] | @tsv' \
+    .helix/trace.jsonl
+```
+
+The four *operation*-end events — `EVAL_END`, `MUTATE_END`, `PROPOSAL_END`,
+`VALIDATE_END` — carry `outcome`, which is `"ok"` on success and something
+else on failure; when the failure was an exception, `error_type` names its
+class. Only the class — never the message, which could carry an evaluator
+command line or its output into a file you are about to attach to an issue.
+The other `*_END` events (`PROPOSAL_BATCH_END`, `ITER_END`, `OPT_END`) are
+span boundaries, not operation results, and never carry `outcome`. So to
+find the failures in a run, filter on the four operation-end types rather
+than assuming `outcome` on anything whose type ends in `_END`:
+
+```console
+$ jq -r 'select(.outcome and .outcome != "ok") | [.type,.candidate_id,.outcome,.error_type] | @tsv' \
+    .helix/trace.jsonl
+```
+
+When several proposals run in parallel the file is in *completion* order, not
+logical order, and one worker's events are interleaved with its siblings'.
+Match a `START` to its `END` on `(thread_id, candidate_id)` rather than on
+adjacency, or the durations you compute will belong to the wrong worker.
+`PROPOSAL_START` / `PROPOSAL_END` additionally carry `proposal_index` (the slot
+in sampling order) and `n_proposals`, so a slot is identifiable without
+depending on file order at all.
 
 ---
 
