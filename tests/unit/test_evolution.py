@@ -1082,6 +1082,82 @@ class TestLlmUsageBudgetIntegration:
         assert state.budget.output_tokens == 13
         assert state.budget.cost_usd == pytest.approx(0.42)
 
+    def test_failed_mutation_usage_charged_through_budget_api(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """A mutation that produces no candidate must still charge its tokens.
+
+        This is the shape of the measured under-report: the backend ran for
+        47 minutes, its JSONL output failed to parse, ``mutate`` returned
+        ``None``, and the whole generation's usage never reached the budget.
+        """
+        seed = make_candidate("g0-s0")
+        usage = UsageStats(input_tokens=2500000, output_tokens=8000, cost_usd=0.44)
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def failing_mutate(*, record_usage=None, **kwargs):
+            # What ``mutate`` does when ``invoke_claude_code`` raises
+            # ``MutationError``: report the usage, return no candidate.
+            if record_usage is not None:
+                record_usage(usage)
+            return None
+
+        all_mocks["mutate"].side_effect = failing_mutate
+        all_mocks["run_evaluator"].return_value = make_eval_result(
+            "g0-s0", {"i1": 0.3}
+        )
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        failed_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "mutation_failed"
+        ]
+        assert len(failed_calls) == 1, (
+            "expected exactly one mutation_failed charge, "
+            f"got {len(failed_calls)}: {failed_calls!r}"
+        )
+        state = failed_calls[0].args[0]
+        assert state.budget.input_tokens == 2500000
+        assert state.budget.output_tokens == 8000
+        assert state.budget.cost_usd == pytest.approx(0.44)
+
+    def test_failed_mutation_without_usage_charges_nothing(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """No backend invocation means no charge — not a zero-token charge."""
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None
+        all_mocks["run_evaluator"].return_value = make_eval_result(
+            "g0-s0", {"i1": 0.3}
+        )
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        assert [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "mutation_failed"
+        ] == []
+
     def test_merge_usage_charged_through_budget_api(self, mocker, tmp_path, all_mocks):
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
