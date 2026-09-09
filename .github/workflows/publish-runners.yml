@@ -6,8 +6,10 @@ on:
       - "v*"
   # Weekly rebuild of `latest` so the images track the agent CLIs' own
   # release cadence instead of waiting for the next HELIX version tag.
+  # 12:00 UTC Monday matches the "before 6am on monday" America/Los_Angeles
+  # window in the repo's Renovate config (PR #54), so both land together.
   schedule:
-    - cron: "0 6 * * 1"
+    - cron: "0 12 * * 1"
   workflow_dispatch:
 
 env:
