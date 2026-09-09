@@ -43,7 +43,7 @@ observability).  The executor stores the full list on
 :func:`helix.mutator._render_per_example_diagnostics` renders it into
 the mutation prompt's ``## Diagnostics`` section (GEPA
 ``format_samples`` parity at
-``src/gepa/strategies/instruction_proposal.py:54-95``).
+``src/gepa/strategies/instruction_proposal.py::format_samples``).
 
 Reserved key: ``side_info_i["scores"]``
 ---------------------------------------

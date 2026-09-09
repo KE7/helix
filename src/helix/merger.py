@@ -25,7 +25,8 @@ def select_eval_subsample_for_merged_program(
     num_subsample_ids: int = 5,
 ) -> list[str]:
     """Port of GEPA's MergeProposer.select_eval_subsample_for_merged_program
-    (gepa/src/gepa/proposer/merge.py:258-288). Stratifies the subsample
+    (gepa/src/gepa/proposer/merge.py::MergeProposer.select_eval_subsample_for_merged_program).
+    Stratifies the subsample
     across ids where one parent wins, the other parent wins, or they tie,
     then tops up from unused common ids (with-replacement fallback when
     common ids are exhausted).
@@ -134,7 +135,9 @@ def build_merge_prompt(
 
     **Diff section format** — two-diff (ancestor-relative) vs single (A↔B):
 
-    GEPA's merge operator (``gepa/proposer/merge.py:155-203``) reasons over
+    GEPA's merge operator
+    (``gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors``)
+    reasons over
     *three* program states — common ancestor, candidate A, candidate B —
     to attribute each component change to whichever parent diverged from
     the ancestor.  When ``ancestor_id`` + both ``diff_a_from_ancestor``
@@ -246,7 +249,8 @@ def merge(
       labelled sections in the prompt.  The agent can then attribute
       each hunk to whichever parent diverged from the common ancestor —
       file-hunk-level analogue of GEPA's component-wise attribution
-      (``gepa/proposer/merge.py:163-191``: ``if pred_anc == pred_id1 …``
+      (``gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors``:
+      ``if pred_anc == pred_id1 …``
       → take id2's version; ``elif pred_anc != pred_id1 and pred_anc !=
       pred_id2`` → tiebreak by score).
     * **Single (A↔B)** — fallback when no ancestor is provided.
@@ -255,7 +259,9 @@ def merge(
       infer three-way info from a two-way comparison.
 
     GEPA-parity note: this is the correct domain adaptation of GEPA's
-    text-component merge (``gepa/proposer/merge.py:155-203``) for HELIX's
+    text-component merge
+    (``gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors``)
+    for HELIX's
     full-codebase setting.  GEPA can splice ``dict[str, str]`` programs
     deterministically by swapping components from each parent; HELIX
     candidates are full git worktrees, where syntactic per-component swap

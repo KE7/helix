@@ -151,6 +151,7 @@ class TestLoadConfig:
         assert cfg.evolution.max_evaluations == -1
         assert cfg.evolution.merge_enabled is False  # GEPA parity: off by default
         assert cfg.evolution.max_merge_invocations == 5
+        assert cfg.evolution.retain_rejected_worktrees is False
 
         # AgentConfig defaults
         assert cfg.agent.backend == "claude"
@@ -235,7 +236,8 @@ class TestDirectModelConstruction:
         assert cfg.max_generations == 10
 
     def test_merge_subsample_size_default_is_5(self) -> None:
-        """Pin default to 5 per GEPA merge.py:262.
+        """Pin default to 5 per GEPA
+        merge.py::MergeProposer.select_eval_subsample_for_merged_program.
 
         Changing this default without intent should be a conscious act — the
         constant is algorithmically load-bearing (stratification math uses
@@ -245,7 +247,8 @@ class TestDirectModelConstruction:
         cfg = EvolutionConfig()
         assert cfg.merge_subsample_size == 5, (
             "Default must match GEPA's num_subsample_ids=5 constant "
-            "(gepa/src/gepa/proposer/merge.py:262).  If you are intentionally "
+            "(gepa/src/gepa/proposer/merge.py::MergeProposer."
+            "select_eval_subsample_for_merged_program).  If you are intentionally "
             "changing this default, update this test AND the comment in "
             "config.py that cites the GEPA line."
         )

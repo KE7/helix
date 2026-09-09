@@ -515,3 +515,126 @@ class TestTomlRoundTrip:
         assert restored.evolution.val_stage_size == 25
         assert restored.evolution.num_sampled_groups == 1
         assert restored.evolution.num_examples_per_group == 2
+
+
+# ---------------------------------------------------------------------------
+# EvolutionConfig.candidate_selection_strategy + its sub-knobs
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateSelectionConfig:
+    def test_default_strategy_is_pareto_with_no_sub_knobs(self):
+        cfg = EvolutionConfig()
+        assert cfg.candidate_selection_strategy == "pareto"
+        assert cfg.candidate_selection_epsilon is None
+        assert cfg.candidate_selection_top_k is None
+
+    def test_current_best_accepts_no_sub_knobs(self):
+        cfg = EvolutionConfig(candidate_selection_strategy="current_best")
+        assert cfg.candidate_selection_epsilon is None
+        assert cfg.candidate_selection_top_k is None
+
+    def test_epsilon_greedy_requires_epsilon(self):
+        with pytest.raises(ValidationError, match="candidate_selection_epsilon is required"):
+            EvolutionConfig(candidate_selection_strategy="epsilon_greedy")
+
+    def test_epsilon_greedy_accepts_boundary_values(self):
+        cfg = EvolutionConfig(
+            candidate_selection_strategy="epsilon_greedy",
+            candidate_selection_epsilon=0.0,
+        )
+        assert cfg.candidate_selection_epsilon == 0.0
+        cfg = EvolutionConfig(
+            candidate_selection_strategy="epsilon_greedy",
+            candidate_selection_epsilon=1.0,
+        )
+        assert cfg.candidate_selection_epsilon == 1.0
+
+    def test_epsilon_greedy_rejects_out_of_range_epsilon(self):
+        with pytest.raises(ValidationError, match="must be between 0.0 and 1.0"):
+            EvolutionConfig(
+                candidate_selection_strategy="epsilon_greedy",
+                candidate_selection_epsilon=1.5,
+            )
+        with pytest.raises(ValidationError, match="must be between 0.0 and 1.0"):
+            EvolutionConfig(
+                candidate_selection_strategy="epsilon_greedy",
+                candidate_selection_epsilon=-0.1,
+            )
+
+    def test_epsilon_rejected_for_other_strategies(self):
+        for strategy in ("pareto", "current_best", "top_k_pareto"):
+            kwargs: dict[str, object] = {"candidate_selection_strategy": strategy}
+            if strategy == "top_k_pareto":
+                kwargs["candidate_selection_top_k"] = 3
+            with pytest.raises(
+                ValidationError, match="candidate_selection_epsilon is only valid"
+            ):
+                EvolutionConfig(candidate_selection_epsilon=0.1, **kwargs)
+
+    def test_top_k_pareto_requires_top_k(self):
+        with pytest.raises(ValidationError, match="candidate_selection_top_k is required"):
+            EvolutionConfig(candidate_selection_strategy="top_k_pareto")
+
+    def test_top_k_pareto_rejects_non_positive_top_k(self):
+        with pytest.raises(ValidationError, match="must be >= 1"):
+            EvolutionConfig(
+                candidate_selection_strategy="top_k_pareto",
+                candidate_selection_top_k=0,
+            )
+
+    def test_top_k_rejected_for_other_strategies(self):
+        for strategy in ("pareto", "current_best", "epsilon_greedy"):
+            kwargs: dict[str, object] = {"candidate_selection_strategy": strategy}
+            if strategy == "epsilon_greedy":
+                kwargs["candidate_selection_epsilon"] = 0.1
+            with pytest.raises(
+                ValidationError, match="candidate_selection_top_k is only valid"
+            ):
+                EvolutionConfig(candidate_selection_top_k=5, **kwargs)
+
+    def test_top_k_pareto_accepts_valid_top_k(self):
+        cfg = EvolutionConfig(
+            candidate_selection_strategy="top_k_pareto",
+            candidate_selection_top_k=5,
+        )
+        assert cfg.candidate_selection_top_k == 5
+
+    @pytest.mark.parametrize(
+        "strategy,epsilon,top_k,error_match",
+        [
+            # pareto / current_best own neither knob.
+            ("pareto", None, None, None),
+            ("pareto", None, 3, "candidate_selection_top_k is only valid"),
+            ("pareto", 0.1, None, "candidate_selection_epsilon is only valid"),
+            ("pareto", 0.1, 3, "candidate_selection_epsilon is only valid"),
+            ("current_best", None, None, None),
+            ("current_best", None, 3, "candidate_selection_top_k is only valid"),
+            ("current_best", 0.1, None, "candidate_selection_epsilon is only valid"),
+            ("current_best", 0.1, 3, "candidate_selection_epsilon is only valid"),
+            # epsilon_greedy owns epsilon only.
+            ("epsilon_greedy", None, None, "candidate_selection_epsilon is required"),
+            ("epsilon_greedy", None, 3, "candidate_selection_epsilon is required"),
+            ("epsilon_greedy", 0.1, None, None),
+            ("epsilon_greedy", 0.1, 3, "candidate_selection_top_k is only valid"),
+            # top_k_pareto owns top_k only.
+            ("top_k_pareto", None, None, "candidate_selection_top_k is required"),
+            ("top_k_pareto", None, 3, None),
+            ("top_k_pareto", 0.1, None, "candidate_selection_epsilon is only valid"),
+            ("top_k_pareto", 0.1, 3, "candidate_selection_epsilon is only valid"),
+        ],
+    )
+    def test_strategy_epsilon_top_k_matrix(self, strategy, epsilon, top_k, error_match):
+        """Full strategy x epsilon-presence x top_k-presence matrix,
+        including the cases where both knobs are set."""
+        kwargs: dict[str, object] = {"candidate_selection_strategy": strategy}
+        if epsilon is not None:
+            kwargs["candidate_selection_epsilon"] = epsilon
+        if top_k is not None:
+            kwargs["candidate_selection_top_k"] = top_k
+        if error_match is None:
+            cfg = EvolutionConfig(**kwargs)
+            assert cfg.candidate_selection_strategy == strategy
+        else:
+            with pytest.raises(ValidationError, match=error_match):
+                EvolutionConfig(**kwargs)

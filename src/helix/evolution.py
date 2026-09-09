@@ -25,6 +25,7 @@ from helix.batch_sampler import (
     StratifiedBatchSampler,
 )
 from helix import budget as budget_api
+from helix.candidate_selector import select_candidate
 from helix.config import HelixConfig, load_dataset_examples
 from helix.eval_cache import EvaluationCache as MinibatchEvalCache
 from helix.eval_policy import (
@@ -874,12 +875,14 @@ def _cached_evaluate_batch(
     config: HelixConfig,
     split: str,
     project_root: Path,
+    evaluation_phase: str | None = None,
 ) -> tuple[EvalResult, int]:
     """Evaluate ``candidate`` on ``example_ids`` with per-example caching.
 
     GEPA parity: line-for-line mirror of GEPA's ``cached_evaluate_full`` in
     ``core/state.py``, which delegates to
     ``EvaluationCache.evaluate_with_cache_full`` (also ``core/state.py``).
+
     Flow:
 
       1. ``cache.get_batch(candidate, example_ids)`` partitions into
@@ -909,6 +912,7 @@ def _cached_evaluate_batch(
                 config,
                 split=split,
                 instance_ids=example_ids,
+                evaluation_phase=evaluation_phase,
             )
         return result, len(example_ids)
 
@@ -956,6 +960,7 @@ def _cached_evaluate_batch(
                 config,
                 split=split,
                 instance_ids=batch,
+                evaluation_phase=evaluation_phase,
             )
         # HELIX does not track rollout outputs per-example; store ``None``
         # per slot (the cache's ``RolloutOutput`` type parameter is
@@ -1146,6 +1151,47 @@ def _scores_for_example_ids(result: EvalResult, example_ids: list[str]) -> list[
     return [float(result.instance_scores.get(eid, 0.0)) for eid in example_ids]
 
 
+def _merge_partitioned_evaluations(
+    candidate: Candidate,
+    requested_ids: list[str],
+    carried: EvalResult,
+    carried_ids: list[str],
+    fresh: EvalResult,
+    fresh_ids: list[str],
+) -> EvalResult:
+    """Compose staged and tail results into one result over *requested_ids*.
+
+    Per-id scores are carried across unchanged, so both halves must come from
+    the same candidate and the evaluator's per-id scores must not depend on
+    which ids were requested.
+    """
+    assert set(carried_ids).isdisjoint(fresh_ids)
+    assert set(requested_ids) == set(carried_ids) | set(fresh_ids)
+
+    def by_id(result: EvalResult, ids: list[str], attr: str) -> dict[str, dict[str, Any]]:
+        values = getattr(result, attr)
+        if values is None:
+            return {}
+        assert len(values) == len(ids)
+        return dict(zip(ids, values, strict=True))
+
+    carried_obj = by_id(carried, carried_ids, "objective_scores")
+    fresh_obj = by_id(fresh, fresh_ids, "objective_scores")
+    carried_side = by_id(carried, carried_ids, "per_example_side_info")
+    fresh_side = by_id(fresh, fresh_ids, "per_example_side_info")
+    all_scores = carried.instance_scores | fresh.instance_scores
+    all_obj = carried_obj | fresh_obj
+    all_side = carried_side | fresh_side
+    return EvalResult(
+        candidate_id=candidate.id,
+        scores={},
+        asi={},
+        instance_scores={eid: all_scores[eid] for eid in requested_ids},
+        objective_scores=[all_obj.get(eid, {}) for eid in requested_ids] if all_obj else None,
+        per_example_side_info=[all_side.get(eid, {}) for eid in requested_ids] if all_side else None,
+    )
+
+
 def _has_example_scores(result: EvalResult | None, example_ids: list[str]) -> bool:
     """Return whether a result contains every requested per-example score."""
     if result is None:
@@ -1256,6 +1302,7 @@ def _plan_proposals(
     config: HelixConfig,
     state: EvolutionState,
     frontier: ParetoFrontier,
+    rng: _random.Random,
     batch_sampler: "BatchSampler[str] | None",
     train_loader: "HelixDataLoader | _RangeDataLoader | None",
     use_minibatch_gate: bool,
@@ -1337,7 +1384,13 @@ def _plan_proposals(
                 )
 
             if parent is None:
-                parent = frontier.select_parent()
+                parent = select_candidate(
+                    config.evolution.candidate_selection_strategy,
+                    frontier,
+                    rng,
+                    epsilon=config.evolution.candidate_selection_epsilon,
+                    top_k=config.evolution.candidate_selection_top_k,
+                )
                 parent_frontier_result = frontier._results.get(parent.id)
 
             # --- Minibatch gate pre-sampling -----------------------------
@@ -1647,7 +1700,16 @@ def run_evolution(
     project_root: Path,
     base_dir: Path,
 ) -> HelixResult:
-    """Run the HELIX evolutionary loop."""
+    """Run the HELIX evolutionary loop.
+
+    When ``config.evolution.val_stage_size`` is positive, an accepted staged
+    validation result is carried into final validation: the evaluator receives
+    only the remaining validation ids and HELIX composes both per-id results.
+    Enable it only for evaluators whose per-id scores and objectives do not
+    depend on the complete id set (for example, no batch-relative metric,
+    cross-example normalization, shared warm-up, or an aggregate metric used
+    as an objective).
+    """
     # Mirror GEPA's ``optimize`` (``api.py``): at least one stopping condition is required.
     # Without this, perfect-skip + always-perfect data + no effective bound =
     # a run that terminates only by the OS.  In HELIX, max_generations (loop
@@ -2177,7 +2239,9 @@ def _run_evolution_impl(
             # the effective mutation count by the merge-gate failure rate.
             # GEPA-parity note: the *merge operator itself* (helix.merger.merge,
             # invoked below) deliberately diverges from GEPA's deterministic
-            # text-component splicing (gepa/proposer/merge.py:155-203).  GEPA
+            # text-component splicing
+            # (gepa/proposer/merge.py::
+            # sample_and_attempt_merge_programs_by_common_predictors).  GEPA
             # candidates are dict[str, str], so a syntactic per-component swap
             # is well-defined; helix candidates are full git worktrees, where
             # LLM-mediated file editing is the only viable approach.  Every
@@ -2209,7 +2273,7 @@ def _run_evolution_impl(
                         score_map[cid] = sum(inst_scores.values()) / len(inst_scores)
 
                 # GEPA parity (M2): merge candidates must be non-dominated.
-                # GEPA merge.py:299-304 uses find_dominator_programs() to filter.
+                # GEPA merge.py::MergeProposer.propose uses find_dominator_programs() to filter.
                 non_dominated = frontier.get_non_dominated()
                 merge_candidate_ids = [
                     cid for cid in frontier._candidates if cid in non_dominated
@@ -2224,7 +2288,9 @@ def _run_evolution_impl(
                 # ``MergeProposer.propose`` returns ``None``.
                 #
                 # GEPA parity (merge-pairing audit D1):
-                # mirror GEPA ``merge.py:130-131`` — you need two siblings plus
+                # mirror GEPA
+                # ``merge.py::sample_and_attempt_merge_programs_by_common_predictors``
+                # — you need two siblings plus
                 # one ancestor, so fewer than 3 total candidates can never
                 # yield a valid triplet.  Kept as an explicit guard for
                 # clarity; functionally equivalent to ``find_merge_triplet``
@@ -2241,7 +2307,8 @@ def _run_evolution_impl(
                     # blocked sample triggers resampling rather than bailing
                     # the iteration.  Mirrors GEPA
                     # ``sample_and_attempt_merge_programs_by_common_predictors``
-                    # (merge.py:118-207) where the same filters are inside the
+                    # (merge.py::sample_and_attempt_merge_programs_by_common_predictors)
+                    # where the same filters are inside the
                     # ``for _ in range(max_attempts)`` loop.
                     _attempted_pairs: set[tuple[str, str]] = {
                         (p[0], p[1]) for p in state.merge_attempted_pairs if len(p) >= 2
@@ -2267,7 +2334,7 @@ def _run_evolution_impl(
                     )
 
                 if triplet is not None:
-                    # GEPA parity (merge.py:94-95): ``find_merge_triplet``
+                    # GEPA parity (merge.py::find_common_ancestor_pair): ``find_merge_triplet``
                     # now returns the canonical ``(i, j)`` (lex-sorted),
                     # so ``cid_i <= cid_j`` always — the merge subprocess,
                     # attempted-pair ledger and the description-triplet
@@ -2295,7 +2362,9 @@ def _run_evolution_impl(
                     # prompt (GEPA parity at the file-hunk level: feed the
                     # agent the same three-way structure GEPA's algorithm
                     # uses to attribute changes —
-                    # ``gepa/proposer/merge.py:163-191``).  The ancestor
+                    # ``gepa/proposer/merge.py::
+                    # sample_and_attempt_merge_programs_by_common_predictors``).
+                    # The ancestor
                     # came from ``find_merge_triplet``; resolve it through
                     # the frontier's append-only candidate map.  ``None``
                     # is tolerated downstream — ``merge()`` falls back to
@@ -2381,7 +2450,8 @@ def _run_evolution_impl(
                             _save_state(state)
                             # GEPA parity (merge-pairing audit C1): the
                             # HEAD SHA of the snapshotted worktree is HELIX's
-                            # port of GEPA's ``new_prog_desc`` (merge.py:195-203);
+                            # port of GEPA's ``new_prog_desc``
+                            # (merge.py::sample_and_attempt_merge_programs_by_common_predictors);
                             # content-addressed so two different triplets that
                             # land on the same merged output hash once and skip
                             # the eval on the duplicate, while the same pair
@@ -2406,10 +2476,11 @@ def _run_evolution_impl(
                             # GEPA parity (M5): merge acceptance evaluates merged on a
                             # size-bounded stratified subsample of ids both parents have
                             # val-scored. Subsample selection ported from GEPA
-                            # merge.py:258-288 (select_eval_subsample_for_merged_program);
+                            # merge.py::MergeProposer.select_eval_subsample_for_merged_program;
                             # default size 5 matches GEPA's hardcoded constant, overridable
                             # via evolution.merge_subsample_size. Required score is
-                            # max(parent subsample sums); mirrors GEPA merge.py:344-345, 394-395.
+                            # max(parent subsample sums); mirrors GEPA
+                            # merge.py::MergeProposer.propose.
                             merge_subsample_ids = sorted(
                                 select_eval_subsample_for_merged_program(
                                     era.instance_scores,
@@ -2453,13 +2524,13 @@ def _run_evolution_impl(
                                 break
 
                             # Merged subsample sum must be >= max of parent
-                            # subsample sums (GEPA merge.py:344-345, 394-395).
+                            # subsample sums (GEPA merge.py::MergeProposer.propose).
                             # merge_subsample_ids is sorted(select_eval_subsample_for_merged_program(
                             #   era.instance_scores, erb.instance_scores, ...))
                             # — every sampled id is drawn from the intersection
                             # of era.instance_scores and erb.instance_scores
                             # (common_val_ids above).  The asserts keep the
-                            # invariant loud (GEPA merge.py:342-343).
+                            # invariant loud (GEPA merge.py::MergeProposer.propose).
                             assert set(merge_subsample_ids).issubset(
                                 era.instance_scores
                             ), (
@@ -2507,9 +2578,11 @@ def _run_evolution_impl(
                                 # itself backed by
                                 # ``_evaluate_programs_on_valset``.
                                 # Without this, the merged entry carries only
-                                # subsample coverage and Pareto dominance /
-                                # ``sum_score`` comparisons skew against the
-                                # merged candidate once it is picked as a parent.
+                                # subsample coverage, so its per-key frontier
+                                # membership and its ``aggregate_score()`` are
+                                # both computed over a handful of ids — skewing
+                                # Pareto dominance against the merged candidate
+                                # once it is picked as a parent.
                                 # Budget accounting charges the uncached
                                 # full-val example count; single-task/no-example
                                 # evals still charge 0/1 metric calls via _cached_eval.
@@ -2609,6 +2682,7 @@ def _run_evolution_impl(
             presample_contexts, _budget_break = _plan_proposals(
                 config=config,
                 state=state,
+                rng=rng,
                 frontier=frontier,
                 batch_sampler=batch_sampler,
                 train_loader=train_loader,
@@ -2757,8 +2831,9 @@ def _run_evolution_impl(
                         "reason": "perfect_subsample",
                         "parent_eval": wr.parent_eval_result.to_dict(),
                     })
-                    # GEPA parity: reflective_mutation.py:308-327 skips a
-                    # proposal when every parent subsample score is perfect.
+                    # GEPA parity:
+                    # reflective_mutation.py::ReflectiveMutationProposer.propose
+                    # skips a proposal when every parent subsample score is perfect.
                     print_info(
                         f"Iteration {gen}: all subsample scores perfect for parent "
                         f"{_parent.id}; skipping proposal."
@@ -3008,11 +3083,12 @@ def _run_evolution_impl(
                 use_val_stage_gate = _has_example_scores(
                     _parent_frontier_result, stage_val_example_ids
                 )
+                stage_result: EvalResult | None = None
                 if stage_val_example_ids and use_val_stage_gate:
                     set_phase(HelixPhase.VAL_EVALUATION)
                     stage_result, _n = _cached_evaluate_batch(
-                        child, list(stage_val_example_ids), minibatch_cache,
-                        config, "val", project_root,
+                        child, list(stage_val_example_ids), None,
+                        config, "val", project_root, evaluation_phase="val_stage",
                     )
                     stage_result.candidate_id = child.id
                     _last_eval_result = stage_result
@@ -3053,13 +3129,24 @@ def _run_evolution_impl(
                             decision="reject_stage", example_ids=list(stage_val_example_ids),
                             score=float(sum(_stage_after)),
                         )
-                        print_warning(
-                            f"Val stage: {child.id} rejected on first "
-                            f"{len(stage_val_example_ids)} val ids "
-                            f"(sum {sum(_stage_after):.4f} vs parent "
-                            f"{sum(_stage_before):.4f}) -- removing."
-                        )
-                        _safe_remove_worktree(child, label="val-stage-rejected candidate")
+                        if config.evolution.retain_rejected_worktrees:
+                            print_warning(
+                                f"Val stage: {child.id} rejected on first "
+                                f"{len(stage_val_example_ids)} val ids "
+                                f"(sum {sum(_stage_after):.4f} vs parent "
+                                f"{sum(_stage_before):.4f}) -- retaining worktree "
+                                f"for review."
+                            )
+                        else:
+                            print_warning(
+                                f"Val stage: {child.id} rejected on first "
+                                f"{len(stage_val_example_ids)} val ids "
+                                f"(sum {sum(_stage_after):.4f} vs parent "
+                                f"{sum(_stage_before):.4f}) -- removing."
+                            )
+                            _safe_remove_worktree(
+                                child, label="val-stage-rejected candidate"
+                            )
                         del candidates[child.id]
                         return
 
@@ -3075,19 +3162,37 @@ def _run_evolution_impl(
                     )
 
                 # --- Val evaluation -------------------------------------------
-                # UNCHANGED: run full val eval sequentially after gating.
                 set_phase(HelixPhase.VAL_EVALUATION)
-                val_result = _run_full_val_eval(
-                    child,
-                    state,
-                    full_val_example_ids=full_val_example_ids,
-                    minibatch_cache=minibatch_cache,
-                    eval_cache=eval_cache,
-                    config=config,
-                    project_root=project_root,
-                    source_batch="mutation_full_val_batch",
-                    source_single="mutation_full_val",
-                )
+                if stage_result is not None:
+                    stage_ids = list(stage_val_example_ids)
+                    stage_id_set = set(stage_ids)
+                    tail_ids = [eid for eid in full_val_example_ids if eid not in stage_id_set]
+                    if not tail_ids:
+                        val_result = stage_result
+                    else:
+                        tail_result, tail_evals = _cached_evaluate_batch(
+                            child, tail_ids, None, config, "val", project_root,
+                        )
+                        budget_api.charge_evaluation(
+                            state, num_actual_examples=tail_evals, candidate_id=child.id,
+                            split="val", source="mutation_full_val_batch",
+                        )
+                        val_result = _merge_partitioned_evaluations(
+                            child, list(full_val_example_ids), stage_result, stage_ids,
+                            tail_result, tail_ids,
+                        )
+                else:
+                    val_result = _run_full_val_eval(
+                        child,
+                        state,
+                        full_val_example_ids=full_val_example_ids,
+                        minibatch_cache=minibatch_cache,
+                        eval_cache=eval_cache,
+                        config=config,
+                        project_root=project_root,
+                        source_batch="mutation_full_val_batch",
+                        source_single="mutation_full_val",
+                    )
                 _last_eval_result = val_result
 
                 if budget_api.budget_exhausted(state, config):

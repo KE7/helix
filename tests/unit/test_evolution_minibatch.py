@@ -26,6 +26,7 @@ from helix.config import (
 from helix.evolution import (
     HelixDataLoader,
     _make_data_loader,
+    _merge_partitioned_evaluations,
     _reconcile_incomplete_attempts_on_resume,
     run_evolution,
 )
@@ -118,6 +119,7 @@ def _make_minibatch_config(
     num_parallel_proposals: int = 1,
     cache_evaluation: bool = True,
     acceptance_criterion: str = "strict_improvement",
+    retain_rejected_worktrees: bool = False,
     max_workers: int | None = None,
 ) -> HelixConfig:
     evo_kwargs: dict[str, Any] = dict(
@@ -129,6 +131,7 @@ def _make_minibatch_config(
         cache_evaluation=cache_evaluation,
         acceptance_criterion=acceptance_criterion,
         val_stage_size=val_stage_size,
+        retain_rejected_worktrees=retain_rejected_worktrees,
         frontier_type="instance",
     )
     if max_workers is not None:
@@ -569,6 +572,7 @@ class TestMinibatchGateIntegration:
             val_stage_size=2,
             max_generations=1,
             max_evaluations=100,
+            retain_rejected_worktrees=True,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
@@ -584,8 +588,11 @@ class TestMinibatchGateIntegration:
         # example_ids should be the val stage ids (first val_stage_size=2 val ids).
         assert attempt["attempt"]["example_ids"] is not None
         assert len(attempt["attempt"]["example_ids"]) == 2
-        # Verify worktree cleaned up.
-        assert all_mocks["remove_worktree"].called
+        all_mocks["remove_worktree"].assert_not_called()
+        assert any(
+            "-- retaining worktree for review." in str(call.args[0])
+            for call in all_mocks["print_warning"].call_args_list
+        )
 
     def test_accepted_proposal_triggers_full_val_eval(
         self, tmp_path: Path, all_mocks: dict[str, Any]
@@ -677,18 +684,24 @@ class TestMinibatchGateIntegration:
 
         assert child_val_calls == [["0", "1"]]
         assert all_mocks["_save_evaluation"].call_count == 1
-        assert all_mocks["remove_worktree"].called
+        all_mocks["remove_worktree"].assert_called_once()
+        removed_candidate = all_mocks["remove_worktree"].call_args.args[0]
+        assert removed_candidate.id == "g1-s1"
+        assert any(
+            "-- removing." in str(call.args[0])
+            for call in all_mocks["print_warning"].call_args_list
+        )
 
-    def test_stage_pass_promotes_to_full_val_with_cache_reuse(
+    def test_stage_pass_promotes_to_partition_carry_without_cache(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
-        """Stage pass should only full-eval the uncached remainder and persist full val."""
+        """Stage pass evaluates only the tail even when caching is disabled."""
         train_path = _write_train_jsonl(tmp_path, n=4)
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["mutate"].return_value = _make_candidate("g1-s1")
 
-        child_val_calls: list[list[str]] = []
+        child_val_calls: list[tuple[list[str], str | None]] = []
 
         def run_eval(
             candidate: Candidate,
@@ -698,7 +711,7 @@ class TestMinibatchGateIntegration:
             **kwargs: Any,
         ) -> EvalResult:
             if split == "val" and instance_ids is not None and candidate.id == "g1-s1":
-                child_val_calls.append(list(instance_ids))
+                child_val_calls.append((list(instance_ids), kwargs.get("evaluation_phase")))
             if split == "val" and instance_ids == ["0", "1", "2", "3"] and candidate.id == seed.id:
                 return _make_result(candidate.id, {"0": 0.2, "1": 0.2, "2": 0.2, "3": 0.2})
             if split == "train" and instance_ids is not None:
@@ -720,11 +733,11 @@ class TestMinibatchGateIntegration:
             val_stage_size=2,
             max_generations=1,
             max_evaluations=100,
-            cache_evaluation=True,
+            cache_evaluation=False,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        assert child_val_calls == [["0", "1"], ["2", "3"]]
+        assert child_val_calls == [(["0", "1"], "val_stage"), (["2", "3"], None)]
         assert all_mocks["_save_evaluation"].call_count == 2
         saved_child_result = all_mocks["_save_evaluation"].call_args_list[-1].args[1]
         assert saved_child_result.candidate_id == "g1-s1"
@@ -2944,3 +2957,31 @@ class TestAtomicProposalWorker:
             assert snapped is None or snapped.id != child.id, (
                 f"snapshot_candidate must not be called for tampered child {child.id}"
             )
+
+
+def test_merge_partitioned_evaluations_preserves_id_alignment() -> None:
+    candidate = _make_candidate("g1-s1")
+    stage = EvalResult(
+        candidate_id=candidate.id, scores={}, asi={},
+        instance_scores={"0": 0.8, "1": 0.7},
+        objective_scores=[{"quality": 0.8}, {"quality": 0.7}],
+        per_example_side_info=[{"judge": "stage-0"}, {"judge": "stage-1"}],
+    )
+    tail = EvalResult(
+        candidate_id=candidate.id, scores={}, asi={},
+        instance_scores={"2": 0.6},
+        objective_scores=[{"quality": 0.6}],
+        per_example_side_info=[{"judge": "tail-2"}],
+    )
+
+    merged = _merge_partitioned_evaluations(
+        candidate, ["2", "0", "1"], stage, ["0", "1"], tail, ["2"]
+    )
+
+    assert merged.instance_scores == {"2": 0.6, "0": 0.8, "1": 0.7}
+    assert merged.objective_scores == [
+        {"quality": 0.6}, {"quality": 0.8}, {"quality": 0.7}
+    ]
+    assert merged.per_example_side_info == [
+        {"judge": "tail-2"}, {"judge": "stage-0"}, {"judge": "stage-1"}
+    ]
