@@ -11,9 +11,16 @@
   "labels": ["dependencies"],
   "packageRules": [
     {
-      "description": "Pin Docker base images by digest so runner image builds are reproducible.",
+      "description": "Pin the runner base image (docker/base.Dockerfile) by digest so runner image builds are reproducible.",
       "matchManagers": ["dockerfile"],
+      "matchFileNames": ["docker/base.Dockerfile"],
       "pinDigests": true
+    },
+    {
+      "description": "The backend Dockerfiles only FROM the locally built helix-runner-base image, which exists on no registry, so Renovate would just emit lookup warnings for them. Their agent CLI installs (npm latest / curl installers) are unpinned by design; the weekly publish-runners rebuild is what tracks those.",
+      "matchManagers": ["dockerfile"],
+      "matchFileNames": ["docker/*.Dockerfile", "!docker/base.Dockerfile"],
+      "enabled": false
     }
   ],
   "vulnerabilityAlerts": {
