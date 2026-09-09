@@ -56,6 +56,7 @@ from helix.exceptions import (
 )
 from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
+from helix.lines import split_lf_lines
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.proposals import (
@@ -697,7 +698,7 @@ def _load_dataset_ids(path: Path) -> list[str]:
         return [str(i) for i in range(len(data))]
     # JSONL
     count = 0
-    for line in raw.splitlines():
+    for line in split_lf_lines(raw):
         if line.strip():
             count += 1
     return [str(i) for i in range(count)]

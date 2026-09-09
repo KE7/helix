@@ -21,6 +21,7 @@ from typing import Literal
 
 from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
+from helix.lines import split_lf_lines
 
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
     try:
         payloads.append(json.loads(stdout))
     except json.JSONDecodeError:
-        for raw_line in stdout.splitlines():
+        for raw_line in split_lf_lines(stdout):
             line = raw_line.strip()
             if not line:
                 continue

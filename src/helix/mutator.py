@@ -21,6 +21,7 @@ from helix.exceptions import (
     print_helix_error,
 )
 from helix.executor import _scrub_environment
+from helix.lines import split_lf_lines
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
@@ -133,7 +134,7 @@ def _strip_machine_protocol_from_evaluator_stream(text: str) -> str:
         return ""
 
     kept: list[str] = []
-    for line in text.splitlines():
+    for line in split_lf_lines(text):
         if line.strip().startswith("HELIX_RESULT="):
             continue
         kept.append(line)
@@ -889,7 +890,7 @@ def _parse_jsonl_output(
 ) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     unparsable: list[str] = []
-    for raw_line in stdout.splitlines():
+    for raw_line in split_lf_lines(stdout):
         line = raw_line.strip()
         if not line:
             continue
@@ -1183,7 +1184,7 @@ def _count_claude_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1218,7 +1219,7 @@ def _count_codex_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1264,7 +1265,7 @@ def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
         "grepToolCall": "grep",
     }
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1301,7 +1302,7 @@ def _count_gemini_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1330,7 +1331,7 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
