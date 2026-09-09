@@ -6,16 +6,16 @@ Pins the per-axis state accumulation (``_per_key_best``,
 :meth:`get_non_dominated`, and :meth:`select_parent`.
 
 Cross-references:
-  * GEPA ``FrontierType`` literal: ``src/gepa/core/state.py:22-23``.
-  * ``_update_objective_pareto_front``: ``state.py:474-484``.
-  * ``_update_pareto_front_for_cartesian``: ``state.py:512-525``.
-  * O.A. default ``frontier_type="hybrid"``:
-    ``src/gepa/optimize_anything.py:476`` — rationale for HELIX's own
-    default (``evolution.frontier_type``).
+  * GEPA's ``FrontierType`` literal, defined in ``core/state.py``.
+  * ``_update_objective_pareto_front`` in ``core/state.py``.
+  * ``_update_pareto_front_for_cartesian`` in ``core/state.py``.
+  * O.A. default ``frontier_type="hybrid"``: GEPA's
+    ``EngineConfig.frontier_type`` in ``gepa_launcher.py`` — rationale
+    for HELIX's own default (``evolution.frontier_type``).
 
 The acceptance gate is **not** tested here: it remains positional on
-``scores_list`` regardless of ``frontier_type`` (GEPA
-``acceptance.py:39-48``).
+raw score lists regardless of ``frontier_type`` (GEPA's
+``StrictImprovementAcceptance.should_accept`` in ``strategies/acceptance.py``).
 """
 
 from __future__ import annotations
@@ -93,8 +93,8 @@ class TestDefaultFrontierTypeBackCompat:
 class TestObjectiveFrontier:
     def test_objective_best_tracks_mean_across_valset(self):
         """``_objective_best_score[obj]`` = max over candidates of
-        mean(obj-score across valset), mirroring GEPA
-        ``_update_objective_pareto_front`` + ``_per_prog_mean_objective_scores``.
+        mean(obj-score across valset), mirroring GEPA's
+        ``_update_objective_pareto_front``.
         """
         frontier = ParetoFrontier(frontier_type="objective")
         # Candidate a: obj_alpha mean = (0.8+0.2)/2 = 0.5

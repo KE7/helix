@@ -1172,7 +1172,10 @@ def attempts_cmd(
     help="Project root directory (defaults to current working directory).",
 )
 def resume(config_path: str, project_dir: Path | None) -> None:
-    """Resume a previously started evolution run."""
+    """Resume from the last completed generation of an evolution run.
+
+    In-flight proposal batches are reconciled rather than resumed slot-by-slot.
+    """
     # NOTE: ``resume`` deliberately does NOT expose ``--effort`` (or other
     # agent-config overrides). Switching reasoning effort mid-run would
     # mix candidates produced under different sampling regimes, breaking

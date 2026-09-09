@@ -5,8 +5,8 @@ evaluator emits a list of ``[score_i, side_info_i]`` pairs positional
 to the ids in ``helix_batch.json``.  HELIX zips them into the id-keyed
 ``instance_scores`` the minibatch gate needs and stores the
 per-example side_info list on :class:`helix.population.EvalResult` for
-the reflection prompt.  See :mod:`helix.parsers.helix_result` and
-``/tmp/gepa_audit_report.md`` for the GEPA parity rationale.
+the reflection prompt.  See :mod:`helix.parsers.helix_result` for the
+GEPA parity rationale.
 
 The parser is strict by design: any deviation from the contract raises
 :class:`EvaluatorError` rather than silently falling back.  The footgun
@@ -172,8 +172,8 @@ class TestHelixResultHappyPath:
 
 
 class TestObjectiveScoresHarvest:
-    """Mirrors GEPA's ``OptimizeAnythingAdapter._process_side_info``
-    (``optimize_anything_adapter.py:260-272``): each per-example
+    """Mirrors GEPA's ``OptimizeAnythingAdapter._extract_objective_scores``
+    in ``optimize_anything_adapter.py``: each per-example
     ``side_info["scores"]`` dict is harvested into the corresponding
     slot of ``objective_scores``.  No frontier wiring yet (that's a
     later commit in this branch); this test just pins the harvest.
@@ -257,9 +257,10 @@ class TestObjectiveScoresHarvest:
 
 
 class TestBareAndMixedForms:
-    """Per-example entry matches GEPA O.A.'s ``tuple[float, SideInfo] | float``
-    union (``src/gepa/optimize_anything.py:971``): either a bare score or a
-    ``[score, side_info]`` pair.  Mixed within one payload is allowed."""
+    """Per-example entry matches GEPA O.A.'s evaluator return-type union —
+    a bare score, or a ``[score, side_info]`` pair (see GEPA's
+    ``_normalize_result`` in ``oa/eval_server.py``).  Mixed within one
+    payload is allowed."""
 
     def test_all_bare_scores_accepted(self, tmp_path: Path) -> None:
         """``HELIX_RESULT=[s_0, s_1, s_2]`` — all bare floats."""

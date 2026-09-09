@@ -187,6 +187,7 @@ def run_evaluator(
     config: HelixConfig,
     split: str = "val",
     instance_ids: list[str] | None = None,
+    evaluation_phase: str | None = None,
 ) -> EvalResult:
     """Run the evaluator for a single candidate.
 
@@ -199,6 +200,8 @@ def run_evaluator(
             the evaluator via HELIX_INSTANCE_IDS. The positional id list
             in helix_batch.json is the source of truth for the returned
             instance_scores. None → evaluate the whole split.
+        evaluation_phase: Optional lifecycle hint for evaluators that need
+            to defer non-score side effects during a staged validation call.
 
     Returns:
         EvalResult with scores and instance_scores.
@@ -245,6 +248,8 @@ def run_evaluator(
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
     )
+    if evaluation_phase is not None:
+        env["HELIX_EVALUATION_PHASE"] = evaluation_phase
     helix_log_name = f".helix_asi_log_{uuid.uuid4().hex}.jsonl"
     helix_log_path = Path(candidate.worktree_path) / helix_log_name
     # Absolute path inside the sidecar — the evaluator command may run

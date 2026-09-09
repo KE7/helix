@@ -15,12 +15,13 @@ from typing import Any
 from helix.population import FrontierType
 
 
-# GEPA parity (audit-rng-state-persist D1):
-# GEPA core/state.py:153 declares ``_VALIDATION_SCHEMA_VERSION: ClassVar[int] = 5``
-# and migrates older state dicts on load (state.py:355-376).  HELIX previously
-# had no schema version on ``state.json``; subsequent bumps mark explicit
-# JSON-native schema additions (the unversioned predecessor is treated as
-# v0; ``load_state`` migrates by default-filling missing fields).
+# GEPA parity (rng-state-persist audit D1):
+# GEPA declares ``_VALIDATION_SCHEMA_VERSION: ClassVar[int] = 6`` on
+# ``GEPAState`` (``core/state.py``) and migrates older state dicts on load
+# in ``GEPAState.load``.  HELIX previously had no schema version on
+# ``state.json``; subsequent bumps mark explicit JSON-native schema
+# additions (the unversioned predecessor is treated as v0; ``load_state``
+# migrates by default-filling missing fields).
 SCHEMA_VERSION: int = 2
 
 
@@ -87,8 +88,9 @@ class EvolutionState:
     # filter in ``lineage.find_merge_triplet`` reads this set to short-
     # circuit already-seen pairs (merge-pairing audit B2).
     merge_attempted_pairs: list[list[str]] = field(default_factory=list)
-    # GEPA parity (merge-pairing audit C1, /tmp/audit_audit-merge-pairing.md:28-31):
-    # mirrors GEPA ``merges_performed[1]`` at gepa/proposer/merge.py:195-203.
+    # GEPA parity (merge-pairing audit C1):
+    # mirrors GEPA ``merges_performed[1]`` at
+    # gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors.
     # Each entry is [cid_i, cid_j, desc_hash] with cid_i <= cid_j
     # lexicographically and desc_hash = post-snapshot git SHA of the
     # merged worktree.  Blocks only the *same* (pair, output) triplet,
@@ -99,13 +101,13 @@ class EvolutionState:
     # Starts at -1 and is bumped to 0 before the first minibatch sample.
     # Mirrors GEPA ``state.i`` in core/state.py.
     i: int = -1
-    # GEPA parity (audit-rng-state-persist C/§3): per-program discovery budget.
+    # GEPA parity (rng-state-persist audit C/§3): per-program discovery budget.
     # GEPA tracks ``num_metric_calls_by_discovery: list[int]`` indexed by
-    # program_idx (state.py:177, appended at state.py:537).  HELIX uses
-    # candidate_id strings, so the dict keys by id and stores the value of
-    # ``state.budget.evaluations`` at the moment the candidate was added to
-    # the frontier.  Empty by default; populated at every accept site (seed,
-    # mutation, merge) in evolution.py.
+    # program_idx, appended to in ``GEPAState.update_state_with_new_program``
+    # (``core/state.py``).  HELIX uses candidate_id strings, so the dict
+    # keys by id and stores the value of ``state.budget.evaluations`` at the
+    # moment the candidate was added to the frontier.  Empty by default;
+    # populated at every accept site (seed, mutation, merge) in evolution.py.
     num_metric_calls_by_discovery: dict[str, int] = field(default_factory=dict)
     # Active Pareto-front snapshot for the selected ``frontier_type``.
     # ``frontier`` remains HELIX's append-only candidate id list; this
@@ -113,7 +115,7 @@ class EvolutionState:
     # conflating them with all evaluated candidates.
     active_frontier: dict[str, list[str]] = field(default_factory=dict)
     # Persisted ``evolution.frontier_type`` (GEPA ``FrontierType`` parity
-    # — ``src/gepa/core/state.py:22-23``).  Captured at evolve-time so
+    # — ``gepa/core/state.py``).  Captured at evolve-time so
     # read-only CLI commands (``helix frontier``, ``helix best``,
     # ``helix log``) display the frontier with the SAME dimensionality
     # the evolution run actually used — regardless of what
@@ -126,21 +128,23 @@ class EvolutionState:
     # a GEPA-style single pickled artifact: HELIX still persists worktrees,
     # evaluations, lineage, and state as separate artifacts.
     resume_semantics: dict[str, Any] = field(default_factory=dict)
-    # GEPA parity (audit-rng-state-persist D1): persisted schema version.
-    # Mirrors GEPA core/state.py:182 / class-var :153.  Bumped when the
-    # serialized schema changes; ``load_state`` migrates older payloads by
-    # supplying defaults for any missing fields.
+    # GEPA parity (rng-state-persist audit D1): persisted schema version.
+    # Mirrors GEPA's ``validation_schema_version`` field, stamped from the
+    # ``GEPAState._VALIDATION_SCHEMA_VERSION`` class-var (``core/state.py``).
+    # Bumped when the serialized schema changes; ``load_state`` migrates
+    # older payloads by supplying defaults for any missing fields.
     schema_version: int = SCHEMA_VERSION
 
 
 _STATE_FILENAME = "state.json"
 _STATE_DIR = ".helix"
-# GEPA parity (audit-rng-state-persist C1): companion pickle for the
-# per-(candidate_hash, example_id) eval cache.  GEPA pickles the whole state
-# dict, which round-trips its tuple-keyed ``EvaluationCache._cache`` for free
-# (gepa/core/state.py:306-340).  HELIX persists state as JSON, which cannot
-# encode tuple keys, so the cache lives in a sibling pickle alongside
-# ``state.json``.  Loaded conditionally on ``config.evolution.cache_evaluation``.
+# GEPA parity (rng-state-persist audit C1): companion pickle for the
+# per-(candidate_hash, example_id) eval cache.  ``GEPAState.save`` pickles
+# the whole state object, which round-trips its tuple-keyed
+# ``EvaluationCache._cache`` for free (``core/state.py``).  HELIX persists
+# state as JSON, which cannot encode tuple keys, so the cache lives in a
+# sibling pickle alongside ``state.json``.  Loaded conditionally on
+# ``config.evolution.cache_evaluation``.
 _EVAL_CACHE_FILENAME = "eval_cache.pkl"
 
 
@@ -158,7 +162,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
-        # GEPA parity (audit-rng-state-persist D1): schema_version is written
+        # GEPA parity (rng-state-persist audit D1): schema_version is written
         # FIRST so a stripped/legacy state.json without it loads as v0 and
         # triggers the migration branch in ``load_state``.
         "schema_version": SCHEMA_VERSION,
@@ -202,8 +206,8 @@ def load_state(base_dir: Path) -> EvolutionState | None:
     with open(target) as f:
         data = json.load(f)
 
-    # GEPA parity (audit-rng-state-persist D1): migrate older payloads.
-    # GEPA's analogue is ``GEPAState._upgrade_state_dict`` (state.py:402-420):
+    # GEPA parity (rng-state-persist audit D1): migrate older payloads.
+    # GEPA's analogue is ``GEPAState._upgrade_state_dict`` (``core/state.py``):
     # supply defaults for any missing fields, then bump the version stamp.
     # HELIX treats a missing ``schema_version`` as v0 (the unversioned
     # predecessor) and falls through into the same default-fill path.
@@ -260,9 +264,9 @@ def load_state(base_dir: Path) -> EvolutionState | None:
 def save_eval_cache(cache_dict: dict[Any, Any], base_dir: Path) -> None:
     """Atomically pickle the per-(candidate, example) eval cache.
 
-    GEPA parity (audit-rng-state-persist C1): mirrors the cache-survival
-    behaviour of ``GEPAState.save`` at gepa/core/state.py:306-340.  HELIX
-    uses JSON for ``state.json`` (which cannot round-trip tuple keys), so the
+    GEPA parity (rng-state-persist audit C1): mirrors the cache-survival
+    behaviour of ``GEPAState.save`` (``core/state.py``).  HELIX uses JSON
+    for ``state.json`` (which cannot round-trip tuple keys), so the
     cache is written to a sibling pickle.  Caller should pass
     ``MinibatchEvalCache._cache`` directly.  No-op semantics for an empty
     cache: the file is still written so that resume can reliably distinguish
@@ -286,11 +290,11 @@ def save_eval_cache(cache_dict: dict[Any, Any], base_dir: Path) -> None:
 def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
     """Load the per-(candidate, example) eval cache, or None if absent.
 
-    GEPA parity (audit-rng-state-persist C1): mirrors the cache-restore
-    behaviour at gepa/core/state.py:348-376.  Returns the raw dict so the
-    caller can install it on a freshly constructed cache instance (the
-    caller decides whether caching is enabled — see ``initialize_gepa_state``
-    at gepa/core/state.py:683-687 for the equivalent gating).
+    GEPA parity (rng-state-persist audit C1): mirrors the cache-restore
+    behaviour of ``GEPAState.load`` (``core/state.py``).  Returns the raw
+    dict so the caller can install it on a freshly constructed cache
+    instance (the caller decides whether caching is enabled — see
+    ``initialize_gepa_state`` (``core/state.py``) for the equivalent gating).
     """
     target = _eval_cache_path(base_dir)
     if not target.exists():
@@ -299,19 +303,20 @@ def load_eval_cache(base_dir: Path) -> dict[Any, Any] | None:
         with open(target, "rb") as f:
             loaded = pickle.load(f)
     except Exception as exc:
-        quarantined = _quarantine_corrupt_cache(target, reason="unreadable")
+        _quarantine_corrupt_cache(target, reason="unreadable")
         warnings.warn(
-            f"Ignoring unreadable eval cache at {target}: "
-            f"{type(exc).__name__}: {exc}. Quarantined to {quarantined}.",
+            f"Ignoring unreadable eval cache: {type(exc).__name__}: {exc}. "
+            f"A diagnostic copy was retained alongside it.",
             RuntimeWarning,
             stacklevel=2,
         )
         return None
     if not isinstance(loaded, dict):
-        quarantined = _quarantine_corrupt_cache(target, reason="non-dict")
+        _quarantine_corrupt_cache(target, reason="non-dict")
         warnings.warn(
-            f"Ignoring eval cache at {target}: expected dict, got "
-            f"{type(loaded).__name__}. Quarantined to {quarantined}.",
+            f"Ignoring eval cache: expected dict, got "
+            f"{type(loaded).__name__}. A diagnostic copy was retained "
+            f"alongside it.",
             RuntimeWarning,
             stacklevel=2,
         )

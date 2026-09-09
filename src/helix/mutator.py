@@ -165,7 +165,7 @@ def _evaluator_failed(eval_result: EvalResult) -> bool:
 # section is suppressed) or a fully-formed Markdown section.  Empty
 # returns let ``build_mutation_prompt`` skip the section entirely —
 # mirrors GEPA's ``_build_reflection_prompt_template`` accumulator
-# pattern (``gepa/optimize_anything.py:501-596``).  Non-empty returns
+# pattern in ``gepa_launcher.py``.  Non-empty returns
 # may carry trailing whitespace; ``build_mutation_prompt`` rstrips
 # before joining sections with a uniform blank-line separator.
 
@@ -341,7 +341,7 @@ def _render_side_info_value(value: Any, level: int) -> str:
 
     Line-for-line port of GEPA's ``render_value`` closure inside
     ``format_samples`` at
-    ``src/gepa/strategies/instruction_proposal.py:63-85``:
+    ``src/gepa/strategies/instruction_proposal.py::format_samples.render_value``:
 
       * ``dict`` → ``{'#' * level} {key}`` for each item, recursing
         at ``level + 1`` (capped at ``#_MAX_MARKDOWN_HEADER_LEVEL``
@@ -391,10 +391,11 @@ def _render_per_example_diagnostics(
 ) -> str:
     """Render per-example side_info as the mutation-prompt Diagnostics section.
 
-    Mirrors GEPA's ``OptimizeAnythingAdapter.make_reflective_dataset`` +
-    ``format_samples`` at
-    ``src/gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py:524-553``
-    and ``src/gepa/strategies/instruction_proposal.py:54-95``:
+    Mirrors GEPA's ``OptimizeAnythingAdapter.make_reflective_dataset`` in
+    ``adapters/optimize_anything_adapter/optimize_anything_adapter.py`` and
+    the ``format_samples`` closure inside
+    ``InstructionProposalSignature.prompt_renderer`` in
+    ``src/gepa/strategies/instruction_proposal.py``:
 
       * each example gets an ``{'#' * example_header_level} Example <id>``
         header (id recovered from ``helix_batch.json`` via
@@ -453,9 +454,10 @@ def _render_scores_section(eval_result: EvalResult) -> str:
     """Render ``## Current Evaluation Scores`` or ``""`` when no scores exist.
 
     Mirrors GEPA O.A.'s "only emit a section when there is content for it"
-    pattern (``gepa/optimize_anything.py:501-596``).  Previously HELIX
-    emitted the section with a ``"(no scores recorded)"`` placeholder; now
-    the section header is omitted entirely so the agent never sees a stub.
+    pattern in ``_build_reflection_prompt_template`` (``gepa_launcher.py``).
+    Previously HELIX emitted the section with a ``"(no scores recorded)"``
+    placeholder; now the section header is omitted entirely so the agent
+    never sees a stub.
     """
     lines = [f"  {k}: {v}" for k, v in sorted(eval_result.scores.items())]
     if not lines:
@@ -492,9 +494,10 @@ def _render_diagnostics(eval_result: EvalResult) -> str:
          populated; mirrors GEPA's
          ``OptimizeAnythingAdapter.make_reflective_dataset`` combined
          with ``format_samples`` at
-         ``gepa/strategies/instruction_proposal.py:54-95``.
+         ``gepa/strategies/instruction_proposal.py::format_samples``.
       2. ``eval_result.side_info`` (legacy batch-level dict) when
-         per-example data is absent.
+         per-example data is absent. The reserved ``scores`` key is
+         relabelled ``Scores (Higher is Better)`` here too.
       3. Empty string when neither is present.
     """
     if eval_result.per_example_side_info is not None:
@@ -510,7 +513,8 @@ def _render_diagnostics(eval_result: EvalResult) -> str:
         )
     if eval_result.side_info is not None:
         diag_lines = "\n".join(
-            f"  {k}: {v}" for k, v in sorted(eval_result.side_info.items())
+            f"  {'Scores (Higher is Better)' if k == 'scores' else k}: {v}"
+            for k, v in sorted(eval_result.side_info.items())
         )
         return f"## Diagnostics\n{diag_lines}"
     return ""
@@ -526,7 +530,7 @@ def build_mutation_prompt(
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    (``gepa/optimize_anything.py:501-596``).  Empty ``objective``, empty
+    in ``gepa_launcher.py``.  Empty ``objective``, empty
     ``eval_result.scores``, absent diagnostics, absent evaluator notes,
     absent stdout/stderr fallback, absent extra ASI, and absent
     ``background`` all skip their respective sections entirely instead of
@@ -811,7 +815,7 @@ def _build_backend_args(
             "run",
             "--format",
             "json",
-            "--dangerously-skip-permissions",
+            "--auto",
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -1057,6 +1061,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "cache_creation_input_tokens",
                     "cacheCreationInputTokens",
                     "cacheCreation",
+                    "cache_write_input_tokens",
+                    "cacheWriteTokens",
                 ),
             ),
             (
@@ -1064,10 +1070,20 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                 (
                     "cache_read_input_tokens",
                     "cacheReadInputTokens",
+                    "cacheReadTokens",
                     "cacheRead",
                 ),
             ),
-            ("reasoning_tokens", ("reasoning_tokens", "reasoningTokens", "thoughts")),
+            (
+                "reasoning_tokens",
+                (
+                    "reasoning_tokens",
+                    "reasoningTokens",
+                    "reasoning_output_tokens",
+                    "thoughts",
+                    "reasoning",
+                ),
+            ),
             (
                 "cost_usd",
                 ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total"),
@@ -1103,6 +1119,21 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
             coerced = _coerce_number(value)
             if coerced is not None:
                 _d["cost_usd"] = coerced
+
+        # OpenCode emits cache accounting as ``tokens.cache.{read,write}``.
+        # Keep this contextual rather than treating generic ``read``/``write``
+        # fields elsewhere in a transcript as token counts.
+        cache = node.get("cache")
+        if isinstance(cache, dict):
+            for key, field in (
+                ("cache_creation_input_tokens", "write"),
+                ("cache_read_input_tokens", "read"),
+            ):
+                if key in _d:
+                    continue
+                value = _coerce_number(cache.get(field))
+                if value is not None:
+                    _d[key] = value
 
     if tool_event_count and "tool_event_count" not in _d:
         _d["tool_event_count"] = tool_event_count

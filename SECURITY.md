@@ -16,7 +16,7 @@ Evaluator commands in `helix.toml` are parsed with `shlex.split()` and executed 
 
 ### 2. No evaluator timeout
 
-HELIX does not impose a timeout on evaluator subprocess execution. A runaway evaluator (infinite loop, stuck network call) will hang the evolution loop indefinitely. This matches GEPAs behavior and is intentional — users are expected to build their own watchdogs if needed.
+HELIX does not impose a timeout on evaluator subprocess execution. A runaway evaluator (infinite loop, stuck network call) will hang the evolution loop indefinitely. This is intentional: evaluator runtimes are workload-specific and can legitimately range from milliseconds to hours, so any default timeout HELIX picked would silently truncate valid long-running evaluations and corrupt scores. Users are expected to enforce their own watchdogs — wrap the evaluator command in `timeout(1)` or an equivalent supervisor.
 
 ### 3. Mutation backends can run locally or in Docker
 

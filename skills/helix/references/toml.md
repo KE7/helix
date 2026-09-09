@@ -120,7 +120,7 @@ perfect_score_threshold = 1.0
 max_evaluations = -1
 
 minibatch_size = 3
-num_parallel_proposals = 4  # or "auto"
+num_parallel_proposals = 4
 max_workers = 32
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"

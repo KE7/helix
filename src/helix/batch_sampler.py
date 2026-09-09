@@ -1,8 +1,7 @@
 """HELIX minibatch sampler — GEPA parity.
 
 Line-for-line port of
-  gepa.strategies.batch_sampler.EpochShuffledBatchSampler
-(see /tmp/gepa_eval_spec.md §2).
+  gepa.strategies.batch_sampler.EpochShuffledBatchSampler.
 
 Also provides :class:`StratifiedBatchSampler`, which is a HELIX extension
 over EpochShuffledBatchSampler that guarantees each minibatch of size K

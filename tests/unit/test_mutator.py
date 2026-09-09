@@ -118,8 +118,8 @@ class TestBuildMutationPrompt:
 
     def test_background_section_omitted_when_none(self):
         """GEPA parity: empty optional inputs skip the section entirely
-        instead of emitting a placeholder.  Mirrors GEPA O.A.'s
-        ``_build_reflection_prompt_template`` (optimize_anything.py:501-596),
+        instead of emitting a placeholder.  Mirrors GEPA's
+        ``_build_reflection_prompt_template`` in ``gepa_launcher.py``,
         which only appends a section when its content is non-empty.
         """
         er = make_eval_result()
@@ -251,8 +251,9 @@ class TestTurnBudgetArticleAgreement:
 class TestPerExampleDiagnostics:
     """``build_mutation_prompt`` renders ``eval_result.per_example_side_info``
     as the Diagnostics section under the new GEPA O.A. contract
-    (``optimize_anything_adapter.py:524-553`` + ``format_samples``
-    at ``gepa/strategies/instruction_proposal.py:54-95``).  The legacy
+    (``OptimizeAnythingAdapter.make_reflective_dataset`` in
+    ``optimize_anything_adapter.py`` + ``format_samples``
+    at ``gepa/strategies/instruction_proposal.py::format_samples``).  The legacy
     batch-level ``side_info`` rendering is used only when
     ``per_example_side_info`` is absent.
     """
@@ -361,6 +362,28 @@ class TestPerExampleDiagnostics:
         assert "legacy_val" in prompt
         # Per-example markers must NOT appear on the legacy path.
         assert "# Example" not in prompt
+
+    def test_flat_path_scores_label_matches_per_example_path(self):
+        """Same reserved ``scores`` key, rendered through either Diagnostics
+        path, must carry the same "Scores (Higher is Better)" label."""
+        per_example_er = self._make(
+            per_example_side_info=[{"scores": {"acc": 0.5}}],
+            instance_scores={"ex_0": 1.0},
+        )
+        flat_er = self._make(
+            per_example_side_info=None,
+            side_info={"scores": {"acc": 0.5}},
+        )
+        per_example_prompt = build_mutation_prompt("goal", per_example_er)
+        flat_prompt = build_mutation_prompt("goal", flat_er)
+
+        assert "Scores (Higher is Better)" in per_example_prompt
+        assert "Scores (Higher is Better)" in flat_prompt
+        # Flat path keeps its existing ``  label: value`` line shape
+        # rather than growing a markdown header.
+        assert "  Scores (Higher is Better): {'acc': 0.5}" in flat_prompt
+        # The raw reserved key must not leak into the rendered prompt.
+        assert "scores:" not in flat_prompt
 
     def test_no_diagnostics_when_both_absent(self):
         er = self._make(per_example_side_info=None, side_info=None)
@@ -850,9 +873,9 @@ class TestInvokeClaudeCode:
                     [
                         '{"type":"session.started","session_id":"codex-session"}',
                         (
-                            '{"type":"turn","usage":{"prompt_tokens":12,'
-                            '"completion_tokens":8,"cached_input_tokens":21,'
-                            '"reasoning_tokens":6,"total_cost_usd":0.32}}'
+                            '{"type":"turn.completed","usage":{"input_tokens":12,'
+                            '"cached_input_tokens":21,"cache_write_input_tokens":3,'
+                            '"output_tokens":8,"reasoning_output_tokens":6}}'
                         ),
                     ]
                 ),
@@ -860,8 +883,8 @@ class TestInvokeClaudeCode:
                     "input_tokens": 12,
                     "output_tokens": 8,
                     "cached_input_tokens": 21,
+                    "cache_creation_input_tokens": 3,
                     "reasoning_tokens": 6,
-                    "cost_usd": 0.32,
                     "session_id": "codex-session",
                 },
                 id="codex",
@@ -873,7 +896,8 @@ class TestInvokeClaudeCode:
                         '{"type":"system","sessionId":"cursor-session"}',
                         (
                             '{"type":"assistant","usage":{"inputTokens":13,'
-                            '"outputTokens":9,"cachedTokens":22,'
+                            '"outputTokens":9,"cacheReadTokens":22,'
+                            '"cacheWriteTokens":5,'
                             '"reasoningTokens":7,"costUsd":0.33}}'
                         ),
                     ]
@@ -881,7 +905,8 @@ class TestInvokeClaudeCode:
                 {
                     "input_tokens": 13,
                     "output_tokens": 9,
-                    "cached_input_tokens": 22,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 22,
                     "reasoning_tokens": 7,
                     "cost_usd": 0.33,
                     "session_id": "cursor-session",
@@ -895,9 +920,11 @@ class TestInvokeClaudeCode:
                         "MCP advisory preamble tolerated by the Gemini parser.",
                         '{"type":"init","session_id":"gemini-session"}',
                         (
-                            '{"type":"result","usageMetadata":{"prompt_tokens":14,'
-                            '"completion_tokens":10,"cachedTokens":23},'
-                            '"thoughts":8,"cost":0.34}'
+                            '{"type":"result","stats":{"input_tokens":14,'
+                            '"output_tokens":10,"cached":23,"input":14,'
+                            '"models":{"gemini":{"total_tokens":47,'
+                            '"input_tokens":14,"output_tokens":10,'
+                            '"cached":23,"input":14}}}}'
                         ),
                     ]
                 ),
@@ -905,8 +932,6 @@ class TestInvokeClaudeCode:
                     "input_tokens": 14,
                     "output_tokens": 10,
                     "cached_input_tokens": 23,
-                    "reasoning_tokens": 8,
-                    "cost_usd": 0.34,
                     "session_id": "gemini-session",
                 },
                 id="gemini",
@@ -918,14 +943,16 @@ class TestInvokeClaudeCode:
                         '{"type":"step_start","sessionID":"opencode-session"}',
                         (
                             '{"type":"step_finish","part":{"tokens":{"input":15,'
-                            '"output":11,"cached":24,"thoughts":9},"cost":0.35}}'
+                            '"output":11,"reasoning":9,'
+                            '"cache":{"read":24,"write":4}},"cost":0.35}}'
                         ),
                     ]
                 ),
                 {
                     "input_tokens": 15,
                     "output_tokens": 11,
-                    "cached_input_tokens": 24,
+                    "cache_creation_input_tokens": 4,
+                    "cache_read_input_tokens": 24,
                     "reasoning_tokens": 9,
                     "cost_usd": 0.35,
                     "session_id": "opencode-session",
@@ -961,6 +988,31 @@ class TestInvokeClaudeCode:
                 assert payload["usage"][key] == pytest.approx(value)
             else:
                 assert payload["usage"][key] == value
+
+    def test_usage_normalization_keeps_legacy_aliases(self):
+        from helix.mutator import _normalise_usage_stats
+
+        usage = _normalise_usage_stats(
+            {
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "cachedTokens": 3,
+                    "cacheCreationInputTokens": 4,
+                    "cacheReadInputTokens": 5,
+                    "reasoningTokens": 6,
+                    "totalCostUsd": 0.07,
+                }
+            }
+        )
+
+        assert usage.input_tokens == 1
+        assert usage.output_tokens == 2
+        assert usage.cached_input_tokens == 3
+        assert usage.cache_creation_input_tokens == 4
+        assert usage.cache_read_input_tokens == 5
+        assert usage.reasoning_tokens == 6
+        assert usage.cost_usd == pytest.approx(0.07)
 
     def test_claude_backend_artifacts_copy_local_transcript(
         self, tmp_path: Path, mocker, monkeypatch
@@ -1044,7 +1096,7 @@ class TestInvokeClaudeCode:
             (
                 "opencode",
                 ["opencode", "run"],
-                ["--format", "json", "--dangerously-skip-permissions"],
+                ["--format", "json", "--auto"],
             ),
         ],
     )

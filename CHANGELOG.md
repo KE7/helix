@@ -35,6 +35,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MissingObjectiveScoresError` when selection needs that axis; explicitly
   requesting `"hybrid"` warns and no-ops its objective axis, continuing on
   the instance axis.
+- **BEHAVIOUR**: `ParetoFrontier.get_non_dominated()` and
+  `ParetoFrontier.select_parent()` now rank candidates by
+  `EvalResult.aggregate_score()` (the mean instance score) instead of
+  `EvalResult.sum_score()`. This is the default parent-selection path, so
+  every run is affected. The aggregate score does not define dominance —
+  `ParetoFrontier._is_dominated` decides that from per-key frontier
+  membership, unchanged — it *orders* the dominance-elimination scan, which
+  stops at the first dominated candidate it finds. The change therefore
+  affects which candidate survives when several are mutually eliminable,
+  not what "dominated" means. Sum and mean rank a pool identically whenever
+  all candidates carry the same instance count, so runs where every
+  candidate was evaluated on the full valset see no difference. The
+  previous behaviour was justified in-code as GEPA parity; that
+  justification was incorrect. Upstream feeds
+  `gepa.strategies.candidate_selector.ParetoCandidateSelector` from
+  `gepa.core.state.GEPAState.per_program_tracked_scores`, which returns
+  `GEPAState.get_program_average_val_subset(program_idx)[0]` — an average.
+  `EvalResult.sum_score()`, `CandidateSummary.sum_score`, and the
+  `sum_scores` mapping in the result schema are unchanged and still
+  reported; sums also still drive the acceptance gate, which does match
+  upstream's `StrictImprovementAcceptance`.
+
+### Fixed
+- `ParetoFrontier.select_parent()` and `ParetoFrontier.get_non_dominated()`
+  are now reproducible across processes for a given seed. Candidate ids are
+  `str` and the per-key fronts are `set` objects, so set iteration order —
+  which varies with the per-process string-hash salt — reached both the
+  dominance-elimination scan order and the order of the selection sampling
+  list. Two orderings are now imposed: the elimination scan sorts by
+  `(score, candidate_id)`, and the sampling list is built in sorted
+  candidate-id order. Previously, a run pinned to `random.Random(7)` over
+  four identically-scored candidates returned a different parent under
+  different `PYTHONHASHSEED` values. Upstream GEPA indexes programs by
+  integer, so it was never exposed to this; HELIX's port changed the
+  identifier type.
 
 ## [0.2.2] - 2026-05-13
 
@@ -87,11 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layout, minus `tests/`).  Wheel contents unchanged.
 
 ### Added
-- Multi-axis Pareto frontier (GEPA `FrontierType` parity,
-  `src/gepa/core/state.py:22-23`).  New
+- Multi-axis Pareto frontier (GEPA's `FrontierType` type alias in
+  `core/state.py`).  New
   `evolution.frontier_type: Literal["instance", "objective", "hybrid",
   "cartesian"]` with default `"hybrid"` — matches GEPA's own
-  `optimize_anything` default (`src/gepa/optimize_anything.py:476`).
+  Optimize Anything engine default (`EngineConfig.frontier_type` in
+  `gepa_launcher.py`).
   `ParetoFrontier` now tracks per-objective-name and per-`(val_id,
   objective_name)` best sets alongside the existing per-example-id
   tracking, and `get_non_dominated()` / `select_parent()` dispatch on
@@ -100,12 +136,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EvalResult.per_example_side_info: list[dict[str, Any]] | None` —
   per-example diagnostic dicts from the new `helix_result` contract,
   positional to `instance_scores` by `helix_batch.json` id order.
-  GEPA analogue: `EvaluationBatch.trajectories`
-  (`src/gepa/core/adapter.py:25`).
+  GEPA analogue: `EvaluationBatch.trajectories` in `core/adapter.py`.
 - `EvalResult.objective_scores: list[dict[str, float]] | None` —
   per-example objective-axis harvest from `side_info["scores"]`.  GEPA
-  analogue: `EvaluationBatch.objective_scores`
-  (`src/gepa/core/adapter.py:26`).  Feeds `frontier_type ∈ {"objective",
+  analogue: `EvaluationBatch.objective_scores` in `core/adapter.py`.
+  Feeds `frontier_type ∈ {"objective",
   "hybrid", "cartesian"}`; harmless on the `"instance"` path.
 - `DatasetConfig.train_size` / `val_size` — cardinality-only fields that drive
   the minibatch sampler when the evaluator owns the dataset (Architecture A
@@ -141,8 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modes.  The `"instance"` path keeps its existing fallback semantics.
 - **BREAKING**: `evolution.cache_evaluation` now defaults to `False`
   (previously `True`).  Matches GEPA Optimize Anything's conservative
-  cache_evaluation default
-  (`src/gepa/optimize_anything.py:476`).  When the cache *is* enabled,
+  `cache_evaluation` default on `EngineConfig` in `gepa_launcher.py`.
+  When the cache *is* enabled,
   entries are now keyed by candidate **content** (the worktree's
   `HEAD^{tree}` SHA, with a clean-state guard) rather than HELIX's
   lineage `candidate.id`, so equivalent candidates can reuse results
@@ -154,7 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload — one `[score, side_info]` pair per id in `helix_batch.json`.
   HELIX zips it into `instance_scores` and stores `side_info_i` on
   `EvalResult.per_example_side_info` for the reflection prompt.  GEPA
-  `optimize_anything` parity (`src/gepa/optimize_anything.py:387-438`).
+  Optimize Anything parity — evaluators return per-example
+  `(score, side_info)` results, as `OptimizeAnythingAdapter` expects.
   The previous scalar-plus-id-keyed-dict contract is removed — it
   silently failed the minibatch gate whenever the evaluator keyed its
   dict by aggregate metric names (`task__metric`) instead of per-example
@@ -193,7 +229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-04-10
 
 ### Added
-- GEPA (Gradual Enhancement with Progressive Adaptation) parity support for evolution strategies
+- GEPA (Genetic-Pareto) parity support for evolution strategies
 - Seedless evolution mode allowing evolution without explicit random seeds
 - Automatic retry logic for API rate-limit handling
 - Rich progress bar for evolution tracking and visualization

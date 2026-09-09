@@ -206,6 +206,25 @@ HELIX_RESULT=[[0.8, 1.0, 0.5], {"details": "..."}]
 
 Those shapes are intentionally rejected. Emit one entry per example instead.
 
+`side_info` is the channel the *next* mutation actually reasons from: HELIX
+renders it into the mutation prompt's `## Diagnostics` section, which the
+agent reads before the score. An evaluator that emits only a score gives
+that agent nothing to act on beyond "better" or "worse" — put in `side_info`
+what a human reviewing a bad output would want to know: why the score was
+low and which specific things were wrong.
+
+```python
+# Good -- actionable: says what was wrong and why.
+side_info = {
+    "scores": {"accuracy": 0.0},
+    "feedback": "Expected '3.13.2', got '3.12.0' -- agent read a cached "
+                "version list instead of fetching the live one.",
+}
+
+# Bad -- score only, no signal about *why*; the next mutation is guessing.
+side_info = {"scores": {"accuracy": 0.0}}
+```
+
 ## Running And Monitoring
 
 Common commands:
@@ -248,7 +267,6 @@ Map source concepts to HELIX this way:
 | `EngineConfig(seed=N)` | top-level `rng_seed = N` |
 | `EngineConfig(max_metric_calls=N)` | `[evolution].max_evaluations = N` |
 | `EngineConfig(max_workers=N)` | `[evolution].max_workers = N` |
-| `EngineConfig(num_parallel_proposals=N|"auto")` | `[evolution].num_parallel_proposals = N` or `"auto"` |
 | `ReflectionConfig(reflection_minibatch_size=K)` | `[evolution].minibatch_size = K` |
 | `EngineConfig(cache_evaluation=True)` | `[evolution].cache_evaluation = true` |
 | `EngineConfig(acceptance_criterion=...)` | `[evolution].acceptance_criterion = "..."` |

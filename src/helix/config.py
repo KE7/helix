@@ -306,22 +306,62 @@ class EvolutionConfig(BaseModel):
     # Total cap on merge invocations across the entire run (not per-gen).
     max_merge_invocations: int = 5
     # Minimum val-set overlap floor for merge candidates. Must be > 0
-    # (GEPA parity: merge.py:243-244 rejects val_overlap_floor <= 0).
+    # (GEPA parity: merge.py::MergeProposer.__init__ rejects val_overlap_floor <= 0).
     merge_val_overlap_floor: int = 5
     # Number of val ids sampled for merge acceptance. Default 5 matches
-    # GEPA (merge.py:262 num_subsample_ids=5). Must be >= 1.
+    # GEPA (merge.py::MergeProposer.select_eval_subsample_for_merged_program
+    # num_subsample_ids=5). Must be >= 1.
     merge_subsample_size: int = 5
-    # GEPA parity: number of parallel proposals per generation. When > 1,
-    # sample N parents, run N mutations in parallel via ThreadPoolExecutor,
-    # then accept sequentially. See GEPA core/engine.py
-    # _run_parallel_reflective_batch.
-    num_parallel_proposals: int | Literal["auto"] = Field(
+    # HELIX's own P: the number of parents sampled per iteration for
+    # parallel mutation proposals. Upstream expresses the same idea via
+    # its SamplingStrategy classes — see PxNSampling(p, n) in
+    # src/gepa/strategies/proposal_sampling.py ("P parents x N mutations
+    # each = P*N total tasks").
+    num_parallel_proposals: int = Field(
         default=1,
         description=(
-            "Number of concurrent mutation proposals per iteration. "
-            "GEPA parity: EngineConfig.num_parallel_proposals. "
-            "Set to 'auto' to derive from max_workers // minibatch_size, "
-            "matching GEPA's optimize_anything._resolve_num_parallel_proposals."
+            "Number of concurrent mutation proposals per iteration (P). "
+            "Upstream GEPA expresses the same idea through its "
+            "PxNSampling(p, n) sampling strategy. See "
+            "https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/ "
+            "for the scaling analysis."
+        ),
+    )
+    mutations_per_parent: int = Field(
+        default=1,
+        description=(
+            "Number of children proposed per selected parent (N). Combined "
+            "with num_parallel_proposals (P), one iteration proposes P*N "
+            "children: P parents sampled with replacement, N mutations each. "
+            "Each of the P*N tasks draws its own minibatch. Default 1 keeps "
+            "the historical one-child-per-parent behaviour. Note that "
+            "max_evaluations is checked between slots, so raising P*N raises "
+            "how far a single iteration can overshoot the cap. See "
+            "https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/ "
+            "for GEPA's scaling analysis."
+        ),
+    )
+    proposal_selection: Literal[
+        "all_improvements", "best_improvement", "top_k"
+    ] = Field(
+        default="all_improvements",
+        description=(
+            "Which of the proposals that clear the acceptance gate are "
+            "promoted to full validation and the frontier. "
+            "'all_improvements' (default): every proposal that improves on "
+            "its parent. 'best_improvement': only the single largest "
+            "improvement. 'top_k': the proposal_top_k largest improvements. "
+            "Ties resolve to the earlier proposal in sampled order, so "
+            "worker completion timing can never change the outcome."
+        ),
+    )
+    proposal_top_k: int | None = Field(
+        default=None,
+        description=(
+            "Number of proposals to promote under proposal_selection='top_k'. "
+            "Required for that strategy and bounded by "
+            "num_parallel_proposals * mutations_per_parent; rejected for the "
+            "other strategies, where it would have no effect."
         ),
     )
     minibatch_size: int = Field(
@@ -334,11 +374,11 @@ class EvolutionConfig(BaseModel):
     max_workers: int = Field(
         default_factory=lambda: os.cpu_count() or 32,
         description=(
-            "Max parallel eval workers — bounds both the parent-eval and "
-            "mutation ThreadPools in the num_parallel_proposals pipeline. "
-            "GEPA parity: EngineConfig.max_workers "
-            "(/tmp/gepa-official/src/gepa/optimize_anything.py:485, "
-            "default os.cpu_count() or 32)."
+            "Caps how many proposal slots run concurrently; each slot's "
+            "worker does that slot's parent eval and mutation. No effect "
+            "with a single slot (no pool is created). Does not bound full "
+            "validation, which runs sequentially afterward, or "
+            "concurrency inside the evaluator."
         ),
     )
     cache_evaluation: bool = Field(
@@ -359,8 +399,25 @@ class EvolutionConfig(BaseModel):
         default=None,
         description=(
             "Optional deterministic first-N validation stage that runs after "
-            "the train minibatch gate and before full validation. Disabled "
-            "when unset or 0."
+            "the train minibatch gate and before full validation. A passing "
+            "stage is composed with a later call for the remaining ids. Use "
+            "only when per-id scores/objectives are independent of the id "
+            "set; do not use with batch-relative scores, cross-example "
+            "normalization, shared warm-up, or an aggregate metric used as "
+            "an objective. Disabled when unset or 0."
+        ),
+    )
+    retain_rejected_worktrees: bool = Field(
+        default=False,
+        description=(
+            "Whether to keep the worktree of a candidate rejected by the "
+            "validation-stage gate, for inspecting what it changed. Either "
+            "way its identity, lineage, and scores are recorded in "
+            ".helix/lineage.json and .helix/attempts/. When disabled (the "
+            "default), the worktree and its helix/<id> ref are removed and "
+            "the candidate's contents become unrecoverable. Retaining costs "
+            "one full candidate repository per rejection; run helix clean to "
+            "reclaim them."
         ),
     )
     batch_sampler: Literal["epoch_shuffled", "stratified"] = Field(
@@ -429,25 +486,109 @@ class EvolutionConfig(BaseModel):
             "objective/cartesian selection raises an actionable "
             ":class:`helix.population.MissingObjectiveScoresError`.\n\n"
             "The acceptance gate stays positional on ``scores_list`` "
-            "regardless of ``frontier_type``; only the Pareto retention / "
-            "parent-selection decision is multi-axis."
+            "regardless of ``frontier_type`` (GEPA's acceptance criteria "
+            "in ``strategies/acceptance.py`` compare subsample score lists "
+            "positionally); only the Pareto retention / parent-selection decision is "
+            "multi-axis.  Non-``instance`` paths require ``helix_result`` "
+            'to emit per-example ``side_info["scores"]`` dicts — without '
+            "them the objective / cartesian frontiers raise instead of "
+            "falling back to scalar semantics."
+        ),
+    )
+    candidate_selection_strategy: Literal[
+        "pareto", "current_best", "epsilon_greedy", "top_k_pareto"
+    ] = Field(
+        default="pareto",
+        description=(
+            "How to pick the parent candidate for each mutation proposal. "
+            "The same four strategies GEPA provides in "
+            "``gepa.strategies.candidate_selector`` (gepa-ai/gepa).\n\n"
+            '- ``"pareto"`` (default): frequency-weighted draw over the '
+            "dominated-stripped per-key Pareto frontier "
+            "(``ParetoFrontier.select_parent``).\n"
+            '- ``"current_best"``: deterministic argmax over each '
+            "candidate's aggregate validation score; ties resolve to the "
+            "earliest-discovered candidate.\n"
+            '- ``"epsilon_greedy"``: with probability '
+            "``candidate_selection_epsilon``, pick uniformly at random from "
+            "the whole evaluated pool, not just the frontier; otherwise "
+            'fall back to ``"current_best"``.\n'
+            '- ``"top_k_pareto"``: restrict the Pareto frontier draw to the '
+            "top ``candidate_selection_top_k`` candidates by score; falls "
+            "back to a direct argmax when that restriction empties every "
+            "frontier key."
+        ),
+    )
+    candidate_selection_epsilon: float | None = Field(
+        default=None,
+        description=(
+            "Random-exploration probability for "
+            "``candidate_selection_strategy=\"epsilon_greedy\"``; must be "
+            "in [0.0, 1.0]. Required for that strategy and rejected for the "
+            "others, where it would have no effect. There is no default: "
+            "the exploration rate is a search-budget decision and is stated "
+            "per run. GEPA's ``EpsilonGreedyCandidateSelector`` uses 0.1."
+        ),
+    )
+    candidate_selection_top_k: int | None = Field(
+        default=None,
+        description=(
+            "Pool size for "
+            "``candidate_selection_strategy=\"top_k_pareto\"``: only the "
+            "top-K candidates by score are eligible for the Pareto "
+            "frontier draw. Required for that strategy (must be >= 1) and "
+            "rejected for the others, where it would have no effect. There "
+            "is no default: K trades exploration against exploitation and "
+            "is stated per run. GEPA's ``TopKParetoCandidateSelector`` "
+            "uses 5."
         ),
     )
 
     def model_post_init(self, __context: object) -> None:
-        # GEPA parity: resolve ``num_parallel_proposals="auto"`` to
-        # ``max(1, max_workers // minibatch_size)`` once at construction
-        # time so every downstream consumer sees a plain int.  Mirrors
-        # /tmp/gepa-official/src/gepa/optimize_anything.py:1108-1116.
-        if self.num_parallel_proposals == "auto":
-            self.num_parallel_proposals = max(
-                1, self.max_workers // max(1, self.minibatch_size)
+        if self.max_workers < 1:
+            raise ValueError(
+                f"evolution.max_workers must be >= 1 (got {self.max_workers})"
+            )
+        # A zero or negative P was accepted before P×N landed: it produced an
+        # empty proposal batch every iteration, so the run burned through
+        # max_generations without ever proposing a candidate.
+        if self.num_parallel_proposals < 1:
+            raise ValueError(
+                "evolution.num_parallel_proposals must be >= 1 "
+                f"(got {self.num_parallel_proposals})"
+            )
+        if self.mutations_per_parent < 1:
+            raise ValueError(
+                "evolution.mutations_per_parent must be >= 1 "
+                f"(got {self.mutations_per_parent})"
+            )
+        # ``proposal_top_k`` is meaningful only for the strategy that reads
+        # it; accepting it elsewhere would let a config claim a bound that
+        # silently does nothing.
+        _batch_size = self.num_parallel_proposals * self.mutations_per_parent
+        if self.proposal_selection == "top_k":
+            if self.proposal_top_k is None:
+                raise ValueError(
+                    "evolution.proposal_top_k is required when "
+                    "evolution.proposal_selection='top_k'"
+                )
+            if not 1 <= self.proposal_top_k <= _batch_size:
+                raise ValueError(
+                    "evolution.proposal_top_k must be between 1 and "
+                    "num_parallel_proposals * mutations_per_parent "
+                    f"({_batch_size}) (got {self.proposal_top_k})"
+                )
+        elif self.proposal_top_k is not None:
+            raise ValueError(
+                "evolution.proposal_top_k is only valid when "
+                "evolution.proposal_selection='top_k' (got "
+                f"proposal_selection={self.proposal_selection!r})"
             )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(
                 f"evolution.val_stage_size must be >= 0 (got {self.val_stage_size})"
             )
-        # GEPA parity (merge.py:243-244): reject non-positive overlap floors.
+        # GEPA parity (merge.py::MergeProposer.__init__): reject non-positive overlap floors.
         if self.merge_val_overlap_floor <= 0:
             raise ValueError(
                 "evolution.merge_val_overlap_floor must be > 0 "
@@ -471,6 +612,43 @@ class EvolutionConfig(BaseModel):
             raise ValueError(
                 "evolution.num_sampled_groups and evolution.num_examples_per_group "
                 "must be set together"
+            )
+        if self.candidate_selection_strategy == "epsilon_greedy":
+            if self.candidate_selection_epsilon is None:
+                raise ValueError(
+                    "evolution.candidate_selection_epsilon is required when "
+                    "evolution.candidate_selection_strategy='epsilon_greedy'"
+                )
+            if not 0.0 <= self.candidate_selection_epsilon <= 1.0:
+                raise ValueError(
+                    "evolution.candidate_selection_epsilon must be between "
+                    "0.0 and 1.0 "
+                    f"(got {self.candidate_selection_epsilon})"
+                )
+        elif self.candidate_selection_epsilon is not None:
+            raise ValueError(
+                "evolution.candidate_selection_epsilon is only valid when "
+                "evolution.candidate_selection_strategy='epsilon_greedy' "
+                "(got candidate_selection_strategy="
+                f"{self.candidate_selection_strategy!r})"
+            )
+        if self.candidate_selection_strategy == "top_k_pareto":
+            if self.candidate_selection_top_k is None:
+                raise ValueError(
+                    "evolution.candidate_selection_top_k is required when "
+                    "evolution.candidate_selection_strategy='top_k_pareto'"
+                )
+            if self.candidate_selection_top_k < 1:
+                raise ValueError(
+                    "evolution.candidate_selection_top_k must be >= 1 "
+                    f"(got {self.candidate_selection_top_k})"
+                )
+        elif self.candidate_selection_top_k is not None:
+            raise ValueError(
+                "evolution.candidate_selection_top_k is only valid when "
+                "evolution.candidate_selection_strategy='top_k_pareto' "
+                "(got candidate_selection_strategy="
+                f"{self.candidate_selection_strategy!r})"
             )
         if self.num_sampled_groups is not None and self.batch_sampler != "stratified":
             raise ValueError(
