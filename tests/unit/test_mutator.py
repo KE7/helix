@@ -738,7 +738,6 @@ class TestInvokeClaudeCode:
         args_list = mock_run.call_args[0][0]
         assert args_list[0] == "agy"
         assert "--dangerously-skip-permissions" in args_list
-        assert "--print" in args_list
         assert "--output-format" in args_list
         assert "json" in args_list
         assert "--model" in args_list
@@ -747,7 +746,15 @@ class TestInvokeClaudeCode:
         assert "high" in args_list
         assert "--sandbox" not in args_list
         assert "the prompt" not in args_list
+        # agy's ``--print`` takes the prompt as its VALUE (it is not a boolean
+        # flag like claude's), so the prompt must be the element immediately
+        # after ``--print`` and the pair must be the final two argv elements
+        # -- otherwise agy consumes the next flag as the prompt and exits 2.
+        assert args_list.count("--print") == 1
+        assert args_list[-2] == "--print"
         assert ".agent_task_prompt.md" in args_list[-1]
+        assert not args_list[-1].startswith("-")
+        assert "--output-format" not in args_list[args_list.index("--print") :]
         assert "input" not in mock_run.call_args[1]
         assert result["session_id"] == "sess_123"
 
@@ -761,6 +768,10 @@ class TestInvokeClaudeCode:
         args_list = mock_run.call_args[0][0]
         assert "--model" not in args_list
         assert "--effort" not in args_list
+        # The ``--print <prompt>`` pair must still close the argv when no
+        # optional flags are present.
+        assert args_list[-2] == "--print"
+        assert ".agent_task_prompt.md" in args_list[-1]
 
     def test_uses_correct_cwd(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")

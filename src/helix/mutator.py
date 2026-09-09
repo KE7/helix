@@ -740,7 +740,6 @@ def _build_backend_args(
         args = [
             "agy",
             "--dangerously-skip-permissions",
-            "--print",
             "--output-format",
             "json",
         ]
@@ -748,13 +747,15 @@ def _build_backend_args(
             args.extend(["--model", config.model])
         if config.effort:
             args.extend(["--effort", config.effort])
-        # Every other HELIX backend takes its prompt as a trailing positional
-        # argument (see the ``claude`` / ``codex`` / ``cursor`` / ``opencode``
-        # branches below); ``agy --help`` documents ``-p``/``--print`` and a
-        # ``--prompt`` alias but not the exact invocation grammar. This follows
-        # the established convention; the first real run against the CLI must
-        # confirm it before it is relied on.
-        args.append(_prompt_file_instruction(prompt_artifact_name))
+        # Unlike ``claude``, agy's ``-p``/``--print`` (alias ``--prompt``) is
+        # not a boolean flag: it takes the prompt as its VALUE, and a trailing
+        # positional is ignored.  ``agy --print --output-format json <prompt>``
+        # exits 2 with ``--print took "--output-format" as its prompt``
+        # (verified against agy 1.1.27).  So every other flag goes first and
+        # ``--print <prompt>`` is the final argv pair; Go's flag parser accepts
+        # the space-separated form, and the instruction text never starts
+        # with ``-``.  ``test_agy_cli_args_include_required_flags`` pins this.
+        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name)])
         return args
 
     if backend == "claude":
