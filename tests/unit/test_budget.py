@@ -210,21 +210,28 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
             id="opencode",
         ),
         pytest.param(
-            # agy's confirmed dispatch is the same single-JSON-object branch
-            # claude uses (see _parse_backend_output); its real field names
-            # are not yet confirmed (needs a real --print run, out of scope
-            # for this migration), so this envelope is illustrative -- it
-            # exercises the generic _normalise_usage_stats walk, not a
-            # verified agy transcript shape.
+            # Real ``agy --output-format json`` envelope (agy 1.1.27), parsed
+            # on the same single-JSON-object branch claude uses (see
+            # _parse_backend_output).  agy reports no cost field, so
+            # ``cost_usd`` stays 0 for this backend.
             "agy",
             json.dumps(
                 {
-                    "session_id": "agy-session",
-                    "usage": {"input_tokens": 16, "output_tokens": 12},
-                    "total_cost_usd": 0.36,
+                    "conversation_id": "agy-conversation",
+                    "status": "SUCCESS",
+                    "response": "ok ",
+                    "duration_seconds": 1.13,
+                    "num_turns": 1,
+                    "usage": {
+                        "input_tokens": 6246,
+                        "output_tokens": 25,
+                        "thinking_tokens": 24,
+                        "cache_read_tokens": 8126,
+                        "total_tokens": 6271,
+                    },
                 }
             ),
-            (16, 12, 0.36),
+            (6246, 25, 0.0),
             id="agy",
         ),
     ],
@@ -367,26 +374,34 @@ def test_backend_usage_parsing_charges_llm_budget(
             id="opencode",
         ),
         pytest.param(
-            # Illustrative envelope on agy's confirmed dispatch path (the
-            # same single-JSON-object branch claude uses); real field names
-            # are not yet confirmed, see the "agy" case above.
+            # Real ``agy --output-format json`` envelope (agy 1.1.27), see the
+            # "agy" case above.  ``thinking_tokens`` maps to the reasoning
+            # counter and ``cache_read_tokens`` to the cache-read counter;
+            # agy reports no separate cached-input or cache-creation figure.
             "agy",
             json.dumps(
                 {
-                    "session_id": "agy-session",
+                    "conversation_id": "agy-conversation",
+                    "status": "SUCCESS",
+                    "response": "ok ",
+                    "duration_seconds": 1.13,
+                    "num_turns": 1,
                     "usage": {
-                        "input_tokens": 16,
-                        "output_tokens": 12,
-                        "cached_input_tokens": 25,
-                        "reasoning_tokens": 10,
+                        "input_tokens": 6246,
+                        "output_tokens": 25,
+                        "thinking_tokens": 24,
+                        "cache_read_tokens": 8126,
+                        "total_tokens": 6271,
                     },
                 }
             ),
             {
-                "input_tokens": 16,
-                "output_tokens": 12,
-                "cached_input_tokens": 25,
-                "reasoning_tokens": 10,
+                "input_tokens": 6246,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 8126,
+                "reasoning_tokens": 24,
+                "cached_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
             },
             id="agy",
         ),

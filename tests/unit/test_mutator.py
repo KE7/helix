@@ -1766,12 +1766,12 @@ class TestCountTranscriptToolEventsDispatcher:
         assert count == 1
         assert names == ["Read"]
 
-    def test_agy_has_no_dedicated_counter_yet(self, tmp_path: Path) -> None:
-        """agy has no dedicated per-field counter (needs a real transcript sample
-        to write correctly, see ``_TRANSCRIPT_TOOL_COUNTERS``), so it falls back
-        to the dispatcher's unknown-backend behavior even for an existing file.
-        ``_normalise_usage_stats``'s generic walk still produces best-effort
-        stats independently of this counter.
+    def test_agy_has_no_dedicated_counter(self, tmp_path: Path) -> None:
+        """agy has no dedicated per-field counter: its ``--output-format json``
+        envelope carries token totals but no per-tool event list (see
+        ``_TRANSCRIPT_TOOL_COUNTERS``), so the dispatcher treats it like an
+        unknown backend even for an existing file.  ``_normalise_usage_stats``
+        reads the envelope's token fields independently of this counter.
         """
         from helix.mutator import _count_transcript_tool_events
 

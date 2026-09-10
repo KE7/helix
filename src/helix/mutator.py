@@ -1092,6 +1092,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "cacheReadInputTokens",
                     "cacheReadTokens",
                     "cacheRead",
+                    # agy: ``usage.cache_read_tokens``
+                    "cache_read_tokens",
                 ),
             ),
             (
@@ -1102,6 +1104,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "reasoning_output_tokens",
                     "thoughts",
                     "reasoning",
+                    # agy: ``usage.thinking_tokens``
+                    "thinking_tokens",
                 ),
             ),
             (
@@ -1125,6 +1129,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                 "chatId",
                 "thread_id",
                 "threadId",
+                # agy: top-level ``conversation_id``
+                "conversation_id",
             ):
                 value = node.get(alias)
                 if isinstance(value, str) and value:
@@ -1343,10 +1349,14 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
 
 # Dispatcher: maps backend name → per-backend counter function.
 #
-# ``agy`` has no entry yet: writing one correctly needs a real
-# ``--output-format json`` transcript sample, which this project does not have.
-# Until then it falls back to ``_normalise_usage_stats``'s generic walk below,
-# same as any backend without a dedicated counter.
+# ``agy`` has no entry because there is nothing to count: its
+# ``--output-format json`` output (observed against agy 1.1.27) is a single
+# envelope -- ``conversation_id``, ``status``, ``response``, ``error`` (on
+# failure), ``duration_seconds``, ``num_turns`` and a ``usage`` block of
+# ``input_tokens`` / ``output_tokens`` / ``thinking_tokens`` /
+# ``cache_read_tokens`` / ``total_tokens`` -- with no per-tool event list.
+# ``_normalise_usage_stats`` reads the envelope's token fields directly; tool
+# events for agy stay at 0 like any backend without a dedicated counter.
 _TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = {
     "claude": _count_claude_transcript_tool_events,
     "codex": _count_codex_stdout_tool_events,
