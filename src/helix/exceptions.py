@@ -141,7 +141,15 @@ class CredentialRefreshError(HelixError):
     continues, but every credential-classified failure is counted and named in
     the end-of-run summary.  Detection is anchored on distinctive wording read
     out of the shipped backend CLIs; see ``helix.mutator``.
+
+    ``transient`` is True when the backend's wording says the refresh token was
+    *already used* -- the lost-refresh-race outcome, where another candidate
+    has just stored a fresh credential.  That case is retried once before it is
+    raised, and when it is raised the operator is pointed at ``helix resume``
+    rather than at a re-login the stored credential does not need.
     """
+
+    transient: bool = False
 
 
 # ---------------------------------------------------------------------------

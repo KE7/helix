@@ -222,6 +222,44 @@ class TestCredentialFailureIsVisible:
         assert "1 mutation(s) failed on the shared" in out
         assert "helix sandbox login" in out
 
+    def test_lost_refresh_race_does_not_demand_a_relogin(
+        self,
+        mocker,  # noqa: F811
+        tmp_path,
+        all_mocks,  # noqa: F811
+        warm_calls,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When every failure was a lost refresh race, the winner has stored a
+        working credential.  The summary must say resume, not re-login."""
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, *a, **k: make_eval_result(
+                candidate.id, {"i1": 0.5, "i2": 0.5}
+            )
+        )
+        exc = CredentialRefreshError(
+            "Codex CLI lost a refresh race on the shared credential "
+            "(matched 'because your refresh token was already used' in "
+            "stderr; failed again on retry)",
+            suggestion="Run `helix resume`.",
+        )
+        exc.transient = True
+        all_mocks["mutate"].side_effect = exc
+
+        config = _sandboxed(
+            make_config(max_generations=2, perfect_score_threshold=None)
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+        assert result.best_candidate.id == "g0-s0"
+
+        out = " ".join(capsys.readouterr().out.lower().split())
+        assert "credential" in out
+        assert "refresh race" in out
+        assert "helix resume" in out
+        assert "helix sandbox login" not in out
+
     def test_clean_run_says_nothing_about_credentials(
         self,
         mocker,  # noqa: F811
