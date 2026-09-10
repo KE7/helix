@@ -803,6 +803,43 @@ stderr as fallback debug context.
 --backend BACKEND   Override the mutation backend [claude|codex|cursor|gemini|opencode]
 --model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
+--trace PATH        Append a JSONL timing trace of the run to PATH (off by default)
+```
+
+#### Tracing a run
+
+`--trace PATH` (on `helix evolve` and `helix resume`, or `HELIX_TRACE=PATH` in
+the environment) appends a JSON Lines timing trace: one object per line,
+flushed as it is written, so a killed run leaves every record it completed.
+Each traced operation is a *span* with a `start` and an `end` record:
+
+```json
+{"event": "start", "span": "evaluate", "span_id": 7, "wall_time": 1757400000.1, "monotonic": 1234.5, "thread_id": 6199, "attrs": {"candidate_id": "g1-s2", "split": "train", "evaluation_phase": null}}
+{"event": "end",   "span": "evaluate", "span_id": 7, "wall_time": 1757400012.3, "monotonic": 1246.7, "thread_id": 6199, "attrs": {...}, "duration_seconds": 12.2, "outcome": "ok"}
+```
+
+`wall_time` is Unix epoch seconds (for lining up with external logs);
+`monotonic` never jumps backwards, and `duration_seconds` is the difference
+between a span's two `monotonic` values.  `outcome` is `"ok"` or `"error"`;
+on error `error_type` names the exception class (never its message, so a
+trace is safe to attach to an issue).  Match `start` to `end` on `span_id`
+— proposals run concurrently, so records from different threads interleave.
+
+| span | one call of | measures |
+| --- | --- | --- |
+| `run` | `run_evolution` | the whole run; its `end` is always the last line |
+| `proposal` | `_run_proposal_worker` | one proposal slot: parent eval, mutation, child eval |
+| `evaluate` | `run_evaluator` | one evaluator invocation (`attrs.split`) |
+| `validate` | `_run_full_val_eval` | one sequential full-validation stage |
+| `agent` | `invoke_claude_code` | one agent-backend call — inside a `proposal` it is a mutation, inside a `seed` it is seed generation, otherwise a merge |
+| `seed` | `generate_seed` | seedless-mode seed generation |
+
+A trace is complete only if its last line is `{"event": "end", "span": "run", ...}`;
+anything else means the process died mid-run and later spans are missing.
+Per-generation wall time, from the `proposal` spans' `attrs.generation`:
+
+```console
+$ jq -s 'map(select(.event=="end" and .span=="proposal")) | group_by(.attrs.generation) | map({gen: .[0].attrs.generation, seconds: (map(.duration_seconds) | add)})' .helix/trace.jsonl
 ```
 
 ---
