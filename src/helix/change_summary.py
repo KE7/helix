@@ -43,9 +43,12 @@ independent.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +85,14 @@ MAX_HISTORY_PER_PARENT = 3
 # prose and are preserved as written, but any other control character means
 # the file is not the prose it claims to be.
 _ALLOWED_CONTROL_CHARS = frozenset("\t\n")
+# ``O_NOFOLLOW`` makes the kernel refuse a symlink at the final path
+# component; it is POSIX-only, so fall back to no flag where it is absent
+# (the ``is_symlink`` check above the open still applies there).
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# What an ``O_NOFOLLOW`` open reports when it meets a symlink: ``ELOOP`` on
+# Linux and macOS, ``EMLINK`` on FreeBSD.
+_SYMLINK_REFUSED_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
 
 
 def summary_file_instruction() -> str:
@@ -171,21 +182,48 @@ def capture_change_summary(worktree_path: str | Path) -> str | None:
     Only the first ``MAX_SUMMARY_CHARS`` characters are ever read, so an
     enormous file costs a bounded read rather than a second size cap, and an
     over-long report is shortened with the cut disclosed rather than lost.
+
+    Only a regular file sitting directly in the worktree is read.  The agent
+    that wrote the artifact is untrusted, and sandbox sync-back recreates
+    symlinks verbatim on the host, so a link such as ``../../../.env`` would
+    otherwise pull a host file the sandbox deliberately never saw into
+    ``state.json`` and the next mutation prompt.  The link is refused before
+    opening, the open itself uses ``O_NOFOLLOW`` so a swap between the two
+    cannot bypass the check, and the open descriptor is confirmed to be a
+    regular file inside the worktree before anything is read from it.
     """
-    path = Path(worktree_path) / CHANGE_SUMMARY_ARTIFACT_NAME
+    root = Path(worktree_path)
+    path = root / CHANGE_SUMMARY_ARTIFACT_NAME
+    name = CHANGE_SUMMARY_ARTIFACT_NAME
     try:
-        if not path.is_file():
+        if path.is_symlink():
+            logger.debug("Ignoring %s: it is a symbolic link.", name)
             return None
-        size = path.stat().st_size
-        with path.open(encoding="utf-8") as handle:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in _SYMLINK_REFUSED_ERRNOS:
+            logger.debug("Ignoring %s: it is a symbolic link.", name)
+            return None
+        logger.warning("Ignoring %s: could not be read.", name)
+        return None
+    try:
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                logger.debug("Ignoring %s: not a regular file.", name)
+                return None
+            if path.resolve().parent != root.resolve():
+                logger.debug("Ignoring %s: it resolves outside the worktree.", name)
+                return None
+            size = info.st_size
             text = handle.read(MAX_SUMMARY_CHARS + 1)
     except OSError:
-        logger.warning("Ignoring %s: could not be read.", CHANGE_SUMMARY_ARTIFACT_NAME)
+        logger.warning("Ignoring %s: could not be read.", name)
         return None
     except UnicodeDecodeError:
-        logger.warning(
-            "Ignoring %s: not valid UTF-8 text.", CHANGE_SUMMARY_ARTIFACT_NAME
-        )
+        logger.warning("Ignoring %s: not valid UTF-8 text.", name)
         return None
     over_limit = len(text) > MAX_SUMMARY_CHARS
     report, reason = _validate_summary(text)

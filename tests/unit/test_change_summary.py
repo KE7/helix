@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 
 from helix.change_summary import (
     CHANGE_SUMMARY_ARTIFACT_NAME,
@@ -182,6 +184,52 @@ def test_missing_artifact_stays_quiet(tmp_path, caplog):
 
     assert summary is None
     assert caplog.records == []
+
+
+def test_symlink_to_a_file_outside_the_worktree_is_absent_and_never_read(
+    tmp_path, caplog
+):
+    # Sandbox sync-back recreates symlinks verbatim, so an agent can point
+    # the artifact at a host file the sandbox never saw (the project .env).
+    # It must be treated as absent, and its content must not reach the log.
+    project = tmp_path / "project"
+    worktree = project / ".helix" / "worktrees" / "g1-s1"
+    worktree.mkdir(parents=True)
+    secret = "ANTHROPIC_API_KEY=sk-ant-secret-value"
+    (project / ".env").write_text(secret)
+    (worktree / CHANGE_SUMMARY_ARTIFACT_NAME).symlink_to(Path("../../../.env"))
+
+    with caplog.at_level(logging.DEBUG):
+        summary = capture_change_summary(worktree)
+
+    assert summary is None
+    assert (worktree / CHANGE_SUMMARY_ARTIFACT_NAME).read_text() == secret
+    assert secret not in caplog.text
+    assert "sk-ant" not in caplog.text
+    assert "symbolic link" in caplog.text
+
+
+def test_symlink_inside_the_worktree_is_absent_too(tmp_path):
+    # Even a link to a legitimate file within the worktree is refused: the
+    # rule is "a regular file", not "a link that happens to point somewhere
+    # acceptable at the moment it is checked".
+    (tmp_path / "notes.md").write_text(_summary())
+    (tmp_path / CHANGE_SUMMARY_ARTIFACT_NAME).symlink_to(Path("notes.md"))
+
+    assert capture_change_summary(tmp_path) is None
+
+
+def test_symlink_is_refused_by_the_open_itself_not_only_the_pre_check(
+    tmp_path, monkeypatch
+):
+    # A TOCTOU swap between ``is_symlink`` and ``open`` must still lose:
+    # the open uses ``O_NOFOLLOW``, so the kernel refuses the link even
+    # when the pre-check was fooled.
+    (tmp_path / "outside.txt").write_text("secret")
+    (tmp_path / CHANGE_SUMMARY_ARTIFACT_NAME).symlink_to(Path("outside.txt"))
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+
+    assert capture_change_summary(tmp_path) is None
 
 
 def test_history_cap_evicts_oldest_attempt_first():
