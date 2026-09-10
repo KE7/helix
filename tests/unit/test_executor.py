@@ -135,6 +135,90 @@ class TestRunEvaluator:
         assert "image unavailable" in exc_info.value.stderr
         assert "HELIX_RESULT" not in str(exc_info.value)
 
+    def test_docker_exit_125_with_valid_result_is_scored_as_evaluator_exit(
+        self, tmp_path, mocker
+    ):
+        """Docker passes the contained command's exit code through, so an
+        evaluator that itself exits 125 inside the sandbox while emitting a
+        valid HELIX_RESULT= line is scored like any other non-zero exit
+        (aggregate zeroed, per-example scores kept), not raised as a Docker
+        invocation failure.
+        """
+        _prepare_batch(tmp_path)
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "helix.executor.run_sandboxed_commands",
+            return_value=[
+                MagicMock(
+                    stdout=_result_line([1.0]),
+                    stderr="evaluator: giving up after 3 attempts",
+                    returncode=125,
+                ),
+                MagicMock(stdout=""),
+            ],
+        )
+        candidate = make_candidate(str(tmp_path))
+        config = HelixConfig(
+            objective="test objective",
+            evaluator=EvaluatorConfig(
+                command="python eval.py",
+                sidecar=EvaluatorSidecarConfig(
+                    image="runner:latest",
+                    command="serve",
+                    endpoint="http://sidecar",
+                ),
+            ),
+            sandbox=SandboxConfig(enabled=True, evaluator=True),
+        )
+
+        result = run_evaluator(candidate, config)
+
+        assert isinstance(result, EvalResult)
+        assert result.scores["success"] == 0.0
+        assert result.instance_scores == {"example-0": 1.0}
+
+    def test_docker_exit_125_with_daemon_diagnostic_wins_over_result_line(
+        self, tmp_path, mocker
+    ):
+        """A daemon diagnostic on stderr identifies Docker's own failure even
+        when stdout happens to carry a HELIX_RESULT= line."""
+        _prepare_batch(tmp_path)
+        mocker.patch(
+            "helix.executor.current_evaluator_sidecar_runtime",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "helix.executor.run_sandboxed_commands",
+            return_value=[
+                MagicMock(
+                    stdout=_result_line([1.0]),
+                    stderr="docker: Error response from daemon: OCI runtime create failed",
+                    returncode=125,
+                ),
+                MagicMock(stdout=""),
+            ],
+        )
+        candidate = make_candidate(str(tmp_path))
+        config = HelixConfig(
+            objective="test objective",
+            evaluator=EvaluatorConfig(
+                command="python eval.py",
+                sidecar=EvaluatorSidecarConfig(
+                    image="runner:latest",
+                    command="serve",
+                    endpoint="http://sidecar",
+                ),
+            ),
+            sandbox=SandboxConfig(enabled=True, evaluator=True),
+        )
+
+        with pytest.raises(EvaluatorError) as exc_info:
+            run_evaluator(candidate, config)
+        assert exc_info.value.phase == "docker invocation"
+
     def test_non_docker_command_exit_125_with_valid_result_is_not_a_docker_failure(
         self, tmp_path, mocker
     ):

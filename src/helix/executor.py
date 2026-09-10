@@ -182,6 +182,33 @@ def _collect_asi(
     return asi
 
 
+# stderr fragments that identify a failure of the ``docker run`` invocation
+# itself (daemon unreachable, image missing, bad arguments) rather than of the
+# evaluator command running inside the container.
+_DOCKER_INVOCATION_FAILURE_SIGNATURES = (
+    "Cannot connect to the Docker daemon",
+    "Error response from daemon",
+    "error during connect",
+    "Unable to find image",
+    "docker: invalid",
+)
+
+
+def _is_docker_invocation_failure(stdout: str, stderr: str) -> bool:
+    """Whether an exit 125 from ``docker run`` came from Docker, not the evaluator.
+
+    Docker passes the contained command's exit status through, so 125 alone
+    is ambiguous.  It is Docker's own only when the evaluator never emitted
+    a ``HELIX_RESULT=`` line, or when stderr carries a daemon diagnostic.
+    """
+    has_result_line = any(
+        line.startswith("HELIX_RESULT=") for line in stdout.splitlines()
+    )
+    if not has_result_line:
+        return True
+    return any(sig in stderr for sig in _DOCKER_INVOCATION_FAILURE_SIGNATURES)
+
+
 def run_evaluator(
     candidate: Candidate,
     config: HelixConfig,
@@ -359,7 +386,11 @@ def run_evaluator(
     # result parser, which would otherwise hide the Docker diagnostic behind
     # "no HELIX_RESULT= line".  Guarded on ``docker_invoked``: for an
     # evaluator HELIX ran directly, 125 is just the command's own exit code.
-    if returncode == 125 and docker_invoked:
+    # Docker also passes the contained command's own exit code through, so
+    # even under Docker a 125 that arrives with a HELIX_RESULT= line and no
+    # daemon diagnostic is the evaluator's exit status and is scored as any
+    # other non-zero exit would be.
+    if returncode == 125 and docker_invoked and _is_docker_invocation_failure(stdout, stderr):
         raise EvaluatorError(
             "Evaluator Docker invocation failed before the evaluator started.",
             operation="run_evaluator",
