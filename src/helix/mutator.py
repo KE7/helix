@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.change_summary import (
+    CHANGE_SUMMARY_ARTIFACT_NAME,
+    capture_change_summary,
+    summary_file_instruction,
+)
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -568,7 +573,7 @@ def build_mutation_prompt(
     if background:
         sections.append(f"## Background / Context\n{background}")
 
-    sections.append(MUTATION_TASK_INSTRUCTIONS)
+    sections.append(MUTATION_TASK_INSTRUCTIONS + summary_file_instruction())
 
     turn_budget = _turn_budget_section(max_turns)
     if turn_budget:
@@ -643,6 +648,7 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         BACKEND_STDOUT_ARTIFACT_NAME,
         BACKEND_STDERR_ARTIFACT_NAME,
         ".helix_artifacts/",
+        CHANGE_SUMMARY_ARTIFACT_NAME,
         "helix_batch.json",
         # Per-candidate OpenCode SQLite state (XDG_DATA_HOME isolation).
         # Each parallel opencode worker gets a fresh database here; keeps
@@ -1825,6 +1831,7 @@ def mutate(
             prompt_artifact_name=prompt_artifact_name,
         )
         child.usage = usage
+        child.change_summary = capture_change_summary(child.worktree_path)
     except MutationError as exc:
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
