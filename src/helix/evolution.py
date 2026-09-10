@@ -1527,9 +1527,15 @@ def _warm_generation_credential(
         return result
 
     detail = f" Detail: {result.detail}" if result.detail else ""
+    if result.timed_out:
+        cause = "timed out"
+    elif result.returncode is not None:
+        cause = f"exit {result.returncode}"
+    else:
+        cause = "could not start"
     message = (
         f"Credential warm for {display} did not complete before generation "
-        f"{gen} (exit {result.returncode}). Candidates in this generation will "
+        f"{gen} ({cause}). Candidates in this generation will "
         "each decide for themselves whether to refresh the shared login, and "
         "if a refresh is due they can spend the same single-use refresh token "
         "at once -- the losers of that race can fail without reporting an "

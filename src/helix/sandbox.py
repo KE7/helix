@@ -1163,6 +1163,7 @@ def sandbox_auth_docker_args(
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
+    container_name: str | None = None,
 ) -> list[str]:
     try:
         command = BACKEND_AUTH_COMMANDS[agent_backend][action]
@@ -1193,6 +1194,8 @@ def sandbox_auth_docker_args(
         "-e",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ]
+    if container_name:
+        args.extend(["--name", container_name])
     if interactive:
         args.insert(2, "-it")
     args.append(image)
@@ -1209,7 +1212,18 @@ def run_sandbox_auth_command(
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
+    timeout: float | None = None,
+    container_name: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one auth-related command against the shared login volume.
+
+    *timeout* applies to the non-interactive path only and is enforced on the
+    ``docker run`` client.  Killing the client does not stop the container, so
+    when a *container_name* is given the container is force-removed on
+    timeout before :class:`subprocess.TimeoutExpired` propagates; without a
+    name there is nothing to address and the container is left to exit on its
+    own.
+    """
     docker_image = image or resolve_sandbox_image(
         SandboxConfig(enabled=True), agent_backend
     )
@@ -1221,10 +1235,18 @@ def run_sandbox_auth_command(
         add_host_gateway=add_host_gateway,
         extra_hosts=extra_hosts,
         interactive=interactive,
+        container_name=container_name,
     )
     if interactive:
         return subprocess.run(args, text=True)
-    return subprocess.run(args, capture_output=True, text=True)
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        if container_name:
+            _run_docker(["docker", "rm", "-f", container_name], check=False)
+        raise
 
 
 @dataclass(frozen=True)
@@ -1241,6 +1263,7 @@ class CredentialWarmResult:
     skip_reason: str | None = None
     returncode: int | None = None
     detail: str = ""
+    timed_out: bool = False
 
     @property
     def skipped(self) -> bool:
@@ -1255,6 +1278,21 @@ class CredentialWarmResult:
 #: refresh failures in prose, not by echoing the credential, but the cap keeps
 #: an unexpectedly chatty CLI from pasting its whole state into the run log.
 _WARM_DETAIL_CHARS = 400
+
+#: Upper bound on one credential warm, in seconds.  The warm is a single
+#: token-refresh exchange plus, on first use, an image pull; it is never the
+#: long-running agent turn that ``sandbox.timeout_seconds`` is sized for.  A
+#: stalled refresh must not wedge the whole evolution loop before any candidate
+#: is dispatched, so the bound always applies -- ``sandbox.timeout_seconds``
+#: can only tighten it.
+CREDENTIAL_WARM_TIMEOUT_SECONDS = 300
+
+
+def credential_warm_timeout(sandbox: SandboxConfig) -> float:
+    """Return the timeout for one warm: the fixed cap, tightened by the sandbox's."""
+    if sandbox.timeout_seconds is not None:
+        return float(min(sandbox.timeout_seconds, CREDENTIAL_WARM_TIMEOUT_SECONDS))
+    return float(CREDENTIAL_WARM_TIMEOUT_SECONDS)
 
 
 def warm_backend_credential(
@@ -1284,6 +1322,10 @@ def warm_backend_credential(
             backend=agent_backend, warmed=False, skip_reason=skip_reason
         )
 
+    timeout = credential_warm_timeout(sandbox)
+    # Named so a timed-out warm can be stopped rather than left running
+    # against the shared login volume after the client has given up on it.
+    container_name = f"helix-warm-{agent_backend}-{uuid.uuid4().hex[:12]}"
     try:
         image = resolve_sandbox_image(sandbox, agent_backend)
         result = run_sandbox_auth_command(
@@ -1293,6 +1335,21 @@ def warm_backend_credential(
             network=sandbox.network,
             add_host_gateway=sandbox.add_host_gateway,
             extra_hosts=sandbox.extra_hosts,
+            timeout=timeout,
+            container_name=container_name,
+        )
+    except subprocess.TimeoutExpired:
+        # Non-fatal, like every other warm failure: the candidates fall back
+        # to refreshing for themselves.  Reported distinctly because "the
+        # refresh hung" points somewhere different from "the refresh failed".
+        return CredentialWarmResult(
+            backend=agent_backend,
+            warmed=False,
+            timed_out=True,
+            detail=(
+                f"warm did not finish within {timeout:.0f}s; the warm "
+                "container was stopped"
+            ),
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return CredentialWarmResult(

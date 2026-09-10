@@ -28,7 +28,9 @@ from helix.backends import (
 from helix.config import AgentConfig, EvaluatorConfig, HelixConfig, SandboxConfig
 from helix.evolution import _warm_generation_credential
 from helix.sandbox import (
+    CREDENTIAL_WARM_TIMEOUT_SECONDS,
     CredentialWarmResult,
+    credential_warm_timeout,
     sandbox_auth_docker_args,
     warm_backend_credential,
 )
@@ -204,6 +206,102 @@ class TestWarmFailureIsNotFatal:
             "codex", sandbox=SandboxConfig(enabled=True)
         )
         assert 0 < len(result.detail) <= 400
+
+
+# ---------------------------------------------------------------------------
+# A stalled warm cannot wedge the loop
+# ---------------------------------------------------------------------------
+
+
+class TestWarmIsBounded:
+    """The warm runs on the main thread before any candidate is dispatched.
+
+    Without a timeout, a token-refresh HTTP call that blackholes blocks the
+    whole evolution loop indefinitely with nothing but a debug log line, and
+    the unnamed container keeps running against the shared login volume
+    after the operator gives up and hits Ctrl-C.
+    """
+
+    def test_timeout_always_applies(self) -> None:
+        assert credential_warm_timeout(SandboxConfig(enabled=True)) == (
+            CREDENTIAL_WARM_TIMEOUT_SECONDS
+        )
+
+    def test_sandbox_timeout_can_only_tighten_the_cap(self) -> None:
+        assert credential_warm_timeout(
+            SandboxConfig(enabled=True, timeout_seconds=30)
+        ) == 30.0
+        assert credential_warm_timeout(
+            SandboxConfig(enabled=True, timeout_seconds=10_000)
+        ) == CREDENTIAL_WARM_TIMEOUT_SECONDS
+
+    def test_warm_runs_with_a_timeout_and_a_named_container(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        def _fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            seen["args"] = args
+            seen.update(kwargs)
+            return _completed(0)
+
+        monkeypatch.setattr("helix.sandbox.subprocess.run", _fake_run)
+        result = warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True, timeout_seconds=45)
+        )
+
+        assert result.warmed is True
+        assert seen["timeout"] == 45.0
+        name = seen["args"][seen["args"].index("--name") + 1]
+        assert name.startswith("helix-warm-codex-")
+
+    def test_timeout_is_reported_not_raised_and_the_container_is_stopped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        removed: list[list[str]] = []
+
+        def _hang(args: list[str], **kwargs: Any) -> None:
+            raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+
+        def _fake_docker(args: list[str], **_k: Any) -> subprocess.CompletedProcess[str]:
+            removed.append(args)
+            return _completed(0)
+
+        monkeypatch.setattr("helix.sandbox.subprocess.run", _hang)
+        monkeypatch.setattr("helix.sandbox._run_docker", _fake_docker)
+
+        result = warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True, timeout_seconds=7)
+        )
+
+        assert result.failed is True
+        assert result.timed_out is True
+        assert result.warmed is False
+        assert result.skipped is False
+        assert "7s" in result.detail
+        # Killing the docker client does not stop the container; the named
+        # container must be force-removed so it stops touching the volume.
+        assert len(removed) == 1
+        assert removed[0][:3] == ["docker", "rm", "-f"]
+        assert removed[0][3].startswith("helix-warm-codex-")
+
+    def test_timed_out_warm_is_a_warning_in_the_loop(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            "helix.evolution.warm_backend_credential",
+            lambda backend, **_k: CredentialWarmResult(
+                backend=backend, warmed=False, timed_out=True, detail="slow"
+            ),
+        )
+        result = _warm_generation_credential(
+            _config("codex", sandboxed=True), gen=3, announce_skip=False
+        )
+        assert result is not None and result.failed and result.timed_out
+        printed = " ".join(capsys.readouterr().out.lower().split())
+        assert "timed out" in printed
+        assert "exit none" not in printed
+        assert "run continues" in printed
 
 
 # ---------------------------------------------------------------------------
