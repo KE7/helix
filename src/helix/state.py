@@ -23,7 +23,13 @@ from helix.population import FrontierType
 # ``state.json``; subsequent bumps mark explicit JSON-native schema
 # additions (the unversioned predecessor is treated as v0; ``load_state``
 # migrates by default-filling missing fields).
-# v3 adds ``failed_attempt_history``.
+# v3 adds ``failed_attempt_history``.  The field is additive and optional
+# (a v2 ``load_state`` would ignore it, and a v3 one default-fills it when
+# absent), so the bump exists to keep the stamp honest about which fields
+# a file may carry, not because v2 code could misread the payload.  The
+# cost is that ``load_state`` refuses a newer stamp: a run touched by a v3
+# build cannot be resumed by a v2 build without lowering ``schema_version``
+# in state.json by hand, which then drops the history on the next save.
 SCHEMA_VERSION: int = 3
 
 
