@@ -670,7 +670,11 @@ if you route `XDG_CONFIG_HOME` through `passthrough_env` or `[env]`, the cursor
 backend logs a warning because it will break that backend's login.
 `helix.agent_state.REJECTED_AGENT_STATE_KNOBS` records these so they are not
 re-tried, and `tests/integration/test_agent_state_isolation.py` pins the
-behaviour against the real CLIs.
+behaviour against the real CLIs. That suite runs real containers, so a bare
+`pytest` does not collect it; opt in with
+`pytest -m docker_integration tests/integration/` (set
+`HELIX_DOCKER_TESTS_STRICT=1` to fail rather than skip when Docker or an image
+is missing).
 
 **What still crosses candidates.** Relocation is partial, and the residue is
 listed per backend in `helix.agent_state.UNRELOCATED_AGENT_STATE`. The
