@@ -22,6 +22,7 @@ from helix.exceptions import (
 )
 from helix.executor import _scrub_environment
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
+from helix.trace import traced
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,7 @@ def build_seed_generation_prompt(
     )
 
 
+@traced("seed")
 def generate_seed(
     worktree_path: str,
     prompt: str,
@@ -1547,6 +1549,7 @@ def _write_backend_artifacts(
         )
 
 
+@traced("agent")
 def invoke_claude_code(
     worktree_path: str,
     prompt: str,
