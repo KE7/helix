@@ -12,6 +12,13 @@ agent state" section covers the three backends that worked. This note records
 the reasoning for the one that did not, so it does not get re-litigated from
 scratch.
 
+On the host, `/helix-state` is a directory inside the candidate's
+`helix-sandbox-*` scratch tree (a `tempfile.mkdtemp` directory, mode `0700`),
+created `0700` in its own right, and removed with that tree as soon as the
+candidate's container exits. That matters because part of what lands there is
+a credential store -- opencode's `opencode.db` carries OAuth access and refresh
+tokens -- so it must never be world-readable or left behind.
+
 All observations below are from the images HELIX ships
 (`ghcr.io/ke7/helix-evo-runner-*:latest`), against synthetic credentials in
 throwaway volumes.
