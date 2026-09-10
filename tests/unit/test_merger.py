@@ -5,8 +5,11 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
+import pytest
+
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig, EvaluatorConfig
+from helix.exceptions import CredentialRefreshError
 from helix.mutator import MutationError
 from helix.merger import (
     build_merge_prompt,
@@ -304,6 +307,35 @@ class TestMerge:
         merge(ca, cb, "g1-m0", config, Path("/tmp"))
 
         mock_remove.assert_called_once_with(child)
+
+    def test_credential_error_removes_worktree_and_reraises(self, mocker):
+        """A dead login must not leak the merge worktree or become a traceback.
+
+        ``CredentialRefreshError`` is deliberately not a ``MutationError``, so
+        without its own clause it escaped ``merge()`` with the child worktree
+        still on disk.  Mirror ``mutate()``: clean up, label the operation,
+        re-raise so evolution.py can count it as a credential failure.
+        """
+        ca = make_candidate("g0-s0")
+        cb = make_candidate("g0-s1")
+        config = make_config()
+
+        child = make_candidate("g1-m0")
+        mocker.patch("helix.merger.clone_candidate", return_value=child)
+        mocker.patch("helix.merger.get_diff", return_value="some diff")
+        mocker.patch(
+            "helix.merger.invoke_claude_code",
+            side_effect=CredentialRefreshError("login is dead"),
+        )
+        mock_remove = mocker.patch("helix.merger.remove_worktree")
+        mock_snapshot = mocker.patch("helix.merger.snapshot_candidate")
+
+        with pytest.raises(CredentialRefreshError) as exc:
+            merge(ca, cb, "g1-m0", config, Path("/tmp"))
+
+        assert exc.value.operation == "merge g1-m0 (g0-s0 + g0-s1)"
+        mock_remove.assert_called_once_with(child)
+        mock_snapshot.assert_not_called()
 
     def test_snapshot_not_called_by_merge_on_success(self, mocker):
         """merge() must NOT call snapshot_candidate — the caller owns that step.

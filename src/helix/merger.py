@@ -10,7 +10,12 @@ from typing import Callable, Mapping
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff  # noqa: F401
-from helix.exceptions import MutationError, RateLimitError, print_helix_error
+from helix.exceptions import (
+    CredentialRefreshError,
+    MutationError,
+    RateLimitError,
+    print_helix_error,
+)
 from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
 
 # ---------------------------------------------------------------------------
@@ -356,6 +361,18 @@ def merge(
         return None
     except RateLimitError:
         # Rate limit — clean up orphaned worktree, then re-raise.
+        try:
+            remove_worktree(child)
+        except Exception:
+            pass
+        raise
+    except CredentialRefreshError as exc:
+        # The stored login, not this merge, is what failed.  Mirror
+        # ``mutate()``: clean up the orphaned worktree and re-raise so the
+        # merge call site in evolution.py can count it as a credential
+        # failure and fall through to mutation instead of dying with a
+        # traceback and a leaked worktree.
+        exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         try:
             remove_worktree(child)
         except Exception:

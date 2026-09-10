@@ -26,7 +26,12 @@ from helix.display import (
     print_warning,
     render_frontier_table,
 )
-from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_helix_error
+from helix.exceptions import (
+    CredentialRefreshError,
+    RateLimitError,
+    ResumeIncompatibleError,
+    print_helix_error,
+)
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
@@ -694,6 +699,18 @@ def evolve(
             "Run [cyan]helix resume[/cyan] to continue when rate limits clear."
         )
         raise SystemExit(2)
+    except CredentialRefreshError as exc:
+        # Every in-loop path handles this itself (the slot is skipped and the
+        # run continues), so reaching here means a path that does not.  Show
+        # the panel with its suggestion instead of a raw traceback.
+        logger.error("Credential failure escaped the evolution loop: %s", exc)
+        print_helix_error(exc)
+        print_error(
+            "Evolution state has been saved. Re-authenticate with "
+            f"[cyan]helix sandbox login {config.agent.backend}[/cyan] if the "
+            "login is stale, then run [cyan]helix resume[/cyan]."
+        )
+        raise SystemExit(2)
     except KeyboardInterrupt:
         _handle_keyboard_interrupt(project_root)
     else:
@@ -1234,6 +1251,15 @@ def resume(config_path: str, project_dir: Path | None) -> None:
             f"Rate limit reached: {exc}\n"
             "Evolution state has been saved. "
             "Run [cyan]helix resume[/cyan] again when rate limits clear."
+        )
+        raise SystemExit(2)
+    except CredentialRefreshError as exc:
+        logger.error("Credential failure escaped the resumed loop: %s", exc)
+        print_helix_error(exc)
+        print_error(
+            "Evolution state has been saved. Re-authenticate with "
+            f"[cyan]helix sandbox login {config.agent.backend}[/cyan] if the "
+            "login is stale, then run [cyan]helix resume[/cyan] again."
         )
         raise SystemExit(2)
     except KeyboardInterrupt:

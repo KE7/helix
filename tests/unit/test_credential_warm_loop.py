@@ -168,6 +168,60 @@ class TestCredentialFailureIsVisible:
         assert "not a failure of the candidate's code" in out
         assert "helix sandbox login" in out
 
+    def test_merge_credential_failure_is_named_and_the_run_survives(
+        self,
+        mocker,  # noqa: F811
+        tmp_path,
+        all_mocks,  # noqa: F811
+        warm_calls,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The merge gate fires before any mutation in a generation, so a
+        stale login can surface there first.  It must get the same treatment
+        as a mutation: counted, named, and the run continues into mutation
+        rather than dying with a traceback."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].side_effect = CredentialRefreshError(
+            "Codex CLI could not use its stored credential "
+            "(matched 'your access token could not be refreshed' in stderr)",
+            suggestion="Re-authenticate with `helix sandbox login codex`.",
+        )
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9, "i2": 0.5})
+            return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _sandboxed(
+            make_config(
+                max_generations=2,
+                merge_enabled=True,
+                max_merge_invocations=5,
+                merge_val_overlap_floor=1,
+                max_evaluations=10000,
+            )
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        all_mocks["merge"].assert_called_once()
+        # The run went on to mutate after the merge died on the credential.
+        assert all_mocks["mutate"].call_count >= 1
+        assert result.best_candidate is not None
+
+        out = " ".join(capsys.readouterr().out.lower().split())
+        assert "merge" in out
+        assert "credential" in out
+        assert "not a failure of the merged code" in out
+        # The end-of-run summary names the merge slot, not just the mutation.
+        assert "1 mutation(s) failed on the shared" in out
+        assert "helix sandbox login" in out
+
     def test_clean_run_says_nothing_about_credentials(
         self,
         mocker,  # noqa: F811
