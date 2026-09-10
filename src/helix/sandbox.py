@@ -937,6 +937,13 @@ def _prepare_agent_state_dir(
     removed by the ``_safe_rmtree`` in :func:`run_sandboxed_commands`.  It is
     chowned to ``node`` because the container runs as that user, matching how
     the workspace copy is handed over.
+
+    Some of what lands here is a credential store -- opencode's ``opencode.db``
+    carries OAuth access and refresh tokens -- and it is on host disk for the
+    candidate's lifetime.  Two things keep it private: *tmp_path* comes from
+    :func:`tempfile.mkdtemp`, which creates it mode ``0700``, and the state
+    tree itself is created ``0700`` so the guarantee does not rest on the
+    parent alone (or on the umask) once ownership passes to ``node``.
     """
     if scope != "agent" or agent_backend is None:
         return None
@@ -944,8 +951,9 @@ def _prepare_agent_state_dir(
     if not subdirs:
         return None
     state_dir = tmp_path / "agent-state"
+    state_dir.mkdir(mode=0o700, exist_ok=True)
     for name in subdirs:
-        (state_dir / name).mkdir(parents=True, exist_ok=True)
+        (state_dir / name).mkdir(mode=0o700, parents=True, exist_ok=True)
     _docker_chown_workspace(state_dir, image, "node:node")
     return state_dir
 

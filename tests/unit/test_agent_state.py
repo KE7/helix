@@ -8,6 +8,8 @@ volume is what keeps token refresh and the CLIs' refresh locks working.
 
 from __future__ import annotations
 
+import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -220,6 +222,60 @@ def test_state_dir_lives_in_the_per_candidate_scratch_tree(
     assert state_dir is not None
     assert state_dir.is_relative_to(tmp_path)
     assert (state_dir / "codex").is_dir()
+
+
+def test_state_dir_is_private_to_the_owner(tmp_path: Path, mocker) -> None:
+    """``opencode.db`` holds OAuth tokens and sits on host disk while the
+    candidate runs; the tree must be 0700 in its own right, not only by
+    virtue of the mkdtemp parent."""
+    mocker.patch("helix.sandbox._docker_chown_workspace")
+    state_dir = _prepare_agent_state_dir(
+        tmp_path, scope="agent", agent_backend="opencode", image="img"
+    )
+    assert state_dir is not None
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((state_dir / "opencode").stat().st_mode) == 0o700
+
+
+def test_state_dir_is_removed_with_the_candidate_scratch_tree(
+    tmp_path: Path, mocker
+) -> None:
+    """The credential-bearing state must not outlive the candidate."""
+    import helix.sandbox as sandbox_mod
+
+    created: list[Path] = []
+    real_mkdtemp = sandbox_mod.tempfile.mkdtemp
+
+    def _mkdtemp(**kwargs):
+        path = real_mkdtemp(dir=tmp_path, **kwargs)
+        created.append(Path(path))
+        return path
+
+    mocker.patch.object(sandbox_mod.tempfile, "mkdtemp", _mkdtemp)
+    mocker.patch("helix.sandbox._copy_tree_contents")
+    mocker.patch("helix.sandbox._init_synthetic_git_repo")
+    mocker.patch("helix.sandbox._docker_chown_workspace")
+    mocker.patch("helix.sandbox._docker_relax_workspace_permissions")
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+    mocker.patch("helix.sandbox._run_docker")
+    mocker.patch(
+        "helix.sandbox._run_docker_process",
+        return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
+    )
+    source = tmp_path / "src"
+    source.mkdir()
+    sandbox_mod.run_sandboxed_command(
+        ["true"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True, image="img"),
+        scope="agent",
+        sync_back=False,
+        agent_backend="opencode",
+    )
+    assert len(created) == 1
+    assert not (created[0] / "agent-state").exists()
+    assert not created[0].exists()
 
 
 # ---------------------------------------------------------------------------
