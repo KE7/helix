@@ -93,6 +93,15 @@ _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # What an ``O_NOFOLLOW`` open reports when it meets a symlink: ``ELOOP`` on
 # Linux and macOS, ``EMLINK`` on FreeBSD.
 _SYMLINK_REFUSED_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
+# Serialization order of ``EvalResult.to_dict()`` fields inside a stored
+# evaluator output: compact structured scores first, feedback payloads
+# next; ``asi`` is always placed last (see ``_trim_evaluator_output``).
+_EVALUATOR_OUTPUT_KEY_ORDER = (
+    "instance_scores",
+    "objective_scores",
+    "side_info",
+    "per_example_side_info",
+)
 
 
 def summary_file_instruction() -> str:
@@ -261,13 +270,30 @@ def _trim_evaluator_output(raw: dict[str, Any]) -> dict[str, Any]:
     Everything else -- ``side_info``, ``per_example_side_info``,
     ``objective_scores`` -- is the feedback/diagnostic payload this whole
     history exists to carry and is passed through untouched.
+
+    Key order is load-bearing because the serialized text is cut at
+    ``MAX_EVALUATOR_OUTPUT_CHARS``: the compact structured fields come
+    first and ``asi`` (typically captured stdout, and by far the largest)
+    last, so a verbose evaluator loses the tail of its transcript rather
+    than the per-example numbers.
     """
-    trimmed = dict(raw)
-    trimmed.pop("candidate_id", None)
-    trimmed.pop("scores", None)
-    if not trimmed.get("asi"):
-        trimmed.pop("asi", None)
-    return trimmed
+    remaining = {
+        key: value
+        for key, value in raw.items()
+        if key not in ("candidate_id", "scores")
+    }
+    asi = remaining.pop("asi", None)
+    ordered = {
+        key: remaining.pop(key)
+        for key in _EVALUATOR_OUTPUT_KEY_ORDER
+        if key in remaining
+    }
+    # Any field this module does not know about lands between the
+    # structured scores and the transcript, in arrival order.
+    ordered.update(remaining)
+    if asi:
+        ordered["asi"] = asi
+    return ordered
 
 
 def _evaluator_output(evaluation: EvalResult) -> str | None:
@@ -275,7 +301,6 @@ def _evaluator_output(evaluation: EvalResult) -> str | None:
         rendered = json.dumps(
             _trim_evaluator_output(evaluation.to_dict()),
             ensure_ascii=False,
-            sort_keys=True,
         )
     except (TypeError, ValueError):
         return None

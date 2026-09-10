@@ -315,6 +315,27 @@ def test_summary_less_entries_are_evicted_before_renderable_ones():
     ]
 
 
+def test_verbose_stdout_is_cut_before_the_per_example_scores():
+    # The cut lands on the end of the serialized JSON, so the transcript
+    # must be serialized last: a verbose evaluator loses the tail of its
+    # stdout, never the numbers that say which examples regressed.
+    verbose = EvalResult(
+        candidate_id="g1-s0",
+        scores={"quality": 0.4},
+        instance_scores={"example-1": 0.4, "example-2": 0.1},
+        objective_scores=[{"quality": 0.4}, {"quality": 0.1}],
+        asi={"stdout": "E" * (MAX_EVALUATOR_OUTPUT_CHARS * 2)},
+    )
+    history = append_rejected_attempt({}, "g0-s0", _summary(), verbose)
+    stored = history["g0-s0"][0]["evaluator_output"]
+
+    assert stored is not None
+    assert stored.startswith('{"instance_scores": {"example-1": 0.4, "example-2": 0.1}')
+    assert '"objective_scores": [{"quality": 0.4}, {"quality": 0.1}]' in stored
+    assert stored.index('"objective_scores"') < stored.index('"asi"')
+    assert "cut to a 20,480-character limit" in stored
+
+
 def test_invalid_persisted_entry_is_omitted_instead_of_rendered():
     invalid = [{"summary": _summary(), "evaluator_output": "missing score"}]
     assert render_failure_history(invalid) == ""
