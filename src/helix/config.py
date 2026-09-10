@@ -299,10 +299,13 @@ class EvolutionConfig(BaseModel):
     failed_attempt_history_limit: int = Field(
         default=3,
         description=(
-            "Maximum rejected attempts retained per parent and replayed into "
-            "that parent's next mutation prompt. Set 0 to disable retention; "
-            "the maximum is 3, which is also the default. Every retained "
-            "attempt is rendered, whatever the evaluator's verbosity: each is "
+            "Maximum rejected attempts replayed into a parent's next mutation "
+            "prompt. Set 0 to show none; the maximum is 3, which is also the "
+            "default. The record itself always keeps the 3 most recent "
+            "rejected attempts per parent whatever this is set to, so "
+            "lowering it on a resumed run hides history without deleting it "
+            "and raising it again shows what was recorded meanwhile. Every "
+            "shown attempt is rendered, whatever the evaluator's verbosity: each is "
             "already bounded on the way in (a self-report of at most 4096 "
             "characters and an evaluator output of at most 20480, either one "
             "cut with a note in the text rather than discarded), so this "

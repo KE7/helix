@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix import budget as budget_api
+from helix.change_summary import append_rejected_attempt
 from helix.config import (
     DatasetConfig,
     EvolutionConfig,
@@ -111,6 +112,7 @@ def make_config(
     merge_val_overlap_floor: int = 5,
     merge_subsample_size: int = 5,
     frontier_type: str = "hybrid",
+    failed_attempt_history_limit: int = 3,
 ) -> HelixConfig:
     """Build a HelixConfig for evolution unit tests.
 
@@ -132,6 +134,7 @@ def make_config(
         merge_val_overlap_floor=merge_val_overlap_floor,
         merge_subsample_size=merge_subsample_size,
         frontier_type=frontier_type,
+        failed_attempt_history_limit=failed_attempt_history_limit,
     )
     return HelixConfig(
         objective="Improve the code",
@@ -695,6 +698,92 @@ class TestGatingInEvolutionLoop:
         saved_states = [call.args[0] for call in all_mocks["save_state"].call_args_list]
         assert saved_states
         assert saved_states[-1].failed_attempt_history == {}
+
+    def test_resuming_with_a_lower_history_limit_does_not_delete_the_record(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """Resume with ``failed_attempt_history_limit = 0``, then with 3.
+
+        The 0-limit generation must render no history into its prompt but
+        must persist the record it loaded untouched, so that the following
+        resume at 3 renders every stored attempt.  Before the fix the
+        generation-start normalization rewrote the record at the run's
+        configured limit and the next ``_save_state`` made that permanent.
+        """
+        summaries = [f"attempt {index}: rewrote the parser" for index in range(3)]
+        history: dict[str, list[dict[str, Any]]] = {}
+        for summary in summaries:
+            history = append_rejected_attempt(
+                history,
+                "g0-s0",
+                summary,
+                EvalResult(
+                    candidate_id="g1-s1",
+                    scores={},
+                    asi={"stdout": "expected 2, got 1"},
+                    instance_scores={"i1": 0.2},
+                    objective_scores=[{"quality": 0.2}],
+                ),
+            )
+
+        def prior_state() -> EvolutionState:
+            return EvolutionState(
+                generation=1,
+                frontier=["g0-s0"],
+                instance_scores={"g0-s0": {"i1": 0.5}},
+                budget=BudgetState(evaluations=1),
+                config_hash="cfg-prior",
+                i=0,
+                num_metric_calls_by_discovery={"g0-s0": 0},
+                frontier_type="hybrid",
+                failed_attempt_history=json.loads(json.dumps(history)),
+            )
+
+        seed = make_candidate("g0-s0")
+        (tmp_path / ".helix" / "worktrees" / "g0-s0").mkdir(parents=True)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["_load_evaluation"].return_value = make_eval_result(
+            "g0-s0", {"i1": 0.5}
+        )
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, config, split=None, instances=None, **kwargs: (
+                make_eval_result(candidate.id, {"i1": 0.5})
+            )
+        )
+        backgrounds: list[str | None] = []
+
+        def capture_background(*_args, **kwargs):
+            backgrounds.append(kwargs["background"])
+            return make_candidate(f"g2-s{len(backgrounds)}", generation=2)
+
+        all_mocks["mutate"].side_effect = capture_background
+
+        # First resume: limit 0.  Nothing is shown, nothing is lost.
+        all_mocks["load_state"].return_value = prior_state()
+        run_evolution(
+            make_config(max_generations=2, failed_attempt_history_limit=0),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+        assert backgrounds == [None]
+        saved_states = [call.args[0] for call in all_mocks["save_state"].call_args_list]
+        assert saved_states
+        assert [
+            item["summary"] for item in saved_states[-1].failed_attempt_history["g0-s0"]
+        ] == summaries
+
+        # Second resume: limit 3.  Every stored attempt reaches the prompt.
+        backgrounds.clear()
+        all_mocks["load_state"].return_value = prior_state()
+        run_evolution(
+            make_config(max_generations=2, failed_attempt_history_limit=3),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+        assert len(backgrounds) == 1
+        assert backgrounds[0] is not None
+        for summary in summaries:
+            assert summary in backgrounds[0]
 
     def test_returns_structured_helix_result(self, mocker, tmp_path, all_mocks):
         """run_evolution exposes GEPA-style structured result metadata."""

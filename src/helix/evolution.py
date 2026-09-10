@@ -1561,7 +1561,7 @@ def _run_proposal_worker(
         # configured background rather than replacing it.
         _failed_attempt_context = render_failure_history(
             (failed_attempt_history or {}).get(_parent.id, []),
-            retained_limit=config.evolution.failed_attempt_history_limit,
+            limit=config.evolution.failed_attempt_history_limit,
         )
         _mutation_background = "\n\n".join(
             part
@@ -2758,10 +2758,12 @@ def _run_evolution_impl(
 
             # Normalize the retained rejected-report map once, sequentially,
             # before any worker starts: the workers read it concurrently and
-            # must not be the ones rewriting it.
+            # must not be the ones rewriting it.  This trims to the storage
+            # cap only; the configured prompt limit is applied when the
+            # history is rendered, so a resume with a lower limit hides
+            # entries without deleting them from state.json.
             state.failed_attempt_history = normalize_failure_history(
-                state.failed_attempt_history,
-                config.evolution.failed_attempt_history_limit,
+                state.failed_attempt_history
             )
             _failed_attempt_history = state.failed_attempt_history
 
@@ -3029,7 +3031,6 @@ def _run_evolution_impl(
                             _parent.id,
                             child.change_summary,
                             gating_result,
-                            limit=config.evolution.failed_attempt_history_limit,
                         )
                         _save_state(state)
                         TRACE.emit(
@@ -3096,7 +3097,6 @@ def _run_evolution_impl(
                             _parent.id,
                             child.change_summary,
                             gating_result,
-                            limit=config.evolution.failed_attempt_history_limit,
                         )
                         _save_state(state)
                         print_warning(
@@ -3179,7 +3179,6 @@ def _run_evolution_impl(
                             _parent.id,
                             child.change_summary,
                             stage_result,
-                            limit=config.evolution.failed_attempt_history_limit,
                         )
                         _save_state(state)
                         TRACE.emit(

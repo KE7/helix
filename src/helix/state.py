@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from helix.change_summary import MAX_HISTORY_PER_PARENT, normalize_failure_history
+from helix.change_summary import normalize_failure_history
 from helix.population import FrontierType
 
 
@@ -169,7 +169,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
 
     state.failed_attempt_history = normalize_failure_history(
-        state.failed_attempt_history, limit=MAX_HISTORY_PER_PARENT
+        state.failed_attempt_history
     )
     data = {
         # GEPA parity (rng-state-persist audit D1): schema_version is written
@@ -269,7 +269,7 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         frontier_type=frontier_type,
         resume_semantics=data.get("resume_semantics", {}),
         failed_attempt_history=normalize_failure_history(
-            data.get("failed_attempt_history", {}), limit=MAX_HISTORY_PER_PARENT
+            data.get("failed_attempt_history", {})
         ),
         schema_version=SCHEMA_VERSION,
     )
