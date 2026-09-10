@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `helix evolve --trace PATH` / `helix resume --trace PATH` (or `HELIX_TRACE=PATH`)
+  append a JSON Lines timing trace of the run: `start`/`end` records for
+  every `run`, `proposal`, `evaluate`, `validate`, `agent`, and `seed` span,
+  with `duration_seconds`, `outcome`, and candidate identity.  A trace whose
+  last line is not the `run` span's `end` record was cut short.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by
