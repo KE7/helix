@@ -28,7 +28,11 @@ from helix.exceptions import (
     MutationError,
     RateLimitError,
 )
-from helix.mutator import credential_failure_marker, invoke_claude_code
+from helix.mutator import (
+    credential_failure_is_transient,
+    credential_failure_marker,
+    invoke_claude_code,
+)
 
 
 # Codex CLI 0.130.0 -- the four suffixes it appends to one prefix, plus the
@@ -111,8 +115,30 @@ class TestMarkerRecognition:
 
     def test_marker_is_returned_as_evidence(self) -> None:
         """The caller names what matched instead of asserting a bare verdict."""
-        marker = credential_failure_marker(CODEX_ALREADY_USED)
+        marker = credential_failure_marker(CODEX_EXPIRED)
         assert marker == "your access token could not be refreshed"
+
+    def test_already_used_is_the_transient_marker(self) -> None:
+        """Losing a refresh race is named as such, not as a dead login.
+
+        The already-used suffix is the exact outcome a lost race produces; it
+        must be matched ahead of the generic prefix so it can be retried and
+        so the operator is not sent to re-login over a working credential.
+        """
+        marker = credential_failure_marker(CODEX_ALREADY_USED)
+        assert marker == "because your refresh token was already used"
+        assert credential_failure_is_transient(marker)
+
+    @pytest.mark.parametrize(
+        "text",
+        [CODEX_EXPIRED, CODEX_REVOKED, CODEX_OTHER_ACCOUNT, CODEX_BARE,
+         CODEX_GET_ACCOUNT, CODEX_NO_ACCOUNT, OPENCODE_REFRESH_FAILED,
+         CLAUDE_OAUTH_REFRESH, CLAUDE_INVALID_KEY],
+    )
+    def test_every_other_wording_is_not_transient(self, text: str) -> None:
+        marker = credential_failure_marker(text)
+        assert marker is not None
+        assert not credential_failure_is_transient(marker)
 
     def test_embedded_in_a_larger_stream_is_still_found(self) -> None:
         stream = "\n".join(
@@ -148,14 +174,15 @@ class TestInvocationClassification:
     def test_non_zero_exit_with_cli_wording_on_stderr(
         self, mocker: Any, tmp_path: Path
     ) -> None:
-        _patch_backend(mocker, returncode=1, stderr=CODEX_ALREADY_USED)
+        _patch_backend(mocker, returncode=1, stderr=CODEX_EXPIRED)
         with pytest.raises(CredentialRefreshError) as exc:
             invoke_claude_code(
                 str(tmp_path), "p", AgentConfig(backend="codex")
             )
         err = exc.value
         assert err.exit_code == 1
-        assert err.stderr == CODEX_ALREADY_USED
+        assert err.stderr == CODEX_EXPIRED
+        assert err.transient is False
         assert "credential" in err.suggestion.lower()
         assert "helix sandbox login codex" in err.suggestion
 
@@ -272,3 +299,103 @@ class TestInvocationClassification:
             invoke_claude_code(
                 str(tmp_path), "p", AgentConfig(backend="codex")
             )
+
+
+def _completed(
+    returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["backend"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+CODEX_SUCCESS_STREAM = json.dumps({"type": "turn.completed"})
+
+
+class TestLostRefreshRaceIsRetried:
+    """The already-used outcome is the race this work exists to handle.
+
+    When it happens, the *winner* has just written a refreshed credential to
+    the shared volume, so the right response is to invoke again against it,
+    not to drop the slot and tell the operator to redo a login that is fine.
+    """
+
+    def test_already_used_is_retried_once_and_the_retry_can_succeed(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _completed(1, stderr=CODEX_ALREADY_USED),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
+            ],
+        )
+        parsed, _usage = invoke_claude_code(
+            str(tmp_path), "p", AgentConfig(backend="codex")
+        )
+        assert parsed["events"]
+        assert run.call_count == 2
+
+    def test_zero_exit_already_used_envelope_is_retried_too(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Codex swallows the failure on exit 0; the envelope path retries as well."""
+        stream = "\n".join(
+            [
+                json.dumps({"type": "thread.started"}),
+                json.dumps({"type": "error", "is_error": True,
+                            "message": CODEX_ALREADY_USED}),
+            ]
+        )
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _completed(0, stdout=stream),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
+            ],
+        )
+        parsed, _usage = invoke_claude_code(
+            str(tmp_path), "p", AgentConfig(backend="codex")
+        )
+        assert parsed["events"]
+        assert run.call_count == 2
+
+    def test_second_loss_is_raised_without_a_relogin_instruction(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _completed(1, stderr=CODEX_ALREADY_USED),
+                _completed(1, stderr=CODEX_ALREADY_USED),
+            ],
+        )
+        with pytest.raises(CredentialRefreshError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        err = exc.value
+        assert run.call_count == 2  # exactly one retry, no loop
+        assert err.transient is True
+        assert "retry" in str(err).lower()
+        # The stored credential is the winner's fresh one; do not tell the
+        # operator to throw it away.
+        assert "sandbox login" not in err.suggestion
+        assert "helix resume" in err.suggestion
+
+    @pytest.mark.parametrize("text", [CODEX_EXPIRED, CODEX_REVOKED, CODEX_BARE])
+    def test_a_dead_login_is_not_retried(
+        self, mocker: Any, tmp_path: Path, text: str
+    ) -> None:
+        """Retrying an expired or revoked credential only burns a turn."""
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[_completed(1, stderr=text)],
+        )
+        with pytest.raises(CredentialRefreshError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert run.call_count == 1
+        assert exc.value.transient is False
+        assert "helix sandbox login codex" in exc.value.suggestion

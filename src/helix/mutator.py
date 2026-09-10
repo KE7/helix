@@ -619,14 +619,26 @@ def _looks_like_rate_limit(text: str) -> bool:
 # "auth") is the false-positive trap this repo has already paid for once --
 # a candidate whose own diff or test output mentions tokens must never be
 # reported to the operator as a broken login.
+# Markers whose failure is *transient*: the credential is not broken, this
+# invocation merely lost a refresh race.  Checked before the general markers so
+# the more specific wording is what gets reported, and so the caller can retry
+# once against the credential the winner has just stored.
+_TRANSIENT_CREDENTIAL_FAILURE_MARKERS: tuple[str, ...] = (
+    # Codex CLI (codex-cli 0.130.0): the suffix it appends when another
+    # process spent the single-use refresh token first.  The full sentence is
+    # "Your access token could not be refreshed because your refresh token
+    # was already used. Please log out and sign in again." -- the "log out"
+    # advice is the CLI's, and is wrong for this case: the shared auth.json
+    # already holds the refreshed credential.
+    "because your refresh token was already used",
+)
+
 _CREDENTIAL_FAILURE_MARKERS: tuple[str, ...] = (
     # Codex CLI (codex-cli 0.130.0).  One prefix covers every suffix the CLI
-    # appends: "... because your refresh token was already used." / "... has
-    # expired." / "... was revoked." / "... because you have since logged out
-    # or signed in to another account." / the bare
+    # appends: "... has expired." / "... was revoked." / "... because you have
+    # since logged out or signed in to another account." / the bare
     # "Your access token could not be refreshed. Please log out and sign in
-    # again."  The already-used variant is the one a lost refresh race
-    # produces.
+    # again."  (The already-used suffix is matched first, above, as transient.)
     "your access token could not be refreshed",
     "failed to refresh token while getting account",
     "chatgpt account id not available, please re-run `codex login`",
@@ -650,10 +662,15 @@ def credential_failure_marker(text: str) -> str | None:
     if not text:
         return None
     lower = text.lower()
-    for marker in _CREDENTIAL_FAILURE_MARKERS:
+    for marker in _TRANSIENT_CREDENTIAL_FAILURE_MARKERS + _CREDENTIAL_FAILURE_MARKERS:
         if marker in lower:
             return marker
     return None
+
+
+def credential_failure_is_transient(marker: str) -> bool:
+    """True when *marker* names a lost refresh race rather than a dead login."""
+    return marker in _TRANSIENT_CREDENTIAL_FAILURE_MARKERS
 
 
 def _errored_envelope_texts(parsed: dict[str, Any]) -> list[str]:
@@ -722,10 +739,43 @@ def _credential_refresh_error(
     cmd_str: str,
     worktree_path: str,
     result: subprocess.CompletedProcess[str],
+    retried: bool = False,
 ) -> CredentialRefreshError:
-    return CredentialRefreshError(
-        f"{backend_name} could not use its stored credential "
-        f"(matched {marker!r} in {where})",
+    transient = credential_failure_is_transient(marker)
+    if transient:
+        # A lost refresh race.  The winner has stored a fresh credential, so
+        # sending the operator to re-login would discard a working one.
+        message = (
+            f"{backend_name} lost a refresh race on the shared credential "
+            f"(matched {marker!r} in {where}"
+            f"{'; failed again on retry' if retried else ''})"
+        )
+        suggestion = (
+            f"This is a credential failure, not a failed mutation: another "
+            f"candidate refreshed the shared {backend_name} login first and "
+            "the token this invocation held was already spent. The refreshed "
+            "credential is stored and should be usable"
+            + (
+                ", but a retry with it also failed. Run `helix resume`; the "
+                "stored login most likely does not need to be redone, so only "
+                "re-authenticate if this keeps recurring."
+                if retried
+                else "."
+            )
+        )
+    else:
+        message = (
+            f"{backend_name} could not use its stored credential "
+            f"(matched {marker!r} in {where})"
+        )
+        suggestion = (
+            f"This is a credential failure, not a failed mutation: {backend_name} "
+            "reported that its stored login could not be used or refreshed. "
+            f"Re-authenticate with `helix sandbox login {backend}`, then resume "
+            "the run; nothing is wrong with the candidate's code."
+        )
+    error = CredentialRefreshError(
+        message,
         operation=f"{backend_name} invocation",
         phase="credential check",
         command=cmd_str,
@@ -733,13 +783,10 @@ def _credential_refresh_error(
         stdout=result.stdout,
         stderr=result.stderr,
         exit_code=result.returncode,
-        suggestion=(
-            f"This is a credential failure, not a failed mutation: {backend_name} "
-            "reported that its stored login could not be used or refreshed. "
-            f"Re-authenticate with `helix sandbox login {backend}`, then resume "
-            "the run; nothing is wrong with the candidate's code."
-        ),
+        suggestion=suggestion,
     )
+    error.transient = transient
+    return error
 
 
 # ---------------------------------------------------------------------------
@@ -1794,49 +1841,97 @@ def invoke_claude_code(
         backend_env.update(
             agent_state_env(backend, state_root=str(opencode_state_dir))
         )
-    if sandbox is not None and sandbox.enabled:
-        sandbox_image = resolve_sandbox_image(sandbox, backend)
-        result = run_sandboxed_command(
-            args,
-            cwd=worktree_path,
-            env=backend_env,
-            sandbox=sandbox,
-            scope="agent",
-            sync_back=True,
-            image=sandbox_image,
-            agent_backend=backend,
-        )
-    else:
-        result = subprocess.run(
-            args,
-            cwd=worktree_path,
-            capture_output=True,
-            text=True,
-            env=backend_env,
-        )
-
-    parsed: dict[str, Any] | None = None
-    try:
-        if result.returncode == 0:
-            parsed = _parse_backend_output(
-                backend,
-                result,
-                cmd_str=cmd_str,
-                worktree_path=worktree_path,
+    def _attempt(*, retried: bool) -> tuple[dict[str, Any], UsageStats]:
+        """Run the backend once and classify the outcome."""
+        if sandbox is not None and sandbox.enabled:
+            sandbox_image = resolve_sandbox_image(sandbox, backend)
+            result = run_sandboxed_command(
+                args,
+                cwd=worktree_path,
+                env=backend_env,
+                sandbox=sandbox,
+                scope="agent",
+                sync_back=True,
+                image=sandbox_image,
+                agent_backend=backend,
             )
-            usage = _normalise_usage_stats(parsed)
-            # A backend can report an unusable credential and still exit 0 --
-            # measured on codex-cli 0.130.0, whose refresh failure is swallowed
-            # entirely (exit 0, empty stderr, even at RUST_LOG=info).  The
-            # envelope's own ``is_error`` flag is the only signal left on this
-            # path, so read it here rather than letting the failure pass as a
-            # successful-but-useless mutation.
+        else:
+            result = subprocess.run(
+                args,
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                env=backend_env,
+            )
+
+        parsed: dict[str, Any] | None = None
+        try:
+            if result.returncode == 0:
+                parsed = _parse_backend_output(
+                    backend,
+                    result,
+                    cmd_str=cmd_str,
+                    worktree_path=worktree_path,
+                )
+                usage = _normalise_usage_stats(parsed)
+                # A backend can report an unusable credential and still exit 0 --
+                # measured on codex-cli 0.130.0, whose refresh failure is swallowed
+                # entirely (exit 0, empty stderr, even at RUST_LOG=info).  The
+                # envelope's own ``is_error`` flag is the only signal left on this
+                # path, so read it here rather than letting the failure pass as a
+                # successful-but-useless mutation.
+                evidence = _credential_failure_evidence(parsed, result)
+                if evidence is not None:
+                    marker, where = evidence
+                    logger.error(
+                        "Credential failure detected for %s in %s: matched %r",
+                        backend_name,
+                        where,
+                        marker,
+                    )
+                    raise _credential_refresh_error(
+                        backend=backend,
+                        backend_name=backend_name,
+                        marker=marker,
+                        where=where,
+                        cmd_str=cmd_str,
+                        worktree_path=worktree_path,
+                        result=result,
+                        retried=retried,
+                    )
+                if backend == "claude":
+                    error_text = str(parsed.get("error", ""))
+                    if _looks_like_rate_limit(error_text):
+                        logger.error(
+                            "Rate limit detected in JSON response: %s", error_text[:200]
+                        )
+                        raise RateLimitError(
+                            f"{backend_name} returned a rate/usage limit error in JSON response",
+                            operation=f"{backend_name} invocation",
+                            phase="JSON parsing",
+                            command=cmd_str,
+                            cwd=str(worktree_path),
+                            stdout=result.stdout,
+                            stderr=result.stderr,
+                            exit_code=result.returncode,
+                            suggestion=(
+                                f"{backend_name} reported a rate limit. "
+                                "Retry after backoff or check your API quota."
+                            ),
+                        )
+                return parsed, usage
+
+            # Classify a credential failure ahead of the rate-limit and generic
+            # paths.  The markers are disjoint from the rate-limit keywords, and
+            # "the login is unusable" is a strictly more actionable verdict than
+            # "the backend exited non-zero".
             evidence = _credential_failure_evidence(parsed, result)
             if evidence is not None:
                 marker, where = evidence
                 logger.error(
-                    "Credential failure detected for %s in %s: matched %r",
+                    "Credential failure detected for %s (exit %d) in %s: matched %r",
                     backend_name,
+                    result.returncode,
                     where,
                     marker,
                 )
@@ -1848,63 +1943,62 @@ def invoke_claude_code(
                     cmd_str=cmd_str,
                     worktree_path=worktree_path,
                     result=result,
+                    retried=retried,
                 )
-            if backend == "claude":
-                error_text = str(parsed.get("error", ""))
-                if _looks_like_rate_limit(error_text):
-                    logger.error(
-                        "Rate limit detected in JSON response: %s", error_text[:200]
-                    )
-                    raise RateLimitError(
-                        f"{backend_name} returned a rate/usage limit error in JSON response",
-                        operation=f"{backend_name} invocation",
-                        phase="JSON parsing",
-                        command=cmd_str,
-                        cwd=str(worktree_path),
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        exit_code=result.returncode,
-                        suggestion=(
-                            f"{backend_name} reported a rate limit. "
-                            "Retry after backoff or check your API quota."
-                        ),
-                    )
-            return parsed, usage
 
-        # Classify a credential failure ahead of the rate-limit and generic
-        # paths.  The markers are disjoint from the rate-limit keywords, and
-        # "the login is unusable" is a strictly more actionable verdict than
-        # "the backend exited non-zero".
-        evidence = _credential_failure_evidence(parsed, result)
-        if evidence is not None:
-            marker, where = evidence
-            logger.error(
-                "Credential failure detected for %s (exit %d) in %s: matched %r",
-                backend_name,
-                result.returncode,
-                where,
-                marker,
-            )
-            raise _credential_refresh_error(
-                backend=backend,
-                backend_name=backend_name,
-                marker=marker,
-                where=where,
+            rate_limit_source = result.stderr or result.stdout
+            if _looks_like_rate_limit(rate_limit_source):
+                logger.error(
+                    "Rate limit detected in subprocess exit for %s (code %d): %s",
+                    backend_name,
+                    result.returncode,
+                    rate_limit_source[:200],
+                )
+                raise RateLimitError(
+                    f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
+                    operation=f"{backend_name} invocation",
+                    phase="subprocess exit",
+                    command=cmd_str,
+                    cwd=str(worktree_path),
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    exit_code=result.returncode,
+                    suggestion=(
+                        f"{backend_name} reported a rate limit. "
+                        "Retry after backoff or check your quota."
+                    ),
+                )
+
+            # Claude's max-turns exhaustion is intentionally treated as partial
+            # success because the subprocess may have already produced useful edits.
+            if backend == "claude":
+                try:
+                    parsed = _parse_backend_output(
+                        backend,
+                        result,
+                        cmd_str=cmd_str,
+                        worktree_path=worktree_path,
+                    )
+                    usage = _normalise_usage_stats(parsed)
+                    if parsed.get("subtype") == "error_max_turns":
+                        logger.warning(
+                            "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
+                            parsed.get("num_turns", "?"),
+                        )
+                        return parsed, usage
+                except MutationError:
+                    parsed = None
+
+            parsed = _parse_backend_output(
+                backend,
+                result,
                 cmd_str=cmd_str,
                 worktree_path=worktree_path,
-                result=result,
             )
+            usage = _normalise_usage_stats(parsed)
 
-        rate_limit_source = result.stderr or result.stdout
-        if _looks_like_rate_limit(rate_limit_source):
-            logger.error(
-                "Rate limit detected in subprocess exit for %s (code %d): %s",
-                backend_name,
-                result.returncode,
-                rate_limit_source[:200],
-            )
-            raise RateLimitError(
-                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
+            raise MutationError(
+                f"{backend_name} exited with code {result.returncode}",
                 operation=f"{backend_name} invocation",
                 phase="subprocess exit",
                 command=cmd_str,
@@ -1912,60 +2006,34 @@ def invoke_claude_code(
                 stdout=result.stdout,
                 stderr=result.stderr,
                 exit_code=result.returncode,
-                suggestion=(
-                    f"{backend_name} reported a rate limit. "
-                    "Retry after backoff or check your quota."
-                ),
+                suggestion="Check stderr for rate limits, permission errors, or model availability.",
+            )
+        finally:
+            _write_backend_artifacts(
+                worktree_path,
+                backend=backend,
+                command=cmd_str,
+                result=result,
+                parsed=parsed,
+                sandbox=sandbox,
             )
 
-        # Claude's max-turns exhaustion is intentionally treated as partial
-        # success because the subprocess may have already produced useful edits.
-        if backend == "claude":
-            try:
-                parsed = _parse_backend_output(
-                    backend,
-                    result,
-                    cmd_str=cmd_str,
-                    worktree_path=worktree_path,
-                )
-                usage = _normalise_usage_stats(parsed)
-                if parsed.get("subtype") == "error_max_turns":
-                    logger.warning(
-                        "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
-                        parsed.get("num_turns", "?"),
-                    )
-                    return parsed, usage
-            except MutationError:
-                parsed = None
-
-        parsed = _parse_backend_output(
-            backend,
-            result,
-            cmd_str=cmd_str,
-            worktree_path=worktree_path,
+    try:
+        return _attempt(retried=False)
+    except CredentialRefreshError as exc:
+        if not exc.transient:
+            raise
+        # Lost a refresh race: another candidate has already stored the
+        # refreshed credential in the shared volume, so a second invocation
+        # starts from a working login.  One retry; a second loss in a row is
+        # reported as-is rather than looping.
+        logger.warning(
+            "%s lost a refresh race on the shared credential; retrying the "
+            "invocation once against the refreshed credential (%s).",
+            backend_name,
+            exc,
         )
-        usage = _normalise_usage_stats(parsed)
-
-        raise MutationError(
-            f"{backend_name} exited with code {result.returncode}",
-            operation=f"{backend_name} invocation",
-            phase="subprocess exit",
-            command=cmd_str,
-            cwd=str(worktree_path),
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.returncode,
-            suggestion="Check stderr for rate limits, permission errors, or model availability.",
-        )
-    finally:
-        _write_backend_artifacts(
-            worktree_path,
-            backend=backend,
-            command=cmd_str,
-            result=result,
-            parsed=parsed,
-            sandbox=sandbox,
-        )
+    return _attempt(retried=True)
 
 
 # ---------------------------------------------------------------------------

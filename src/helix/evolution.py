@@ -1462,12 +1462,14 @@ class CredentialFailureLog:
     per-slot error that has already scrolled past by the time the run ends.
     """
 
-    entries: list[tuple[str, str]] = field(default_factory=list)
+    entries: list[tuple[str, str, bool]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def record(self, candidate_id: str, message: str) -> None:
+    def record(
+        self, candidate_id: str, message: str, *, transient: bool = False
+    ) -> None:
         with self._lock:
-            self.entries.append((candidate_id, message))
+            self.entries.append((candidate_id, message, transient))
 
     def __len__(self) -> int:
         with self._lock:
@@ -1475,11 +1477,16 @@ class CredentialFailureLog:
 
     def candidate_ids(self) -> list[str]:
         with self._lock:
-            return [candidate_id for candidate_id, _ in self.entries]
+            return [candidate_id for candidate_id, _, _ in self.entries]
 
     def last_message(self) -> str:
         with self._lock:
             return self.entries[-1][1] if self.entries else ""
+
+    def all_transient(self) -> bool:
+        """True when every failure was a lost refresh race, not a dead login."""
+        with self._lock:
+            return bool(self.entries) and all(t for _, _, t in self.entries)
 
 
 def _warm_generation_credential(
@@ -1685,7 +1692,9 @@ def _run_proposal_worker(
                 # Name the failure for what it is.  Without this the slot is
                 # indistinguishable from a mutation that produced bad code,
                 # and a whole generation can die quietly on a broken login.
-                credential_failures.record(_new_id, str(_mu_exc))
+                credential_failures.record(
+                    _new_id, str(_mu_exc), transient=_mu_exc.transient
+                )
                 logger.error(
                     "Mutation %s (parent: %s, gen %d) failed on the shared "
                     "%s credential, not on its code: %s",
@@ -1695,8 +1704,14 @@ def _run_proposal_worker(
                 print_error(
                     f"Mutation [bold]{_new_id}[/bold] failed because the shared "
                     f"{backend_display_name(config.agent.backend)} credential "
-                    f"could not be used or refreshed — this is a login failure, "
-                    f"not a failure of the candidate's code."
+                    + (
+                        "was refreshed by another candidate first and the "
+                        "retry also failed"
+                        if _mu_exc.transient
+                        else "could not be used or refreshed"
+                    )
+                    + " — this is a login failure, not a failure of the "
+                    "candidate's code."
                 )
         else:
             print_error(
@@ -2538,7 +2553,9 @@ def _run_evolution_impl(
                         # fall through to mutation so the run continues.
                         merged = None
                         credential_failures.record(
-                            merge_id, str(_merge_cred_exc)
+                            merge_id,
+                            str(_merge_cred_exc),
+                            transient=_merge_cred_exc.transient,
                         )
                         print_helix_error(_merge_cred_exc)
                         logger.error(
@@ -3607,15 +3624,32 @@ def _run_evolution_impl(
     # that outlives the live display.
     if credential_failures:
         _failed_ids = ", ".join(credential_failures.candidate_ids())
-        print_error(
-            f"{len(credential_failures)} mutation(s) failed on the shared "
-            f"{backend_display_name(config.agent.backend)} credential, not on "
-            f"their code: {_failed_ids}. The backend reported that its stored "
-            f"login could not be used or refreshed. Re-authenticate with "
-            f"[cyan]helix sandbox login {config.agent.backend}[/cyan], then "
-            f"[cyan]helix resume[/cyan]. Last report: "
-            f"{credential_failures.last_message()}"
-        )
+        _display = backend_display_name(config.agent.backend)
+        if credential_failures.all_transient():
+            # Every failure was a lost refresh race: the shared login was
+            # refreshed by another candidate and is most likely fine.  Telling
+            # the operator to re-login here would throw away a working
+            # credential and teach them to distrust a healthy run.
+            print_error(
+                f"{len(credential_failures)} mutation(s) failed on the shared "
+                f"{_display} credential, not on their code: {_failed_ids}. "
+                f"Each lost a refresh race (another candidate refreshed the "
+                f"shared login first) and failed again on its one retry. The "
+                f"stored login is most likely usable: run "
+                f"[cyan]helix resume[/cyan] first, and only re-authenticate "
+                f"if this keeps recurring. Last report: "
+                f"{credential_failures.last_message()}"
+            )
+        else:
+            print_error(
+                f"{len(credential_failures)} mutation(s) failed on the shared "
+                f"{_display} credential, not on their code: {_failed_ids}. "
+                f"The backend reported that its stored login could not be "
+                f"used or refreshed. Re-authenticate with "
+                f"[cyan]helix sandbox login {config.agent.backend}[/cyan], "
+                f"then [cyan]helix resume[/cyan]. Last report: "
+                f"{credential_failures.last_message()}"
+            )
 
     best = frontier.best()
 
