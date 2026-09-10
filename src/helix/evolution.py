@@ -94,7 +94,7 @@ from helix.state import (
     save_eval_cache,
     save_state,
 )
-from helix.trace import TRACE, EventType
+from helix.trace import TRACE, EventType, traced
 from helix.worktree import (
     create_seed_worktree,
     create_empty_seed_worktree,
@@ -1059,6 +1059,7 @@ def _cached_evaluate_batch(
     return merged, num_actual_evals
 
 
+@traced("validate")
 def _run_full_val_eval(
     candidate: Candidate,
     state: EvolutionState,
@@ -1456,6 +1457,7 @@ def _plan_proposals(
 # upstream's ``ReflectiveMutationProposer.propose``, though upstream
 # batches these stages across all sampled tasks per iteration instead
 # of running one call per proposal slot.
+@traced("proposal")
 def _run_proposal_worker(
     pre_ctx: ProposalContext,
     *,
@@ -1732,6 +1734,7 @@ def _reset_sandbox_agent_state_for_generation(config: HelixConfig, gen: int) -> 
     )
 
 
+@traced("run")
 def run_evolution(
     config: HelixConfig,
     project_root: Path,
