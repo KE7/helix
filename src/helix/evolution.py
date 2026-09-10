@@ -2508,22 +2508,47 @@ def _run_evolution_impl(
                             f"diff form for this merge."
                         )
 
-                    merged = merge(
-                        candidate_a=a,
-                        candidate_b=b,
-                        new_id=merge_id,
-                        config=config,
-                        base_dir=worktrees_dir,
-                        background=config.agent.background,
-                        eval_result_a=era,
-                        eval_result_b=erb,
-                        prepare_worktree=lambda cand: (
-                            _refresh_and_snapshot_protected_evaluator_files(
-                                cand, config, project_root
-                            )
-                        ),
-                        ancestor=ancestor_candidate,
-                    )
+                    try:
+                        merged = merge(
+                            candidate_a=a,
+                            candidate_b=b,
+                            new_id=merge_id,
+                            config=config,
+                            base_dir=worktrees_dir,
+                            background=config.agent.background,
+                            eval_result_a=era,
+                            eval_result_b=erb,
+                            prepare_worktree=lambda cand: (
+                                _refresh_and_snapshot_protected_evaluator_files(
+                                    cand, config, project_root
+                                )
+                            ),
+                            ancestor=ancestor_candidate,
+                        )
+                    except CredentialRefreshError as _merge_cred_exc:
+                        # Same treatment the proposal worker gives a
+                        # mutation: the merge worktree is already cleaned
+                        # up by merge(); count and name the failure, then
+                        # fall through to mutation so the run continues.
+                        merged = None
+                        credential_failures.record(
+                            merge_id, str(_merge_cred_exc)
+                        )
+                        print_helix_error(_merge_cred_exc)
+                        logger.error(
+                            "Merge %s (%s + %s, gen %d) failed on the shared "
+                            "%s credential, not on its code: %s",
+                            merge_id, a.id, b.id, gen,
+                            backend_display_name(config.agent.backend),
+                            _merge_cred_exc,
+                        )
+                        print_error(
+                            f"Merge [bold]{merge_id}[/bold] failed because the "
+                            f"shared {backend_display_name(config.agent.backend)} "
+                            f"credential could not be used or refreshed — this "
+                            f"is a login failure, not a failure of the merged "
+                            f"code. Falling through to mutation."
+                        )
 
                     if merged is None:
                         # GEPA parity (M2/B3): merge operator failed before
