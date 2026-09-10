@@ -730,6 +730,20 @@ def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
             env[key] = os.environ[key]
 
 
+# agy's ``--print-timeout`` is a Go ``time.Duration`` flag (default ``5m0s``)
+# that aborts a headless run when it expires; per agy's changelog a mid-turn
+# expiry returns *partial* output with only a stderr warning, so a cut-off
+# mutation could pass for a finished one.  There is no disable value: ``0``
+# and negative durations fail immediately with ``timeout waiting for
+# response``, and no env var or settings key overrides the flag.  So we pass
+# the largest duration Go can represent (``math.MaxInt64`` ns, ~292 years) --
+# ``2562048h`` is rejected as out of range, so this is the ceiling of the
+# flag's type.  Verified against agy 1.1.27.  This keeps agy on the same
+# no-timeout policy every other backend already gets (their subprocesses run
+# with no ``timeout`` at all; see ``test_no_timeout_in_subprocess``).
+_AGY_PRINT_TIMEOUT = "2562047h47m16.854775807s"
+
+
 def _build_backend_args(
     worktree_path: str,
     config: AgentConfig,
@@ -742,6 +756,8 @@ def _build_backend_args(
             "--dangerously-skip-permissions",
             "--output-format",
             "json",
+            "--print-timeout",
+            _AGY_PRINT_TIMEOUT,
         ]
         if config.model:
             args.extend(["--model", config.model])

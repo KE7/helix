@@ -12,6 +12,7 @@ import pytest
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
 from helix.mutator import (
+    _AGY_PRINT_TIMEOUT,
     MutationError,
     BACKEND_RESULT_ARTIFACT_NAME,
     BACKEND_STDERR_ARTIFACT_NAME,
@@ -755,6 +756,13 @@ class TestInvokeClaudeCode:
         assert ".agent_task_prompt.md" in args_list[-1]
         assert not args_list[-1].startswith("-")
         assert "--output-format" not in args_list[args_list.index("--print") :]
+        # agy's ``--print-timeout`` defaults to 5m and has no disable value, so
+        # the argv must carry Go's maximum duration explicitly, as a
+        # ``--print-timeout <value>`` pair ahead of the closing ``--print``.
+        assert args_list.count("--print-timeout") == 1
+        timeout_idx = args_list.index("--print-timeout")
+        assert args_list[timeout_idx + 1] == _AGY_PRINT_TIMEOUT
+        assert timeout_idx < args_list.index("--print")
         assert "input" not in mock_run.call_args[1]
         assert result["session_id"] == "sess_123"
 
@@ -768,6 +776,9 @@ class TestInvokeClaudeCode:
         args_list = mock_run.call_args[0][0]
         assert "--model" not in args_list
         assert "--effort" not in args_list
+        # ``--print-timeout`` is unconditional, not tied to any optional knob.
+        assert args_list.count("--print-timeout") == 1
+        assert args_list[args_list.index("--print-timeout") + 1] == _AGY_PRINT_TIMEOUT
         # The ``--print <prompt>`` pair must still close the argv when no
         # optional flags are present.
         assert args_list[-2] == "--print"
