@@ -586,17 +586,23 @@ def build_mutation_prompt(
 # for "529" or "429" also matches a hex fragment inside a session id, which
 # would discard a completed mutation as a rate limit.
 #
-# This text is raw combined stdout+stderr from an arbitrary agent backend, so
-# a bare "429"/"529" is not on its own distinguishing: it can just as easily
-# be a line number, a token count, a record id, a duration, or a diff hunk
-# header. Only count the number when it sits near backend-error wording —
-# "HTTP", "status", or "code" — in either order, the same way the quota
-# patterns below require "exceeded"/"exhausted"/"reached" next to "quota"
-# rather than trusting "quota" alone.
+# The scanned text is either a backend's own failure strings or raw
+# stderr/stdout from an arbitrary agent backend, so a bare "429"/"529" is not
+# on its own distinguishing: it can just as easily be a line number, a token
+# count, a record id, a duration, or a diff hunk header. Only count the
+# number when it sits near backend-error wording — "HTTP", "status", or
+# "code" — in either order, the same way the quota patterns below require
+# "exceeded"/"exhausted"/"reached" next to "quota" rather than trusting
+# "quota" alone.
+#
+# Word patterns use letter/digit lookarounds instead of ``\b`` so the
+# backend's own type tokens — ``overloaded_error``, ``rate_limit_error`` —
+# still match: ``\b`` treats the underscore as a word character and would
+# miss them.
 _HTTP_STATUS_WORD = r"(?:HTTP|status|code)"
 _RATE_LIMIT_PATTERNS = (
-    re.compile(r"\brate[ -]?limit", re.IGNORECASE),
-    re.compile(r"\boverloaded\b", re.IGNORECASE),
+    re.compile(r"(?<![a-z0-9])rate[ _-]?limit", re.IGNORECASE),
+    re.compile(r"(?<![a-z0-9])overloaded(?![a-z0-9])", re.IGNORECASE),
     re.compile(r"\busage limit\b", re.IGNORECASE),
     re.compile(r"\bextra usage\b", re.IGNORECASE),
     re.compile(r"\btoo many requests\b", re.IGNORECASE),
@@ -633,16 +639,76 @@ def _api_error_status(parsed: dict[str, Any]) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _has_structured_failure_signal(parsed: dict[str, Any]) -> bool:
-    """Whether *parsed* carries an unambiguous backend failure field.
+def _string_leaves(value: Any, *, depth: int = 0) -> list[str]:
+    """Flatten the string leaves of a structured error value.
 
-    When it does, the free-text fallback must not run: the envelope already
-    says what happened, and searching the rest of it only risks matching an
-    unrelated field such as a session id.
+    Backends nest failure text differently — a bare string, a list of
+    strings (Claude Code's ``errors``), or an object such as OpenCode's
+    ``{"name": ..., "data": {"message": ...}}``.  Only the leaves matter
+    for classification.
     """
-    # Structured JSON type names (for example, ``overloaded_error``) are
-    # backend-defined, so only the typed API status is used for classification.
-    return isinstance(parsed.get("subtype"), str) or _api_error_status(parsed) is not None
+    if isinstance(value, str):
+        return [value]
+    if depth >= 4:
+        return []
+    if isinstance(value, list):
+        return [leaf for item in value for leaf in _string_leaves(item, depth=depth + 1)]
+    if isinstance(value, dict):
+        return [
+            leaf for item in value.values() for leaf in _string_leaves(item, depth=depth + 1)
+        ]
+    return []
+
+
+def _envelope_reports_failure(envelope: dict[str, Any]) -> bool:
+    """Whether a Claude Code result envelope says the turn failed.
+
+    Every real envelope carries ``subtype`` (``"success"`` or one of the
+    ``error_*`` values), so its presence alone says nothing; only an
+    ``error_*`` subtype or ``is_error`` marks a failure.
+    """
+    subtype = envelope.get("subtype")
+    return envelope.get("is_error") is True or (
+        isinstance(subtype, str) and subtype.startswith("error_")
+    )
+
+
+def _envelope_failure_text(envelope: dict[str, Any]) -> str:
+    """The backend-authored failure strings of a Claude Code envelope.
+
+    Error subtypes carry ``errors: [...]``; a ``success`` envelope with
+    ``is_error`` carries the message in ``result``.  Nothing else in the
+    envelope (session id, usage, model names) is consulted.
+    """
+    return "\n".join(
+        _string_leaves(envelope.get("errors")) + _string_leaves(envelope.get("result"))
+    )
+
+
+# Keys whose values a JSONL backend uses for failure text on any event, and
+# the extra keys consulted only when the event itself is typed as an error.
+_EVENT_ERROR_KEYS = ("error", "errors")
+_ERROR_EVENT_MESSAGE_KEYS = ("message", "result", "text")
+
+
+def _events_failure_text(events: list[dict[str, Any]]) -> str:
+    """The failure strings carried by a JSONL backend's structured events.
+
+    Only the error fields are read.  The rest of the transcript — tool
+    output, file contents the agent read, its own prose — is never scanned,
+    since a repository that merely mentions "rate limit" must not turn an
+    unrelated non-zero exit into a rate-limit verdict.
+    """
+    parts: list[str] = []
+    for event in events:
+        for key in _EVENT_ERROR_KEYS:
+            parts.extend(_string_leaves(event.get(key)))
+        event_type = str(event.get("type", "")).lower()
+        subtype = str(event.get("subtype", "")).lower()
+        if "error" in event_type or subtype.startswith("error") or event.get("is_error") is True:
+            for key in _ERROR_EVENT_MESSAGE_KEYS:
+                parts.extend(_string_leaves(event.get(key)))
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1717,22 +1783,26 @@ def invoke_claude_code(
         )
 
     def _rate_limit_from_envelope(envelope: dict[str, Any]) -> RateLimitError | None:
-        """Rate-limit verdict for a parsed backend envelope, if it carries one."""
+        """Rate-limit verdict for a parsed Claude Code envelope, if it carries one."""
         api_status = _api_error_status(envelope)
         if api_status in (429, 529):
             return _rate_limit_error(
                 f"{backend_name} hit a rate/usage limit (HTTP {api_status})",
                 "structured backend result",
             )
-        # The error field is a bounded fallback, consulted only when the
-        # envelope supplies no classifying field of its own.
-        error_text = str(envelope.get("error") or "")
-        if _has_structured_failure_signal(envelope) or not _looks_like_rate_limit(error_text):
+        # Without a typed status, classify from the backend's own failure
+        # strings — but only when the envelope says the turn failed.  A
+        # successful turn whose ``result`` prose happens to mention a rate
+        # limit is a completed mutation, not a quota problem.
+        if not _envelope_reports_failure(envelope):
             return None
-        logger.error("Rate limit detected in JSON response: %s", error_text[:200])
+        failure_text = _envelope_failure_text(envelope)
+        if not _looks_like_rate_limit(failure_text):
+            return None
+        logger.error("Rate limit detected in JSON response: %s", failure_text[:200])
         return _rate_limit_error(
             f"{backend_name} returned a rate/usage limit error in JSON response",
-            "structured backend result fallback",
+            "structured backend result",
         )
 
     try:
@@ -1750,11 +1820,13 @@ def invoke_claude_code(
                     raise rate_limited
             return parsed, usage
 
-        # The claude backend may still write a structured result envelope on a
-        # non-zero exit.  Classify that envelope before inspecting raw output,
-        # so a session id or transcript fragment cannot pre-empt a real
-        # max-turns result — which is partial success, not a discarded proposal.
+        # Classify the structured output before inspecting raw text, so a
+        # session id or transcript fragment cannot pre-empt what the backend
+        # itself reported.
         if backend == "claude":
+            # The claude backend may still write a result envelope on a
+            # non-zero exit.  ``error_max_turns`` is partial success, not a
+            # discarded proposal.
             try:
                 parsed = _parse_backend_output(
                     backend,
@@ -1762,6 +1834,9 @@ def invoke_claude_code(
                     cmd_str=cmd_str,
                     worktree_path=worktree_path,
                 )
+            except MutationError:
+                parsed = None
+            if parsed is not None:
                 usage = _normalise_usage_stats(parsed)
                 if parsed.get("subtype") == "error_max_turns":
                     logger.warning(
@@ -1772,22 +1847,46 @@ def invoke_claude_code(
                 rate_limited = _rate_limit_from_envelope(parsed)
                 if rate_limited is not None:
                     raise rate_limited
-            except MutationError:
-                parsed = None
+        else:
+            # JSONL backends: the non-strict parse never raises, and only
+            # the events' error fields are classified — never the transcript.
+            parsed = _parse_backend_output(
+                backend,
+                result,
+                cmd_str=cmd_str,
+                worktree_path=worktree_path,
+            )
+            events_text = _events_failure_text(parsed.get("events", []))
+            if _looks_like_rate_limit(events_text):
+                logger.error(
+                    "Rate limit detected in %s error events (code %d): %s",
+                    backend_name,
+                    result.returncode,
+                    events_text[:200],
+                )
+                raise _rate_limit_error(
+                    f"{backend_name} returned a rate/usage limit error in structured output",
+                    "structured backend result",
+                )
 
-        # Last resort, only when the envelope said nothing: search both streams
-        # so an HTTP status on stdout is not hidden by an unrelated stderr
-        # warning.
-        already_classified = parsed is not None and (
-            _has_structured_failure_signal(parsed) or bool(parsed.get("error"))
-        )
-        raw_output = "\n".join(s for s in (result.stdout, result.stderr) if s)
-        if not already_classified and _looks_like_rate_limit(raw_output):
+        # Last resort, only when the structured output said nothing.  stderr
+        # is the diagnostics stream and takes precedence; stdout is consulted
+        # only where it is not already-classified structured output: raw
+        # stdout when the claude envelope failed to parse, and only the
+        # non-JSON lines of a JSONL stream (never the transcript events).
+        if parsed is None:
+            stdout_view = result.stdout
+        elif backend == "claude":
+            stdout_view = ""
+        else:
+            stdout_view = "\n".join(parsed.get("unparsable_lines", []))
+        fallback_text = result.stderr or stdout_view
+        if _looks_like_rate_limit(fallback_text):
             logger.error(
                 "Rate limit detected in subprocess exit for %s (code %d): %s",
                 backend_name,
                 result.returncode,
-                raw_output[:200],
+                fallback_text[:200],
             )
             raise _rate_limit_error(
                 f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",

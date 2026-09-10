@@ -133,12 +133,22 @@ class TestFix2RateLimitDiagnostics:
         self, mocker: MagicMock
     ) -> None:
         """invoke_claude_code raises RateLimitError with full diagnostics when the
-        returned JSON ``error`` field contains a rate-limit keyword."""
+        returned envelope reports a failure whose ``result`` carries a
+        rate-limit keyword (the real Claude Code shape: ``subtype`` is always
+        present and the message lives in ``result``, not an ``error`` field)."""
         import json
 
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = json.dumps({"error": "usage limit exceeded"})
+        mock_result.stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "result": "usage limit exceeded",
+                "session_id": "00000000-0000-4000-8000-000000000000",
+            }
+        )
         mock_result.stderr = ""
         mocker.patch("helix.mutator.subprocess.run", return_value=mock_result)
 

@@ -170,15 +170,22 @@ def test_rate_limit_not_raised_for_normal_errors(tmp_path: Path) -> None:
 
 
 def test_rate_limit_in_json_result(tmp_path: Path) -> None:
-    """invoke_claude_code raises RateLimitError when JSON result contains overload error."""
+    """invoke_claude_code raises RateLimitError when JSON result contains overload error.
+
+    Real Claude Code envelopes always carry ``subtype``; a failed turn that
+    still completed carries ``subtype: "success"`` with ``is_error`` and the
+    message in ``result`` (there is no top-level ``error`` field).
+    """
     from helix.config import AgentConfig
 
     config = AgentConfig()
 
     json_payload = json.dumps({
+        "type": "result",
+        "subtype": "success",
         "is_error": True,
-        "error": "Claude is overloaded",
-        "result": "",
+        "result": "API Error: 529 {\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}",
+        "session_id": "00000000-0000-4000-8000-000000000000",
     })
     fake_result = MagicMock()
     fake_result.returncode = 0
