@@ -5,8 +5,11 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
+import pytest
+
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig, EvaluatorConfig
+from helix.exceptions import CredentialRefreshError
 from helix.mutator import MutationError
 from helix.merger import (
     build_merge_prompt,
@@ -304,6 +307,139 @@ class TestMerge:
         merge(ca, cb, "g1-m0", config, Path("/tmp"))
 
         mock_remove.assert_called_once_with(child)
+
+    def test_credential_error_removes_worktree_and_reraises(self, mocker):
+        """A dead login must not leak the merge worktree or become a traceback.
+
+        ``CredentialRefreshError`` is deliberately not a ``MutationError``, so
+        without its own clause it escaped ``merge()`` with the child worktree
+        still on disk.  Mirror ``mutate()``: clean up, label the operation,
+        re-raise so evolution.py can count it as a credential failure.
+        """
+        ca = make_candidate("g0-s0")
+        cb = make_candidate("g0-s1")
+        config = make_config()
+
+        child = make_candidate("g1-m0")
+        mocker.patch("helix.merger.clone_candidate", return_value=child)
+        mocker.patch("helix.merger.get_diff", return_value="some diff")
+        mocker.patch(
+            "helix.merger.invoke_claude_code",
+            side_effect=CredentialRefreshError("login is dead"),
+        )
+        mock_remove = mocker.patch("helix.merger.remove_worktree")
+        mock_snapshot = mocker.patch("helix.merger.snapshot_candidate")
+
+        with pytest.raises(CredentialRefreshError) as exc:
+            merge(ca, cb, "g1-m0", config, Path("/tmp"))
+
+        assert exc.value.operation == "merge g1-m0 (g0-s0 + g0-s1)"
+        mock_remove.assert_called_once_with(child)
+        mock_snapshot.assert_not_called()
+
+    def test_credential_error_hands_spent_usage_to_the_sink(self, mocker):
+        """Tokens spent before the credential gave out still reach the budget.
+
+        ``invoke_claude_code`` attaches the salvaged usage to every
+        ``HelixError`` it raises; the credential path must forward it through
+        ``record_usage`` exactly as the ``MutationError`` and ``RateLimitError``
+        paths do, or a credential failure becomes a free merge.
+        """
+        from helix.display import UsageStats
+
+        ca = make_candidate("g0-s0")
+        cb = make_candidate("g0-s1")
+        config = make_config()
+
+        child = make_candidate("g1-m0")
+        mocker.patch("helix.merger.clone_candidate", return_value=child)
+        mocker.patch("helix.merger.get_diff", return_value="some diff")
+        spent_before_failure = UsageStats(input_tokens=7, output_tokens=3)
+        mocker.patch(
+            "helix.merger.invoke_claude_code",
+            side_effect=CredentialRefreshError(
+                "login is dead", usage=spent_before_failure
+            ),
+        )
+        mocker.patch("helix.merger.remove_worktree")
+        mocker.patch("helix.merger.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        with pytest.raises(CredentialRefreshError):
+            merge(
+                ca, cb, "g1-m0", config, Path("/tmp"), record_usage=spent.append
+            )
+
+        assert spent == [spent_before_failure]
+
+    def test_lost_refresh_race_is_retried_once_from_a_fresh_worktree(
+        self, mocker, tmp_path: Path
+    ):
+        """``merge()`` gets the same one-shot retry as ``mutate()``: a
+        transient credential failure re-clones the merge worktree and
+        invokes again.  The lost attempt's spend is reported through the
+        waste sink, not folded into the merge that was kept."""
+        from helix.display import UsageStats
+
+        ca = make_candidate("g0-s0")
+        cb = make_candidate("g0-s1")
+        config = make_config()
+        clones: list = []
+
+        def _clone(parent, new_id, base_dir):
+            path = tmp_path / f"clone{len(clones) + 1}"
+            path.mkdir()
+            child = make_candidate(new_id)
+            child.worktree_path = str(path)
+            clones.append(child)
+            return child
+
+        mocker.patch("helix.merger.clone_candidate", side_effect=_clone)
+        mocker.patch("helix.merger.get_diff", return_value="some diff")
+        lost = CredentialRefreshError(
+            "lost a refresh race", usage=UsageStats(input_tokens=5, output_tokens=2)
+        )
+        lost.transient = True
+        invoke = mocker.patch(
+            "helix.merger.invoke_claude_code",
+            side_effect=[lost, ({}, UsageStats(input_tokens=12, output_tokens=8))],
+        )
+        removed: list = []
+        mocker.patch("helix.merger.remove_worktree", side_effect=removed.append)
+        mocker.patch("helix.merger.snapshot_candidate")
+        recovered: list[str] = []
+        spent: list[UsageStats] = []
+        wasted: list[UsageStats] = []
+
+        result = merge(
+            ca,
+            cb,
+            "g1-m0",
+            config,
+            Path("/tmp"),
+            record_usage=spent.append,
+            record_wasted_usage=wasted.append,
+            on_refresh_race_recovered=recovered.append,
+        )
+
+        assert invoke.call_count == 2
+        assert len(clones) == 2
+        assert result is clones[1]
+        assert result.operation == "merge"
+        assert result.parent_ids == ["g0-s0", "g0-s1"]
+        # The retry ran in the fresh clone, and the first one was removed.
+        assert invoke.call_args_list[1].args[0] == clones[1].worktree_path
+        assert invoke.call_args_list[1].kwargs["retried"] is True
+        assert removed == [clones[0]]
+        # The merge is billed for the attempt that produced it; the attempt
+        # the race threw away is its own record, and the two still sum to
+        # what one combined record used to carry.
+        assert spent[0].input_tokens == 12 and spent[0].output_tokens == 8
+        assert len(wasted) == 1
+        assert wasted[0].input_tokens == 5 and wasted[0].output_tokens == 2
+        assert spent[0].input_tokens + wasted[0].input_tokens == 5 + 12
+        assert spent[0].output_tokens + wasted[0].output_tokens == 2 + 8
+        assert recovered and "g1-m0" in recovered[0]
 
     def test_snapshot_not_called_by_merge_on_success(self, mocker):
         """merge() must NOT call snapshot_candidate — the caller owns that step.

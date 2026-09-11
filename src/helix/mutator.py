@@ -6,12 +6,15 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from helix.backends import (
     BACKEND_AUTH_ENV,
+    BACKEND_FRESH_SESSION_ENV,
     BACKEND_TRANSCRIPT_SOURCES,
     TRANSCRIPT_SESSION_ID_RE,
     backend_display_name,
@@ -20,6 +23,7 @@ from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
+    CredentialRefreshError,
     HelixError,
     MutationError,
     PromptArtifactCollisionError,
@@ -28,7 +32,11 @@ from helix.exceptions import (
 )
 from helix.executor import _scrub_environment
 from helix.lines import split_lf_lines
-from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
+from helix.sandbox import (
+    OPENCODE_STATE_DIR_NAME,
+    resolve_sandbox_image,
+    run_sandboxed_command,
+)
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -604,6 +612,381 @@ def _looks_like_rate_limit(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Credential / refresh-exhaustion detection
+# ---------------------------------------------------------------------------
+#
+# Distinct from the rate-limit detection above.  A rate limit means "come back
+# later on the same credential"; these markers mean "the credential itself can
+# no longer be used", which is what a lost refresh race looks like from inside
+# a candidate.  Telling them apart matters because only the second one is
+# unrecoverable without operator action, and neither is a code failure.
+#
+# Every marker below is a phrase read out of the shipped CLI it belongs to, not
+# a guess at the wording.  They are deliberately whole distinctive sentences or
+# clauses: matching a bare number or a single common word ("401", "token",
+# "auth") is the false-positive trap this repo has already paid for once --
+# a candidate whose own diff or test output mentions tokens must never be
+# reported to the operator as a broken login.
+#
+# Which backends can actually lose a refresh race.  Every candidate container
+# mounts the same login volume read-write, so when a credential goes stale the
+# candidates in flight may each decide a refresh is due at the same moment.
+# Whether that is a hazard depends on how the CLI performs the refresh:
+#
+#   codex     YES.  Single-use refresh token, and no cross-process
+#             serialisation.  Measured against codex-cli 0.130.0 with a
+#             synthetic credential and a local single-use token endpoint: five
+#             simultaneous candidates produced five token exchanges, one
+#             granted and four rejected with "your refresh token was already
+#             used" -- and all five processes exited 0 with empty stderr.
+#   opencode  YES, and unmitigated.  It refreshes an ``oauth`` credential only
+#             from inside the fetch wrapper that issues a model request
+#             (opencode-ai 1.14.24), writing the new credential back unlocked.
+#             No free command takes the refresh path, so there is nothing that
+#             could serialise it short of a model call.  (``api``-type
+#             credentials never refresh and are not at risk.)
+#   claude    NO.  Claude Code takes a real cross-process lock file, retries
+#             while another process holds it, and re-reads the credential
+#             afterwards, so two candidates cannot spend the same grant.
+#   cursor    NO.  It re-exchanges an API key rather than spending a stored
+#             refresh token; there is no single-use grant to race for.
+#   agy       UNMEASURED.  No agy credential was available to test against,
+#             so this is unknown rather than safe.
+#
+# Nothing pre-empts the race: what recovers a lost one is the caller-level
+# one-shot retry (``invoke_with_refresh_race_retry``), which re-runs the
+# invocation from a fresh worktree against the credential the winner stored.
+#
+# Markers whose failure is *transient*: the credential is not broken, this
+# invocation merely lost a refresh race.  Checked before the general markers so
+# the more specific wording is what gets reported, and so the caller can retry
+# once against the credential the winner has just stored.
+_TRANSIENT_CREDENTIAL_FAILURE_MARKERS: tuple[str, ...] = (
+    # Codex CLI (codex-cli 0.130.0): the suffix it appends when another
+    # process spent the single-use refresh token first.  The full sentence is
+    # "Your access token could not be refreshed because your refresh token
+    # was already used. Please log out and sign in again." -- the "log out"
+    # advice is the CLI's, and is wrong for this case: the shared auth.json
+    # already holds the refreshed credential.
+    "because your refresh token was already used",
+)
+
+# KNOWN RISK: every marker is pinned to the prose of a specific CLI release
+# (versions noted per entry), while the sandbox images install the unpinned
+# CLI package and are rebuilt on a schedule.  A wording change upstream turns
+# a credential failure back into an unclassified one -- it never produces a
+# false positive.  No test reads real CLI output; when a marker stops matching,
+# the symptom is a generic MutationError whose stderr carries the new wording.
+_CREDENTIAL_FAILURE_MARKERS: tuple[str, ...] = (
+    # Codex CLI (codex-cli 0.130.0).  One prefix covers every suffix the CLI
+    # appends: "... has expired." / "... was revoked." / "... because you have
+    # since logged out or signed in to another account." / the bare
+    # "Your access token could not be refreshed. Please log out and sign in
+    # again."  (The already-used suffix is matched first, above, as transient.)
+    "your access token could not be refreshed",
+    "failed to refresh token while getting account",
+    "chatgpt account id not available, please re-run `codex login`",
+    # OpenCode (opencode-ai 1.14.24) -- thrown by the provider fetch wrapper
+    # when the OAuth token exchange is rejected, e.g. "Token refresh failed:
+    # 400".  The colon is kept so the phrase cannot match narrative prose.
+    "token refresh failed:",
+    # Claude Code (2.1.138).
+    "user oauth refresh failed",
+    "api error: 401 invalid api key",
+)
+
+
+def credential_failure_marker(text: str) -> str | None:
+    """Return the credential-failure marker *text* contains, or ``None``.
+
+    Returns the matched marker rather than a bool so callers can name the
+    evidence in the operator-facing message instead of asserting a verdict
+    with nothing behind it.
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    for marker in _TRANSIENT_CREDENTIAL_FAILURE_MARKERS + _CREDENTIAL_FAILURE_MARKERS:
+        if marker in lower:
+            return marker
+    return None
+
+
+def credential_failure_is_transient(marker: str) -> bool:
+    """True when *marker* names a lost refresh race rather than a dead login."""
+    return marker in _TRANSIENT_CREDENTIAL_FAILURE_MARKERS
+
+
+#: Event types under which the JSONL backends report a failure of the
+#: invocation itself, as opposed to a tool call the agent made.  Read from the
+#: shipped CLIs' own event definitions:
+#:
+#:   codex     ``{"type": "error", "message": ...}`` and
+#:             ``{"type": "turn.failed", "error": {"message": ...}}``
+#:             (codex-rs ``exec/src/exec_events.rs``: ``ThreadErrorEvent``,
+#:             ``TurnFailedEvent``).  ``codex exec --json`` never emits an
+#:             ``is_error`` key.
+#:   opencode  ``{"type": "error", ..., "error": {"name": ..., "data":
+#:             {"message": ...}}}`` -- the ``session.error`` event that
+#:             ``opencode run --format json`` re-emits (``cli/cmd/run.ts``).
+#:   cursor    no documented failure event; a ``type: "error"`` line carrying
+#:             ``message`` / ``error`` is read the same way.
+_STRUCTURED_ERROR_EVENT_TYPES: frozenset[str] = frozenset(
+    {"error", "turn.failed", "session.error"}
+)
+
+
+def _error_field_texts(value: Any) -> list[str]:
+    """Flatten an ``error``-shaped field into the message strings it carries.
+
+    Accepts the shapes the backends use: a bare string, a list of strings
+    (Claude Code's ``errors``), or an object with ``message`` / ``error`` /
+    ``data.message`` (opencode's ``{name, data: {message}}``).  Anything else
+    contributes nothing -- an unknown shape is not evidence.
+    """
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        texts: list[str] = []
+        for item in value:
+            texts.extend(_error_field_texts(item))
+        return texts
+    if isinstance(value, dict):
+        texts = []
+        for key in ("message", "error"):
+            texts.extend(_error_field_texts(value.get(key)))
+        data = value.get("data")
+        if isinstance(data, dict):
+            texts.extend(_error_field_texts(data.get("message")))
+        return texts
+    return []
+
+
+def _structured_error_texts(
+    backend: str, parsed: dict[str, Any] | None, stdout: str
+) -> list[str]:
+    """Return every failure the backend reported through a *structured* field.
+
+    This is the only stdout-derived text the credential classifier is ever
+    asked about.  It is deliberately narrow: the fields read here are the ones
+    the CLI itself uses to say "this invocation failed", never the agent's
+    prose and never a tool's captured output.  A candidate whose test suite
+    prints ``Token refresh failed: 400`` into a ``command_execution`` item, or
+    whose final message quotes a 401, must not be able to talk HELIX into
+    declaring the operator's login dead.
+
+    JSONL backends (codex, cursor, opencode): the ``message`` / ``error`` of
+    events whose type is in :data:`_STRUCTURED_ERROR_EVENT_TYPES`.  When the
+    strict parse has not happened yet (non-zero exit), the stream is read
+    leniently so a malformed line elsewhere does not hide the error event.
+
+    Envelope backends (claude, agy): the envelope's ``errors`` list and
+    ``error`` field always, and ``result`` only when the envelope flags
+    ``is_error`` -- on a successful turn ``result`` is the assistant's prose.
+    """
+    if backend in {"codex", "cursor", "opencode"}:
+        events: Any = parsed.get("events") if parsed is not None else None
+        if not isinstance(events, list):
+            events = _parse_jsonl_output(
+                stdout,
+                backend=backend,
+                cmd_str="",
+                worktree_path="",
+                stderr="",
+                exit_code=0,
+                strict=False,
+            )["events"]
+        texts: list[str] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") not in _STRUCTURED_ERROR_EVENT_TYPES:
+                continue
+            texts.extend(_error_field_texts(event.get("message")))
+            texts.extend(_error_field_texts(event.get("error")))
+        return texts
+
+    envelope: dict[str, Any] | None = parsed
+    if envelope is None:
+        try:
+            loaded = json.loads(stdout) if stdout.strip() else None
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            loaded = None
+        if isinstance(loaded, dict):
+            envelope = loaded
+    if envelope is None:
+        return []
+    texts = []
+    texts.extend(_error_field_texts(envelope.get("errors")))
+    texts.extend(_error_field_texts(envelope.get("error")))
+    if envelope.get("is_error") is True:
+        texts.extend(_error_field_texts(envelope.get("result")))
+    return texts
+
+
+#: HTTP statuses Claude reports in ``api_error_status`` that are rate limits.
+#: 429 is the rate limit itself; 529 is an overload.  Compared as strings so an
+#: envelope carrying either the number or its text reads the same.
+_RATE_LIMIT_API_STATUSES: frozenset[str] = frozenset({"429", "529"})
+
+
+def _is_rate_limit_api_status(backend: str, parsed: dict[str, Any] | None) -> bool:
+    """True when Claude's envelope names an API status that *is* a rate limit.
+
+    The keyword list already catches a bare ``529`` in prose, but nothing read
+    a structured ``api_error_status``, so a 429 reported only in that field
+    was previously invisible.
+    """
+    if backend != "claude" or parsed is None:
+        return False
+    status = parsed.get("api_error_status")
+    if status is None or isinstance(status, bool):
+        return False
+    return str(status).strip() in _RATE_LIMIT_API_STATUSES
+
+
+def _has_structured_output(
+    backend: str, parsed: dict[str, Any] | None, stdout: str
+) -> bool:
+    """True when the backend emitted output its own parser can read."""
+    if parsed is not None:
+        return True
+    if backend in {"codex", "cursor", "opencode"}:
+        return bool(
+            _parse_jsonl_output(
+                stdout,
+                backend=backend,
+                cmd_str="",
+                worktree_path="",
+                stderr="",
+                exit_code=0,
+                strict=False,
+            )["events"]
+        )
+    try:
+        return isinstance(json.loads(stdout), dict) if stdout.strip() else False
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return False
+
+
+def _rate_limit_scan_texts(
+    backend: str,
+    parsed: dict[str, Any] | None,
+    result: subprocess.CompletedProcess[str],
+) -> list[str]:
+    """Return every text a rate-limit verdict may be read from.
+
+    Never the transcript.  For the JSONL backends ``stdout`` is the agent's
+    whole run -- tool output and the file contents it read included -- so a
+    candidate working on a repository whose source merely *mentions* a rate
+    limit (this file does, a few lines up) plus any unrelated non-zero exit
+    with an empty stderr used to be reported to the operator as a quota
+    failure, sending them to a dashboard for an ordinary code failure.
+
+    Only what the backend itself said counts: its own stderr, and the
+    structured fields it uses to report a failure
+    (:func:`_structured_error_texts`).  The one exception is a backend that
+    produced no parseable structured output at all *and* said nothing on
+    stderr -- a CLI that died before it could emit its stream has spoken
+    nowhere else, so its raw stdout is still worth a look.
+    """
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    texts = [stderr, *_structured_error_texts(backend, parsed, stdout)]
+    if not stderr.strip() and not _has_structured_output(backend, parsed, stdout):
+        texts.append(stdout)
+    return texts
+
+
+def _credential_failure_evidence(
+    backend: str,
+    parsed: dict[str, Any] | None,
+    result: subprocess.CompletedProcess[str],
+) -> tuple[str, str] | None:
+    """Return ``(marker, where)`` when this invocation is a credential failure.
+
+    Structured error fields (see :func:`_structured_error_texts`) are read on
+    every exit code: they are how a backend that swallows its own failure and
+    exits 0 -- codex on a rejected refresh, measured on codex-cli 0.130.0 --
+    still says what went wrong.
+
+    On a **non-zero** exit stderr is read as well: CLIs routinely report an
+    unusable credential there without emitting a structured event.  The raw
+    stdout stream is never scanned on any exit code; for the JSONL backends it
+    is the whole transcript, tool output and agent prose included.
+    """
+    for text in _structured_error_texts(backend, parsed, result.stdout or ""):
+        marker = credential_failure_marker(text)
+        if marker is not None:
+            return marker, "structured error event"
+    if result.returncode == 0:
+        return None
+    marker = credential_failure_marker(result.stderr or "")
+    if marker is not None:
+        return marker, "stderr"
+    return None
+
+
+def _credential_refresh_error(
+    *,
+    backend: str,
+    backend_name: str,
+    marker: str,
+    where: str,
+    cmd_str: str,
+    worktree_path: str,
+    result: subprocess.CompletedProcess[str],
+    retried: bool = False,
+) -> CredentialRefreshError:
+    transient = credential_failure_is_transient(marker)
+    if transient:
+        # A lost refresh race.  The winner has stored a fresh credential, so
+        # sending the operator to re-login would discard a working one.
+        message = (
+            f"{backend_name} lost a refresh race on the shared credential "
+            f"(matched {marker!r} in {where}"
+            f"{'; failed again on retry' if retried else ''})"
+        )
+        suggestion = (
+            f"This is a credential failure, not a failed mutation: another "
+            f"candidate refreshed the shared {backend_name} login first and "
+            "the token this invocation held was already spent. The refreshed "
+            "credential is stored and should be usable"
+            + (
+                ", but a retry with it also failed. Run `helix resume`; the "
+                "stored login most likely does not need to be redone, so only "
+                "re-authenticate if this keeps recurring."
+                if retried
+                else "."
+            )
+        )
+    else:
+        message = (
+            f"{backend_name} could not use its stored credential "
+            f"(matched {marker!r} in {where})"
+        )
+        suggestion = (
+            f"This is a credential failure, not a failed mutation: {backend_name} "
+            "reported that its stored login could not be used or refreshed. "
+            f"Re-authenticate with `helix sandbox login {backend}`, then resume "
+            "the run; nothing is wrong with the candidate's code."
+        )
+    error = CredentialRefreshError(
+        message,
+        operation=f"{backend_name} invocation",
+        phase="credential check",
+        command=cmd_str,
+        cwd=str(worktree_path),
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.returncode,
+        suggestion=suggestion,
+    )
+    error.transient = transient
+    return error
+
+
+# ---------------------------------------------------------------------------
 # Rendered-mutation-prompt artifact
 # ---------------------------------------------------------------------------
 
@@ -618,6 +1001,10 @@ BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
 BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
 BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
 BACKEND_TRANSCRIPT_ARTIFACT_DIR = ".helix_artifacts/backend_transcripts"
+
+#: Where a sandboxed opencode candidate keeps its SQLite database: under the
+#: per-candidate workspace copy, which the container sees at ``/workspace``.
+OPENCODE_SANDBOX_DB_PATH = f"/workspace/{OPENCODE_STATE_DIR_NAME}/opencode/opencode.db"
 
 
 def _prompt_file_instruction(prompt_artifact_name: str) -> str:
@@ -649,12 +1036,17 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         BACKEND_RESULT_ARTIFACT_NAME,
         BACKEND_STDOUT_ARTIFACT_NAME,
         BACKEND_STDERR_ARTIFACT_NAME,
+        # The first attempt's copies after a lost refresh race (see
+        # ``invoke_with_refresh_race_retry``).
+        attempt_artifact_name(BACKEND_RESULT_ARTIFACT_NAME, 1),
+        attempt_artifact_name(BACKEND_STDOUT_ARTIFACT_NAME, 1),
+        attempt_artifact_name(BACKEND_STDERR_ARTIFACT_NAME, 1),
         ".helix_artifacts/",
         "helix_batch.json",
-        # Per-candidate OpenCode SQLite state (XDG_DATA_HOME isolation).
+        # Per-candidate OpenCode SQLite state (OPENCODE_DB isolation).
         # Each parallel opencode worker gets a fresh database here; keeps
-        # the candidate git tree free of opencode's session/session files.
-        ".helix_opencode_state/",
+        # the candidate git tree free of opencode's session transcripts.
+        f"{OPENCODE_STATE_DIR_NAME}/",
     ]
     existing = gitignore.read_text() if gitignore.exists() else ""
     to_append = [p for p in patterns if p not in existing]
@@ -808,6 +1200,11 @@ def _build_backend_args(
             "exec",
             "--json",
             "--dangerously-bypass-approvals-and-sandbox",
+            # Pin codex's cross-session memory off (default off, but a flag)
+            # so no candidate reads a prior candidate's session; see
+            # ``helix.backends.BACKEND_FRESH_SESSION_ENV``.
+            "-c",
+            "features.memories=false",
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -1533,8 +1930,6 @@ def _copy_local_claude_transcript(
         }
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-
         shutil.copy2(src, dst)
     except OSError as exc:
         return {
@@ -1867,6 +2262,236 @@ def _write_backend_artifacts(
         )
 
 
+def _combine_usage(
+    first: UsageStats | None, second: UsageStats | None
+) -> UsageStats | None:
+    """Sum two per-attempt usage records into one, tolerating ``None``.
+
+    Used when an invocation is retried after a lost refresh race and both
+    attempts' spend has to travel as one ``UsageStats``: the total written
+    into the result artifact, and the fallback for a caller that supplies no
+    ``record_wasted_usage`` sink to charge the lost attempt separately.
+    Neither input is mutated.  ``session_id`` is taken from the later
+    attempt, which is the one whose output the caller receives; the earlier
+    one is used only when the later attempt reported none.  Returns ``None``
+    only when both inputs are ``None``, which keeps the "no backend ran"
+    reading of a missing record intact.
+    """
+    if first is None:
+        return second
+    total = UsageStats.from_dict(first.to_dict())
+    if second is not None:
+        total.add(second)
+        if second.session_id is not None:
+            total.session_id = second.session_id
+    return total
+
+
+
+# ---------------------------------------------------------------------------
+# One-shot retry after a lost refresh race
+# ---------------------------------------------------------------------------
+
+
+def attempt_artifact_name(name: str, attempt: int) -> str:
+    """Name under which an earlier attempt's artifact is kept.
+
+    ``.helix_backend_result.json`` -> ``.helix_backend_result.attempt1.json``;
+    a name without an extension gets the suffix appended.
+    """
+    stem, dot, ext = name.rpartition(".")
+    if not stem:
+        return f"{name}.attempt{attempt}"
+    return f"{stem}.attempt{attempt}{dot}{ext}"
+
+
+_ATTEMPT_ARTIFACT_NAMES: tuple[str, ...] = (
+    BACKEND_RESULT_ARTIFACT_NAME,
+    BACKEND_STDOUT_ARTIFACT_NAME,
+    BACKEND_STDERR_ARTIFACT_NAME,
+    BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+)
+
+
+def _stash_attempt_artifacts(worktree_path: str, stash_dir: Path) -> None:
+    """Copy the invocation artifacts of *worktree_path* into *stash_dir*."""
+    wt = Path(worktree_path)
+    for name in _ATTEMPT_ARTIFACT_NAMES:
+        src = wt / name
+        dst = stash_dir / name
+        try:
+            if src.is_dir():
+                shutil.copytree(src, dst)
+            elif src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        except OSError as exc:
+            logger.debug("could not stash %s from %s: %s", name, worktree_path, exc)
+
+
+def _restore_attempt_artifacts(
+    worktree_path: str, stash_dir: Path, *, attempt: int
+) -> None:
+    """Write stashed artifacts into *worktree_path* under their attempt names."""
+    wt = Path(worktree_path)
+    for name in _ATTEMPT_ARTIFACT_NAMES:
+        src = stash_dir / name
+        dst = wt / attempt_artifact_name(name, attempt)
+        try:
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            elif src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        except OSError as exc:
+            logger.debug("could not restore %s into %s: %s", name, worktree_path, exc)
+
+
+def _note_retry_in_result_artifact(
+    worktree_path: str,
+    *,
+    first_usage: UsageStats | None,
+    combined_usage: UsageStats,
+) -> None:
+    """Make the final attempt's result artifact account for both attempts.
+
+    The artifact on disk describes the retry only; the caller is charged the
+    sum.  Record the sum and point at the first attempt's artifact so the
+    file stays a faithful account of what the invocation spent.
+    """
+    path = Path(worktree_path) / BACKEND_RESULT_ARTIFACT_NAME
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["attempts"] = 2
+    payload["retry_of"] = attempt_artifact_name(BACKEND_RESULT_ARTIFACT_NAME, 1)
+    payload["retry_reason"] = "lost refresh race on the shared credential"
+    payload["usage_first_attempt"] = (
+        first_usage.to_dict() if first_usage is not None else None
+    )
+    payload["usage_combined"] = combined_usage.to_dict()
+    try:
+        path.write_text(json.dumps(payload, indent=2))
+    except OSError as exc:
+        logger.debug("could not annotate %s: %s", path, exc)
+
+
+def invoke_with_refresh_race_retry(
+    child: Candidate,
+    *,
+    backend_name: str,
+    invoke: Callable[[Candidate, bool], tuple[dict[str, Any], UsageStats]],
+    fresh_child: Callable[[], Candidate],
+    remove_child: Callable[[Candidate], None],
+    on_child_replaced: Callable[[Candidate], None],
+    record_usage: Callable[[UsageStats], None] | None = None,
+    record_wasted_usage: Callable[[UsageStats], None] | None = None,
+    on_refresh_race_recovered: Callable[[str], None] | None = None,
+) -> tuple[Candidate, UsageStats]:
+    """Run *invoke* on *child*, retrying once on a lost refresh race.
+
+    A transient :class:`CredentialRefreshError` means another candidate
+    refreshed the shared login first and the token this invocation held was
+    already spent; the winner has stored a working credential, so a second
+    invocation against it is the right response.  The retry must not run on
+    the tree the first attempt was editing: with the sandbox, ``sync_back``
+    copies the first attempt's partial edits into the worktree regardless of
+    exit code, and the retry's workspace copy would commit them as its
+    synthetic baseline, hiding them from ``git diff``.  So the retry starts
+    from a *fresh* worktree -- ``remove_child`` then ``fresh_child`` -- and
+    the first attempt's artifacts are kept beside the retry's under
+    ``attempt1`` names (:func:`attempt_artifact_name`).
+
+    ``on_child_replaced`` is called with the fresh worktree the moment it
+    exists, so the caller's cleanup handlers always address the live one.
+
+    Usage accounting: the lost attempt's tokens are spent and must reach the
+    budget, but they are not productive work, so they are reported *apart*
+    from the retry's.  Whatever the retry does, ``record_wasted_usage`` is
+    handed the first attempt's spend exactly once, and the retry's own spend
+    travels as it would have without a retry: returned as the invocation's
+    usage on success, attached to the exception on a :class:`HelixError`,
+    absent on anything else (a sandbox ``TimeoutExpired``, an ``OSError``).
+    The caller charges the two under different ``source``s; the sum is
+    unchanged.  The result artifact still records the total of both attempts.
+
+    ``record_wasted_usage`` is optional only so that a caller with nowhere to
+    put a second record does not silently drop the lost attempt's tokens:
+    without it the historical behaviour applies and the first attempt's spend
+    rides along with the second's (summed into the returned usage, into the
+    raised :class:`HelixError`'s, or handed to ``record_usage`` directly).
+    The total is the same either way; only the attribution differs.
+
+    A recovered race is reported through ``on_refresh_race_recovered`` so it
+    reaches the operator (the end-of-run summary), not only the log file.
+    A second loss in a row is raised as-is; there is no loop.
+    """
+    try:
+        _, usage = invoke(child, False)
+        return child, usage
+    except CredentialRefreshError as exc:
+        if not exc.transient:
+            raise
+        first_error = exc
+        first_usage = exc.usage
+
+    logger.warning(
+        "%s lost a refresh race on the shared credential; retrying once from "
+        "a fresh worktree against the refreshed credential (%s).",
+        backend_name,
+        first_error,
+    )
+    with tempfile.TemporaryDirectory(prefix="helix-attempt1-") as stash:
+        _stash_attempt_artifacts(child.worktree_path, Path(stash))
+        try:
+            remove_child(child)
+        except Exception as exc:  # noqa: BLE001 - re-clone below reports the real problem
+            logger.debug("could not remove %s before retry: %s", child.worktree_path, exc)
+        child = fresh_child()
+        on_child_replaced(child)
+        _restore_attempt_artifacts(child.worktree_path, Path(stash), attempt=1)
+
+    # Did the lost attempt's spend get its own record?  When it did, the
+    # retry's outcome carries only the retry's own tokens; when it did not,
+    # the two are summed as before so the total still reaches the budget.
+    charged_separately = record_wasted_usage is not None
+    if record_wasted_usage is not None and first_usage is not None:
+        record_wasted_usage(first_usage)
+
+    try:
+        _, usage = invoke(child, True)
+    except HelixError as retry_exc:
+        if not charged_separately:
+            retry_exc.usage = _combine_usage(first_usage, retry_exc.usage)
+        raise
+    except Exception:
+        if not charged_separately and record_usage is not None and first_usage is not None:
+            record_usage(first_usage)
+        raise
+
+    combined = _combine_usage(first_usage, usage)
+    assert combined is not None  # ``usage`` is never None
+    _note_retry_in_result_artifact(
+        child.worktree_path, first_usage=first_usage, combined_usage=combined
+    )
+    message = (
+        f"{child.id} recovered after a lost refresh race on the shared "
+        f"{backend_name} credential: the first attempt reported "
+        f"{first_error}; the retry from a fresh worktree succeeded. Both "
+        "attempts' tokens are charged and the first attempt's output is kept "
+        f"as {attempt_artifact_name(BACKEND_RESULT_ARTIFACT_NAME, 1)}."
+    )
+    logger.warning("%s", message)
+    if on_refresh_race_recovered is not None:
+        on_refresh_race_recovered(message)
+    # The lost attempt has its own record; do not fold it into the retry's,
+    # or the caller charges wasted tokens as productive work.
+    return child, (usage if charged_separately else combined)
+
+
 def invoke_claude_code(
     worktree_path: str,
     prompt: str,
@@ -1875,6 +2500,8 @@ def invoke_claude_code(
     fixed_env: dict[str, str] | None = None,
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
+    *,
+    retried: bool = False,
 ) -> tuple[dict[str, Any], UsageStats]:
     """Invoke the configured backend CLI in *worktree_path*.
 
@@ -1892,6 +2519,12 @@ def invoke_claude_code(
     fixed_env:
         Optional mapping of explicit env var values to inject after
         passthrough values.
+    retried:
+        True when this is the one-shot retry after a lost refresh race (see
+        :func:`invoke_with_refresh_race_retry`).  Only changes what a second
+        credential failure says to the operator; this function itself never
+        retries, because a retry has to start from a fresh worktree and only
+        the caller owns the worktree.
 
     Returns
     -------
@@ -1904,14 +2537,17 @@ def invoke_claude_code(
         On non-zero return code or JSON decode failure.
         All errors include the full command, full stdout, full stderr
         (never truncated), exit code, and working directory.
+    CredentialRefreshError
+        When the backend reported, in its own structured error fields or on
+        stderr, that its stored credential could not be used or refreshed.
+        ``transient`` is set when it merely lost a refresh race.
     """
     if _MUTATOR_OVERRIDE is not None:
         return _MUTATOR_OVERRIDE(worktree_path, prompt, config)
     backend = config.backend
     backend_name = backend_display_name(backend)
-    backend_worktree_path = (
-        "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
-    )
+    sandboxed = sandbox is not None and sandbox.enabled
+    backend_worktree_path = "/workspace" if sandboxed else worktree_path
     args = _build_backend_args(
         backend_worktree_path,
         config,
@@ -1922,7 +2558,12 @@ def invoke_claude_code(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
-    if backend == "opencode" and (sandbox is None or not sandbox.enabled):
+    # The fresh-session switch applies to sandboxed and unsandboxed runs
+    # alike.  An operator who names the same key in ``[env]`` has made a
+    # deliberate choice, so their value wins.
+    for key, value in BACKEND_FRESH_SESSION_ENV.get(backend, {}).items():
+        backend_env.setdefault(key, value)
+    if backend == "opencode":
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
         # OpenCode stores its session database at:
@@ -1936,17 +2577,38 @@ def invoke_claude_code(
         #   "Failed to run the query 'PRAGMA journal_mode = WAL'"
         # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while g1-s2 succeeded).
         #
-        # Fix: set XDG_DATA_HOME to a per-candidate directory.  OpenCode respects
-        # XDG_DATA_HOME and will create an isolated database at:
+        # Fix: point OPENCODE_DB at a per-candidate database.  OPENCODE_DB
+        # relocates opencode.db and its -wal/-shm companions and nothing else.
+        # XDG_DATA_HOME would also solve the locking problem but moves
+        # auth.json along with the database, which makes an existing opencode
+        # login invisible -- verified against the real CLI, where
+        # `opencode auth list` then reports 0 credentials.  The on-disk layout
+        # is unchanged from the earlier XDG_DATA_HOME approach:
         #   <worktree>/.helix_opencode_state/opencode/opencode.db
         # Each parallel worker gets its own fresh database; no contention.
         #
-        # The sandbox branch is excluded: container isolation already provides
-        # per-candidate filesystem separation, so XDG_DATA_HOME would be redundant.
-        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
-        opencode_state_dir.mkdir(parents=True, exist_ok=True)
-        backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
-    if sandbox is not None and sandbox.enabled:
+        # The sandbox needs the same knob, not less: every sandboxed agent
+        # container mounts the one ``helix-auth-opencode`` volume at
+        # ``/home/node`` read-write with ``HOME=/home/node`` forced, so
+        # without it every concurrent container opens the same
+        # ``~/.local/share/opencode/opencode.db``.  Container isolation
+        # separates ``/workspace``, which is why the database goes there:
+        # the container's cwd is the per-candidate workspace copy, the
+        # sandbox creates the directory in that copy before the run (see
+        # ``helix.sandbox.run_sandboxed_commands``), and ``.helix*`` paths
+        # are excluded from sync-back and gitignored like the unsandboxed
+        # layout.
+        if sandboxed:
+            backend_env["OPENCODE_DB"] = OPENCODE_SANDBOX_DB_PATH
+        else:
+            opencode_state_dir = (
+                Path(worktree_path) / OPENCODE_STATE_DIR_NAME / "opencode"
+            )
+            opencode_state_dir.mkdir(parents=True, exist_ok=True)
+            backend_env["OPENCODE_DB"] = str(opencode_state_dir / "opencode.db")
+
+    if sandboxed:
+        assert sandbox is not None
         sandbox_image = resolve_sandbox_image(sandbox, backend)
         result = run_sandboxed_command(
             args,
@@ -1967,12 +2629,36 @@ def invoke_claude_code(
             env=backend_env,
         )
 
-    # Recover the usage record from the raw stream FIRST, with a parse that
-    # cannot raise.  Everything below this line can fail — and when it does,
-    # the tokens have still been spent.  Charging must not be conditional on
-    # the candidate being usable, so every error raised from here carries
-    # this on ``HelixError.usage`` for the caller to charge.
+    # Recover the usage record from the raw stream FIRST, with a parse
+    # that cannot raise.  Everything below this line can fail -- and
+    # when it does, the tokens have still been spent.  Charging must
+    # not be conditional on the candidate being usable, so every error
+    # raised from here carries this on ``HelixError.usage`` for the
+    # caller to charge.
     spent_usage = _salvage_backend_usage(backend, result)
+
+    def _raise_if_credential_failure(parsed: dict[str, Any] | None) -> None:
+        evidence = _credential_failure_evidence(backend, parsed, result)
+        if evidence is None:
+            return
+        marker, where = evidence
+        logger.error(
+            "Credential failure detected for %s (exit %d) in %s: matched %r",
+            backend_name,
+            result.returncode,
+            where,
+            marker,
+        )
+        raise _credential_refresh_error(
+            backend=backend,
+            backend_name=backend_name,
+            marker=marker,
+            where=where,
+            cmd_str=cmd_str,
+            worktree_path=worktree_path,
+            result=result,
+            retried=retried,
+        )
 
     parsed: dict[str, Any] | None = None
     try:
@@ -1984,6 +2670,13 @@ def invoke_claude_code(
                 worktree_path=worktree_path,
             )
             usage = _normalise_usage_stats(parsed)
+            # A backend can report an unusable credential and still exit 0 --
+            # measured on codex-cli 0.130.0, whose refresh failure is swallowed
+            # entirely (exit 0, empty stderr, even at RUST_LOG=info).  Its
+            # own structured error event is the only signal left on this
+            # path, so read it here rather than letting the failure pass as
+            # a successful-but-useless mutation.
+            _raise_if_credential_failure(parsed)
             if backend == "claude":
                 error_text = str(parsed.get("error", ""))
                 if _looks_like_rate_limit(error_text):
@@ -2006,8 +2699,50 @@ def invoke_claude_code(
                     )
             return parsed, usage
 
-        rate_limit_source = result.stderr or result.stdout
-        if _looks_like_rate_limit(rate_limit_source):
+        # Non-zero exit.  Claude's max-turns exhaustion is partial success
+        # and is decided FIRST: the subprocess may have already produced
+        # useful edits, and the envelope's ``result`` is the assistant's
+        # own prose, which no later classifier may read as evidence.
+        if backend == "claude":
+            try:
+                parsed = _parse_backend_output(
+                    backend,
+                    result,
+                    cmd_str=cmd_str,
+                    worktree_path=worktree_path,
+                )
+            except MutationError:
+                parsed = None
+            else:
+                if parsed.get("subtype") == "error_max_turns":
+                    logger.warning(
+                        "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
+                        parsed.get("num_turns", "?"),
+                    )
+                    return parsed, _normalise_usage_stats(parsed)
+
+        # Then a credential failure, from structured error fields and stderr
+        # only.  The markers are disjoint from the rate-limit keywords, and
+        # "the login is unusable" is a strictly more actionable verdict than
+        # "the backend exited non-zero".
+        _raise_if_credential_failure(parsed)
+
+        # Then a rate limit, read only from what the backend itself said --
+        # stderr, its structured error fields, and Claude's api_error_status.
+        # The agent's transcript is not evidence: see _rate_limit_scan_texts.
+        rate_limit_source = next(
+            (
+                text
+                for text in _rate_limit_scan_texts(backend, parsed, result)
+                if _looks_like_rate_limit(text)
+            ),
+            None,
+        )
+        if rate_limit_source is None and _is_rate_limit_api_status(backend, parsed):
+            rate_limit_source = (
+                f"api_error_status {(parsed or {}).get('api_error_status')}"
+            )
+        if rate_limit_source is not None:
             logger.error(
                 "Rate limit detected in subprocess exit for %s (code %d): %s",
                 backend_name,
@@ -2029,33 +2764,12 @@ def invoke_claude_code(
                 ),
             )
 
-        # Claude's max-turns exhaustion is intentionally treated as partial
-        # success because the subprocess may have already produced useful edits.
-        if backend == "claude":
-            try:
-                parsed = _parse_backend_output(
-                    backend,
-                    result,
-                    cmd_str=cmd_str,
-                    worktree_path=worktree_path,
-                )
-                usage = _normalise_usage_stats(parsed)
-                if parsed.get("subtype") == "error_max_turns":
-                    logger.warning(
-                        "Claude Code reached max_turns limit (%s turns) — treating as partial success.",
-                        parsed.get("num_turns", "?"),
-                    )
-                    return parsed, usage
-            except MutationError:
-                parsed = None
-
         parsed = _parse_backend_output(
             backend,
             result,
             cmd_str=cmd_str,
             worktree_path=worktree_path,
         )
-        usage = _normalise_usage_stats(parsed)
 
         raise MutationError(
             f"{backend_name} exited with code {result.returncode}",
@@ -2069,8 +2783,8 @@ def invoke_claude_code(
             suggestion="Check stderr for rate limits, permission errors, or model availability.",
         )
     except HelixError as exc:
-        # Attach only when the raiser did not already supply a more precise
-        # record; never overwrite one.
+        # Attach only when the raiser did not already supply a more
+        # precise record; never overwrite one.
         if exc.usage is None:
             exc.usage = spent_usage
         raise
@@ -2100,6 +2814,8 @@ def mutate(
     background: str | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
+    record_wasted_usage: Callable[[UsageStats], None] | None = None,
+    on_refresh_race_recovered: Callable[[str], None] | None = None,
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -2125,17 +2841,36 @@ def mutate(
         whether or not the mutation produced a usable candidate.  The tokens
         are spent either way, so this is how a caller charges the budget for
         an attempt that ends in ``None``.  Not called when no backend
-        invocation happened (e.g. the worktree clone raised).
+        invocation happened (e.g. the worktree clone raised).  When a lost
+        refresh race forced a retry, this reports the *retry's* spend only;
+        the lost attempt's goes to ``record_wasted_usage``.
+    record_wasted_usage:
+        Optional sink called once with the spend of an attempt that lost a
+        refresh race and was thrown away (see
+        :func:`invoke_with_refresh_race_retry`).  Never called when no retry
+        happened.  It exists so the caller can charge wasted tokens under
+        their own budget ``source`` instead of billing them as productive
+        mutation work; the sum charged is the same either way.  Omitting it
+        keeps the old behaviour of folding that spend into ``record_usage``.
+    on_refresh_race_recovered:
+        Optional sink told, in operator-facing words, when the invocation lost
+        a refresh race on the shared credential and succeeded on its one retry
+        from a fresh worktree (see :func:`invoke_with_refresh_race_retry`).
 
     Returns
     -------
     Candidate | None
         The new candidate on success, or ``None`` if mutation failed.
     """
-    child = clone_candidate(parent, new_id, base_dir)
-    child.operation = "mutate"
-    if prepare_worktree is not None:
-        prepare_worktree(child)
+
+    def _fresh_child() -> Candidate:
+        fresh = clone_candidate(parent, new_id, base_dir)
+        fresh.operation = "mutate"
+        if prepare_worktree is not None:
+            prepare_worktree(fresh)
+        return fresh
+
+    child = _fresh_child()
 
     prompt = build_mutation_prompt(
         config.objective,
@@ -2150,18 +2885,48 @@ def mutate(
     # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
     # keep it out of the candidate git tree — otherwise it'd leak into
     # every subsequent mutation's diff and the mutator would see its own
-    # prior prompt file as part of the codebase.
-    prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
+    # prior prompt file as part of the codebase.  Written here, before the
+    # first invocation, so a collision is raised as-is; the retry path
+    # rewrites it into its fresh worktree (the write is idempotent).
+    _write_mutation_prompt_artifact(child.worktree_path, prompt)
 
-    try:
-        _, usage = invoke_claude_code(
-            child.worktree_path,
+    def _invoke(
+        target: Candidate, retried: bool
+    ) -> tuple[dict[str, Any], UsageStats]:
+        return invoke_claude_code(
+            target.worktree_path,
             prompt,
             config.agent,
             passthrough_env=config.passthrough_env,
             fixed_env=config.env,
             sandbox=config.sandbox,
-            prompt_artifact_name=prompt_artifact_name,
+            prompt_artifact_name=_write_mutation_prompt_artifact(
+                target.worktree_path, prompt
+            ),
+            retried=retried,
+        )
+
+    def _replace(fresh: Candidate) -> None:
+        nonlocal child
+        child = fresh
+
+    def _discard_child() -> None:
+        try:
+            remove_worktree(child)
+        except Exception:
+            pass
+
+    try:
+        child, usage = invoke_with_refresh_race_retry(
+            child,
+            backend_name=backend_display_name(config.agent.backend),
+            invoke=_invoke,
+            fresh_child=_fresh_child,
+            remove_child=remove_worktree,
+            on_child_replaced=_replace,
+            record_usage=record_usage,
+            record_wasted_usage=record_wasted_usage,
+            on_refresh_race_recovered=on_refresh_race_recovered,
         )
         child.usage = usage
         if record_usage is not None:
@@ -2173,10 +2938,7 @@ def mutate(
             record_usage(exc.usage)
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+        _discard_child()
         return None
     except RateLimitError as exc:
         # Rate limit — clean up orphaned worktree, then re-raise so the parallel
@@ -2185,10 +2947,25 @@ def mutate(
         # before the limit hit, so the same handoff applies.
         if record_usage is not None and exc.usage is not None:
             record_usage(exc.usage)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+        _discard_child()
+        raise
+    except CredentialRefreshError as exc:
+        # The stored login, not this candidate, is what failed.  The tokens
+        # spent before the credential gave out are still spent, so hand them
+        # to the sink like the other paths do; then clean up the orphaned
+        # worktree and re-raise so evolution.py can count it and name it as a
+        # credential failure instead of filing it under "the agent wrote bad
+        # code".
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
+        _discard_child()
+        raise
+    except Exception:
+        # Anything else (a sandbox ``TimeoutExpired``, an ``OSError`` from
+        # the launch) carries no usage of its own; whatever an earlier
+        # attempt spent has already been handed to the sink.  Do not leak
+        # the worktree on the way out.
+        _discard_child()
         raise
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.

@@ -14,9 +14,11 @@ import threading
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+
+from rich.markup import escape
 
 
 from helix.batch_sampler import (
@@ -47,7 +49,9 @@ from helix.display import (
     set_phase,
 )
 
+from helix.backends import backend_display_name
 from helix.exceptions import (
+    CredentialRefreshError,
     HelixError,
     PromptArtifactCollisionError,
     RateLimitError,
@@ -1451,6 +1455,111 @@ def _plan_proposals(
 # upstream's ``ReflectiveMutationProposer.propose``, though upstream
 # batches these stages across all sampled tasks per iteration instead
 # of running one call per proposal slot.
+@dataclass
+class CredentialFailureLog:
+    """Every credential failure seen during a run, in the order observed.
+
+    Proposal workers run in a thread pool, so the list is appended under a
+    lock.  The log exists so a run that dies from an unusable login says so
+    once, plainly, in the permanent end-of-run summary -- not only in a
+    per-slot error that has already scrolled past by the time the run ends.
+
+    ``recovered`` holds the invocations that lost a refresh race and
+    succeeded on their one retry: not failures, but the only evidence an
+    operator gets that candidates are still competing to refresh the shared
+    login.
+    """
+
+    entries: list[tuple[str, str, bool, str]] = field(default_factory=list)
+    recovered: list[tuple[str, str]] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def record(
+        self,
+        candidate_id: str,
+        message: str,
+        *,
+        transient: bool = False,
+        kind: str = "mutation",
+    ) -> None:
+        with self._lock:
+            self.entries.append((candidate_id, message, transient, kind))
+
+    def record_recovered(self, candidate_id: str, message: str) -> None:
+        with self._lock:
+            self.recovered.append((candidate_id, message))
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self.entries)
+
+    def candidate_ids(self) -> list[str]:
+        with self._lock:
+            return [candidate_id for candidate_id, _, _, _ in self.entries]
+
+    def recovered_ids(self) -> list[str]:
+        with self._lock:
+            return [candidate_id for candidate_id, _ in self.recovered]
+
+    def last_message(self) -> str:
+        with self._lock:
+            return self.entries[-1][1] if self.entries else ""
+
+    def all_transient(self) -> bool:
+        """True when every failure was a lost refresh race, not a dead login."""
+        with self._lock:
+            return bool(self.entries) and all(t for _, _, t, _ in self.entries)
+
+    def describe_failed(self) -> str:
+        """``"2 mutation(s) and 1 merge(s)"`` -- what failed, by kind."""
+        with self._lock:
+            kinds = [kind for _, _, _, kind in self.entries]
+        parts = [
+            f"{kinds.count(kind)} {kind}(s)"
+            for kind in ("mutation", "merge")
+            if kind in kinds
+        ]
+        return " and ".join(parts) if parts else "0 invocation(s)"
+
+
+def _credential_failure_verdict(
+    backend: str, *, transient: bool, subject: str
+) -> str:
+    """The one operator-facing sentence for a credential failure.
+
+    Used by the proposal worker and the merge gate so the cause is worded
+    once (the CLI and the summary share :func:`_credential_remedy`);
+    *subject* names what the failure is **not** about ("the candidate's
+    code", "the merged code").
+    """
+    display = backend_display_name(backend)
+    if transient:
+        cause = (
+            f"the shared {display} credential was refreshed by another "
+            "candidate first and the retry also failed"
+        )
+    else:
+        cause = f"the shared {display} credential could not be used or refreshed"
+    return (
+        f"failed because {cause} — this is a login failure, "
+        f"not a failure of {subject}."
+    )
+
+
+def _credential_remedy(backend: str, *, transient: bool) -> str:
+    """What the operator should do about a credential failure."""
+    if transient:
+        return (
+            "The stored login is most likely usable: run "
+            "[cyan]helix resume[/cyan] first, and only re-authenticate if "
+            "this keeps recurring."
+        )
+    return (
+        f"Re-authenticate with [cyan]helix sandbox login {backend}[/cyan], "
+        "then [cyan]helix resume[/cyan]."
+    )
+
+
 def _run_proposal_worker(
     pre_ctx: ProposalContext,
     *,
@@ -1462,6 +1571,7 @@ def _run_proposal_worker(
     evaluator_manifest: dict[str, str],
     use_minibatch_gate: bool,
     gen: int,
+    credential_failures: CredentialFailureLog,
 ) -> ProposalResult:
     """Atomic proposal worker — mirrors the sample/evaluate/mutate/evaluate
     shape of GEPA's ``ReflectiveMutationProposer.propose``.
@@ -1552,7 +1662,11 @@ def _run_proposal_worker(
     # not it returns a candidate, so a failed slot still carries its usage
     # into the sequential apply phase for charging.  The list is worker-local
     # — no shared state is touched here, per the thread-safety contract above.
+    # ``_wasted_usage`` is the same handoff for tokens burned by an attempt
+    # that lost a refresh race and was thrown away: spent, but not productive
+    # work, so the apply phase charges it under its own source.
     _spent_usage: list[UsageStats] = []
+    _wasted_usage: list[UsageStats] = []
     try:
         _child = mutate(
             parent=_parent,
@@ -1567,6 +1681,10 @@ def _run_proposal_worker(
                 )
             ),
             record_usage=_spent_usage.append,
+            record_wasted_usage=_wasted_usage.append,
+            on_refresh_race_recovered=lambda msg: (
+                credential_failures.record_recovered(_new_id, msg)
+            ),
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
@@ -1590,6 +1708,27 @@ def _run_proposal_worker(
                     f"retries — proposal slot skipped. "
                     f"Run [cyan]helix resume[/cyan] when rate limits clear."
                 )
+            elif isinstance(_mu_exc, CredentialRefreshError):
+                # Name the failure for what it is.  Without this the slot is
+                # indistinguishable from a mutation that produced bad code,
+                # and a whole generation can die quietly on a broken login.
+                credential_failures.record(
+                    _new_id, str(_mu_exc), transient=_mu_exc.transient
+                )
+                logger.error(
+                    "Mutation %s (parent: %s, gen %d) failed on the shared "
+                    "%s credential, not on its code: %s",
+                    _new_id, _parent.id, gen,
+                    backend_display_name(config.agent.backend), _mu_exc,
+                )
+                print_error(
+                    f"Mutation [bold]{_new_id}[/bold] "
+                    + _credential_failure_verdict(
+                        config.agent.backend,
+                        transient=_mu_exc.transient,
+                        subject="the candidate's code",
+                    )
+                )
         else:
             print_error(
                 f"Parallel mutation {_new_id} (parent: {_parent.id}, gen {gen}) "
@@ -1600,6 +1739,7 @@ def _run_proposal_worker(
             parent_eval_result=_parent_eval,
             parent_n_uncached=_parent_n_uncached,
             child_usage=_spent_usage[-1] if _spent_usage else None,
+            child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
         )
 
     if _child is None:
@@ -1608,6 +1748,7 @@ def _run_proposal_worker(
             parent_eval_result=_parent_eval,
             parent_n_uncached=_parent_n_uncached,
             child_usage=_spent_usage[-1] if _spent_usage else None,
+            child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
         )
 
     # ---- Step W5: Tamper check ----
@@ -1622,6 +1763,7 @@ def _run_proposal_worker(
             tampered_paths=_tampered,
             parent_n_uncached=_parent_n_uncached,
             child_usage=_child.usage if _child.usage else None,
+            child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
         )
 
     # ---- Step W6: Child minibatch eval ----
@@ -1648,6 +1790,7 @@ def _run_proposal_worker(
         parent_n_uncached=_parent_n_uncached,
         child_n_uncached=_child_n_uncached,
         child_usage=_child.usage if _child.usage else None,
+        child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
     )
 
 def _dispatch_proposals(
@@ -1693,7 +1836,8 @@ def _dispatch_proposals(
                         f"Worker for proposal {_wid} "
                         f"(parent: {_wparent.id}, gen {gen}) "
                         f"raised an unexpected exception: "
-                        f"{type(_wexc).__name__}: {_wexc} — proposal slot dropped."
+                        f"{type(_wexc).__name__}: {escape(str(_wexc))} — "
+                        "proposal slot dropped."
                     )
                     worker_results[_widx] = MutationFailedProposal(
                         presample_ctx=_wpctx,
@@ -2107,7 +2251,18 @@ def _run_evolution_impl(
                     candidate_id=seed.id,
                     source="seed_generation",
                 )
-            except Exception:
+            except Exception as _seed_exc:
+                # The tokens the seed invocation spent before it failed are
+                # still spent; charge them before the worktree goes, exactly
+                # as ``merge()`` / ``mutate()`` hand a failed attempt's usage
+                # to their sink.
+                if isinstance(_seed_exc, HelixError) and _seed_exc.usage is not None:
+                    budget_api.charge_llm_usage(
+                        state,
+                        _seed_exc.usage,
+                        candidate_id=seed.id,
+                        source="seed_generation_failed",
+                    )
                 _safe_remove_worktree(seed, label="failed seed generation")
                 raise
             print_success("Seed generation complete.")
@@ -2214,6 +2369,7 @@ def _run_evolution_impl(
         # Mutation counters for display
         mutations_attempted = 0
         mutations_accepted = 0
+        credential_failures = CredentialFailureLog()
 
         gen = start_gen - 1
         while gen < config.evolution.max_generations:
@@ -2416,23 +2572,74 @@ def _run_evolution_impl(
                         )
 
                     merge_usage: list[UsageStats] = []
-                    merged = merge(
-                        candidate_a=a,
-                        candidate_b=b,
-                        new_id=merge_id,
-                        config=config,
-                        base_dir=worktrees_dir,
-                        background=config.agent.background,
-                        eval_result_a=era,
-                        eval_result_b=erb,
-                        prepare_worktree=lambda cand: (
-                            _refresh_and_snapshot_protected_evaluator_files(
-                                cand, config, project_root
+                    merge_wasted_usage: list[UsageStats] = []
+                    merge_credential_failed = False
+                    try:
+                        merged = merge(
+                            candidate_a=a,
+                            candidate_b=b,
+                            new_id=merge_id,
+                            config=config,
+                            base_dir=worktrees_dir,
+                            background=config.agent.background,
+                            eval_result_a=era,
+                            eval_result_b=erb,
+                            prepare_worktree=lambda cand: (
+                                _refresh_and_snapshot_protected_evaluator_files(
+                                    cand, config, project_root
+                                )
+                            ),
+                            ancestor=ancestor_candidate,
+                            record_usage=merge_usage.append,
+                            record_wasted_usage=merge_wasted_usage.append,
+                            on_refresh_race_recovered=lambda msg: (
+                                credential_failures.record_recovered(merge_id, msg)
+                            ),
+                        )
+                    except CredentialRefreshError as _merge_cred_exc:
+                        # Same treatment the proposal worker gives a
+                        # mutation: the merge worktree is already cleaned
+                        # up by merge(); count and name the failure once,
+                        # then fall through to mutation so the run continues.
+                        merged = None
+                        merge_credential_failed = True
+                        credential_failures.record(
+                            merge_id,
+                            str(_merge_cred_exc),
+                            transient=_merge_cred_exc.transient,
+                            kind="merge",
+                        )
+                        print_helix_error(_merge_cred_exc)
+                        logger.error(
+                            "Merge %s (%s + %s, gen %d) failed on the shared "
+                            "%s credential, not on its code: %s",
+                            merge_id, a.id, b.id, gen,
+                            backend_display_name(config.agent.backend),
+                            _merge_cred_exc,
+                        )
+                        print_error(
+                            f"Merge [bold]{merge_id}[/bold] "
+                            + _credential_failure_verdict(
+                                config.agent.backend,
+                                transient=_merge_cred_exc.transient,
+                                subject="the merged code",
                             )
-                        ),
-                        ancestor=ancestor_candidate,
-                        record_usage=merge_usage.append,
-                    )
+                            + " Falling through to mutation."
+                        )
+
+                    # An attempt thrown away by a lost refresh race spent
+                    # real tokens on nothing, whether or not the retry went on
+                    # to produce a candidate.  Charge it here, once, under its
+                    # own source, so the merge below is billed for its own
+                    # work only.
+                    if merge_wasted_usage:
+                        live.update(usage=merge_wasted_usage[-1])
+                        budget_api.charge_llm_usage(
+                            state,
+                            merge_wasted_usage[-1],
+                            candidate_id=merge_id,
+                            source="refresh_race_retry",
+                        )
 
                     if merged is None:
                         # GEPA parity (M2/B3): merge operator failed before
@@ -2446,12 +2653,17 @@ def _run_evolution_impl(
                                 candidate_id=merge_id,
                                 source="merge_failed",
                             )
-                        print_error(
-                            f"Merge {merge_id} failed "
-                            f"(candidates: {a.id} + {b.id}, gen {gen}). "
-                            f"Claude Code returned no output or the merge subprocess errored. "
-                            f"Check the HELIX ERROR panel above for full diagnostics."
-                        )
+                        # A credential failure has already been diagnosed
+                        # above; the generic wording would contradict it.
+                        if not merge_credential_failed:
+                            print_error(
+                                f"Merge {merge_id} failed "
+                                f"(candidates: {a.id} + {b.id}, gen {gen}). "
+                                f"{backend_display_name(config.agent.backend)} "
+                                "returned no output or the merge subprocess "
+                                "errored. Check the HELIX ERROR panel above "
+                                "for full diagnostics."
+                            )
                     else:
                         if merged.usage:
                             live.update(usage=merged.usage)
@@ -2790,6 +3002,7 @@ def _run_evolution_impl(
                     evaluator_manifest=evaluator_manifest,
                     use_minibatch_gate=use_minibatch_gate,
                     gen=gen,
+                    credential_failures=credential_failures,
                 ),
                 max_workers=config.evolution.max_workers,
                 gen=gen,
@@ -2814,6 +3027,27 @@ def _run_evolution_impl(
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
             _acceptance_memo = AcceptanceMemo(acceptance)
+
+            def _charge_refresh_race_waste(
+                wasted: "UsageStats | None", candidate_id: str
+            ) -> None:
+                """Charge an attempt that lost a refresh race, under its own source.
+
+                Its tokens are part of the run's real spend — the total here
+                is the same as when they rode along inside the successful
+                attempt's record — but they bought nothing, so charging them
+                as ``"mutation"`` hides what races cost.  Sequential, like
+                every other ``budget_api`` call in this phase.
+                """
+                if not wasted:
+                    return
+                live.update(usage=wasted)
+                budget_api.charge_llm_usage(
+                    state,
+                    wasted,
+                    candidate_id=candidate_id,
+                    source="refresh_race_retry",
+                )
 
             def _gate_proposal(
                 _p_idx: int, wr: "ProposalResult | None"
@@ -2849,6 +3083,7 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
+                    _charge_refresh_race_waste(wr.child_wasted_usage, _new_id)
                     # Charge LLM usage: the mutation failed, but its tokens
                     # were still spent.  Skipping this is how a run's budget
                     # silently under-reports by a whole generation.
@@ -2910,6 +3145,7 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
+                    _charge_refresh_race_waste(wr.child_wasted_usage, wr.child.id)
                     # Charge LLM usage (mutation happened, even if rejected)
                     if wr.child_usage:
                         live.update(usage=wr.child_usage)
@@ -2954,6 +3190,7 @@ def _run_evolution_impl(
                     _budget_break = True
                     return None
 
+                _charge_refresh_race_waste(wr.child_wasted_usage, child.id)
                 # Charge LLM usage
                 if wr.child_usage:
                     live.update(usage=wr.child_usage)
@@ -3497,6 +3734,48 @@ def _run_evolution_impl(
     # Permanent summary after the live display disappears
     render_budget(state.budget, config.evolution)
     render_frontier_table(frontier, frontier._results)
+
+    # A credential failure is not a code failure, and the operator has to be
+    # able to tell them apart after the fact.  The per-slot errors above have
+    # long scrolled away by now; this line is part of the permanent summary
+    # that outlives the live display.
+    _display = backend_display_name(config.agent.backend)
+    if credential_failures.recovered_ids():
+        # Not failures -- but the only visible sign that candidates are
+        # racing to refresh the shared login at all.
+        _recovered_ids = ", ".join(credential_failures.recovered_ids())
+        print_warning(
+            f"{len(credential_failures.recovered_ids())} invocation(s) "
+            f"recovered after a lost refresh race on the shared {_display} "
+            f"credential: {_recovered_ids}. Each was retried once from a "
+            "fresh worktree and succeeded; both attempts' tokens are charged "
+            "and the first attempt's output is kept beside the retry's "
+            "(`.attempt1` artifacts)."
+        )
+    if credential_failures:
+        _failed_ids = ", ".join(credential_failures.candidate_ids())
+        _transient = credential_failures.all_transient()
+        if _transient:
+            # Every failure was a lost refresh race: the shared login was
+            # refreshed by another candidate and is most likely fine.  Telling
+            # the operator to re-login here would throw away a working
+            # credential and teach them to distrust a healthy run.
+            _cause = (
+                "Each lost a refresh race (another candidate refreshed the "
+                "shared login first) and failed again on its one retry."
+            )
+        else:
+            _cause = (
+                "The backend reported that its stored login could not be "
+                "used or refreshed."
+            )
+        print_error(
+            f"{credential_failures.describe_failed()} failed on the shared "
+            f"{_display} credential, not on their code: {_failed_ids}. "
+            f"{_cause} "
+            + _credential_remedy(config.agent.backend, transient=_transient)
+            + f" Last report: {escape(credential_failures.last_message())}"
+        )
 
     best = frontier.best()
 

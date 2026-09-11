@@ -42,6 +42,13 @@ HELIX_ARTIFACT_NAMES = {
     "helix_batch.json",
 }
 
+#: Per-candidate OpenCode state directory (holds ``opencode/opencode.db``).
+#: Under the worktree when unsandboxed; created in the per-candidate workspace
+#: copy (mounted at ``/workspace``) when sandboxed.  Starts with ``.helix`` so
+#: it is excluded from the sandbox copy and sync-back like every other HELIX
+#: artifact, and ``helix.mutator._ignore_helix_artifacts`` gitignores it.
+OPENCODE_STATE_DIR_NAME = ".helix_opencode_state"
+
 
 @dataclass(frozen=True)
 class EvaluatorSidecarRuntime:
@@ -673,6 +680,30 @@ def _init_synthetic_git_repo(workspace: Path) -> None:
     )
 
 
+def _prepare_opencode_state_dir(workspace: Path) -> None:
+    """Create the per-candidate OpenCode database directory in *workspace*.
+
+    ``invoke_claude_code`` points ``OPENCODE_DB`` at
+    ``/workspace/.helix_opencode_state/opencode/opencode.db`` for sandboxed
+    opencode runs (every container shares one ``/home/node``, so the default
+    location would be one database for all concurrent candidates).  SQLite
+    does not create parent directories, and ``.helix*`` paths are excluded
+    from the workspace copy, so the directory has to be made here.  It is
+    listed in the synthetic repo's local excludes so the agent's ``git
+    status`` never shows the database as an untracked file.
+    """
+    (workspace / OPENCODE_STATE_DIR_NAME / "opencode").mkdir(
+        parents=True, exist_ok=True
+    )
+    exclude = workspace / ".git" / "info" / "exclude"
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as fh:
+            fh.write(f"{OPENCODE_STATE_DIR_NAME}/\n")
+    except OSError as exc:
+        logger.debug("could not write %s: %s", exclude, exc)
+
+
 def _run_workspace_helper(
     workspace: Path,
     image: str,
@@ -1213,6 +1244,8 @@ def run_sandboxed_commands(
             omit_paths=omit_paths,
         )
         _init_synthetic_git_repo(workspace)
+        if scope == "agent" and agent_backend == "opencode":
+            _prepare_opencode_state_dir(workspace)
         _docker_chown_workspace(workspace, docker_image, "node:node")
         sidecar_runtime = (
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None
@@ -1308,7 +1341,13 @@ def sandbox_auth_docker_args(
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
+    container_name: str | None = None,
 ) -> list[str]:
+    """Build the ``docker run`` argv for one auth-related command.
+
+    *container_name* names the container so a caller that gives up on the
+    ``docker run`` client can still stop what it started.
+    """
     try:
         command = BACKEND_AUTH_COMMANDS[agent_backend][action]
     except KeyError as exc:
@@ -1338,11 +1377,23 @@ def sandbox_auth_docker_args(
         "-e",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ]
+    if container_name:
+        args.extend(["--name", container_name])
     if interactive:
         args.insert(2, "-it")
     args.append(image)
     args.extend(command)
     return args
+
+
+#: Upper bound on one *non-interactive* sandbox auth command, in seconds.
+#: ``helix sandbox status`` runs one container per backend and ``helix sandbox
+#: logout`` one per call; each is a local probe or a file removal, not an agent
+#: turn.  A wedged daemon or a container that never exits would otherwise hang
+#: the CLI with no output and no way out but Ctrl-C.  Deliberately not applied
+#: to ``login``, which is interactive and waits on a human completing a device
+#: flow in a browser.
+SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS = 300
 
 
 def run_sandbox_auth_command(
@@ -1354,7 +1405,18 @@ def run_sandbox_auth_command(
     add_host_gateway: bool = False,
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
+    timeout: float | None = None,
+    container_name: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one auth-related command against the shared login volume.
+
+    *timeout* applies to the non-interactive path only and is enforced on the
+    ``docker run`` client.  Killing the client does not stop the container, so
+    when a *container_name* is given the container is force-removed on
+    timeout before :class:`subprocess.TimeoutExpired` propagates; without a
+    name there is nothing to address and the container is left to exit on its
+    own.
+    """
     docker_image = image or resolve_sandbox_image(
         SandboxConfig(enabled=True), agent_backend
     )
@@ -1366,10 +1428,18 @@ def run_sandbox_auth_command(
         add_host_gateway=add_host_gateway,
         extra_hosts=extra_hosts,
         interactive=interactive,
+        container_name=container_name,
     )
     if interactive:
         return subprocess.run(args, text=True)
-    return subprocess.run(args, capture_output=True, text=True)
+    try:
+        return subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        if container_name:
+            _run_docker(["docker", "rm", "-f", container_name], check=False)
+        raise
 
 
 def run_command(

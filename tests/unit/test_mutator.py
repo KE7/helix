@@ -845,6 +845,34 @@ class TestInvokeClaudeCode:
         args_list = mock_run.call_args[0][0]
         assert 'model_reasoning_effort="high\\"quoted"' in args_list
 
+    def test_codex_cli_args_pin_memories_off(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        invoke_claude_code("/tmp/wt", "the prompt", AgentConfig(backend="codex"))
+
+        args_list = mock_run.call_args[0][0]
+        idx = args_list.index("features.memories=false")
+        assert args_list[idx - 1] == "-c"
+
+    def test_claude_env_disables_auto_memory(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+
+        invoke_claude_code("/tmp/wt", "the prompt", AgentConfig(backend="claude"))
+
+        env = mock_run.call_args[1]["env"]
+        assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+
+    def test_fresh_session_env_not_injected_for_other_backends(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        invoke_claude_code("/tmp/wt", "the prompt", AgentConfig(backend="codex"))
+
+        env = mock_run.call_args[1]["env"]
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in env
+
     def test_cursor_cli_args_use_stream_json(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
@@ -1846,18 +1874,22 @@ class TestTranscriptToolPatchesUsageInArtifact:
 
 
 # ---------------------------------------------------------------------------
-# Tests: OpenCode per-candidate SQLite isolation (XDG_DATA_HOME)
+# Tests: OpenCode per-candidate SQLite isolation (OPENCODE_DB)
 # ---------------------------------------------------------------------------
 
 
 class TestOpenCodeSubprocessIsolation:
-    """Verify that concurrent opencode subprocesses receive isolated XDG_DATA_HOME
+    """Verify that concurrent opencode subprocesses receive isolated OPENCODE_DB
     values so each worker opens its own SQLite database and the shared-database
     'PRAGMA journal_mode = WAL' contention observed in PR #34 cannot recur.
+
+    OPENCODE_DB rather than XDG_DATA_HOME: the latter relocates opencode's
+    ``auth.json`` along with the database, which makes an existing login
+    invisible to the CLI.
     """
 
     def test_opencode_subprocess_isolation_env_set(self, tmp_path: Path, mocker):
-        """invoke_claude_code sets XDG_DATA_HOME for opencode backend."""
+        """invoke_claude_code sets OPENCODE_DB for opencode backend."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
@@ -1871,20 +1903,55 @@ class TestOpenCodeSubprocessIsolation:
 
         call_kwargs = mock_run.call_args[1]
         env = call_kwargs["env"]
-        assert "XDG_DATA_HOME" in env, (
-            "XDG_DATA_HOME must be set for opencode to isolate its SQLite database "
+        assert "OPENCODE_DB" in env, (
+            "OPENCODE_DB must be set for opencode to isolate its SQLite database "
             "from other concurrent opencode workers"
         )
         # Must point inside the candidate worktree so cleanup is automatic
-        xdg = env["XDG_DATA_HOME"]
-        assert xdg.startswith(str(tmp_path)), (
-            f"XDG_DATA_HOME={xdg!r} should be under the candidate worktree {tmp_path}"
+        db_path = env["OPENCODE_DB"]
+        assert db_path.startswith(str(tmp_path)), (
+            f"OPENCODE_DB={db_path!r} should be under the candidate worktree {tmp_path}"
         )
+        # The credential knob must stay untouched: relocating XDG_DATA_HOME
+        # would move auth.json with the database and hide an existing login.
+        assert "XDG_DATA_HOME" not in env, (
+            "XDG_DATA_HOME must not be set for opencode; it moves auth.json too"
+        )
+
+    def test_sandboxed_opencode_gets_a_per_candidate_database_too(
+        self, tmp_path: Path, mocker
+    ):
+        """Every sandboxed container shares one ``/home/node`` (the
+        ``helix-auth-opencode`` volume with ``HOME`` forced), so without the
+        knob all concurrent candidates open the same ``opencode.db``.  The
+        database goes under the per-candidate workspace copy instead."""
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","sessionID":"ses_abc"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(
+            str(tmp_path),
+            "fix the bug",
+            AgentConfig(backend="opencode"),
+            sandbox=SandboxConfig(enabled=True, image="img:latest"),
+        )
+
+        env = mock_run.call_args[1]["env"]
+        assert env["OPENCODE_DB"] == (
+            "/workspace/.helix_opencode_state/opencode/opencode.db"
+        )
+        assert "XDG_DATA_HOME" not in env
+        # The host worktree is untouched: the directory is created in the
+        # workspace copy by the sandbox, not here.
+        assert not (tmp_path / ".helix_opencode_state").exists()
 
     def test_opencode_subprocess_isolation_unique_per_candidate(
         self, tmp_path: Path, mocker
     ):
-        """Two different candidates get different XDG_DATA_HOME values."""
+        """Two different candidates get different OPENCODE_DB values."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
@@ -1898,18 +1965,18 @@ class TestOpenCodeSubprocessIsolation:
         wt_b.mkdir()
 
         invoke_claude_code(str(wt_a), "prompt", AgentConfig(backend="opencode"))
-        env_a = mock_run.call_args[1]["env"]["XDG_DATA_HOME"]
+        env_a = mock_run.call_args[1]["env"]["OPENCODE_DB"]
 
         invoke_claude_code(str(wt_b), "prompt", AgentConfig(backend="opencode"))
-        env_b = mock_run.call_args[1]["env"]["XDG_DATA_HOME"]
+        env_b = mock_run.call_args[1]["env"]["OPENCODE_DB"]
 
         assert env_a != env_b, (
-            "Each candidate worktree must produce a distinct XDG_DATA_HOME so their "
+            "Each candidate worktree must produce a distinct OPENCODE_DB so their "
             "opencode SQLite databases don't collide"
         )
 
     def test_opencode_subprocess_inherits_other_env(self, tmp_path: Path, mocker):
-        """Non-isolation env vars (PATH, HOME) are still present after XDG injection."""
+        """Non-isolation env vars (PATH, HOME) survive the OPENCODE_DB injection."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"result","sessionID":"ses_abc"}\n',
@@ -1929,13 +1996,13 @@ class TestOpenCodeSubprocessIsolation:
             assert "PATH" in env, "PATH must survive the env scrub for opencode"
         if "HOME" in os.environ:
             assert "HOME" in env, "HOME must survive the env scrub for opencode"
-        # And XDG_DATA_HOME is the *only* new opencode-specific addition
-        assert "XDG_DATA_HOME" in env
+        # And OPENCODE_DB is the *only* new opencode-specific addition
+        assert "OPENCODE_DB" in env
 
     def test_opencode_isolation_not_applied_to_other_backends(
         self, tmp_path: Path, mocker
     ):
-        """XDG_DATA_HOME must NOT be injected for agy/claude/codex/cursor."""
+        """OPENCODE_DB must NOT be injected for agy/claude/codex/cursor."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
 
@@ -1944,8 +2011,8 @@ class TestOpenCodeSubprocessIsolation:
                 str(tmp_path), "prompt", AgentConfig(backend=backend)
             )
             env = mock_run.call_args[1]["env"]
-            assert "XDG_DATA_HOME" not in env, (
-                f"XDG_DATA_HOME must not be injected for {backend} backend"
+            assert "OPENCODE_DB" not in env, (
+                f"OPENCODE_DB must not be injected for {backend} backend"
             )
 
     def test_opencode_isolation_dir_gitignored(self, tmp_path: Path, mocker):
@@ -2069,6 +2136,60 @@ class TestMutateRecordsUsageOnFailure:
 
         assert result is None
         assert spent == []
+
+    def test_usage_is_reported_when_the_credential_fails(
+        self, tmp_path: Path, mocker
+    ):
+        """A credential failure is not free: the tokens spent before the
+        login gave out reach the sink like the sibling error paths."""
+        from helix.exceptions import CredentialRefreshError
+
+        usage = UsageStats(input_tokens=11, output_tokens=4)
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=CredentialRefreshError("login is dead", usage=usage),
+        )
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
+        mocker.patch("helix.mutator.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        with pytest.raises(CredentialRefreshError):
+            mutate(
+                parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+            )
+
+        assert spent == [usage]
+        mock_remove.assert_called_once_with(child)
+
+    def test_worktree_is_removed_on_a_non_helix_exception(
+        self, tmp_path: Path, mocker
+    ):
+        import subprocess as _sp
+
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=_sp.TimeoutExpired(cmd=["codex"], timeout=1),
+        )
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
+
+        with pytest.raises(_sp.TimeoutExpired):
+            mutate(parent, er, "g1-s0", config, Path("/tmp"))
+
+        mock_remove.assert_called_once_with(child)
 
 
 class TestSalvageBackendUsage:
