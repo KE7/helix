@@ -8,10 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Every sandboxed candidate now starts with a fresh agent session:
-  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude` and
-  `-c features.memories=false` for `codex` (the other backends read nothing
-  from a prior session); transcripts stay in the `helix-auth-<backend>` volume.
+- The agent CLIs' own cross-session memory is switched off for every
+  candidate, sandboxed or not: `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude`
+  and `-c features.memories=false` for `codex` (the other backends recalled
+  nothing from a prior session on their own). An explicit `[env]` value for
+  the same key wins. This is not a session-isolation guarantee: the login
+  volume is shared by design, and a candidate with shell access can still
+  write the shared HOME's config files (`~/.claude/CLAUDE.md`,
+  `~/.claude/settings.json`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`),
+  which later sessions load. Transcripts stay in the `helix-auth-<backend>`
+  volume.
+- Sandboxed runs with more than one concurrent candidate warm the shared
+  `codex` credential once per generation under a single writer, verified by
+  reading `last_refresh` back from `auth.json`; a credential failure is now
+  its own error kind (`CredentialRefreshError`), a lost refresh race is
+  retried once from a fresh worktree, and both are named in the end-of-run
+  summary.
 
 ### Changed
 - **BREAKING**: Removed the `gemini` mutation backend and replaced it with

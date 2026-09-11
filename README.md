@@ -645,13 +645,26 @@ evaluator uses a local proxy, keep that endpoint in your evaluator code as
 usual. Docker Desktop supports `host.docker.internal`; Linux users can set
 `add_host_gateway = true`.
 
-Every candidate starts with a fresh agent session: HELIX sets
+HELIX stops the agent CLIs' own cross-session memory: it sets
 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude` (its auto-memory is keyed by
 repo root and would otherwise span candidates) and passes
 `-c features.memories=false` to `codex`; `agy`, `cursor`, and `opencode` were
-probed and read nothing from a prior session, so they need no switch.
-Transcripts and session databases remain in the `helix-auth-<backend>` volume,
-so operators can read them after a run.
+probed and recalled nothing from a prior session on their own, so they need no
+switch. Both switches apply to sandboxed and unsandboxed runs, and an explicit
+`[env]` value for the same key wins. This is not a session-isolation guarantee:
+the login volume is shared by design, so a candidate with shell access can
+still write the shared HOME's config files (`~/.claude/CLAUDE.md`,
+`~/.claude/settings.json`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`),
+which later sessions load. Transcripts and session databases remain in the
+`helix-auth-<backend>` volume, so operators can read them after a run.
+
+When several candidates can write the shared login at once, HELIX refreshes
+the `codex` credential once per generation under a single writer before
+dispatching anything (`codex debug models`, verified by reading `last_refresh`
+back from `auth.json`), so the credential is fresh at the start of the
+generation. A token that crosses its refresh threshold during the generation
+can still be raced by candidates in flight; a lost race is retried once from
+a fresh worktree and reported in the end-of-run summary.
 
 The container-backed tests in `tests/integration/` run real backend images,
 so a bare `pytest` does not collect them; opt in with

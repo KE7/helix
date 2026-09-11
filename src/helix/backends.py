@@ -73,13 +73,23 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
     "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
 }
 
-# Environment that makes every candidate start from a fresh agent session.
+# Environment that stops the agent CLIs' own cross-session memory.
 #
 # Candidates share one login volume per backend (mounted at /home/node), so a
 # CLI that reads memory from an earlier session would carry state from
 # candidate N-1 into candidate N.  Probed 2026-09-10 against the real CLIs:
 # plant a fact in one one-shot session, ask for it in a fresh one, same cwd,
-# no tools.
+# no tools.  That probe measures the spontaneous channel only -- what a CLI
+# recalls on its own.  It is not a session-isolation guarantee: a candidate
+# with shell access can still write the shared HOME's config files
+# (``~/.claude/CLAUDE.md``, ``~/.claude/settings.json``, ``~/.codex/AGENTS.md``,
+# ``~/.codex/config.toml``), which later sessions load.  That channel is
+# deliberately left open, because the volume is shared by design so that
+# transcripts and a refreshed login persist across candidates.
+#
+# Applies to sandboxed and unsandboxed runs alike (``invoke_claude_code``
+# sets it on the backend environment either way).  An operator who names the
+# same key in ``[env]`` wins: the value here is a default, not an override.
 #   claude   recalled it -- auto-memory, keyed by repo root, so it spans
 #            worktrees and the shared HOME; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 #            stops it and no memory directory is created.
