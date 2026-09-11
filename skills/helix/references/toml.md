@@ -212,14 +212,19 @@ Sandbox behavior:
 - Evaluator containers do not get agent auth volumes.
 - `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX artifacts are excluded
   from sandbox workspace copies/sync-back.
-- Claude Code transcript preservation is enabled by default for agent
-  sandboxes. HELIX looks for
-  `/home/node/.claude/projects/-workspace/<session_id>.jsonl` in the auth
-  volume and copies it to
-  `.helix_artifacts/backend_transcripts/claude/<session_id>.jsonl`.
-  Set `preserve_backend_transcripts = false` under `[sandbox]` to disable it,
-  or override `transcript_artifact_dir` / `claude_transcript_root` for custom
-  layouts.
+- After each agent invocation HELIX copies the CLI's own transcript for that
+  session (claude `projects/-workspace/<id>.jsonl`, codex `sessions/.../
+  rollout-*-<thread_id>.jsonl`, cursor `projects/*/agent-transcripts/<id>/`,
+  agy `brain/<id>/.system_generated/logs/transcript*.jsonl`, opencode this
+  session's rows exported from `opencode.db`) out of the auth volume into
+  `.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl`. This
+  always happens for every backend; override `transcript_artifact_dir` /
+  `claude_transcript_root` under `[sandbox]` for custom layouts. See
+  `run-debug.md` for the full per-backend table.
+- Sandboxed runs reset the backend CLI's session state in its auth volume at
+  the start of every generation. Credentials and operator configuration are
+  never touched; the copied transcripts are the only durable record of what
+  the agent did.
 - Special files are skipped by default; set `skip_special_files = false` to
   raise on unsupported file types instead.
 

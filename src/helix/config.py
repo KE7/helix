@@ -704,7 +704,17 @@ class SandboxConfig(BaseModel):
     extra_hosts: dict[str, str] = Field(default_factory=dict)
     skip_special_files: bool = True
     omit_from_agent: list[str] = Field(default_factory=list)
-    preserve_backend_transcripts: bool = True
+    # Every agent invocation's native CLI transcript is copied into the
+    # candidate worktree under ``transcript_artifact_dir/<backend>/
+    # <session_id>.jsonl`` and used for tool-call accounting: claude
+    # (``claude_transcript_root``), codex (``~/.codex/sessions`` rollout),
+    # cursor (``~/.cursor/projects/*/agent-transcripts``), agy
+    # (``brain/<id>/.../transcript.jsonl`` plus ``<id>.full.jsonl``) and
+    # opencode (this session's rows exported from ``opencode.db``); see
+    # ``helix.backends.BACKEND_TRANSCRIPT_SOURCES``.  Sandboxed runs read the
+    # ``helix-auth-<backend>`` volume, whose session state is reset at the
+    # start of every generation (``helix.backends.BACKEND_STATE_PATHS``), so
+    # these copies are the only durable record of what the agent did.
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
     claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
 

@@ -19,7 +19,15 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
+from helix.backends import (
+    BACKEND_AUTH_COMMANDS,
+    BACKEND_STATE_PATHS,
+    BACKEND_TRANSCRIPT_SOURCES,
+    DEFAULT_BACKEND_IMAGES,
+    OPENCODE_STATE_TABLES,
+    TRANSCRIPT_SESSION_ID_RE,
+    transcript_session_id_keys,
+)
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.lines import split_lf_lines
 
@@ -147,8 +155,19 @@ def _ignore_for_sync(path: Path) -> bool:
     )
 
 
-def _extract_session_id_from_json_output(stdout: str) -> str | None:
-    """Best-effort session id extraction from backend structured stdout."""
+_DEFAULT_SESSION_ID_KEYS = ("session_id", "sessionId", "sessionID")
+
+
+def _extract_session_id_from_json_output(
+    stdout: str,
+    keys: tuple[str, ...] = _DEFAULT_SESSION_ID_KEYS,
+) -> str | None:
+    """Best-effort session id extraction from backend structured stdout.
+
+    ``keys`` are the candidate field names in priority order; backends name
+    the id differently (``thread_id`` for codex, ``conversation_id`` for agy,
+    ``sessionID`` for opencode), see ``transcript_session_id_keys``.
+    """
     if not stdout.strip():
         return None
     payloads: list[object] = []
@@ -167,7 +186,7 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
     # Check top-level payloads first
     for payload in payloads:
         if isinstance(payload, dict):
-            for key in ("session_id", "sessionId", "sessionID"):
+            for key in keys:
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     return value
@@ -185,14 +204,64 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
         for node in walk(payload):
             if not isinstance(node, dict) or node is payload:
                 continue
-            for key in ("session_id", "sessionId", "sessionID"):
+            for key in keys:
                 value = node.get(key)
                 if isinstance(value, str) and value:
                     return value
     return None
 
 
-def _copy_claude_transcript_from_auth_volume(
+def _shell_glob_word(pattern: str) -> str:
+    """Quote ``pattern`` for ``sh`` while leaving ``*`` free to glob."""
+    return "*".join(shlex.quote(part) if part else "" for part in pattern.split("*"))
+
+
+def _backend_transcript_copy_script(
+    *,
+    agent_backend: str,
+    sandbox: SandboxConfig,
+    session_id: str,
+) -> str | None:
+    """Build the ``sh`` script that copies one session's transcript files.
+
+    Returns ``None`` when nothing is known to copy for ``agent_backend``.
+    Every source is optional: a missing file is skipped, never an error, so
+    the helper container exits 0 and the mutator records the miss.
+    """
+    rel_dir = Path(sandbox.transcript_artifact_dir) / agent_backend
+    if agent_backend == "claude":
+        rel_file = rel_dir / f"{session_id}.jsonl"
+        source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
+        rel_file_str = str(rel_file).lstrip("/")
+        return (
+            "set -eu; "
+            f"src={shlex.quote(str(source))}; "
+            f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
+            '[ -f "$src" ] || exit 0; '
+            'mkdir -p "$(dirname "$dst")"; '
+            'cp "$src" "$dst"'
+        )
+    source_spec = BACKEND_TRANSCRIPT_SOURCES.get(agent_backend)
+    if source_spec is None or not source_spec.files:
+        return None
+    steps = []
+    for pattern, dest_name in source_spec.files:
+        glob_word = '"$HOME"/' + _shell_glob_word(pattern.format(session_id=session_id))
+        rel_file = rel_dir / dest_name.format(session_id=session_id)
+        dst = shlex.quote("/workspace/" + str(rel_file).lstrip("/"))
+        steps.append(
+            f"for src in {glob_word}; do "
+            '[ -f "$src" ] || continue; '
+            f"dst={dst}; "
+            'mkdir -p "$(dirname "$dst")"; '
+            'cp "$src" "$dst"; '
+            "break; "
+            "done"
+        )
+    return "set -u; " + "; ".join(steps)
+
+
+def _copy_backend_transcript_from_auth_volume(
     *,
     workspace: Path,
     image: str,
@@ -200,23 +269,46 @@ def _copy_claude_transcript_from_auth_volume(
     sandbox: SandboxConfig,
     stdout: str,
 ) -> None:
-    if agent_backend != "claude" or not sandbox.preserve_backend_transcripts:
+    """Copy the backend's native transcript for this run out of its auth volume.
+
+    The backend CLI writes its session store under ``/home/node`` in the
+    ``helix-auth-<backend>`` volume, which the agent container mounts.  A
+    short-lived helper container mounts that volume read-only alongside the
+    workspace and copies the per-session files named by
+    ``BACKEND_TRANSCRIPT_SOURCES`` (or ``claude_transcript_root`` for claude)
+    into ``<transcript_artifact_dir>/<backend>/`` so the regular sync-back
+    carries them to the candidate worktree.
+
+    This always runs: the mutator needs the copy to count tool events, and
+    the volume is reset at the next generation, so the copy is the record.
+    """
+    if agent_backend is None:
         return
-    session_id = _extract_session_id_from_json_output(stdout)
-    if not session_id:
-        return
-    rel_dir = Path(sandbox.transcript_artifact_dir) / "claude"
-    rel_file = rel_dir / f"{session_id}.jsonl"
-    source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
-    rel_file_str = str(rel_file).lstrip("/")
-    command = (
-        "set -eu; "
-        f"src={shlex.quote(str(source))}; "
-        f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
-        '[ -f "$src" ] || exit 0; '
-        'mkdir -p "$(dirname "$dst")"; '
-        'cp "$src" "$dst"'
+    session_id = _extract_session_id_from_json_output(
+        stdout, transcript_session_id_keys(agent_backend)
     )
+    if not session_id:
+        logger.debug(
+            "%s transcript not preserved: no session id in backend output",
+            agent_backend,
+        )
+        return
+    if agent_backend != "claude" and not TRANSCRIPT_SESSION_ID_RE.match(session_id):
+        logger.debug(
+            "%s transcript not preserved: unexpected session id %r",
+            agent_backend,
+            session_id,
+        )
+        return
+    command = _backend_transcript_copy_script(
+        agent_backend=agent_backend, sandbox=sandbox, session_id=session_id
+    )
+    if command is None:
+        logger.debug(
+            "%s transcript not preserved: no known native transcript location",
+            agent_backend,
+        )
+        return
     args = [
         "docker",
         "run",
@@ -241,6 +333,114 @@ def _copy_claude_transcript_from_auth_volume(
         command,
     ]
     _run_docker(args, check=False)
+
+
+_OPENCODE_STATE_ROWS_SCRIPT = (
+    "import os, sqlite3\n"
+    "db = os.path.expanduser('~/.local/share/opencode/opencode.db')\n"
+    "if os.path.isfile(db):\n"
+    "    con = sqlite3.connect(db)\n"
+    "    names = {r[0] for r in con.execute(\"select name from sqlite_master where type='table'\")}\n"
+    "    for t in %s:\n"
+    "        if t in names: con.execute('delete from \"%%s\"' %% t)\n"
+    "    con.commit(); con.close()\n"
+) % (OPENCODE_STATE_TABLES,)
+
+
+def _backend_state_reset_script(agent_backend: str) -> str | None:
+    """Build the ``sh`` script that deletes ``agent_backend``'s session state.
+
+    Returns ``None`` when the table has nothing for the backend.  Paths are
+    ``$HOME``-relative globs from ``BACKEND_STATE_PATHS``; for opencode the
+    session rows are additionally deleted from ``opencode.db`` in place so the
+    credential rows in the same file survive.
+    """
+    paths = BACKEND_STATE_PATHS.get(agent_backend)
+    if not paths:
+        return None
+    words = " ".join('"$HOME"/' + _shell_glob_word(path) for path in paths)
+    script = f"set -u; rm -rf {words}"
+    if agent_backend == "opencode":
+        script += "; python3 -c " + shlex.quote(_OPENCODE_STATE_ROWS_SCRIPT)
+    return script
+
+
+def reset_sandbox_agent_state(
+    agent_backend: str,
+    *,
+    image: str | None = None,
+    generation: int | None = None,
+) -> int:
+    """Delete the backend CLI's session state from its sandbox auth volume.
+
+    Runs once per generation from ``run_evolution`` (sandboxed runs only) in a
+    single-writer container that mounts ``helix-auth-<backend>`` read-write
+    with no network, so each generation's candidates start from a CLI with no
+    memory of earlier candidates.  Transcripts were already copied into the
+    run at the end of each invocation, so nothing HELIX keeps is lost.  Credentials and operator configuration are
+    never touched (see ``BACKEND_STATE_PATHS``).  Returns the number of state
+    paths in the table; a failure is logged as a warning and never raised.
+    """
+    script = _backend_state_reset_script(agent_backend)
+    if script is None:
+        logger.debug("no sandbox state paths known for backend %s", agent_backend)
+        return 0
+    volume = sandbox_auth_volume_name(agent_backend)
+    docker_image = image or resolve_sandbox_image(
+        SandboxConfig(enabled=True), agent_backend
+    )
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--workdir",
+        "/home/node",
+        "--user",
+        "node",
+        "--network",
+        "none",
+        "--security-opt",
+        "no-new-privileges",
+        "-v",
+        f"{volume}:/home/node:rw",
+        "-e",
+        "HOME=/home/node",
+        docker_image,
+        "sh",
+        "-c",
+        script,
+    ]
+    count = len(BACKEND_STATE_PATHS[agent_backend])
+    label = f" before generation {generation}" if generation is not None else ""
+    try:
+        result = _run_docker(args, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "failed to reset %s agent state in %s%s: %s",
+            agent_backend,
+            volume,
+            label,
+            exc,
+        )
+        return 0
+    if result.returncode != 0:
+        logger.warning(
+            "failed to reset %s agent state in %s%s (exit %s): %s",
+            agent_backend,
+            volume,
+            label,
+            result.returncode,
+            (result.stderr or "").strip()[-500:],
+        )
+        return 0
+    logger.info(
+        "reset %s agent state in %s%s (%d paths)",
+        agent_backend,
+        volume,
+        label,
+        count,
+    )
+    return count
 
 
 def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
@@ -1080,7 +1280,7 @@ def run_sandboxed_commands(
                 finally:
                     _run_docker(["docker", "rm", "-f", container_name], check=False)
                 if scope == "agent":
-                    _copy_claude_transcript_from_auth_volume(
+                    _copy_backend_transcript_from_auth_volume(
                         workspace=workspace,
                         image=docker_image,
                         agent_backend=agent_backend,

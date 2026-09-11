@@ -636,6 +636,15 @@ and complete provider login in one setup session.
 
 The volume names are `helix-auth-agy`, `helix-auth-claude`, `helix-auth-codex`,
 `helix-auth-cursor`, and `helix-auth-opencode`.
+
+Backend state in the sandbox never survives a generation; the run's artifacts
+are the record. At the start of every generation HELIX wipes the backend
+CLI's session state in its auth volume (transcripts, memories, shell
+snapshots, session indexes; never credentials or operator configuration) so
+no candidate sees another candidate's history. Each invocation's native
+transcript (every backend) is copied out of the volume first and kept at
+`.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl` in the
+candidate worktree, where tool-call accounting also reads it.
 This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
 browser-login tokens may live in Keychain; on Linux they may live in
 Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.

@@ -1208,3 +1208,277 @@ def test_no_auth_command_uses_a_login_shell():
             assert not any(
                 flag.startswith("-") and "l" in flag for flag in argv[1:-1]
             ), (backend, action, argv)
+
+
+# ---------------------------------------------------------------------------
+# Native transcript collection for non-Claude backends (auth-volume side)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("backend", "stdout", "expected"),
+    [
+        ("codex", '{"type":"thread.started","thread_id":"thr_1"}\n{"type":"x"}', "thr_1"),
+        ("agy", '{"conversation_id":"conv_1","response":"hi"}', "conv_1"),
+        ("opencode", '{"type":"step_start","sessionID":"ses_1"}\n', "ses_1"),
+        ("cursor", '{"type":"system","sessionId":"cur_1"}\n', "cur_1"),
+        ("claude", '{"type":"result","session_id":"cl_1"}', "cl_1"),
+        # A codex-shaped id inside claude output is not a claude session id.
+        ("claude", '{"type":"thread.started","thread_id":"thr_1"}', None),
+    ],
+)
+def test_extract_session_id_uses_backend_keys(backend, stdout, expected):
+    from helix.backends import transcript_session_id_keys
+
+    assert (
+        sandbox_module._extract_session_id_from_json_output(
+            stdout, transcript_session_id_keys(backend)
+        )
+        == expected
+    )
+
+
+def test_shell_glob_word_quotes_literals_but_not_globs():
+    word = sandbox_module._shell_glob_word(".codex/sessions/*/*/*/rollout-*-a b.jsonl")
+    assert word == ".codex/sessions/*/*/*/rollout-*'-a b.jsonl'"
+
+
+def test_backend_transcript_copy_script_per_backend():
+    build = sandbox_module._backend_transcript_copy_script
+    cfg = SandboxConfig(enabled=True)
+
+    claude = build(agent_backend="claude", sandbox=cfg, session_id="sess_1")
+    assert claude is not None
+    assert "/home/node/.claude/projects/-workspace/sess_1.jsonl" in claude
+    assert "/workspace/.helix_artifacts/backend_transcripts/claude/sess_1.jsonl" in claude
+
+    codex = build(agent_backend="codex", sandbox=cfg, session_id="thr_1")
+    assert codex is not None
+    assert '"$HOME"/.codex/sessions/*/*/*/rollout-*-thr_1.jsonl' in codex
+    assert "/workspace/.helix_artifacts/backend_transcripts/codex/thr_1.jsonl" in codex
+
+    agy = build(agent_backend="agy", sandbox=cfg, session_id="conv_1")
+    assert agy is not None
+    assert agy.count("cp ") == 2
+    assert "backend_transcripts/agy/conv_1.full.jsonl" in agy
+
+    opencode = build(agent_backend="opencode", sandbox=cfg, session_id="ses_1")
+    assert opencode is not None
+    assert '"$HOME"/.local/share/opencode/opencode.db-wal' in opencode
+    assert "backend_transcripts/opencode/.ses_1.opencode.db-wal" in opencode
+
+    assert build(agent_backend="unknown", sandbox=cfg, session_id="x") is None
+
+
+def test_agent_copies_codex_transcript_from_auth_volume(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            if args[-3] == "sh" and "thr_123" in args[-1]:
+                transcript = (
+                    workspace
+                    / ".helix_artifacts"
+                    / "backend_transcripts"
+                    / "codex"
+                    / "thr_123.jsonl"
+                )
+                transcript.parent.mkdir(parents=True)
+                transcript.write_text('{"type":"session_meta"}\n')
+            else:
+                (workspace / "main.py").write_text("new\n")
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='{"type":"thread.started","thread_id":"thr_123"}\n',
+            stderr="",
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["codex", "exec", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="codex",
+    )
+
+    assert (source / "main.py").read_text() == "new\n"
+    transcript = (
+        source / ".helix_artifacts" / "backend_transcripts" / "codex" / "thr_123.jsonl"
+    )
+    assert transcript.read_text() == '{"type":"session_meta"}\n'
+    copy_call = next(
+        call
+        for call in calls
+        if call[:2] == ["docker", "run"] and "thr_123" in " ".join(call)
+    )
+    assert "helix-auth-codex:/home/node:ro" in copy_call
+    assert "--network" in copy_call and copy_call[copy_call.index("--network") + 1] == "none"
+
+
+def test_agent_skips_transcript_helper_for_unsafe_session_id(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args, 0, stdout='{"thread_id":"../x; rm -rf /"}\n', stderr=""
+        )
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    run_sandboxed_command(
+        ["codex", "exec", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="codex",
+    )
+
+    assert not any("helix-auth-codex:/home/node:ro" in call for call in calls)
+
+
+# ---------------------------------------------------------------------------
+# Per-generation sandbox agent state reset
+# ---------------------------------------------------------------------------
+
+# Fixed, independent of the code under test: paths that must never be wiped.
+_CREDENTIAL_PATHS = (
+    ".claude/.credentials.json",
+    ".claude/settings.json",
+    ".claude.json",
+    ".codex/auth.json",
+    ".codex/config.toml",
+    ".codex/AGENTS.md",
+    ".codex/installation_id",
+    ".config/cursor/auth.json",
+    ".cursor/cli-config.json",
+    ".cursor/mcp.json",
+    ".gemini/antigravity-cli/antigravity-oauth-token",
+    ".gemini/antigravity-cli/settings.json",
+    ".gemini/antigravity-cli/installation_id",
+    ".local/share/opencode/auth.json",
+    ".local/share/opencode/account.json",
+    ".local/share/opencode/opencode.db",
+    ".local/state/opencode/locks",
+    ".local/state/opencode/locks/auth.lock",
+)
+
+
+def test_sandbox_state_paths_never_match_credentials():
+    from fnmatch import fnmatchcase
+    from pathlib import PurePosixPath
+
+    from helix.backends import BACKEND_STATE_PATHS, BACKENDS
+
+    assert set(BACKEND_STATE_PATHS) == set(BACKENDS)
+    for backend, patterns in BACKEND_STATE_PATHS.items():
+        assert patterns, backend
+        for pattern in patterns:
+            assert not pattern.startswith(("/", "~", "..")), pattern
+            assert "$" not in pattern, pattern
+            for cred in _CREDENTIAL_PATHS:
+                cred_path = PurePosixPath(cred)
+                targets = [cred, *(str(p) for p in cred_path.parents if str(p) != ".")]
+                hits = [t for t in targets if fnmatchcase(t, pattern)]
+                assert not hits, f"{backend}: {pattern!r} would remove {cred!r}"
+
+
+def test_reset_sandbox_agent_state_runs_single_writer_container(mocker, caplog):
+    from helix.backends import BACKEND_STATE_PATHS
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    caplog.set_level("INFO", logger="helix.sandbox")
+
+    count = sandbox_module.reset_sandbox_agent_state(
+        "codex", image="helix-test:latest", generation=3
+    )
+
+    assert count == len(BACKEND_STATE_PATHS["codex"])
+    [args] = calls
+    assert args[:2] == ["docker", "run"]
+    assert "helix-auth-codex:/home/node:rw" in args
+    assert args[args.index("--network") + 1] == "none"
+    assert args[args.index("--user") + 1] == "node"
+    assert args[-3:-1] == ["sh", "-c"]
+    script = args[-1]
+    assert script.startswith("set -u; rm -rf ")
+    for path in BACKEND_STATE_PATHS["codex"]:
+        assert '"$HOME"/' + path.replace("*", "*") in script or path in script
+    assert "auth.json" not in script and "config.toml" not in script
+    assert any(
+        rec.levelname == "INFO"
+        and rec.message
+        == f"reset codex agent state in helix-auth-codex before generation 3 ({count} paths)"
+        for rec in caplog.records
+    )
+
+
+def test_reset_sandbox_agent_state_opencode_deletes_rows_not_db(mocker):
+    calls: list[list[str]] = []
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        side_effect=lambda args, **kw: (
+            calls.append(args),
+            subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+        )[1],
+    )
+
+    sandbox_module.reset_sandbox_agent_state("opencode", image="img")
+
+    script = calls[0][-1]
+    rm_part, _, py_part = script.partition("; python3 -c ")
+    assert "opencode.db" not in rm_part
+    assert "auth.json" not in rm_part
+    assert "opencode.db" in py_part
+    for table in ("part", "message", "session"):
+        assert table in py_part
+    assert "account" not in py_part
+
+
+def test_reset_sandbox_agent_state_failure_is_a_warning(mocker, caplog):
+    caplog.set_level("WARNING", logger="helix.sandbox")
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="rm: boom"),
+    )
+    assert sandbox_module.reset_sandbox_agent_state("claude", image="img") == 0
+    assert any(
+        "failed to reset claude agent state in helix-auth-claude" in rec.message
+        and "rm: boom" in rec.message
+        for rec in caplog.records
+    )
+
+    caplog.clear()
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=OSError("no docker"))
+    assert sandbox_module.reset_sandbox_agent_state("claude", image="img") == 0
+    assert any("no docker" in rec.message for rec in caplog.records)
+
+
+def test_reset_sandbox_agent_state_unknown_backend_is_noop(mocker):
+    run = mocker.patch("helix.sandbox.subprocess.run")
+    assert sandbox_module.reset_sandbox_agent_state("nope", image="img") == 0
+    run.assert_not_called()
