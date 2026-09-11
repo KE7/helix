@@ -1186,6 +1186,16 @@ def sandbox_auth_docker_args(
     return args
 
 
+#: Upper bound on one *non-interactive* sandbox auth command, in seconds.
+#: ``helix sandbox status`` runs one container per backend and ``helix sandbox
+#: logout`` one per call; each is a local probe or a file removal, not an agent
+#: turn.  A wedged daemon or a container that never exits would otherwise hang
+#: the CLI with no output and no way out but Ctrl-C.  Deliberately not applied
+#: to ``login``, which is interactive and waits on a human completing a device
+#: flow in a browser.
+SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS = 300
+
+
 def run_sandbox_auth_command(
     agent_backend: str,
     *,

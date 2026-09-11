@@ -6,8 +6,9 @@ import json
 import logging
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import click
 from rich.table import Table
@@ -17,7 +18,11 @@ from helix import __version__
 from helix.backends import BACKENDS
 from helix.config import load_config
 from helix.logging_config import setup_file_logging
-from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
+from helix.sandbox import (
+    SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS,
+    run_sandbox_auth_command,
+    sandbox_auth_volume_name,
+)
 from helix.display import (
     console,
     print_error,
@@ -420,6 +425,49 @@ def sandbox_cli() -> None:
     """Manage HELIX Docker sandbox helpers."""
 
 
+def _run_bounded_auth_command(
+    backend: str,
+    *,
+    action: Literal["status", "logout"],
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+    extra_hosts: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Run a non-interactive sandbox auth command under a bound.
+
+    ``status`` and ``logout`` are unattended probes against the login volume,
+    so a container that never exits must not hang the CLI forever with no
+    output.  The container is named so that killing the ``docker run`` client
+    on timeout can be followed by removing the container it started, and the
+    timeout is reported as a non-zero result rather than a traceback.
+    (``login`` gets no bound: it waits on a human finishing a device flow.)
+    """
+    container_name = f"helix-auth-{action}-{backend}-{uuid.uuid4().hex[:12]}"
+    try:
+        return run_sandbox_auth_command(
+            backend,
+            action=action,
+            image=image,
+            network=network,
+            add_host_gateway=add_host_gateway,
+            extra_hosts=extra_hosts,
+            timeout=SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS,
+            container_name=container_name,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"sandbox {action} for {backend} did not finish within "
+                f"{SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS}s; the container was "
+                "stopped."
+            ),
+        )
+
+
 @sandbox_cli.command(name="login")
 @click.argument("backend", type=click.Choice(BACKENDS))
 @click.option("--image", default=None, help="Override the backend runner image.")
@@ -510,7 +558,7 @@ def sandbox_status(
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
     for item in backends:
         console.print(f"[bold]{item}[/bold] ({sandbox_auth_volume_name(item)})")
-        result = run_sandbox_auth_command(
+        result = _run_bounded_auth_command(
             item,
             action="status",
             image=image if backend is not None else None,
@@ -557,7 +605,7 @@ def sandbox_logout(
 ) -> None:
     """Log out a backend from its persistent sandbox auth volume."""
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
-    result = run_sandbox_auth_command(
+    result = _run_bounded_auth_command(
         backend,
         action="logout",
         image=image,

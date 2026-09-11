@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 
 from click.testing import CliRunner
 
 from helix.cli import cli
+from helix.sandbox import SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS
 
 
 def test_sandbox_login_invokes_backend_auth_volume(mocker):
@@ -42,6 +43,61 @@ def test_sandbox_status_all_backends(mocker):
     assert mock_run.call_count == 5
     assert "claude" in result.output
     assert "opencode" in result.output
+
+
+def test_sandbox_status_is_bounded_and_names_its_container(mocker):
+    """An unattended probe must not be able to hang the CLI forever, and the
+    container has to be addressable so a timed-out client can stop it."""
+    mock_run = mocker.patch(
+        "helix.cli.run_sandbox_auth_command",
+        return_value=CompletedProcess([], 0, stdout="ok\n", stderr=""),
+    )
+
+    assert CliRunner().invoke(cli, ["sandbox", "status", "codex"]).exit_code == 0
+
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["timeout"] == SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS
+    assert kwargs["container_name"].startswith("helix-auth-status-codex-")
+
+
+def test_sandbox_logout_is_bounded(mocker):
+    mock_run = mocker.patch(
+        "helix.cli.run_sandbox_auth_command",
+        return_value=CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    assert CliRunner().invoke(cli, ["sandbox", "logout", "codex"]).exit_code == 0
+
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["timeout"] == SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS
+    assert kwargs["container_name"].startswith("helix-auth-logout-codex-")
+
+
+def test_interactive_login_is_never_bounded(mocker):
+    """``login`` waits on a human finishing a device flow in a browser; a
+    timeout there would kill a working sign-in mid-flight."""
+    mocker.patch("os.isatty", return_value=True)
+    mock_run = mocker.patch(
+        "helix.cli.run_sandbox_auth_command",
+        return_value=CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    assert CliRunner().invoke(cli, ["sandbox", "login", "codex"]).exit_code == 0
+
+    assert "timeout" not in mock_run.call_args.kwargs
+
+
+def test_sandbox_status_reports_a_timeout_instead_of_raising(mocker):
+    mocker.patch(
+        "helix.cli.run_sandbox_auth_command",
+        side_effect=TimeoutExpired(cmd=["docker"], timeout=300),
+    )
+
+    result = CliRunner().invoke(cli, ["sandbox", "status", "codex"])
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "did not finish within" in result.output
 
 
 def test_parse_extra_hosts_ipv4_colon_form():
