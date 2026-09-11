@@ -824,6 +824,80 @@ def _structured_error_texts(
     return texts
 
 
+#: HTTP statuses Claude reports in ``api_error_status`` that are rate limits.
+#: 429 is the rate limit itself; 529 is an overload.  Compared as strings so an
+#: envelope carrying either the number or its text reads the same.
+_RATE_LIMIT_API_STATUSES: frozenset[str] = frozenset({"429", "529"})
+
+
+def _is_rate_limit_api_status(backend: str, parsed: dict[str, Any] | None) -> bool:
+    """True when Claude's envelope names an API status that *is* a rate limit.
+
+    The keyword list already catches a bare ``529`` in prose, but nothing read
+    a structured ``api_error_status``, so a 429 reported only in that field
+    was previously invisible.
+    """
+    if backend != "claude" or parsed is None:
+        return False
+    status = parsed.get("api_error_status")
+    if status is None or isinstance(status, bool):
+        return False
+    return str(status).strip() in _RATE_LIMIT_API_STATUSES
+
+
+def _has_structured_output(
+    backend: str, parsed: dict[str, Any] | None, stdout: str
+) -> bool:
+    """True when the backend emitted output its own parser can read."""
+    if parsed is not None:
+        return True
+    if backend in {"codex", "cursor", "opencode"}:
+        return bool(
+            _parse_jsonl_output(
+                stdout,
+                backend=backend,
+                cmd_str="",
+                worktree_path="",
+                stderr="",
+                exit_code=0,
+                strict=False,
+            )["events"]
+        )
+    try:
+        return isinstance(json.loads(stdout), dict) if stdout.strip() else False
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return False
+
+
+def _rate_limit_scan_texts(
+    backend: str,
+    parsed: dict[str, Any] | None,
+    result: subprocess.CompletedProcess[str],
+) -> list[str]:
+    """Return every text a rate-limit verdict may be read from.
+
+    Never the transcript.  For the JSONL backends ``stdout`` is the agent's
+    whole run -- tool output and the file contents it read included -- so a
+    candidate working on a repository whose source merely *mentions* a rate
+    limit (this file does, a few lines up) plus any unrelated non-zero exit
+    with an empty stderr used to be reported to the operator as a quota
+    failure, sending them to a dashboard for an ordinary code failure.
+
+    Only what the backend itself said counts: its own stderr, and the
+    structured fields it uses to report a failure
+    (:func:`_structured_error_texts`).  The one exception is a backend that
+    produced no parseable structured output at all *and* said nothing on
+    stderr -- a CLI that died before it could emit its stream has spoken
+    nowhere else, so its raw stdout is still worth a look.
+    """
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    texts = [stderr, *_structured_error_texts(backend, parsed, stdout)]
+    if not stderr.strip() and not _has_structured_output(backend, parsed, stdout):
+        texts.append(stdout)
+    return texts
+
+
 def _credential_failure_evidence(
     backend: str,
     parsed: dict[str, Any] | None,
@@ -2631,8 +2705,22 @@ def invoke_claude_code(
         # "the backend exited non-zero".
         _raise_if_credential_failure(parsed)
 
-        rate_limit_source = result.stderr or result.stdout
-        if _looks_like_rate_limit(rate_limit_source):
+        # Then a rate limit, read only from what the backend itself said --
+        # stderr, its structured error fields, and Claude's api_error_status.
+        # The agent's transcript is not evidence: see _rate_limit_scan_texts.
+        rate_limit_source = next(
+            (
+                text
+                for text in _rate_limit_scan_texts(backend, parsed, result)
+                if _looks_like_rate_limit(text)
+            ),
+            None,
+        )
+        if rate_limit_source is None and _is_rate_limit_api_status(backend, parsed):
+            rate_limit_source = (
+                f"api_error_status {(parsed or {}).get('api_error_status')}"
+            )
+        if rate_limit_source is not None:
             logger.error(
                 "Rate limit detected in subprocess exit for %s (code %d): %s",
                 backend_name,
