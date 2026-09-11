@@ -2119,3 +2119,258 @@ class TestSalvageBackendUsage:
                 ),
             )
             assert usage == UsageStats(), stdout
+
+
+# ---------------------------------------------------------------------------
+# preserve_backend_transcripts for non-Claude backends
+# ---------------------------------------------------------------------------
+
+
+def _collect(
+    worktree: Path,
+    backend: str,
+    session_id: str | None,
+    sandbox: SandboxConfig | None = None,
+) -> list[dict[str, Any]]:
+    from helix.mutator import _collect_backend_transcript_artifacts
+
+    return _collect_backend_transcript_artifacts(
+        str(worktree),
+        backend=backend,
+        usage=UsageStats(session_id=session_id),
+        sandbox=sandbox,
+    )
+
+
+def _make_opencode_db(path: Path, session_ids: list[str]) -> None:
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, data BLOB);"
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);"
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT,"
+            " session_id TEXT, data TEXT);"
+        )
+        for sid in session_ids:
+            conn.execute(
+                "INSERT INTO session VALUES (?, ?, ?)", (sid, f"title {sid}", b"raw")
+            )
+            conn.execute(
+                "INSERT INTO message VALUES (?, ?, ?)",
+                (f"msg_{sid}", sid, json.dumps({"role": "user"})),
+            )
+            conn.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?)",
+                (f"prt_{sid}", f"msg_{sid}", sid, json.dumps({"type": "text"})),
+            )
+
+
+class TestBackendTranscriptCollection:
+    """``_collect_backend_transcript_artifacts`` for codex/cursor/agy/opencode."""
+
+    @pytest.fixture
+    def home(self, tmp_path: Path, monkeypatch) -> Path:
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        return home
+
+    @pytest.fixture
+    def worktree(self, tmp_path: Path) -> Path:
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        return wt
+
+    def test_codex_copies_dated_rollout_file(self, home: Path, worktree: Path):
+        sid = "01a00000-0000-7000-8000-00000000c0de"
+        src = (
+            home
+            / ".codex/sessions/2026/09/10"
+            / f"rollout-2026-09-10T19-17-26-{sid}.jsonl"
+        )
+        src.parent.mkdir(parents=True)
+        src.write_text('{"type":"session_meta"}\n')
+
+        artifacts = _collect(worktree, "codex", sid)
+
+        rel = f".helix_artifacts/backend_transcripts/codex/{sid}.jsonl"
+        assert artifacts == [
+            {
+                "backend": "codex",
+                "session_id": sid,
+                "path": rel,
+                "source": str(src),
+                "available": True,
+            }
+        ]
+        assert (worktree / rel).read_text() == '{"type":"session_meta"}\n'
+
+    def test_cursor_copies_project_agent_transcript(self, home: Path, worktree: Path):
+        sid = "00000000-0000-4000-8000-0000curs0r01"
+        src = home / ".cursor/projects/workspace/agent-transcripts" / sid / f"{sid}.jsonl"
+        src.parent.mkdir(parents=True)
+        src.write_text('{"role":"user"}\n')
+
+        artifacts = _collect(worktree, "cursor", sid)
+
+        assert [a["available"] for a in artifacts] == [True]
+        assert artifacts[0]["source"] == str(src)
+        assert (
+            worktree / ".helix_artifacts/backend_transcripts/cursor" / f"{sid}.jsonl"
+        ).read_text() == '{"role":"user"}\n'
+
+    def test_agy_copies_both_brain_transcripts(self, home: Path, worktree: Path):
+        sid = "00000000-0000-4000-8000-00000000a6b1"
+        logs = home / ".gemini/antigravity-cli/brain" / sid / ".system_generated/logs"
+        logs.mkdir(parents=True)
+        (logs / "transcript.jsonl").write_text("short\n")
+        (logs / "transcript_full.jsonl").write_text("full\n")
+
+        artifacts = _collect(worktree, "agy", sid)
+
+        out = worktree / ".helix_artifacts/backend_transcripts/agy"
+        assert [a["path"].rsplit("/", 1)[1] for a in artifacts] == [
+            f"{sid}.jsonl",
+            f"{sid}.full.jsonl",
+        ]
+        assert all(a["available"] for a in artifacts)
+        assert (out / f"{sid}.jsonl").read_text() == "short\n"
+        assert (out / f"{sid}.full.jsonl").read_text() == "full\n"
+
+    def test_opencode_exports_only_this_sessions_rows(self, home: Path, worktree: Path):
+        sid = "ses_000000000000TestSession01"
+        db = home / ".local/share/opencode/opencode.db"
+        _make_opencode_db(db, [sid, "ses_other"])
+
+        artifacts = _collect(worktree, "opencode", sid)
+
+        out = worktree / ".helix_artifacts/backend_transcripts/opencode"
+        assert len(artifacts) == 1
+        assert artifacts[0]["available"] is True
+        assert artifacts[0]["path"].endswith(f"opencode/{sid}.jsonl")
+        assert artifacts[0]["source"] == str(db)
+        lines = [json.loads(line) for line in (out / f"{sid}.jsonl").read_text().splitlines()]
+        assert [line["table"] for line in lines] == ["session", "message", "part"]
+        assert lines[0]["row"]["id"] == sid
+        assert lines[0]["row"]["data"] == "raw"
+        assert lines[1]["row"]["session_id"] == sid
+        assert "ses_other" not in (out / f"{sid}.jsonl").read_text()
+        # The staged raw database copy does not survive in the worktree.
+        assert sorted(p.name for p in out.iterdir()) == [f"{sid}.jsonl"]
+
+    def test_opencode_session_missing_from_db(self, home: Path, worktree: Path):
+        _make_opencode_db(home / ".local/share/opencode/opencode.db", ["ses_other"])
+
+        artifacts = _collect(worktree, "opencode", "ses_missing")
+
+        assert artifacts[0]["available"] is False
+        assert artifacts[0]["reason"] == "session_rows_not_found"
+        out = worktree / ".helix_artifacts/backend_transcripts/opencode"
+        assert not any(p.name.startswith(".") for p in out.iterdir())
+
+    @pytest.mark.parametrize("backend", ["codex", "cursor", "agy", "opencode"])
+    def test_missing_transcript_is_recorded_and_logged(
+        self, home: Path, worktree: Path, backend: str, caplog
+    ):
+        caplog.set_level("DEBUG", logger="helix.mutator")
+
+        artifacts = _collect(worktree, backend, "sess-404")
+
+        assert artifacts, backend
+        assert all(a["available"] is False for a in artifacts)
+        assert all(a["reason"] == "transcript_not_found" for a in artifacts)
+        assert all(a["source"].startswith(str(home)) for a in artifacts)
+        assert any(
+            f"{backend} transcript" in rec.message and "not preserved" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_sandbox_mode_records_files_staged_by_helper(self, worktree: Path):
+        sid = "thr_123"
+        staged = worktree / ".helix_artifacts/backend_transcripts/codex" / f"{sid}.jsonl"
+        staged.parent.mkdir(parents=True)
+        staged.write_text("x\n")
+
+        artifacts = _collect(worktree, "codex", sid, SandboxConfig(enabled=True))
+
+        assert artifacts == [
+            {
+                "backend": "codex",
+                "session_id": sid,
+                "path": f".helix_artifacts/backend_transcripts/codex/{sid}.jsonl",
+                "source": "sandbox_auth_volume",
+                "available": True,
+            }
+        ]
+
+    def test_sandbox_mode_miss_never_touches_host_home(self, home: Path, worktree: Path):
+        src = home / ".codex/sessions/2026/09/10/rollout-x-thr_123.jsonl"
+        src.parent.mkdir(parents=True)
+        src.write_text("host\n")
+
+        artifacts = _collect(worktree, "codex", "thr_123", SandboxConfig(enabled=True))
+
+        assert artifacts[0]["available"] is False
+        assert artifacts[0]["source"] == "sandbox_auth_volume"
+        assert artifacts[0]["reason"] == "transcript_not_found"
+
+    def test_sandbox_mode_opencode_exports_staged_db(self, worktree: Path):
+        sid = "ses_abc"
+        out = worktree / ".helix_artifacts/backend_transcripts/opencode"
+        _make_opencode_db(out / f".{sid}.opencode.db", [sid])
+        (out / f".{sid}.opencode.db-wal").write_bytes(b"")
+
+        artifacts = _collect(worktree, "opencode", sid, SandboxConfig(enabled=True))
+
+        assert artifacts[0]["available"] is True
+        assert sorted(p.name for p in out.iterdir()) == [f"{sid}.jsonl"]
+
+    def test_disabled_option_collects_nothing(self, home: Path, worktree: Path):
+        src = home / ".codex/sessions/2026/09/10/rollout-x-thr_123.jsonl"
+        src.parent.mkdir(parents=True)
+        src.write_text("host\n")
+
+        assert (
+            _collect(
+                worktree,
+                "codex",
+                "thr_123",
+                SandboxConfig(preserve_backend_transcripts=False),
+            )
+            == []
+        )
+
+    def test_unsafe_session_id_is_skipped(self, home: Path, worktree: Path, caplog):
+        caplog.set_level("DEBUG", logger="helix.mutator")
+        assert _collect(worktree, "codex", "../../etc/passwd") == []
+        assert _collect(worktree, "codex", "a b; rm -rf /") == []
+        assert any("unexpected session id" in rec.message for rec in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("backend", "stdout"),
+        [
+            ("codex", '{"type":"thread.started","thread_id":"thr_9"}\n'),
+            ("cursor", '{"type":"system","session_id":"thr_9"}\n'),
+            ("opencode", '{"type":"step_start","sessionID":"thr_9"}\n'),
+            ("agy", '{"conversation_id":"thr_9","status":"ok","response":"x"}'),
+        ],
+    )
+    def test_write_backend_artifacts_derives_id_from_stdout(
+        self, home: Path, worktree: Path, backend: str, stdout: str
+    ):
+        from helix.mutator import _write_backend_artifacts
+
+        _write_backend_artifacts(
+            str(worktree),
+            backend=backend,
+            command=backend,
+            result=subprocess.CompletedProcess([backend], 0, stdout=stdout, stderr=""),
+            parsed={"events": [json.loads(line) for line in stdout.splitlines()]},
+        )
+
+        payload = json.loads((worktree / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["transcript_artifacts"]
+        assert all(a["session_id"] == "thr_9" for a in payload["transcript_artifacts"])
+        assert all(a["backend"] == backend for a in payload["transcript_artifacts"])

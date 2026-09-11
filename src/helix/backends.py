@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
 from typing import Literal, TypeAlias
 
 
@@ -133,3 +135,118 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
 
 def backend_display_name(backend: str) -> str:
     return BACKEND_DISPLAY_NAMES.get(backend, backend)
+
+
+# ---------------------------------------------------------------------------
+# Native transcript stores (``sandbox.preserve_backend_transcripts``)
+# ---------------------------------------------------------------------------
+#
+# Every backend CLI keeps its own durable record of a session somewhere under
+# ``$HOME`` (``/home/node`` inside the sandbox auth volume).  The table below
+# is the single place that knows where, keyed by backend, so that
+# ``helix.sandbox`` (copy out of the ``helix-auth-<backend>`` volume) and
+# ``helix.mutator`` (copy from the operator's ``$HOME`` when unsandboxed,
+# then record the artifact) can share one locator.  Paths were established
+# against codex 0.154, opencode 1.18, agy 1.1 and cursor-agent 2026.08; they
+# are best-effort and a miss is recorded, never raised.
+#
+# ``claude`` is listed for completeness of ``id_keys`` only: its source path is
+# ``SandboxConfig.claude_transcript_root`` (or ``HELIX_CLAUDE_TRANSCRIPT_ROOT``)
+# and is handled by the pre-existing claude-specific code path.
+
+# Session ids are interpolated into shell globs and file names, so only accept
+# the shapes the CLIs actually emit (UUIDs, ``ses_…``, ``thr_…``).
+TRANSCRIPT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class BackendTranscriptSource:
+    """Where a backend CLI persists one session's transcript.
+
+    ``id_keys`` are the field names, in priority order, that carry the session
+    id in the backend's structured stdout.  ``files`` maps a ``$HOME``-relative
+    glob (``{session_id}`` is substituted; ``*`` is left for the shell/glob) to
+    the file name written under ``<transcript_artifact_dir>/<backend>/``.
+    ``sqlite_export`` names the staged raw sqlite copy in ``files`` and the
+    ``(table, session_id_column)`` pairs whose rows for this session are
+    exported to ``{session_id}.jsonl`` once the raw copy is on the host.
+    """
+
+    id_keys: tuple[str, ...]
+    files: tuple[tuple[str, str], ...]
+    sqlite_export: tuple[str, tuple[tuple[str, str], ...]] | None = None
+
+
+BACKEND_TRANSCRIPT_SOURCES: dict[str, BackendTranscriptSource] = {
+    "claude": BackendTranscriptSource(
+        id_keys=("session_id", "sessionId", "sessionID"),
+        files=(),
+    ),
+    # ``codex exec --json`` opens with ``thread.started {thread_id}``; the
+    # rollout file is date-partitioned by local start time and its name ends
+    # in that thread id.  ``session_meta.payload.id`` inside equals it.
+    "codex": BackendTranscriptSource(
+        id_keys=("thread_id", "session_id", "sessionId"),
+        files=(
+            (
+                ".codex/sessions/*/*/*/rollout-*-{session_id}.jsonl",
+                "{session_id}.jsonl",
+            ),
+        ),
+    ),
+    # ``cursor-agent --output-format stream-json`` reports the session id on
+    # its ``system`` event.  Cursor keeps a binary blob store under
+    # ``~/.cursor/chats/<cwd-hash>/<session>/store.db`` and a plain JSONL
+    # transcript under ``~/.cursor/projects/<cwd-slug>/agent-transcripts``;
+    # the JSONL is the one preserved.
+    "cursor": BackendTranscriptSource(
+        id_keys=("session_id", "sessionId", "sessionID"),
+        files=(
+            (
+                ".cursor/projects/*/agent-transcripts/{session_id}/{session_id}.jsonl",
+                "{session_id}.jsonl",
+            ),
+        ),
+    ),
+    # Antigravity keeps the readable transcript (and a ``_full`` variant with
+    # tool payloads) per conversation under ``brain/``.  The sibling
+    # ``conversations/<id>.db`` / ``.pb`` are the same conversation in binary
+    # form and are not copied.
+    "agy": BackendTranscriptSource(
+        id_keys=("conversation_id",),
+        files=(
+            (
+                ".gemini/antigravity-cli/brain/{session_id}/.system_generated/logs/transcript.jsonl",
+                "{session_id}.jsonl",
+            ),
+            (
+                ".gemini/antigravity-cli/brain/{session_id}/.system_generated/logs/transcript_full.jsonl",
+                "{session_id}.full.jsonl",
+            ),
+        ),
+    ),
+    # OpenCode >= 1.x persists sessions only in one sqlite database shared by
+    # every session (the older ``storage/`` JSON tree is no longer written).
+    # The db and its WAL are staged next to the artifacts under a dot-prefixed
+    # name, this session's ``session``/``message``/``part`` rows are exported
+    # to ``{session_id}.jsonl``, and the staged copy is removed.
+    "opencode": BackendTranscriptSource(
+        id_keys=("sessionID", "session_id", "sessionId"),
+        files=(
+            (".local/share/opencode/opencode.db", ".{session_id}.opencode.db"),
+            (".local/share/opencode/opencode.db-wal", ".{session_id}.opencode.db-wal"),
+        ),
+        sqlite_export=(
+            ".{session_id}.opencode.db",
+            (("session", "id"), ("message", "session_id"), ("part", "session_id")),
+        ),
+    ),
+}
+
+
+def transcript_session_id_keys(backend: str) -> tuple[str, ...]:
+    """Structured-stdout field names that carry ``backend``'s session id."""
+    source = BACKEND_TRANSCRIPT_SOURCES.get(backend)
+    if source is None:
+        return ("session_id", "sessionId", "sessionID")
+    return source.id_keys

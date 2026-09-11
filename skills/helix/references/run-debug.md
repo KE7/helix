@@ -98,17 +98,29 @@ For backend diagnostics in a candidate worktree, inspect:
 .helix_backend_result.json
 .helix_backend_stdout.txt
 .helix_backend_stderr.txt
-.helix_artifacts/backend_transcripts/claude/<session_id>.jsonl
+.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl
 ```
 
-The backend result JSON includes normalized usage metadata and, for Claude Code,
-`transcript_artifacts` entries when HELIX can copy the JSONL transcript. In
-Docker sandbox mode HELIX copies Claude transcripts from the backend auth volume
-at `/home/node/.claude/projects/-workspace/<session_id>.jsonl` into the
-candidate worktree before syncing changes back. Codex structured stdout is
-preserved in `.helix_backend_stdout.txt`; durable Codex transcript copying is an
-extension point because HELIX does not currently know a stable Codex transcript
-path in the sandbox auth volume.
+The backend result JSON includes normalized usage metadata and
+`transcript_artifacts` entries describing the backend CLI's own transcript
+for the invocation (`available: false` plus a `reason` when it could not be
+found).  With `preserve_backend_transcripts = true` (the default) HELIX copies
+that native transcript for every backend, in Docker sandbox mode out of the
+`helix-auth-<backend>` volume before syncing changes back, otherwise from the
+operator's `$HOME`:
+
+| backend | native source (relative to `$HOME`) | artifact |
+| --- | --- | --- |
+| claude | `.claude/projects/-workspace/<session_id>.jsonl` (`claude_transcript_root`) | `claude/<session_id>.jsonl` |
+| codex | `.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl` | `codex/<thread_id>.jsonl` |
+| cursor | `.cursor/projects/<cwd-slug>/agent-transcripts/<session_id>/<session_id>.jsonl` | `cursor/<session_id>.jsonl` |
+| agy | `.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript{,_full}.jsonl` | `agy/<id>.jsonl`, `agy/<id>.full.jsonl` |
+| opencode | this session's `session`/`message`/`part` rows of `.local/share/opencode/opencode.db` | `opencode/<sessionID>.jsonl` (one `{"table", "row"}` object per line) |
+
+The structured stdout of the JSONL backends is still kept verbatim in
+`.helix_backend_stdout.txt`; the native transcript is preserved in addition
+because it carries the full per-turn record (tool payloads, reasoning items)
+that the streamed events elide.
 
 ## Resuming
 

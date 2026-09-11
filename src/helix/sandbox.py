@@ -19,7 +19,13 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from helix.backends import BACKEND_AUTH_COMMANDS, DEFAULT_BACKEND_IMAGES
+from helix.backends import (
+    BACKEND_AUTH_COMMANDS,
+    BACKEND_TRANSCRIPT_SOURCES,
+    DEFAULT_BACKEND_IMAGES,
+    TRANSCRIPT_SESSION_ID_RE,
+    transcript_session_id_keys,
+)
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.lines import split_lf_lines
 
@@ -140,8 +146,19 @@ def _ignore_for_sync(path: Path) -> bool:
     )
 
 
-def _extract_session_id_from_json_output(stdout: str) -> str | None:
-    """Best-effort session id extraction from backend structured stdout."""
+_DEFAULT_SESSION_ID_KEYS = ("session_id", "sessionId", "sessionID")
+
+
+def _extract_session_id_from_json_output(
+    stdout: str,
+    keys: tuple[str, ...] = _DEFAULT_SESSION_ID_KEYS,
+) -> str | None:
+    """Best-effort session id extraction from backend structured stdout.
+
+    ``keys`` are the candidate field names in priority order; backends name
+    the id differently (``thread_id`` for codex, ``conversation_id`` for agy,
+    ``sessionID`` for opencode), see ``transcript_session_id_keys``.
+    """
     if not stdout.strip():
         return None
     payloads: list[object] = []
@@ -160,7 +177,7 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
     # Check top-level payloads first
     for payload in payloads:
         if isinstance(payload, dict):
-            for key in ("session_id", "sessionId", "sessionID"):
+            for key in keys:
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     return value
@@ -178,14 +195,64 @@ def _extract_session_id_from_json_output(stdout: str) -> str | None:
         for node in walk(payload):
             if not isinstance(node, dict) or node is payload:
                 continue
-            for key in ("session_id", "sessionId", "sessionID"):
+            for key in keys:
                 value = node.get(key)
                 if isinstance(value, str) and value:
                     return value
     return None
 
 
-def _copy_claude_transcript_from_auth_volume(
+def _shell_glob_word(pattern: str) -> str:
+    """Quote ``pattern`` for ``sh`` while leaving ``*`` free to glob."""
+    return "*".join(shlex.quote(part) if part else "" for part in pattern.split("*"))
+
+
+def _backend_transcript_copy_script(
+    *,
+    agent_backend: str,
+    sandbox: SandboxConfig,
+    session_id: str,
+) -> str | None:
+    """Build the ``sh`` script that copies one session's transcript files.
+
+    Returns ``None`` when nothing is known to copy for ``agent_backend``.
+    Every source is optional: a missing file is skipped, never an error, so
+    the helper container exits 0 and the mutator records the miss.
+    """
+    rel_dir = Path(sandbox.transcript_artifact_dir) / agent_backend
+    if agent_backend == "claude":
+        rel_file = rel_dir / f"{session_id}.jsonl"
+        source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
+        rel_file_str = str(rel_file).lstrip("/")
+        return (
+            "set -eu; "
+            f"src={shlex.quote(str(source))}; "
+            f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
+            '[ -f "$src" ] || exit 0; '
+            'mkdir -p "$(dirname "$dst")"; '
+            'cp "$src" "$dst"'
+        )
+    source_spec = BACKEND_TRANSCRIPT_SOURCES.get(agent_backend)
+    if source_spec is None or not source_spec.files:
+        return None
+    steps = []
+    for pattern, dest_name in source_spec.files:
+        glob_word = '"$HOME"/' + _shell_glob_word(pattern.format(session_id=session_id))
+        rel_file = rel_dir / dest_name.format(session_id=session_id)
+        dst = shlex.quote("/workspace/" + str(rel_file).lstrip("/"))
+        steps.append(
+            f"for src in {glob_word}; do "
+            '[ -f "$src" ] || continue; '
+            f"dst={dst}; "
+            'mkdir -p "$(dirname "$dst")"; '
+            'cp "$src" "$dst"; '
+            "break; "
+            "done"
+        )
+    return "set -u; " + "; ".join(steps)
+
+
+def _copy_backend_transcript_from_auth_volume(
     *,
     workspace: Path,
     image: str,
@@ -193,23 +260,43 @@ def _copy_claude_transcript_from_auth_volume(
     sandbox: SandboxConfig,
     stdout: str,
 ) -> None:
-    if agent_backend != "claude" or not sandbox.preserve_backend_transcripts:
+    """Copy the backend's native transcript for this run out of its auth volume.
+
+    The backend CLI writes its session store under ``/home/node`` in the
+    ``helix-auth-<backend>`` volume, which the agent container mounts.  A
+    short-lived helper container mounts that volume read-only alongside the
+    workspace and copies the per-session files named by
+    ``BACKEND_TRANSCRIPT_SOURCES`` (or ``claude_transcript_root`` for claude)
+    into ``<transcript_artifact_dir>/<backend>/`` so the regular sync-back
+    carries them to the candidate worktree.
+    """
+    if agent_backend is None or not sandbox.preserve_backend_transcripts:
         return
-    session_id = _extract_session_id_from_json_output(stdout)
-    if not session_id:
-        return
-    rel_dir = Path(sandbox.transcript_artifact_dir) / "claude"
-    rel_file = rel_dir / f"{session_id}.jsonl"
-    source = Path(sandbox.claude_transcript_root) / f"{session_id}.jsonl"
-    rel_file_str = str(rel_file).lstrip("/")
-    command = (
-        "set -eu; "
-        f"src={shlex.quote(str(source))}; "
-        f"dst={shlex.quote('/workspace/' + rel_file_str)}; "
-        '[ -f "$src" ] || exit 0; '
-        'mkdir -p "$(dirname "$dst")"; '
-        'cp "$src" "$dst"'
+    session_id = _extract_session_id_from_json_output(
+        stdout, transcript_session_id_keys(agent_backend)
     )
+    if not session_id:
+        logger.debug(
+            "%s transcript not preserved: no session id in backend output",
+            agent_backend,
+        )
+        return
+    if agent_backend != "claude" and not TRANSCRIPT_SESSION_ID_RE.match(session_id):
+        logger.debug(
+            "%s transcript not preserved: unexpected session id %r",
+            agent_backend,
+            session_id,
+        )
+        return
+    command = _backend_transcript_copy_script(
+        agent_backend=agent_backend, sandbox=sandbox, session_id=session_id
+    )
+    if command is None:
+        logger.debug(
+            "%s transcript not preserved: no known native transcript location",
+            agent_backend,
+        )
+        return
     args = [
         "docker",
         "run",
@@ -1047,7 +1134,7 @@ def run_sandboxed_commands(
                 finally:
                     _run_docker(["docker", "rm", "-f", container_name], check=False)
                 if scope == "agent":
-                    _copy_claude_transcript_from_auth_volume(
+                    _copy_backend_transcript_from_auth_volume(
                         workspace=workspace,
                         image=docker_image,
                         agent_backend=agent_backend,

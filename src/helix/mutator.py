@@ -10,7 +10,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.backends import (
+    BACKEND_AUTH_ENV,
+    BACKEND_TRANSCRIPT_SOURCES,
+    TRANSCRIPT_SESSION_ID_RE,
+    backend_display_name,
+)
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -1511,6 +1516,155 @@ def _copy_local_claude_transcript(
     }
 
 
+def _export_sqlite_session_rows(
+    db_path: Path,
+    *,
+    session_id: str,
+    tables: tuple[tuple[str, str], ...],
+    dst: Path,
+) -> int:
+    """Write this session's rows from ``tables`` in ``db_path`` to ``dst`` as JSONL.
+
+    One line per row, ``{"table": <name>, "row": {<column>: <value>, ...}}``,
+    ordered as the tables are listed.  ``db_path`` must be a private copy:
+    sqlite may replay the sibling ``-wal`` into it.  Returns the row count.
+    """
+    import sqlite3
+
+    written = 0
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        with dst.open("w", encoding="utf-8") as out:
+            for table, column in tables:
+                rows = conn.execute(
+                    f'SELECT * FROM "{table}" WHERE "{column}" = ? ORDER BY rowid',
+                    (session_id,),
+                )
+                for row in rows:
+                    record = {
+                        key: (
+                            value.decode("utf-8", "replace")
+                            if isinstance(value, bytes)
+                            else value
+                        )
+                        for key, value in dict(row).items()
+                    }
+                    out.write(json.dumps({"table": table, "row": record}) + "\n")
+                    written += 1
+    return written
+
+
+def _copy_local_backend_transcripts(
+    worktree_path: str,
+    *,
+    backend: str,
+    session_id: str,
+    artifact_dir: str = BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+    home: Path | None,
+) -> list[dict[str, Any]]:
+    """Collect ``backend``'s native transcript for ``session_id`` into the worktree.
+
+    Driven by ``BACKEND_TRANSCRIPT_SOURCES``.  With ``home`` set (unsandboxed)
+    the files are globbed under that directory and copied; with ``home`` of
+    ``None`` (sandboxed) the sandbox helper has already staged them under the
+    artifact dir and only their presence is recorded.  An sqlite-backed store
+    is then reduced to this session's rows and the staged copy removed.  A
+    missing source yields an ``available: False`` entry with a reason, mirroring
+    the claude path, plus a debug log saying why nothing was preserved.
+    """
+    source_spec = BACKEND_TRANSCRIPT_SOURCES.get(backend)
+    if source_spec is None or not source_spec.files:
+        logger.debug(
+            "%s transcript not preserved: no known native transcript location",
+            backend,
+        )
+        return []
+    if not TRANSCRIPT_SESSION_ID_RE.match(session_id):
+        logger.debug(
+            "%s transcript not preserved: unexpected session id %r",
+            backend,
+            session_id,
+        )
+        return []
+    rel_dir = Path(artifact_dir) / backend
+    out_dir = Path(worktree_path) / rel_dir
+    artifacts: list[dict[str, Any]] = []
+    staged: list[Path] = []
+    for pattern, dest_name in source_spec.files:
+        rel_path = rel_dir / dest_name.format(session_id=session_id)
+        dst = Path(worktree_path) / rel_path
+        entry: dict[str, Any] = {
+            "backend": backend,
+            "session_id": session_id,
+            "path": str(rel_path),
+            "source": "sandbox_auth_volume",
+            "available": dst.is_file(),
+        }
+        if home is not None and not dst.is_file():
+            glob_pattern = pattern.format(session_id=session_id)
+            matches = sorted(p for p in home.glob(glob_pattern) if p.is_file())
+            entry["source"] = str(matches[0]) if matches else str(home / glob_pattern)
+            if matches:
+                try:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    import shutil
+
+                    shutil.copy2(matches[0], dst)
+                    entry["available"] = True
+                except OSError as exc:
+                    entry["reason"] = f"copy_failed: {exc}"
+        if not entry["available"]:
+            entry.setdefault("reason", "transcript_not_found")
+        if dest_name.startswith("."):
+            staged.append(dst)
+        else:
+            artifacts.append(entry)
+    if source_spec.sqlite_export is not None:
+        raw_name, tables = source_spec.sqlite_export
+        raw_db = out_dir / raw_name.format(session_id=session_id)
+        rel_path = rel_dir / f"{session_id}.jsonl"
+        entry = {
+            "backend": backend,
+            "session_id": session_id,
+            "path": str(rel_path),
+            "source": str(raw_db)
+            if home is None
+            else str(home / source_spec.files[0][0]),
+            "available": False,
+        }
+        if raw_db.is_file():
+            try:
+                rows = _export_sqlite_session_rows(
+                    raw_db,
+                    session_id=session_id,
+                    tables=tables,
+                    dst=Path(worktree_path) / rel_path,
+                )
+                entry["available"] = rows > 0
+                if rows == 0:
+                    entry["reason"] = "session_rows_not_found"
+            except Exception as exc:  # noqa: BLE001 - sqlite errors are not fatal
+                entry["reason"] = f"export_failed: {exc}"
+        else:
+            entry["reason"] = "transcript_not_found"
+        for path in staged:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        artifacts.append(entry)
+    for entry in artifacts:
+        if not entry["available"]:
+            logger.debug(
+                "%s transcript %s not preserved: %s (looked at %s)",
+                backend,
+                entry["path"],
+                entry.get("reason"),
+                entry["source"],
+            )
+    return artifacts
+
+
 def _collect_backend_transcript_artifacts(
     worktree_path: str,
     *,
@@ -1518,18 +1672,35 @@ def _collect_backend_transcript_artifacts(
     usage: UsageStats,
     sandbox: SandboxConfig | None,
 ) -> list[dict[str, Any]]:
-    if backend != "claude":
-        return []
+    """Copy the backend's native transcript for this invocation into the worktree.
+
+    Claude keeps its pre-existing path (``claude_transcript_root`` /
+    ``HELIX_CLAUDE_TRANSCRIPT_ROOT``); every other backend is located through
+    ``BACKEND_TRANSCRIPT_SOURCES``.  In sandbox mode the files were copied out
+    of the auth volume by ``helix.sandbox`` before sync-back; unsandboxed they
+    are read from the operator's ``$HOME``.
+    """
     if sandbox is not None and not sandbox.preserve_backend_transcripts:
         return []
     session_id = usage.session_id
     if not isinstance(session_id, str) or not session_id:
+        logger.debug(
+            "%s transcript not preserved: no session id in backend output", backend
+        )
         return []
     artifact_dir = (
         sandbox.transcript_artifact_dir
         if sandbox is not None
         else BACKEND_TRANSCRIPT_ARTIFACT_DIR
     )
+    if backend != "claude":
+        return _copy_local_backend_transcripts(
+            worktree_path,
+            backend=backend,
+            session_id=session_id,
+            artifact_dir=artifact_dir,
+            home=None if sandbox is not None and sandbox.enabled else Path.home(),
+        )
     transcript_root = (
         "sandbox_auth_volume"
         if sandbox is not None and sandbox.enabled
@@ -1554,6 +1725,13 @@ def _collect_backend_transcript_artifacts(
         if tc > 0 and usage.tool_event_count == 0:
             usage.tool_event_count = tc
             usage.tool_names = list(tn)
+    elif artifact is not None:
+        logger.debug(
+            "claude transcript %s not preserved: %s (looked at %s)",
+            artifact["path"],
+            artifact.get("reason"),
+            artifact["source"],
+        )
     return [artifact] if artifact is not None else []
 
 

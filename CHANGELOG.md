@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
+- `sandbox.preserve_backend_transcripts` now covers every backend. It was
+  only ever implemented for `claude`; `codex`, `opencode`, `agy`, and
+  `cursor` runs silently kept no native transcript. Each backend's own
+  session record is now located by a single per-backend table
+  (`helix.backends.BACKEND_TRANSCRIPT_SOURCES`), copied out of the
+  `helix-auth-<backend>` volume (or the operator's `$HOME` when unsandboxed)
+  into `.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl`,
+  and reported in `.helix_backend_result.json` with an explicit reason when
+  it cannot be found. OpenCode keeps sessions only in a shared sqlite
+  database, so just that session's `session`/`message`/`part` rows are
+  exported as JSONL rather than copying the whole file.
 - Backend token usage is no longer discarded when the backend's output fails
   to parse. `budget.charge_llm_usage` was reachable only from the success
   paths of `mutate` / `merge`, so a `MutationError` raised while parsing
