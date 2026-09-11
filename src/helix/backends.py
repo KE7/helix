@@ -95,6 +95,11 @@ BACKEND_FRESH_SESSION_ENV: dict[str, dict[str, str]] = {
     "claude": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
 }
 
+# Every shell entry below is ``sh -c``, never ``sh -lc``: a login shell sources
+# ``/etc/profile`` and ``$HOME/.profile`` from the shared login volume, which
+# every candidate container mounts read-write, so ``-l`` would let a candidate
+# plant code that runs in the next auth command.  PATH is pinned with ``-e`` by
+# ``helix.sandbox.sandbox_auth_docker_args``; nothing here needs a profile.
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "agy": {
         # No dedicated non-interactive login subcommand; the bare interactive
@@ -107,7 +112,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # confirmed against a completed sign-in.
         "status": [
             "sh",
-            "-lc",
+            "-c",
             'set -eu; test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"',
         ],
         # Surgical: only remove agy's own state directory. ``~/.gemini`` also
@@ -115,7 +120,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # would destroy state this backend does not own.
         "logout": [
             "sh",
-            "-lc",
+            "-c",
             'set -eu; rm -rf "${HOME:-/home/node}/.gemini/antigravity-cli"',
         ],
     },
@@ -128,7 +133,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # localised in some CLI versions).
         "status": [
             "sh",
-            "-lc",
+            "-c",
             "set -eu; "
             "claude auth status --text 2>&1 || true; "
             'test -s "${HOME:-/home/node}/.claude/.credentials.json"',
@@ -149,18 +154,28 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # old.  It reads auth.json; it never takes the refresh path, so warming
         # with it would be a placebo.
         #
-        # ``codex debug models`` renders the CLI's built-in model catalog.  It
-        # loads auth through the refreshing path, so it performs the refresh
-        # this warm exists to perform, and it is free:
-        #   * with a fresh credential it completes with ``--network none``,
-        #     writes nothing to the login volume, and makes no request at all;
+        # ``codex debug models`` renders the CLI's model catalog.  It loads
+        # auth through the refreshing path, so it performs the refresh this
+        # warm exists to perform, and it is free:
+        #   * with a fresh credential it completes with ``--network none`` and
+        #     makes no request at all -- the only thing it may write to the
+        #     login volume is its own ``~/.codex/models_cache.json`` (a
+        #     catalog cache with a 5-minute TTL), never the credential;
         #   * with a stale credential its only request is the OAuth token
         #     exchange, which the refreshed credential is then written back
         #     from.  No model is invoked and no quota is consumed either way.
+        # Its exit code says nothing about the refresh: a rejected exchange is
+        # logged and swallowed and the command still exits 0.  That is why
+        # ``helix.sandbox.warm_backend_credential`` reads ``last_refresh``
+        # back from ``auth.json`` and only reports ``warmed`` when the
+        # credential is verifiably inside codex's refresh interval.  There is
+        # no flag to bypass the catalog cache (``--bundled`` does the
+        # opposite: it skips the refresh), so a cache younger than 5 minutes
+        # can short-circuit the refresh; the read-back catches that too.
         # stdout is discarded because the catalog is ~200 KB and the command is
         # run for its side effect on the credential, not for its output;
         # stderr is kept so a failure stays diagnosable.
-        "warm": ["sh", "-lc", "set -eu; codex debug models >/dev/null"],
+        "warm": ["sh", "-c", "set -eu; codex debug models >/dev/null"],
     },
     "cursor": {
         "login": ["cursor-agent", "login"],
