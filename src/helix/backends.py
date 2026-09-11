@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
 from typing import Literal, TypeAlias
 
 
@@ -170,3 +172,209 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
 
 def backend_display_name(backend: str) -> str:
     return BACKEND_DISPLAY_NAMES.get(backend, backend)
+
+
+# ---------------------------------------------------------------------------
+# Native transcript stores
+# ---------------------------------------------------------------------------
+#
+# Every backend CLI keeps its own durable record of a session somewhere under
+# ``$HOME`` (``/home/node`` inside the sandbox auth volume).  The table below
+# is the single place that knows where, keyed by backend, so that
+# ``helix.sandbox`` (copy out of the ``helix-auth-<backend>`` volume) and
+# ``helix.mutator`` (copy from the operator's ``$HOME`` when unsandboxed,
+# then record the artifact) can share one locator.  Paths were established
+# against codex 0.154, opencode 1.18, agy 1.1 and cursor-agent 2026.08; they
+# are best-effort and a miss is recorded, never raised.
+#
+# ``claude`` is listed for completeness of ``id_keys`` only: its source path is
+# ``SandboxConfig.claude_transcript_root`` (or ``HELIX_CLAUDE_TRANSCRIPT_ROOT``)
+# and is handled by the pre-existing claude-specific code path.
+
+# Session ids are interpolated into shell globs and file names, so only accept
+# the shapes the CLIs actually emit (UUIDs, ``ses_…``, ``thr_…``).
+TRANSCRIPT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+@dataclass(frozen=True)
+class BackendTranscriptSource:
+    """Where a backend CLI persists one session's transcript.
+
+    ``id_keys`` are the field names, in priority order, that carry the session
+    id in the backend's structured stdout.  ``files`` maps a ``$HOME``-relative
+    glob (``{session_id}`` is substituted; ``*`` is left for the shell/glob) to
+    the file name written under ``<transcript_artifact_dir>/<backend>/``.
+    ``sqlite_export`` names the staged raw sqlite copy in ``files`` and the
+    ``(table, session_id_column)`` pairs whose rows for this session are
+    exported to ``{session_id}.jsonl`` once the raw copy is on the host.
+    """
+
+    id_keys: tuple[str, ...]
+    files: tuple[tuple[str, str], ...]
+    sqlite_export: tuple[str, tuple[tuple[str, str], ...]] | None = None
+
+
+BACKEND_TRANSCRIPT_SOURCES: dict[str, BackendTranscriptSource] = {
+    "claude": BackendTranscriptSource(
+        id_keys=("session_id", "sessionId", "sessionID"),
+        files=(),
+    ),
+    # ``codex exec --json`` opens with ``thread.started {thread_id}``; the
+    # rollout file is date-partitioned by local start time and its name ends
+    # in that thread id.  ``session_meta.payload.id`` inside equals it.
+    "codex": BackendTranscriptSource(
+        id_keys=("thread_id", "session_id", "sessionId"),
+        files=(
+            (
+                ".codex/sessions/*/*/*/rollout-*-{session_id}.jsonl",
+                "{session_id}.jsonl",
+            ),
+        ),
+    ),
+    # ``cursor-agent --output-format stream-json`` reports the session id on
+    # its ``system`` event.  Cursor keeps a binary blob store under
+    # ``~/.cursor/chats/<cwd-hash>/<session>/store.db`` and a plain JSONL
+    # transcript under ``~/.cursor/projects/<cwd-slug>/agent-transcripts``;
+    # the JSONL is the one preserved.
+    "cursor": BackendTranscriptSource(
+        id_keys=("session_id", "sessionId", "sessionID"),
+        files=(
+            (
+                ".cursor/projects/*/agent-transcripts/{session_id}/{session_id}.jsonl",
+                "{session_id}.jsonl",
+            ),
+        ),
+    ),
+    # Antigravity keeps the readable transcript (and a ``_full`` variant with
+    # tool payloads) per conversation under ``brain/``.  The sibling
+    # ``conversations/<id>.db`` / ``.pb`` are the same conversation in binary
+    # form and are not copied.
+    "agy": BackendTranscriptSource(
+        id_keys=("conversation_id",),
+        files=(
+            (
+                ".gemini/antigravity-cli/brain/{session_id}/.system_generated/logs/transcript.jsonl",
+                "{session_id}.jsonl",
+            ),
+            (
+                ".gemini/antigravity-cli/brain/{session_id}/.system_generated/logs/transcript_full.jsonl",
+                "{session_id}.full.jsonl",
+            ),
+        ),
+    ),
+    # OpenCode >= 1.x persists sessions only in one sqlite database shared by
+    # every session (the older ``storage/`` JSON tree is no longer written).
+    # The db and its WAL are staged next to the artifacts under a dot-prefixed
+    # name, this session's ``session``/``message``/``part`` rows are exported
+    # to ``{session_id}.jsonl``, and the staged copy is removed.
+    "opencode": BackendTranscriptSource(
+        id_keys=("sessionID", "session_id", "sessionId"),
+        files=(
+            (".local/share/opencode/opencode.db", ".{session_id}.opencode.db"),
+            (".local/share/opencode/opencode.db-wal", ".{session_id}.opencode.db-wal"),
+        ),
+        sqlite_export=(
+            ".{session_id}.opencode.db",
+            (("session", "id"), ("message", "session_id"), ("part", "session_id")),
+        ),
+    ),
+}
+
+
+def transcript_session_id_keys(backend: str) -> tuple[str, ...]:
+    """Structured-stdout field names that carry ``backend``'s session id."""
+    source = BACKEND_TRANSCRIPT_SOURCES.get(backend)
+    if source is None:
+        return ("session_id", "sessionId", "sessionID")
+    return source.id_keys
+
+
+# ---------------------------------------------------------------------------
+# Per-generation sandbox state reset
+# ---------------------------------------------------------------------------
+#
+# Every sandboxed agent run leaves session state behind in the
+# ``helix-auth-<backend>`` volume: transcripts, memories, shell snapshots,
+# indexes.  Left alone it accumulates across a whole evolution run and leaks
+# earlier candidates' work into later ones through the CLI's own history and
+# memory features.  ``helix.sandbox.reset_sandbox_agent_state`` deletes the
+# ``$HOME``-relative paths below at the start of every generation, after the
+# previous generation's transcripts were copied into the run.  Credentials and
+# operator configuration are deliberately absent from this table; the unit
+# test ``test_sandbox_state_paths_never_match_credentials`` guards that.  The
+# entries were verified against local installs of codex 0.154, opencode 1.18,
+# agy 1.1, cursor-agent 2026.08 and claude code; unknown directories were left
+# alone rather than guessed at.
+BACKEND_STATE_PATHS: dict[str, tuple[str, ...]] = {
+    "claude": (
+        ".claude/projects",  # per-project transcripts, memory/, todo state
+        ".claude/sessions",  # session index
+        ".claude/telemetry",
+        ".claude/backups",  # settings/conversation backups
+        ".claude/history.jsonl",  # prompt history
+        ".claude/shell-snapshots",
+        ".claude/file-history",  # pre-edit file copies
+        ".claude/session-env",
+        ".claude/debug",  # per-session debug logs
+        ".claude/paste-cache",
+        # kept: .credentials.json, settings.json, plugins, skills, cache, ~/.claude.json
+    ),
+    "codex": (
+        ".codex/sessions",  # rollout JSONL transcripts
+        ".codex/archived_sessions",
+        ".codex/session_index.jsonl",
+        ".codex/history.jsonl",  # prompt history
+        ".codex/memories",  # auto-memory text
+        ".codex/memories_*.sqlite*",
+        ".codex/shell_snapshots",
+        ".codex/state_*.sqlite*",  # thread state (state_5.sqlite + wal/shm)
+        ".codex/thread_history*.sqlite*",
+        ".codex/logs_*.sqlite*",
+        ".codex/models_cache.json",
+        ".codex/log",
+        # kept: auth.json, config.toml, AGENTS.md, installation_id, version.json,
+        #       .codex-global-state.json, skills, rules, plugins
+    ),
+    "agy": (
+        ".gemini/antigravity-cli/conversations",  # per-conversation .db/.pb
+        ".gemini/antigravity-cli/brain",  # transcripts, steps, task logs
+        ".gemini/antigravity-cli/cache",
+        ".gemini/antigravity-cli/log",
+        ".gemini/antigravity-cli/cli.log",
+        ".gemini/antigravity-cli/crashes",
+        ".gemini/antigravity-cli/presence",
+        ".gemini/antigravity-cli/knowledge",  # auto-memory
+        ".gemini/antigravity-cli/history.jsonl",
+        ".gemini/antigravity-cli/conversation_summaries.db",
+        # kept: antigravity-oauth-token, settings.json, installation_id,
+        #       keybindings.json, mcp, plugins, bin, builtin, updater
+    ),
+    "cursor": (
+        ".cursor/projects",  # agent-transcripts/, per-project state
+        ".cursor/chats",  # per-session store.db + meta.json
+        ".cursor/ai-tracking",
+        ".cursor/browser-logs",
+        ".cursor/prompt_history.json",
+        ".cursor/snapshots",
+        ".cursor/worktrees",
+        # kept: cli-config.json, mcp.json, agent-cli-state.json, extensions,
+        #       plugins, skills-cursor, ~/.config/cursor/auth.json
+    ),
+    "opencode": (
+        ".local/share/opencode/storage",  # legacy per-session JSON tree
+        ".local/share/opencode/snapshot",  # per-session git snapshots
+        ".local/share/opencode/tool-output",
+        ".local/share/opencode/log",
+        ".local/state/opencode/prompt-history.jsonl",
+        # opencode.db is NOT a path here: its ``account`` table holds the
+        # opencode account's access/refresh tokens, so the file is kept and
+        # only session rows are deleted (``OPENCODE_STATE_TABLES``).
+        # kept: auth.json, account.json, bin, ~/.local/state/opencode/locks
+    ),
+}
+
+# Tables in ``~/.local/share/opencode/opencode.db`` whose rows are per-session
+# state.  ``session`` is the parent; the others reference it by ``session_id``
+# (``part`` also by ``message_id``).  Listed children-first so the deletes do
+# not depend on foreign-key enforcement being on.
+OPENCODE_STATE_TABLES: tuple[str, ...] = ("part", "message", "session")

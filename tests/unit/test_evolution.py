@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix import budget as budget_api
+from helix.backends import DEFAULT_BACKEND_IMAGES
 from helix.config import (
     DatasetConfig,
     EvolutionConfig,
@@ -2675,3 +2676,86 @@ class TestActiveFrontierSyncOnObjectiveMode:
             "init sync must rebuild active_frontier from the loaded "
             f"EvalResult; got {first_snapshot!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# run_evolution — per-generation sandbox agent state reset
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxAgentStateResetPerGeneration:
+    def _run(self, tmp_path, all_mocks, mocker, sandbox: SandboxConfig):
+        events: list[tuple[str, int]] = []
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, config, split=None, instances=None, **kw: make_eval_result(
+                candidate.id, {"i1": 0.5}
+            )
+        )
+        gen_counter = {"n": 0}
+
+        def fake_mutate(*args, **kwargs):
+            gen_counter["n"] += 1
+            # Stands in for the invocation, whose tail copies the transcript.
+            events.append(("candidate-transcript-copy", gen_counter["n"]))
+            return None
+
+        def fake_reset(backend, *, generation=None, **kwargs):
+            events.append(("reset", generation))
+            return 5
+
+        all_mocks["mutate"].side_effect = fake_mutate
+        reset = mocker.patch(
+            "helix.evolution.reset_sandbox_agent_state", side_effect=fake_reset
+        )
+        config = make_config(max_generations=2, max_evaluations=10000).model_copy(
+            update={"sandbox": sandbox}
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+        return events, reset
+
+    def test_reset_runs_before_each_generation(self, tmp_path, all_mocks, mocker):
+        events, reset = self._run(tmp_path, all_mocks, mocker, SandboxConfig(enabled=True))
+
+        assert reset.call_count == 2
+        assert reset.call_args_list[0].args == (make_config().agent.backend,)
+        assert reset.call_args_list[0].kwargs["generation"] == 1
+        assert (
+            reset.call_args_list[0].kwargs["image"]
+            == DEFAULT_BACKEND_IMAGES[make_config().agent.backend]
+        )
+        # Generation 1's copy completes before generation 2's reset.
+        assert events == [
+            ("reset", 1),
+            ("candidate-transcript-copy", 1),
+            ("reset", 2),
+            ("candidate-transcript-copy", 2),
+        ]
+
+    def test_reset_uses_the_runs_configured_sandbox_image(
+        self, tmp_path, all_mocks, mocker
+    ):
+        """A private ``sandbox.image`` must reach the reset container.
+
+        Resolving from a default ``SandboxConfig`` instead would run the reset
+        on the public image, which an operator pinned to their own registry may
+        not be able to pull at all -- and a reset that cannot start is only a
+        warning, so the run would continue with the isolation silently gone.
+        """
+        _, reset = self._run(
+            tmp_path,
+            all_mocks,
+            mocker,
+            SandboxConfig(enabled=True, image="registry.internal/runner:v9"),
+        )
+
+        assert reset.call_count == 2
+        for call in reset.call_args_list:
+            assert call.kwargs["image"] == "registry.internal/runner:v9"
+
+    def test_no_reset_when_unsandboxed(self, tmp_path, all_mocks, mocker):
+        events, reset = self._run(tmp_path, all_mocks, mocker, SandboxConfig(enabled=False))
+
+        reset.assert_not_called()
+        assert [e for e, _ in events] == ["candidate-transcript-copy"] * 2
