@@ -1117,3 +1117,78 @@ class TestDockerEnvRedaction:
         result = sandbox_module._run_docker(args, check=False)
 
         assert result.stderr == traceback_text
+
+
+def test_sandboxed_opencode_workspace_carries_its_own_state_dir(
+    tmp_path: Path, mocker
+):
+    """The database directory named by ``OPENCODE_DB`` must exist inside the
+    workspace copy before the container starts (SQLite does not create
+    parent directories), and must not show up as an untracked file to the
+    agent."""
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("print('hi')\n")
+
+    seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and "--user" in args and "-e" in args:
+            mount = next(a for a in args if a.endswith(":/workspace:rw"))
+            workspace = Path(mount.split(":")[0])
+            seen["state_dir_exists"] = (
+                workspace / ".helix_opencode_state" / "opencode"
+            ).is_dir()
+            exclude = workspace / ".git" / "info" / "exclude"
+            seen["excluded"] = exclude.is_file() and (
+                ".helix_opencode_state/" in exclude.read_text()
+            )
+            seen["env"] = [a for a in args if a.startswith("OPENCODE_DB=")]
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value="1000:1000")
+
+    run_sandboxed_command(
+        ["opencode", "run", "prompt"],
+        cwd=source,
+        env={"OPENCODE_DB": "/workspace/.helix_opencode_state/opencode/opencode.db"},
+        sandbox=SandboxConfig(enabled=True, image="helix-test:latest"),
+        scope="agent",
+        sync_back=True,
+        agent_backend="opencode",
+    )
+
+    assert seen["state_dir_exists"] is True
+    assert seen["excluded"] is True
+    assert seen["env"] == [
+        "OPENCODE_DB=/workspace/.helix_opencode_state/opencode/opencode.db"
+    ]
+    # Nothing came back to the candidate's worktree.
+    assert not (source / ".helix_opencode_state").exists()
+
+
+def test_other_backends_get_no_opencode_state_dir(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and "--user" in args and "-e" in args:
+            mount = next(a for a in args if a.endswith(":/workspace:rw"))
+            workspace = Path(mount.split(":")[0])
+            seen["state_dir_exists"] = (workspace / ".helix_opencode_state").exists()
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value="1000:1000")
+    run_sandboxed_command(
+        ["codex", "exec", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True, image="helix-test:latest"),
+        scope="agent",
+        sync_back=False,
+        agent_backend="codex",
+    )
+    assert seen["state_dir_exists"] is False
