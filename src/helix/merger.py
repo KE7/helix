@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
@@ -17,7 +17,13 @@ from helix.exceptions import (
     RateLimitError,
     print_helix_error,
 )
-from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
+from helix.backends import backend_display_name
+from helix.mutator import (  # noqa: F401
+    AUTONOMOUS_SYSTEM_PROMPT,
+    _turn_budget_section,
+    invoke_claude_code,
+    invoke_with_refresh_race_retry,
+)
 
 # ---------------------------------------------------------------------------
 # Merge-acceptance subsample selection (GEPA parity)
@@ -240,6 +246,7 @@ def merge(
     prepare_worktree: Callable[[Candidate], None] | None = None,
     ancestor: Candidate | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
+    on_refresh_race_recovered: Callable[[str], None] | None = None,
 ) -> Candidate | None:
     """Merge *candidate_a* and *candidate_b* using Claude Code.
 
@@ -308,17 +315,25 @@ def merge(
         Optional sink called exactly once with the backend's token usage,
         whether or not the merge produced a usable candidate — the same
         contract as :func:`helix.mutator.mutate`'s parameter of that name.
+    on_refresh_race_recovered:
+        Optional sink told when the merge lost a refresh race on the shared
+        credential and succeeded on its one retry from a fresh worktree; the
+        same contract as :func:`helix.mutator.mutate`'s parameter.
 
     Returns
     -------
     Candidate | None
         The merged candidate on success, or ``None`` on failure.
     """
-    child = clone_candidate(candidate_a, new_id, base_dir)
-    child.operation = "merge"
-    child.parent_ids = [candidate_a.id, candidate_b.id]
-    if prepare_worktree is not None:
-        prepare_worktree(child)
+    def _fresh_child() -> Candidate:
+        fresh = clone_candidate(candidate_a, new_id, base_dir)
+        fresh.operation = "merge"
+        fresh.parent_ids = [candidate_a.id, candidate_b.id]
+        if prepare_worktree is not None:
+            prepare_worktree(fresh)
+        return fresh
+
+    child = _fresh_child()
 
     # Diff-rendering mode selection.  ``ancestor`` available → compute
     # the two ancestor-relative diffs that drive the GEPA-style
@@ -347,14 +362,39 @@ def merge(
         diff_b_from_ancestor=diff_b_from_ancestor,
     )
 
-    try:
-        _, usage = invoke_claude_code(
-            child.worktree_path,
+    def _invoke(
+        target: Candidate, retried: bool
+    ) -> tuple[dict[str, Any], UsageStats]:
+        return invoke_claude_code(
+            target.worktree_path,
             prompt,
             config.agent,
             passthrough_env=config.passthrough_env,
             fixed_env=config.env,
             sandbox=config.sandbox,
+            retried=retried,
+        )
+
+    def _replace(fresh: Candidate) -> None:
+        nonlocal child
+        child = fresh
+
+    def _discard_child() -> None:
+        try:
+            remove_worktree(child)
+        except Exception:
+            pass
+
+    try:
+        child, usage = invoke_with_refresh_race_retry(
+            child,
+            backend_name=backend_display_name(config.agent.backend),
+            invoke=_invoke,
+            fresh_child=_fresh_child,
+            remove_child=remove_worktree,
+            on_child_replaced=_replace,
+            record_usage=record_usage,
+            on_refresh_race_recovered=on_refresh_race_recovered,
         )
         child.usage = usage
         if record_usage is not None:
@@ -366,19 +406,13 @@ def merge(
             record_usage(exc.usage)
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         print_helix_error(exc)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+        _discard_child()
         return None
     except RateLimitError as exc:
         # Rate limit — clean up orphaned worktree, then re-raise.
         if record_usage is not None and exc.usage is not None:
             record_usage(exc.usage)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+        _discard_child()
         raise
     except CredentialRefreshError as exc:
         # The stored login, not this merge, is what failed.  Mirror
@@ -391,10 +425,13 @@ def merge(
         if record_usage is not None and exc.usage is not None:
             record_usage(exc.usage)
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
+        _discard_child()
+        raise
+    except Exception:
+        # A non-HELIX exception (sandbox ``TimeoutExpired``, ``OSError``)
+        # carries no usage; an earlier attempt's spend has already reached
+        # the sink.  Do not leak the worktree on the way out.
+        _discard_child()
         raise
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.

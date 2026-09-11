@@ -21,7 +21,8 @@ from typing import Any
 
 import pytest
 
-from helix.config import AgentConfig
+from helix.config import AgentConfig, EvaluatorConfig, HelixConfig
+from helix.display import UsageStats
 from helix.exceptions import (
     CredentialRefreshError,
     HelixError,
@@ -32,7 +33,10 @@ from helix.mutator import (
     credential_failure_is_transient,
     credential_failure_marker,
     invoke_claude_code,
+    mutate,
 )
+from helix.population import Candidate
+from tests.unit.test_mutator import make_eval_result  # type: ignore[import-untyped]
 
 
 # Codex CLI 0.130.0 -- the four suffixes it appends to one prefix, plus the
@@ -170,6 +174,55 @@ def _patch_backend(
     mocker.patch("helix.mutator.subprocess.run", return_value=result)
 
 
+def _jsonl(*events: dict[str, Any]) -> str:
+    return "\n".join(json.dumps(event) for event in events)
+
+
+# The real shapes, read from the CLIs' own event definitions:
+#   codex     ``ThreadErrorEvent`` / ``TurnFailedEvent`` in
+#             codex-rs/exec/src/exec_events.rs -- no ``is_error`` key exists
+#             anywhere in ``codex exec --json`` output.
+#   opencode  ``emit("error", { error: props.error })`` in cli/cmd/run.ts,
+#             where ``props.error`` is ``{ name, data: { message } }``.
+def _codex_error_event(message: str) -> dict[str, Any]:
+    return {"type": "error", "message": message}
+
+
+def _codex_turn_failed(message: str) -> dict[str, Any]:
+    return {"type": "turn.failed", "error": {"message": message}}
+
+
+def _opencode_error_event(message: str) -> dict[str, Any]:
+    return {
+        "type": "error",
+        "timestamp": 1757500000000,
+        "sessionID": "ses_x",
+        "error": {"name": "UnknownError", "data": {"message": message}},
+    }
+
+
+def _codex_command_output(output: str) -> dict[str, Any]:
+    """A completed ``command_execution`` item: the candidate's own tool output."""
+    return {
+        "type": "item.completed",
+        "item": {
+            "id": "item_1",
+            "type": "command_execution",
+            "command": "pytest -q",
+            "aggregated_output": output,
+            "exit_code": 1,
+            "status": "completed",
+        },
+    }
+
+
+def _codex_agent_message(text: str) -> dict[str, Any]:
+    return {
+        "type": "item.completed",
+        "item": {"id": "item_2", "type": "agent_message", "text": text},
+    }
+
+
 class TestInvocationClassification:
     def test_non_zero_exit_with_cli_wording_on_stderr(
         self, mocker: Any, tmp_path: Path
@@ -186,22 +239,20 @@ class TestInvocationClassification:
         assert "credential" in err.suggestion.lower()
         assert "helix sandbox login codex" in err.suggestion
 
-    def test_zero_exit_is_error_envelope_is_read(
+    def test_zero_exit_codex_error_event_is_read(
         self, mocker: Any, tmp_path: Path
     ) -> None:
         """Codex swallows its own refresh failure: exit 0, empty stderr.
 
         Measured on codex-cli 0.130.0 against a synthetic credential whose
-        refresh was rejected -- the process exits 0 and prints nothing, even at
-        RUST_LOG=info.  The envelope's ``is_error`` flag is the only signal
-        left, so it has to be read.
+        refresh was rejected -- the process exits 0 and prints nothing on
+        stderr, even at RUST_LOG=info.  What it does emit is its own
+        ``{"type": "error", "message": ...}`` event, so that is what has to
+        be read.
         """
-        stream = "\n".join(
-            [
-                json.dumps({"type": "thread.started"}),
-                json.dumps({"type": "error", "is_error": True,
-                            "message": CODEX_ALREADY_USED}),
-            ]
+        stream = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            _codex_error_event(CODEX_ALREADY_USED),
         )
         _patch_backend(mocker, returncode=0, stdout=stream)
         with pytest.raises(CredentialRefreshError) as exc:
@@ -209,9 +260,56 @@ class TestInvocationClassification:
                 str(tmp_path), "p", AgentConfig(backend="codex")
             )
         assert exc.value.exit_code == 0
-        assert "is_error" in str(exc.value)
+        assert exc.value.transient is True
+        assert "structured error event" in str(exc.value)
 
-    def test_claude_top_level_envelope_is_read(
+    def test_zero_exit_codex_turn_failed_is_read(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        stream = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            {"type": "turn.started"},
+            _codex_turn_failed(CODEX_EXPIRED),
+        )
+        _patch_backend(mocker, returncode=0, stdout=stream)
+        with pytest.raises(CredentialRefreshError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert exc.value.transient is False
+
+    def test_zero_exit_opencode_error_event_is_read(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        stream = _jsonl(
+            {"type": "step_start", "sessionID": "ses_x"},
+            _opencode_error_event(OPENCODE_REFRESH_FAILED),
+        )
+        _patch_backend(mocker, returncode=0, stdout=stream)
+        with pytest.raises(CredentialRefreshError):
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="opencode")
+            )
+
+    def test_claude_errors_list_is_read(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Claude Code's error envelope carries an ``errors`` list, not a string."""
+        envelope = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "errors": [CLAUDE_OAUTH_REFRESH],
+            }
+        )
+        _patch_backend(mocker, returncode=0, stdout=envelope)
+        with pytest.raises(CredentialRefreshError):
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="claude")
+            )
+
+    def test_claude_errored_result_is_read(
         self, mocker: Any, tmp_path: Path
     ) -> None:
         envelope = json.dumps(
@@ -228,22 +326,53 @@ class TestInvocationClassification:
                 str(tmp_path), "p", AgentConfig(backend="claude")
             )
 
-    def test_is_error_alone_does_not_classify(
+    def test_claude_successful_result_prose_is_not_read(
         self, mocker: Any, tmp_path: Path
     ) -> None:
-        """An ``is_error`` tool result is usually the agent's own failing
-        command.  That is an ordinary code failure and must stay one."""
-        stream = "\n".join(
-            [
-                json.dumps(
-                    {
-                        "type": "tool_result",
-                        "is_error": True,
-                        "content": "pytest exited 1: 2 failed, 9 passed",
-                    }
-                ),
-                json.dumps({"type": "turn.completed"}),
-            ]
+        """On a successful turn ``result`` is the assistant's own words."""
+        envelope = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": f"I fixed the handler that raised '{CLAUDE_INVALID_KEY}'.",
+            }
+        )
+        _patch_backend(mocker, returncode=0, stdout=envelope)
+        parsed, _usage = invoke_claude_code(
+            str(tmp_path), "p", AgentConfig(backend="claude")
+        )
+        assert parsed["subtype"] == "success"
+
+    def test_tool_result_is_not_evidence(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """A failing tool call is the agent's own failing command -- an
+        ordinary code failure -- whatever flag the backend puts on it."""
+        stream = _jsonl(
+            {
+                "type": "tool_result",
+                "is_error": True,
+                "content": f"pytest exited 1: {CODEX_ALREADY_USED}",
+            },
+            {"type": "turn.completed"},
+        )
+        _patch_backend(mocker, returncode=0, stdout=stream)
+        parsed, _usage = invoke_claude_code(
+            str(tmp_path), "p", AgentConfig(backend="codex")
+        )
+        assert parsed["events"]
+
+    def test_agent_prose_with_marker_on_zero_exit_is_not_classified(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """The agent quoting the CLI's own wording is still prose."""
+        stream = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            _codex_agent_message(
+                f"The old client printed '{CODEX_ALREADY_USED}'; I removed it."
+            ),
+            {"type": "turn.completed", "usage": {"input_tokens": 1}},
         )
         _patch_backend(mocker, returncode=0, stdout=stream)
         parsed, _usage = invoke_claude_code(
@@ -256,25 +385,73 @@ class TestInvocationClassification:
     ) -> None:
         """A candidate whose own work is about refresh tokens must not be able
         to talk HELIX into declaring the operator's login broken."""
-        stream = "\n".join(
-            [
-                json.dumps(
-                    {
-                        "type": "tool_result",
-                        "is_error": True,
-                        "content": (
-                            "FAILED tests/test_oauth.py::test_reuse - "
-                            "expected the refresh token to be rejected"
-                        ),
-                    }
-                )
-            ]
+        stream = _jsonl(
+            _codex_command_output(
+                "FAILED tests/test_oauth.py::test_reuse - "
+                "expected the refresh token to be rejected"
+            ),
+            {"type": "turn.completed"},
         )
         _patch_backend(mocker, returncode=0, stdout=stream)
         parsed, _usage = invoke_claude_code(
             str(tmp_path), "p", AgentConfig(backend="codex")
         )
         assert parsed["events"]
+
+    def test_non_zero_exit_never_scans_tool_output_in_the_transcript(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Exit 1 on a 502 after the candidate's tests printed opencode's
+        refresh wording into a command's output is a generic failure."""
+        stream = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            _codex_command_output(f"E   RuntimeError: {OPENCODE_REFRESH_FAILED}"),
+        )
+        _patch_backend(
+            mocker, returncode=1, stdout=stream, stderr="error: 502 Bad Gateway"
+        )
+        with pytest.raises(MutationError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert not isinstance(exc.value, CredentialRefreshError)
+
+    def test_non_zero_exit_never_scans_raw_stdout_prose(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        _patch_backend(
+            mocker,
+            returncode=1,
+            stdout=f"note: {CODEX_EXPIRED}",
+            stderr="Traceback (most recent call last): SyntaxError",
+        )
+        with pytest.raises(MutationError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert not isinstance(exc.value, CredentialRefreshError)
+
+    @pytest.mark.parametrize("is_error", [False, True])
+    def test_claude_max_turns_with_auth_wording_in_prose_stays_partial_success(
+        self, mocker: Any, tmp_path: Path, is_error: bool
+    ) -> None:
+        """Pre-existing contract: max-turns exhaustion is partial success
+        because the edits may be useful.  It is decided before any credential
+        check, so the assistant's prose in ``result`` is never read."""
+        envelope = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_max_turns",
+                "is_error": is_error,
+                "num_turns": 30,
+                "result": f"I hit '{CLAUDE_INVALID_KEY}' in the old test fixture.",
+            }
+        )
+        _patch_backend(mocker, returncode=1, stdout=envelope)
+        parsed, _usage = invoke_claude_code(
+            str(tmp_path), "p", AgentConfig(backend="claude")
+        )
+        assert parsed["subtype"] == "error_max_turns"
 
     def test_ordinary_non_zero_exit_stays_a_mutation_error(
         self, mocker: Any, tmp_path: Path
@@ -300,6 +477,34 @@ class TestInvocationClassification:
                 str(tmp_path), "p", AgentConfig(backend="codex")
             )
 
+    def test_invoke_itself_never_retries(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """The retry needs a fresh worktree, which only the caller owns."""
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=_completed(1, stderr=CODEX_ALREADY_USED),
+        )
+        with pytest.raises(CredentialRefreshError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert run.call_count == 1
+        assert exc.value.transient is True
+        assert "retry" not in str(exc.value).lower()
+
+    def test_retried_flag_changes_the_second_loss_wording(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        _patch_backend(mocker, returncode=1, stderr=CODEX_ALREADY_USED)
+        with pytest.raises(CredentialRefreshError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex"), retried=True
+            )
+        assert "failed again on retry" in str(exc.value)
+        assert "helix resume" in exc.value.suggestion
+        assert "sandbox login" not in exc.value.suggestion
+
 
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
@@ -309,7 +514,104 @@ def _completed(
     )
 
 
-CODEX_SUCCESS_STREAM = json.dumps({"type": "turn.completed"})
+def _codex_stream(*, session: str, input_tokens: int, output_tokens: int) -> str:
+    return _jsonl(
+        {"type": "session.started", "session_id": session},
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        },
+    )
+
+
+CODEX_SUCCESS_STREAM = _codex_stream(session="won", input_tokens=12, output_tokens=8)
+CODEX_LOST_STREAM = _codex_stream(session="lost", input_tokens=5, output_tokens=2)
+
+
+def _codex_config() -> HelixConfig:
+    return HelixConfig(
+        objective="Improve the code",
+        evaluator=EvaluatorConfig(command="true"),
+        agent=AgentConfig(backend="codex"),
+    )
+
+
+def _candidate(cid: str, path: Path) -> Candidate:
+    return Candidate(
+        id=cid,
+        worktree_path=str(path),
+        branch_name=f"helix/{cid}",
+        generation=0,
+        parent_id=None,
+        parent_ids=[],
+        operation="seed",
+    )
+
+
+class _RetryHarness:
+    """``mutate()`` with a clone that hands out a fresh directory per call.
+
+    Each ``clone_candidate`` call creates ``<tmp>/clone<N>`` so the test can
+    see which tree each attempt ran in, what it left behind, and which trees
+    were removed.
+    """
+
+    def __init__(self, tmp_path: Path, mocker: Any) -> None:
+        self.tmp_path = tmp_path
+        self.clones: list[Candidate] = []
+        self.removed: list[Candidate] = []
+        self.run_cwds: list[str] = []
+        self.spent: list[UsageStats] = []
+        self.recovered: list[str] = []
+        self.parent = _candidate("g0-s0", tmp_path / "parent")
+
+        def _clone(parent: Candidate, new_id: str, base_dir: Path) -> Candidate:
+            path = tmp_path / f"clone{len(self.clones) + 1}"
+            path.mkdir()
+            child = _candidate(new_id, path)
+            self.clones.append(child)
+            return child
+
+        mocker.patch("helix.mutator.clone_candidate", side_effect=_clone)
+        mocker.patch(
+            "helix.mutator.remove_worktree", side_effect=self.removed.append
+        )
+        mocker.patch("helix.mutator.snapshot_candidate")
+        self.mocker = mocker
+
+    def run_backend(self, outcomes: list[Any]) -> Any:
+        """Patch ``subprocess.run`` with per-attempt outcomes.
+
+        An outcome is a ``CompletedProcess`` to return or an exception to
+        raise.  Every attempt first drops ``partial.py`` into its cwd, the way
+        a backend that lost mid-turn leaves half-applied edits behind.
+        """
+        outcomes = list(outcomes)
+
+        def _run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cwd = kwargs["cwd"]
+            self.run_cwds.append(cwd)
+            (Path(cwd) / "partial.py").write_text("# half-applied edit\n")
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        return self.mocker.patch("helix.mutator.subprocess.run", side_effect=_run)
+
+    def mutate(self) -> Candidate | None:
+        return mutate(
+            self.parent,
+            make_eval_result("g0-s0"),
+            "g1-s0",
+            _codex_config(),
+            self.tmp_path,
+            record_usage=self.spent.append,
+            on_refresh_race_recovered=self.recovered.append,
+        )
 
 
 class TestLostRefreshRaceIsRetried:
@@ -318,204 +620,292 @@ class TestLostRefreshRaceIsRetried:
     When it happens, the *winner* has just written a refreshed credential to
     the shared volume, so the right response is to invoke again against it,
     not to drop the slot and tell the operator to redo a login that is fine.
+    The retry lives in ``mutate()`` / ``merge()`` rather than in
+    ``invoke_claude_code`` because it must start from a fresh worktree.
     """
 
-    def test_already_used_is_retried_once_and_the_retry_can_succeed(
+    def test_retry_runs_in_a_fresh_worktree(
         self, mocker: Any, tmp_path: Path
     ) -> None:
-        run = mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[
-                _completed(1, stderr=CODEX_ALREADY_USED),
-                _completed(0, stdout=CODEX_SUCCESS_STREAM),
-            ],
-        )
-        parsed, _usage = invoke_claude_code(
-            str(tmp_path), "p", AgentConfig(backend="codex")
-        )
-        assert parsed["events"]
-        assert run.call_count == 2
-
-    def test_zero_exit_already_used_envelope_is_retried_too(
-        self, mocker: Any, tmp_path: Path
-    ) -> None:
-        """Codex swallows the failure on exit 0; the envelope path retries as well."""
-        stream = "\n".join(
+        """Attempt 1's half-applied edits must not be under the retry."""
+        h = _RetryHarness(tmp_path, mocker)
+        run = h.run_backend(
             [
-                json.dumps({"type": "thread.started"}),
-                json.dumps({"type": "error", "is_error": True,
-                            "message": CODEX_ALREADY_USED}),
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
             ]
         )
-        run = mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[
-                _completed(0, stdout=stream),
-                _completed(0, stdout=CODEX_SUCCESS_STREAM),
-            ],
-        )
-        parsed, _usage = invoke_claude_code(
-            str(tmp_path), "p", AgentConfig(backend="codex")
-        )
-        assert parsed["events"]
-        assert run.call_count == 2
 
-    def test_second_loss_is_raised_without_a_relogin_instruction(
+        child = h.mutate()
+
+        assert run.call_count == 2
+        assert len(h.clones) == 2
+        assert h.run_cwds == [h.clones[0].worktree_path, h.clones[1].worktree_path]
+        assert child is h.clones[1]
+        # The first tree was discarded before the retry, and the retry's tree
+        # was clean when the backend started in it.
+        assert h.removed == [h.clones[0]]
+        retry_tree = Path(h.clones[1].worktree_path)
+        assert sorted(p.name for p in retry_tree.iterdir() if p.name == "partial.py") == [
+            "partial.py"
+        ], "only the retry's own edit is present"
+        assert not (retry_tree / ".helix_backend_result.attempt1.json").read_text().count(
+            "partial"
+        )
+
+    def test_both_attempts_artifacts_are_kept(
         self, mocker: Any, tmp_path: Path
     ) -> None:
-        run = mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[
-                _completed(1, stderr=CODEX_ALREADY_USED),
-                _completed(1, stderr=CODEX_ALREADY_USED),
-            ],
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend(
+            [
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
+            ]
+        )
+
+        child = h.mutate()
+        assert child is not None
+        tree = Path(child.worktree_path)
+
+        # Attempt 1, under its own names, with the marker that explains why
+        # there was a retry.
+        assert (tree / ".helix_backend_stderr.attempt1.txt").read_text() == CODEX_ALREADY_USED
+        assert (tree / ".helix_backend_stdout.attempt1.txt").read_text() == CODEX_LOST_STREAM
+        first = json.loads((tree / ".helix_backend_result.attempt1.json").read_text())
+        assert first["returncode"] == 1
+        assert first["usage"]["input_tokens"] == 5
+
+        # The final attempt's artifact accounts for both.
+        final = json.loads((tree / ".helix_backend_result.json").read_text())
+        assert final["returncode"] == 0
+        assert final["attempts"] == 2
+        assert final["retry_of"] == ".helix_backend_result.attempt1.json"
+        assert final["usage_first_attempt"]["input_tokens"] == 5
+        assert final["usage_combined"]["input_tokens"] == 5 + 12
+        assert final["usage_combined"]["output_tokens"] == 2 + 8
+
+        # And none of it can leak into the candidate's git tree.
+        gitignore = (tree / ".gitignore").read_text()
+        for name in (
+            ".helix_backend_result.attempt1.json",
+            ".helix_backend_stdout.attempt1.txt",
+            ".helix_backend_stderr.attempt1.txt",
+        ):
+            assert name in gitignore
+
+    def test_recovered_race_is_reported_and_charged_once(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend(
+            [
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
+            ]
+        )
+
+        child = h.mutate()
+        assert child is not None
+
+        # The caller sees the sum, exactly once, and the child carries it.
+        assert len(h.spent) == 1
+        assert h.spent[0].input_tokens == 5 + 12
+        assert h.spent[0].output_tokens == 2 + 8
+        assert h.spent[0].session_id == "won"
+        assert child.usage.input_tokens == 5 + 12
+        # The race is visible to whoever keeps the end-of-run summary.
+        assert len(h.recovered) == 1
+        assert "recovered after a lost refresh race" in h.recovered[0]
+        assert "g1-s0" in h.recovered[0]
+
+    def test_zero_exit_codex_error_event_is_retried_too(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Codex swallows the failure on exit 0; the event path retries as well."""
+        h = _RetryHarness(tmp_path, mocker)
+        run = h.run_backend(
+            [
+                _completed(
+                    0,
+                    stdout=_jsonl(
+                        {"type": "thread.started", "thread_id": "t1"},
+                        _codex_error_event(CODEX_ALREADY_USED),
+                    ),
+                ),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
+            ]
+        )
+        assert h.mutate() is h.clones[1]
+        assert run.call_count == 2
+
+    def test_second_loss_is_raised_with_the_sum_and_no_relogin_instruction(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        h = _RetryHarness(tmp_path, mocker)
+        run = h.run_backend(
+            [
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                _completed(
+                    1,
+                    stdout=_codex_stream(session="lost-2", input_tokens=3, output_tokens=1),
+                    stderr=CODEX_ALREADY_USED,
+                ),
+            ]
         )
         with pytest.raises(CredentialRefreshError) as exc:
-            invoke_claude_code(
-                str(tmp_path), "p", AgentConfig(backend="codex")
-            )
+            h.mutate()
         err = exc.value
         assert run.call_count == 2  # exactly one retry, no loop
         assert err.transient is True
-        assert "retry" in str(err).lower()
+        assert "failed again on retry" in str(err)
         # The stored credential is the winner's fresh one; do not tell the
         # operator to throw it away.
         assert "sandbox login" not in err.suggestion
         assert "helix resume" in err.suggestion
+        # Both attempts' spend, attached to the error and handed to the sink.
+        assert err.usage is not None
+        assert err.usage.input_tokens == 5 + 3
+        assert err.usage.output_tokens == 2 + 1
+        assert err.usage.session_id == "lost-2"
+        assert h.spent == [err.usage]
+        # Neither worktree leaks.
+        assert h.removed == h.clones
+        assert h.recovered == []
+
+    def test_retry_failing_for_another_reason_still_carries_the_sum(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """The retry's error class does not matter; the first spend rides along."""
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend(
+            [
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                _completed(
+                    2,
+                    stdout=_codex_stream(session="crashed", input_tokens=4, output_tokens=0),
+                    stderr="segfault",
+                ),
+            ]
+        )
+        assert h.mutate() is None  # MutationError -> None, by contract
+        assert len(h.spent) == 1
+        assert h.spent[0].input_tokens == 5 + 4
+        assert h.spent[0].output_tokens == 2
+        assert h.removed == h.clones
+
+    def test_timeout_on_the_retry_records_the_first_spend_and_cleans_up(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """A sandbox ``TimeoutExpired`` is not a HelixError and carries no
+        usage: the first attempt's spend must still reach the sink, and the
+        retry's worktree must not leak."""
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend(
+            [
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                subprocess.TimeoutExpired(cmd=["codex"], timeout=30),
+            ]
+        )
+        with pytest.raises(subprocess.TimeoutExpired):
+            h.mutate()
+        assert len(h.spent) == 1
+        assert h.spent[0].input_tokens == 5
+        assert h.spent[0].output_tokens == 2
+        assert h.removed == h.clones
+
+    def test_timeout_on_the_first_attempt_cleans_up(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend([subprocess.TimeoutExpired(cmd=["codex"], timeout=30)])
+        with pytest.raises(subprocess.TimeoutExpired):
+            h.mutate()
+        assert h.spent == []
+        assert h.removed == h.clones == h.clones[:1]
 
     @pytest.mark.parametrize("text", [CODEX_EXPIRED, CODEX_REVOKED, CODEX_BARE])
     def test_a_dead_login_is_not_retried(
         self, mocker: Any, tmp_path: Path, text: str
     ) -> None:
         """Retrying an expired or revoked credential only burns a turn."""
-        run = mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[_completed(1, stderr=text)],
-        )
+        h = _RetryHarness(tmp_path, mocker)
+        run = h.run_backend([_completed(1, stdout=CODEX_LOST_STREAM, stderr=text)])
         with pytest.raises(CredentialRefreshError) as exc:
-            invoke_claude_code(
-                str(tmp_path), "p", AgentConfig(backend="codex")
-            )
+            h.mutate()
         assert run.call_count == 1
+        assert len(h.clones) == 1
         assert exc.value.transient is False
         assert "helix sandbox login codex" in exc.value.suggestion
+        # Item: the credential path records usage like its siblings.
+        assert len(h.spent) == 1
+        assert h.spent[0].input_tokens == 5
+        assert h.removed == h.clones
 
 
-def _codex_stream(*, session: str, input_tokens: int, output_tokens: int) -> str:
-    return "\n".join(
-        [
-            json.dumps({"type": "session.started", "session_id": session}),
-            json.dumps(
-                {
-                    "type": "turn.completed",
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                    },
-                }
-            ),
+class TestRetryOnARealWorktree:
+    """The same contract against real git worktrees, not a stubbed clone."""
+
+    def test_retry_starts_from_the_parent_commit(
+        self, mocker: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from helix.worktree import create_seed_worktree
+
+        for key, value in {
+            "GIT_AUTHOR_NAME": "HELIX Test",
+            "GIT_AUTHOR_EMAIL": "helix@test.local",
+            "GIT_COMMITTER_NAME": "HELIX Test",
+            "GIT_COMMITTER_EMAIL": "helix@test.local",
+        }.items():
+            monkeypatch.setenv(key, value)
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "main.py").write_text("print('hello')\n")
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(project, base_dir)
+
+        seen: list[dict[str, Any]] = []
+        outcomes = [
+            _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+            _completed(0, stdout=CODEX_SUCCESS_STREAM),
         ]
-    )
 
+        real_run = subprocess.run
 
-class TestRetryUsageAccounting:
-    """A retried invocation spent tokens twice; the caller must see both.
-
-    The lost attempt raises a transient ``CredentialRefreshError`` carrying
-    the usage salvaged from its output.  Whatever the retry then reports --
-    a candidate or another error -- has to include that first spend, or the
-    budget silently under-counts every lost race.
-    """
-
-    def test_retry_success_includes_the_lost_attempts_usage(
-        self, mocker: Any, tmp_path: Path
-    ) -> None:
-        run = mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[
-                _completed(
-                    1,
-                    stdout=_codex_stream(
-                        session="lost", input_tokens=5, output_tokens=2
-                    ),
-                    stderr=CODEX_ALREADY_USED,
-                ),
-                _completed(
-                    0,
-                    stdout=_codex_stream(
-                        session="won", input_tokens=12, output_tokens=8
-                    ),
-                ),
-            ],
-        )
-        parsed, usage = invoke_claude_code(
-            str(tmp_path), "p", AgentConfig(backend="codex")
-        )
-        assert run.call_count == 2
-        assert parsed["events"]
-        assert usage.input_tokens == 5 + 12
-        assert usage.output_tokens == 2 + 8
-        # The session the caller receives output from is the retry's.
-        assert usage.session_id == "won"
-
-    def test_second_loss_carries_the_sum_of_both_attempts(
-        self, mocker: Any, tmp_path: Path
-    ) -> None:
-        mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[
-                _completed(
-                    1,
-                    stdout=_codex_stream(
-                        session="lost-1", input_tokens=5, output_tokens=2
-                    ),
-                    stderr=CODEX_ALREADY_USED,
-                ),
-                _completed(
-                    1,
-                    stdout=_codex_stream(
-                        session="lost-2", input_tokens=3, output_tokens=1
-                    ),
-                    stderr=CODEX_ALREADY_USED,
-                ),
-            ],
-        )
-        with pytest.raises(CredentialRefreshError) as exc:
-            invoke_claude_code(
-                str(tmp_path), "p", AgentConfig(backend="codex")
+        def _run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if args[0] != "codex":
+                # git, driven by the real clone_candidate / remove_worktree
+                return real_run(args, **kwargs)
+            cwd = Path(kwargs["cwd"])
+            seen.append(
+                {
+                    "cwd": str(cwd),
+                    "partial_present": (cwd / "partial.py").exists(),
+                    "main": (cwd / "main.py").read_text(),
+                }
             )
-        assert exc.value.usage is not None
-        assert exc.value.usage.input_tokens == 5 + 3
-        assert exc.value.usage.output_tokens == 2 + 1
-        assert exc.value.usage.session_id == "lost-2"
+            (cwd / "partial.py").write_text("# half-applied\n")
+            (cwd / "main.py").write_text("print('half edited')\n")
+            return outcomes.pop(0)
 
-    def test_retry_failing_for_another_reason_still_carries_the_sum(
-        self, mocker: Any, tmp_path: Path
-    ) -> None:
-        """The retry's error class does not matter; the first spend rides along."""
-        mocker.patch(
-            "helix.mutator.subprocess.run",
-            side_effect=[
-                _completed(
-                    1,
-                    stdout=_codex_stream(
-                        session="lost", input_tokens=5, output_tokens=2
-                    ),
-                    stderr=CODEX_ALREADY_USED,
-                ),
-                _completed(
-                    2,
-                    stdout=_codex_stream(
-                        session="crashed", input_tokens=4, output_tokens=0
-                    ),
-                    stderr="segfault",
-                ),
-            ],
+        mocker.patch("helix.mutator.subprocess.run", side_effect=_run)
+        recovered: list[str] = []
+        child = mutate(
+            seed,
+            make_eval_result(seed.id),
+            "g1-s0",
+            _codex_config(),
+            base_dir,
+            on_refresh_race_recovered=recovered.append,
         )
-        with pytest.raises(MutationError) as exc:
-            invoke_claude_code(
-                str(tmp_path), "p", AgentConfig(backend="codex")
-            )
-        assert exc.value.usage is not None
-        assert exc.value.usage.input_tokens == 5 + 4
-        assert exc.value.usage.output_tokens == 2
+
+        assert child is not None
+        assert len(seen) == 2
+        assert seen[0]["cwd"] == seen[1]["cwd"] == str(base_dir / "g1-s0")
+        # The retry saw the parent's tree, not attempt 1's half-applied edits.
+        assert seen[1]["partial_present"] is False
+        assert seen[1]["main"] == "print('hello')\n"
+        tree = Path(child.worktree_path)
+        assert (tree / ".helix_backend_result.attempt1.json").is_file()
+        assert (tree / ".helix_backend_result.json").is_file()
+        assert recovered and "recovered after a lost refresh race" in recovered[0]
