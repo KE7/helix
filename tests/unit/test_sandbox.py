@@ -9,6 +9,7 @@ import pytest
 
 import helix.sandbox as sandbox_module
 
+from helix.backends import BACKEND_AUTH_COMMANDS
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.sandbox import (
     EvaluatorSidecarRuntime,
@@ -1192,3 +1193,18 @@ def test_other_backends_get_no_opencode_state_dir(tmp_path: Path, mocker):
         agent_backend="codex",
     )
     assert seen["state_dir_exists"] is False
+
+
+def test_no_auth_command_uses_a_login_shell():
+    """``sh -l`` sources ``$HOME/.profile`` from the shared login volume that
+    every candidate container mounts read-write, so a login shell would let a
+    candidate plant code that runs in the next ``helix sandbox status`` or
+    ``logout``.  PATH is pinned with ``-e`` instead."""
+    for backend, actions in BACKEND_AUTH_COMMANDS.items():
+        for action, argv in actions.items():
+            if argv[0] != "sh":
+                continue
+            assert argv[1] == "-c", (backend, action, argv)
+            assert not any(
+                flag.startswith("-") and "l" in flag for flag in argv[1:-1]
+            ), (backend, action, argv)

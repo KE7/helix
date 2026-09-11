@@ -1,14 +1,12 @@
-"""The warm's placement in the loop, and how a credential failure ends up
-somewhere an operator will actually read it.
+"""How a credential failure ends up somewhere an operator will actually read
+it.
 
-Two things are asserted end-to-end against the real evolution loop:
-
-* the warm fires once per generation -- not once per run, because a run
-  outlives any refresh interval, and not once per candidate, because that is
-  the race it exists to prevent; and
-* when a mutation dies on the shared credential, the run says so in its own
-  terms and keeps going, instead of filing the slot under "the agent wrote bad
-  code" and finishing silently.
+Asserted end-to-end against the real evolution loop: when a mutation or a
+merge dies on the shared credential, the run says so in its own terms and
+keeps going, instead of filing the slot under "the agent wrote bad code" and
+finishing silently.  A lost refresh race that the one-shot retry recovered is
+reported too -- it is not a failure, but it is the only sign the operator gets
+that candidates are competing to refresh the shared login.
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ import pytest
 from helix.config import AgentConfig, SandboxConfig
 from helix.evolution import run_evolution
 from helix.exceptions import CredentialRefreshError
-from helix.sandbox import CredentialWarmResult
 from tests.unit.test_evolution import (  # type: ignore[import-untyped]
     all_mocks,  # noqa: F401, F811 — re-exported pytest fixture
     make_candidate,
@@ -30,7 +27,7 @@ from tests.unit.test_evolution import (  # type: ignore[import-untyped]
 
 
 def _sandboxed(config: Any) -> Any:
-    """Sandboxed, on the one backend the code actually warms (codex)."""
+    """Sandboxed, on a backend whose credential can actually be raced (codex)."""
     return config.model_copy(
         update={
             "sandbox": SandboxConfig(enabled=True),
@@ -39,114 +36,12 @@ def _sandboxed(config: Any) -> Any:
     )
 
 
-@pytest.fixture(autouse=True)
-def two_writers(mocker: Any) -> None:
-    """The warm is skipped for a single writer; that gate has its own tests
-    (``test_credential_warm.py``).  Here the loop shape is what matters, so
-    pretend every generation has two concurrent writers."""
-    mocker.patch("helix.evolution._generation_concurrent_writers", return_value=2)
-
-
-@pytest.fixture()
-def warm_calls(mocker: Any) -> list[str]:
-    calls: list[str] = []
-
-    def _fake(backend: str, **_kwargs: Any) -> CredentialWarmResult:
-        calls.append(backend)
-        return CredentialWarmResult(backend=backend, warmed=True, returncode=0)
-
-    mocker.patch("helix.evolution.warm_backend_credential", side_effect=_fake)
-    return calls
-
-
-class TestWarmRunsOncePerGeneration:
-    def test_one_warm_per_generation(
-        self, mocker, tmp_path, all_mocks, warm_calls  # noqa: F811
-    ) -> None:
-        """Three generations, three warms.
-
-        A single warm at startup would leave a long run unprotected the moment
-        the credential next goes stale mid-flight, so the count must track
-        generations rather than runs.
-        """
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = None
-        all_mocks["run_evaluator"].side_effect = (
-            lambda candidate, *a, **k: make_eval_result(
-                candidate.id, {"i1": 0.5, "i2": 0.5}
-            )
-        )
-
-        config = _sandboxed(
-            make_config(max_generations=3, perfect_score_threshold=None)
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        assert warm_calls == ["codex", "codex", "codex"]
-
-    def test_warm_precedes_every_mutation(
-        self, mocker, tmp_path, all_mocks  # noqa: F811
-    ) -> None:
-        """Ordering, not just counting: the credential is fresh before any
-        candidate could start refreshing it for itself."""
-        order: list[str] = []
-        mocker.patch(
-            "helix.evolution.warm_backend_credential",
-            side_effect=lambda backend, **_k: (
-                order.append("warm"),
-                CredentialWarmResult(backend=backend, warmed=True, returncode=0),
-            )[1],
-        )
-
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].side_effect = lambda *a, **k: (
-            order.append("mutate"),
-            None,
-        )[1]
-        all_mocks["run_evaluator"].side_effect = (
-            lambda candidate, *a, **k: make_eval_result(
-                candidate.id, {"i1": 0.5, "i2": 0.5}
-            )
-        )
-
-        config = _sandboxed(
-            make_config(max_generations=2, perfect_score_threshold=None)
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        assert order[0] == "warm"
-        assert order.count("warm") == 2
-        for index, event in enumerate(order):
-            if event == "mutate":
-                assert "warm" in order[:index]
-
-    def test_unsandboxed_run_warms_nothing(
-        self, mocker, tmp_path, all_mocks, warm_calls  # noqa: F811
-    ) -> None:
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = None
-        all_mocks["run_evaluator"].side_effect = (
-            lambda candidate, *a, **k: make_eval_result(
-                candidate.id, {"i1": 0.5, "i2": 0.5}
-            )
-        )
-
-        config = make_config(max_generations=2, perfect_score_threshold=None)
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        assert warm_calls == []
-
-
 class TestCredentialFailureIsVisible:
     def test_failure_is_named_and_the_run_survives(
         self,
         mocker,  # noqa: F811
         tmp_path,
         all_mocks,  # noqa: F811
-        warm_calls,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A dead credential must not read as a run that merely found nothing.
@@ -187,7 +82,6 @@ class TestCredentialFailureIsVisible:
         mocker,  # noqa: F811
         tmp_path,
         all_mocks,  # noqa: F811
-        warm_calls,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """The merge gate fires before any mutation in a generation, so a
@@ -246,7 +140,6 @@ class TestCredentialFailureIsVisible:
         mocker,  # noqa: F811
         tmp_path,
         all_mocks,  # noqa: F811
-        warm_calls,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         seed = make_candidate("g0-s0")
@@ -291,7 +184,6 @@ class TestCredentialFailureIsVisible:
         mocker,  # noqa: F811
         tmp_path,
         all_mocks,  # noqa: F811
-        warm_calls,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """When every failure was a lost refresh race, the winner has stored a
@@ -329,7 +221,6 @@ class TestCredentialFailureIsVisible:
         mocker,  # noqa: F811
         tmp_path,
         all_mocks,  # noqa: F811
-        warm_calls,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         seed = make_candidate("g0-s0")
@@ -353,12 +244,11 @@ class TestCredentialFailureIsVisible:
         mocker,  # noqa: F811
         tmp_path,
         all_mocks,  # noqa: F811
-        warm_calls,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A race the retry recovered from is not a failure, but it is the
-        only sign the operator gets that candidates are still refreshing the
-        shared login for themselves."""
+        only sign the operator gets that candidates are refreshing the shared
+        login for themselves."""
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
         all_mocks["run_evaluator"].side_effect = (

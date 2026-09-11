@@ -82,11 +82,7 @@ from helix.population import (
     HelixResult,
     ParetoFrontier,
 )
-from helix.sandbox import (
-    CredentialWarmResult,
-    start_evaluator_sidecar,
-    warm_backend_credential,
-)
+from helix.sandbox import start_evaluator_sidecar
 from helix.state import (
     BudgetState,
     clear_eval_cache,
@@ -1466,7 +1462,8 @@ class CredentialFailureLog:
 
     ``recovered`` holds the invocations that lost a refresh race and
     succeeded on their one retry: not failures, but the only evidence an
-    operator gets that the warm is not protecting the run.
+    operator gets that candidates are still competing to refresh the shared
+    login.
     """
 
     entries: list[tuple[str, str, bool, str]] = field(default_factory=list)
@@ -1557,127 +1554,6 @@ def _credential_remedy(backend: str, *, transient: bool) -> str:
         f"Re-authenticate with [cyan]helix sandbox login {backend}[/cyan], "
         "then [cyan]helix resume[/cyan]."
     )
-
-
-def _generation_concurrent_writers(config: HelixConfig) -> int:
-    """How many candidates can write the shared login at once in a generation.
-
-    ``num_parallel_proposals * mutations_per_parent`` slots, run under a pool
-    of at most ``max_workers``; a single slot takes the in-thread path with no
-    pool at all.  The merge branch is one invocation.
-    """
-    slots = (
-        config.evolution.num_parallel_proposals
-        * config.evolution.mutations_per_parent
-    )
-    return max(1, min(slots, config.evolution.max_workers))
-
-
-def _operator_env(config: HelixConfig) -> dict[str, str]:
-    """The operator's ``passthrough_env`` / ``[env]`` selection, as a mapping."""
-    env = {
-        key: os.environ[key]
-        for key in config.passthrough_env
-        if key in os.environ
-    }
-    env.update(config.env)
-    return env
-
-
-def _warm_generation_credential(
-    config: HelixConfig, *, gen: int, announce_skip: bool
-) -> CredentialWarmResult | None:
-    """Refresh the agent backend's shared credential once for generation *gen*.
-
-    Called once per generation, before any candidate is dispatched, so that a
-    refresh which has come due happens under one writer and the credential is
-    fresh at the start of the generation.  That is the extent of the
-    protection: a token that crosses its refresh threshold *during* the
-    generation -- each worker runs the parent evaluation before its mutation,
-    and slots beyond ``max_workers`` start later still -- can still be raced
-    by the candidates in flight.
-
-    Per *generation* rather than once per run on purpose: a long run outlives
-    any refresh interval, so a single warm at startup stops protecting the run
-    the moment the credential next goes stale mid-flight.
-
-    Skipped when at most one candidate can write the shared login at a time
-    (``_generation_concurrent_writers``): a single writer cannot race itself,
-    and the warm would only add a container per generation.
-
-    Returns ``None`` when there is nothing to warm -- an unsandboxed run has no
-    HELIX-managed login volume, because the backend runs directly against the
-    operator's own CLI state and HELIX never mounts or arbitrates it.
-
-    Never fatal.  A warm that could not run, or that left the credential
-    unverified, leaves exactly today's behaviour in place (candidates refresh
-    for themselves and may race), and candidates may still succeed on the
-    credential already stored -- so the run continues and the operator is
-    told, in those terms, what protection was lost.
-    """
-    if not config.sandbox.enabled:
-        return None
-
-    backend = config.agent.backend
-    display = backend_display_name(backend)
-    writers = _generation_concurrent_writers(config)
-    if writers <= 1:
-        result = CredentialWarmResult(
-            backend=backend,
-            warmed=False,
-            skip_reason=(
-                "at most one candidate writes the shared login at a time "
-                f"(num_parallel_proposals × mutations_per_parent = "
-                f"{config.evolution.num_parallel_proposals * config.evolution.mutations_per_parent}, "
-                f"max_workers = {config.evolution.max_workers}); a single "
-                "writer cannot lose a refresh race to itself"
-            ),
-        )
-    else:
-        result = warm_backend_credential(
-            backend, sandbox=config.sandbox, env=_operator_env(config)
-        )
-
-    if result.skipped:
-        # The reason is a property of the backend or the run's concurrency,
-        # not of this generation, so say it once per run instead of once per
-        # generation.
-        if announce_skip:
-            logger.info(
-                "No credential warm for %s: %s", display, result.skip_reason
-            )
-        return result
-
-    if result.warmed:
-        logger.debug(
-            "Credential warm for %s completed before generation %d: %s",
-            display,
-            gen,
-            result.detail,
-        )
-        return result
-
-    detail = f" Detail: {escape(result.detail)}" if result.detail else ""
-    if result.timed_out:
-        cause = "timed out"
-    elif result.stale:
-        cause = "exited 0 but the credential is not verifiably fresh"
-    elif result.returncode is not None:
-        cause = f"exit {result.returncode}"
-    else:
-        cause = "could not start"
-    message = (
-        f"Credential warm for {display} did not complete before generation "
-        f"{gen} ({cause}). Candidates in this generation will "
-        "each decide for themselves whether to refresh the shared login, and "
-        "if a refresh is due they can spend the same single-use refresh token "
-        "at once -- the losers of that race can fail without reporting an "
-        "error of their own. The run continues: the credential already stored "
-        f"may still be usable.{detail}"
-    )
-    logger.warning("%s", message)
-    print_warning(message)
-    return result
 
 
 def _run_proposal_worker(
@@ -2466,9 +2342,6 @@ def _run_evolution_impl(
         mutations_attempted = 0
         mutations_accepted = 0
         credential_failures = CredentialFailureLog()
-        # The credential warm's skip reason is a fact about the backend, not
-        # about any one generation; announce it once.
-        credential_warm_skip_announced = False
 
         gen = start_gen - 1
         while gen < config.evolution.max_generations:
@@ -2501,18 +2374,6 @@ def _run_evolution_impl(
             if budget_api.budget_exhausted(state, config):
                 print_warning("Budget exhausted -- stopping early.")
                 break
-
-            # ---- Credential warm (once per generation) -------------------
-            # Sits above the merge/mutate split so it covers every path that
-            # dispatches a candidate this generation.  It makes the shared
-            # login fresh at the start of the generation; a token that
-            # crosses its refresh threshold while candidates are in flight
-            # can still be raced.  Skipped when only one writer exists.
-            _warm = _warm_generation_credential(
-                config, gen=gen, announce_skip=not credential_warm_skip_announced
-            )
-            if _warm is not None and _warm.skipped:
-                credential_warm_skip_announced = True
 
             # =============================================================
             # GEPA parity (Fix 6/7): Merge OR mutate per iteration.
@@ -3806,7 +3667,7 @@ def _run_evolution_impl(
     _display = backend_display_name(config.agent.backend)
     if credential_failures.recovered_ids():
         # Not failures -- but the only visible sign that candidates are
-        # still racing to refresh the shared login despite the warm.
+        # racing to refresh the shared login at all.
         _recovered_ids = ", ".join(credential_failures.recovered_ids())
         print_warning(
             f"{len(credential_failures.recovered_ids())} invocation(s) "
@@ -3814,9 +3675,7 @@ def _run_evolution_impl(
             f"credential: {_recovered_ids}. Each was retried once from a "
             "fresh worktree and succeeded; both attempts' tokens are charged "
             "and the first attempt's output is kept beside the retry's "
-            "(`.attempt1` artifacts). The credential is being refreshed by "
-            "candidates in flight, which the per-generation warm does not "
-            "prevent."
+            "(`.attempt1` artifacts)."
         )
     if credential_failures:
         _failed_ids = ", ".join(credential_failures.candidate_ids())

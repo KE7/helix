@@ -18,12 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.claude/settings.json`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`),
   which later sessions load. Transcripts stay in the `helix-auth-<backend>`
   volume.
-- Sandboxed runs with more than one concurrent candidate warm the shared
-  `codex` credential once per generation under a single writer, verified by
-  reading `last_refresh` back from `auth.json`; a credential failure is now
-  its own error kind (`CredentialRefreshError`), a lost refresh race is
-  retried once from a fresh worktree, and both are named in the end-of-run
-  summary.
+- A credential failure is now its own error kind (`CredentialRefreshError`)
+  rather than being scored as a bad mutation, and an invocation that loses a
+  refresh race against another candidate is retried once from a fresh
+  worktree. Both attempts' usage is charged, and failures and recoveries are
+  named in the end-of-run summary.
+- Sandboxed `opencode` candidates each get their own session database:
+  `OPENCODE_DB` points into the per-candidate workspace copy instead of the
+  shared login volume.
 
 ### Changed
 - **BREAKING**: Removed the `gemini` mutation backend and replaced it with

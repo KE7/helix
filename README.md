@@ -658,19 +658,13 @@ still write the shared HOME's config files (`~/.claude/CLAUDE.md`,
 which later sessions load. Transcripts and session databases remain in the
 `helix-auth-<backend>` volume, so operators can read them after a run.
 
-When several candidates can write the shared login at once, HELIX refreshes
-the `codex` credential once per generation under a single writer before
-dispatching anything (`codex debug models`, verified by reading `last_refresh`
-back from `auth.json`), so the credential is fresh at the start of the
-generation. A token that crosses its refresh threshold during the generation
-can still be raced by candidates in flight; a lost race is retried once from
-a fresh worktree and reported in the end-of-run summary.
-
-The container-backed tests in `tests/integration/` run real backend images,
-so a bare `pytest` does not collect them; opt in with
-`pytest -m docker_integration tests/integration/` (set
-`HELIX_DOCKER_TESTS_STRICT=1` to fail rather than skip when Docker or an image
-is missing).
+Candidates share that login volume, so when a credential goes stale they can
+each decide a refresh is due at the same moment and compete to spend one
+single-use refresh grant. `codex` is measurably vulnerable to this (and
+`opencode` is too, with no free command that could serialise it); `claude` and
+`cursor` are not. An invocation that loses such a race is retried once from a
+fresh worktree against the credential the winner stored, both attempts' tokens
+are charged, and the recovery is named in the end-of-run summary.
 
 By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,
