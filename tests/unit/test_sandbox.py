@@ -65,12 +65,12 @@ def test_resolve_sandbox_image_defaults_from_backend():
         == "ghcr.io/ke7/helix-evo-runner-cursor:latest"
     )
     assert (
-        resolve_sandbox_image(cfg, "gemini")
-        == "ghcr.io/ke7/helix-evo-runner-gemini:latest"
-    )
-    assert (
         resolve_sandbox_image(cfg, "opencode")
         == "ghcr.io/ke7/helix-evo-runner-opencode:latest"
+    )
+    assert (
+        resolve_sandbox_image(cfg, "agy")
+        == "ghcr.io/ke7/helix-evo-runner-agy:latest"
     )
 
 
@@ -941,16 +941,51 @@ def test_sandbox_auth_codex_login_uses_device_auth_flow():
     assert args[-3:] == ["codex", "login", "--device-auth"]
 
 
-def test_sandbox_auth_gemini_login_skips_workspace_trust_prompt():
+def test_sandbox_auth_agy_login_uses_bare_interactive_launch():
+    # agy has no dedicated login subcommand; the login flow is the same bare
+    # interactive launch as opencode's below.
     args = sandbox_auth_docker_args(
-        "gemini",
-        image="helix-gemini:latest",
+        "agy",
+        image="helix-agy:latest",
         action="login",
         interactive=True,
     )
 
-    assert "helix-auth-gemini:/home/node:rw" in args
-    assert args[-2:] == ["gemini", "--skip-trust"]
+    assert "helix-auth-agy:/home/node:rw" in args
+    assert args[-1:] == ["agy"]
+
+
+def test_sandbox_auth_agy_status_uses_credential_file_probe():
+    # ``agy models`` exits 0 even when logged out, so status is a file probe
+    # against the traced credential path, matching claude's pattern above.
+    args = sandbox_auth_docker_args(
+        "agy",
+        image="helix-agy:latest",
+        action="status",
+    )
+
+    assert "helix-auth-agy:/home/node:rw" in args
+    assert args[-3:-1] == ["sh", "-lc"]
+    script = args[-1]
+    assert (
+        'test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"'
+        in script
+    )
+
+
+def test_sandbox_auth_agy_logout_only_removes_its_own_state_directory():
+    # ~/.gemini also holds unrelated Google CLI state; logout must not
+    # blanket-remove it.
+    args = sandbox_auth_docker_args(
+        "agy",
+        image="helix-agy:latest",
+        action="logout",
+    )
+
+    assert args[-3:-1] == ["sh", "-lc"]
+    script = args[-1]
+    assert '"${HOME:-/home/node}/.gemini/antigravity-cli"' in script
+    assert script.count(".gemini") == 1
 
 
 def test_sandbox_auth_opencode_login_uses_full_setup_tui():

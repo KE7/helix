@@ -295,13 +295,21 @@ class TestAgentEffortValidation:
             )
         assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
 
-    def test_effort_warns_on_ignoring_backend_gemini(self, recwarn):
+    def test_effort_accepts_valid_value_on_agy(self, recwarn):
+        for value in ("low", "medium", "high"):
+            HelixConfig(
+                **self._base_kwargs(),
+                agent=AgentConfig(backend="agy", effort=value),
+            )
+        assert [w for w in recwarn.list if issubclass(w.category, UserWarning)] == []
+
+    def test_effort_warns_on_unknown_value_for_agy(self, recwarn):
         HelixConfig(
             **self._base_kwargs(),
-            agent=AgentConfig(backend="gemini", effort="high"),
+            agent=AgentConfig(backend="agy", effort="extreme"),
         )
         warnings = [str(w.message) for w in recwarn.list if w.category is UserWarning]
-        assert any("does not propagate" in w for w in warnings), warnings
+        assert any("not a recognized value" in w and "extreme" in w for w in warnings), warnings
 
     def test_effort_warns_on_ignoring_backend_cursor(self, recwarn):
         HelixConfig(
@@ -350,7 +358,7 @@ class TestAgentEffortValidation:
         with pytest.warns(UserWarning, match="does not propagate"):
             HelixConfig(
                 **self._base_kwargs(),
-                agent=AgentConfig(backend="gemini", effort="high"),
+                agent=AgentConfig(backend="cursor", effort="high"),
             )
 
     def test_every_backend_has_effort_metadata(self):

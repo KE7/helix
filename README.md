@@ -12,7 +12,7 @@
 
 **Evolutionary optimization for full codebases using agentic coding tools as the mutation engine and git worktrees as the population pool.**
 
-HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage. Supported mutation backends include Claude Code, Codex CLI, Cursor Agent, Gemini CLI, and OpenCode.
+HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage. Supported mutation backends include Antigravity CLI, Claude Code, Codex CLI, Cursor Agent, and OpenCode.
 
 <br>
 
@@ -109,7 +109,7 @@ flowchart TD
     subgraph DOCKER["🐳  Docker Sandbox  —  isolated execution environment"]
         direction LR
         subgraph ANET["  Agent Network  (normal egress)  "]
-            AGENT["Mutation / Merge Container\n──────────────────────────\nclaude · codex · cursor\ngemini · opencode\nAuth: helix-auth-BACKEND"]:::agent
+            AGENT["Mutation / Merge Container\n──────────────────────────\nagy · claude · codex\ncursor · opencode\nAuth: helix-auth-BACKEND"]:::agent
         end
         subgraph ENET["  Private Evaluator Network  (helix-eval-*)  "]
             ERUN["Eval Runners\n(short-lived,\ncopied workspace)"]:::eval
@@ -201,7 +201,7 @@ Install and start Docker, then log in to your selected backend inside its
 persistent sandbox auth volume:
 
 ```bash
-helix sandbox login claude      # or codex, cursor, gemini, opencode
+helix sandbox login claude      # or agy, codex, cursor, opencode
 helix sandbox status claude
 ```
 
@@ -407,7 +407,7 @@ frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType pari
                                  # raise MissingObjectiveScoresError at selection.
 
 [agent]
-backend = "claude"               # "claude" | "codex" | "cursor" | "gemini" | "opencode"
+backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "opencode"
 # model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
@@ -629,14 +629,13 @@ For Claude, HELIX uses `claude setup-token` for sandbox login because that is
 the flow that works cleanly in browserless Docker/SSH-style environments; it
 prints a URL and then accepts the code from the browser in the terminal.
 Codex similarly uses `codex login --device-auth` so the callback does not depend
-on a localhost server inside the container. Gemini starts its normal
-interactive CLI with `--skip-trust` so its authentication picker is not blocked
-by the temporary sandbox workspace trust prompt. OpenCode starts the normal TUI
-so you can choose the provider/model and complete provider login in one setup
-session.
+on a localhost server inside the container. Antigravity CLI (`agy`) has no
+dedicated login subcommand, so HELIX starts its normal interactive CLI, same
+as OpenCode, which starts the normal TUI so you can choose the provider/model
+and complete provider login in one setup session.
 
-The volume names are `helix-auth-claude`, `helix-auth-codex`,
-`helix-auth-cursor`, `helix-auth-gemini`, and `helix-auth-opencode`.
+The volume names are `helix-auth-agy`, `helix-auth-claude`, `helix-auth-codex`,
+`helix-auth-cursor`, and `helix-auth-opencode`.
 This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
 browser-login tokens may live in Keychain; on Linux they may live in
 Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
@@ -647,10 +646,10 @@ usual. Docker Desktop supports `host.docker.internal`; Linux users can set
 `add_host_gateway = true`.
 
 By default HELIX chooses a published backend-specific mutator image from
-`agent.backend`: `ghcr.io/ke7/helix-evo-runner-claude`,
+`agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,
+`ghcr.io/ke7/helix-evo-runner-claude`,
 `ghcr.io/ke7/helix-evo-runner-codex`,
-`ghcr.io/ke7/helix-evo-runner-cursor`,
-`ghcr.io/ke7/helix-evo-runner-gemini`, or
+`ghcr.io/ke7/helix-evo-runner-cursor`, or
 `ghcr.io/ke7/helix-evo-runner-opencode`. To build locally instead, build the
 shared base first with
 `docker build -t helix-runner-base:latest -f docker/base.Dockerfile .`, then
@@ -800,7 +799,7 @@ stderr as fallback debug context.
 --evaluator TEXT     Override the evaluator command
 --generations INT   Override max_generations
 --no-merge          Disable merge operations
---backend BACKEND   Override the mutation backend [claude|codex|cursor|gemini|opencode]
+--backend BACKEND   Override the mutation backend [agy|claude|codex|cursor|opencode]
 --model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
@@ -887,10 +886,10 @@ BSD 3-Clause License. See [LICENSE](LICENSE) for details.
 HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Agrawal, Lee, Ma, Elmaaroufi, Tan, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis, and Zaharia. Their work on applying reflective Pareto evolution to any text made HELIX possible — we extended their algorithm to full codebases and agentic mutation but the foundation is theirs.
 
 - **[GEPA optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)** — The algorithmic foundation: minibatch-gated Pareto evolution with reflective LLM mutation
+- **[Antigravity CLI](https://antigravity.google/cli)** — Supported HELIX mutation backend
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Supported HELIX mutation backend
 - **[Codex CLI](https://developers.openai.com/codex/cli)** — Supported HELIX mutation backend
 - **[Cursor CLI](https://cursor.com/cli/)** — Supported HELIX mutation backend
-- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Supported HELIX mutation backend
 - **[OpenCode](https://opencode.ai/docs/cli/)** — Supported HELIX mutation backend
 - **[OMAR](http://omar.tech/)** — The multi-agent orchestration system used to build HELIX
 

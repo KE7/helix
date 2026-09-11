@@ -1,0 +1,42 @@
+name: Runner Images
+
+# Build every runner image from this checkout's own Dockerfiles and probe
+# each CLI as `node`, the unprivileged user HELIX runs agent containers as.
+# publish-runners.yml pushes `latest` before it verifies, so this is the only
+# gate that keeps a broken Dockerfile off `latest` -- and the only one that
+# can cover a backend whose image does not exist on GHCR yet.
+on:
+  pull_request:
+    paths:
+      - "docker/**"
+      - "src/helix/backends.py"
+      - ".github/workflows/runner-images.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-probe:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: agy,      command: "agy --version" }
+          - { name: claude,   command: "claude --version" }
+          - { name: codex,    command: "codex --version" }
+          - { name: cursor,   command: "cursor agent --version" }
+          - { name: opencode, command: "opencode --version" }
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build base image
+        run: docker build -f docker/base.Dockerfile -t helix-runner-base:ci .
+      - name: Build ${{ matrix.name }} image
+        run: >-
+          docker build -f docker/${{ matrix.name }}.Dockerfile
+          --build-arg BASE_IMAGE=helix-runner-base:ci
+          -t helix-runner-${{ matrix.name }}:ci .
+      - name: Probe CLI as the unprivileged agent user
+        run: >-
+          docker run --rm --user node --network none
+          helix-runner-${{ matrix.name }}:ci
+          sh -lc '${{ matrix.command }}'

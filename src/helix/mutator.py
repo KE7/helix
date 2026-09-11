@@ -1,4 +1,4 @@
-"""HELIX mutator: applies code mutations via agentic coding backends (claude, codex, cursor, gemini, opencode)."""
+"""HELIX mutator: applies code mutations via agentic coding backends (agy, claude, codex, cursor, opencode)."""
 
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def _turn_budget_section(max_turns: int | None) -> str:
       limit, and the resulting ``subtype="error_max_turns"`` response is
       detected at :func:`invoke_claude_code` and treated as partial
       success.
-    * ``codex`` / ``cursor`` / ``gemini`` / ``opencode`` — soft hint only.
+    * ``agy`` / ``codex`` / ``cursor`` / ``opencode`` — soft hint only.
       None of these CLIs expose an equivalent flag (verified against
       ``--help`` for the installed binaries), so the in-prompt request is
       the only signal the agent receives.  Whether the agent self-honors
@@ -732,12 +732,50 @@ def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
             env[key] = os.environ[key]
 
 
+# agy's ``--print-timeout`` is a Go ``time.Duration`` flag (default ``5m0s``)
+# that aborts a headless run when it expires; per agy's changelog a mid-turn
+# expiry returns *partial* output with only a stderr warning, so a cut-off
+# mutation could pass for a finished one.  There is no disable value: ``0``
+# and negative durations fail immediately with ``timeout waiting for
+# response``, and no env var or settings key overrides the flag.  So we pass
+# the largest duration Go can represent (``math.MaxInt64`` ns, ~292 years) --
+# ``2562048h`` is rejected as out of range, so this is the ceiling of the
+# flag's type.  Verified against agy 1.1.27.  This keeps agy on the same
+# no-timeout policy every other backend already gets (their subprocesses run
+# with no ``timeout`` at all; see ``test_no_timeout_in_subprocess``).
+_AGY_PRINT_TIMEOUT = "2562047h47m16.854775807s"
+
+
 def _build_backend_args(
     worktree_path: str,
     config: AgentConfig,
     prompt_artifact_name: str,
 ) -> list[str]:
     backend = config.backend
+    if backend == "agy":
+        args = [
+            "agy",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            _AGY_PRINT_TIMEOUT,
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["--effort", config.effort])
+        # Unlike ``claude``, agy's ``-p``/``--print`` (alias ``--prompt``) is
+        # not a boolean flag: it takes the prompt as its VALUE, and a trailing
+        # positional is ignored.  ``agy --print --output-format json <prompt>``
+        # exits 2 with ``--print took "--output-format" as its prompt``
+        # (verified against agy 1.1.27).  So every other flag goes first and
+        # ``--print <prompt>`` is the final argv pair; Go's flag parser accepts
+        # the space-separated form, and the instruction text never starts
+        # with ``-``.  ``test_agy_cli_args_include_required_flags`` pins this.
+        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name)])
+        return args
+
     if backend == "claude":
         args = [
             "claude",
@@ -793,18 +831,6 @@ def _build_backend_args(
             "--trust",
             "--workspace",
             worktree_path,
-        ]
-        if config.model:
-            args.extend(["--model", config.model])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
-        return args
-
-    if backend == "gemini":
-        args = [
-            "gemini",
-            "--yolo",
-            "--output-format",
-            "stream-json",
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -899,12 +925,6 @@ def _parse_jsonl_output(
             parsed = json.loads(line)
         except json.JSONDecodeError:
             if strict:
-                # Gemini CLI may prepend advisory text such as MCP-health
-                # warnings before the JSON stream even when
-                # `--output-format stream-json` is requested.
-                if backend == "gemini":
-                    unparsable.append(line)
-                    continue
                 raise MutationError(
                     f"Failed to parse {backend_display_name(backend)} JSONL output line",
                     operation=f"{backend_display_name(backend)} invocation",
@@ -936,7 +956,7 @@ def _parse_backend_output(
     cmd_str: str,
     worktree_path: str,
 ) -> dict[str, Any]:
-    if backend == "claude":
+    if backend in {"agy", "claude"}:
         return _parse_json_object_output(
             result.stdout,
             backend=backend,
@@ -945,7 +965,7 @@ def _parse_backend_output(
             stderr=result.stderr,
             exit_code=result.returncode,
         )
-    if backend in {"codex", "cursor", "gemini", "opencode"}:
+    if backend in {"codex", "cursor", "opencode"}:
         return _parse_jsonl_output(
             result.stdout,
             backend=backend,
@@ -1131,6 +1151,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "cacheReadInputTokens",
                     "cacheReadTokens",
                     "cacheRead",
+                    # agy: ``usage.cache_read_tokens``
+                    "cache_read_tokens",
                 ),
             ),
             (
@@ -1141,6 +1163,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "reasoning_output_tokens",
                     "thoughts",
                     "reasoning",
+                    # agy: ``usage.thinking_tokens``
+                    "thinking_tokens",
                 ),
             ),
             (
@@ -1164,6 +1188,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                 "chatId",
                 "thread_id",
                 "threadId",
+                # agy: top-level ``conversation_id``
+                "conversation_id",
             ):
                 value = node.get(alias)
                 if isinstance(value, str) and value:
@@ -1349,36 +1375,6 @@ def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     return count, names
 
 
-def _count_gemini_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
-    """Count tool invocations from a Gemini stream-json stdout artifact.
-
-    Gemini emits ``tool_use`` events (correctly counted by
-    ``_normalise_usage_stats``) but stores the tool name in ``tool_name``
-    rather than ``name``, so ``tool_names`` remains empty after the initial
-    parse.  This function provides both the count and the names.
-    """
-    count = 0
-    names: list[str] = []
-    try:
-        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                event = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(event, dict) or event.get("type") != "tool_use":
-                continue
-            count += 1
-            name = event.get("tool_name")
-            if isinstance(name, str) and name:
-                names.append(name)
-    except OSError:
-        return 0, []
-    return count, names
-
-
 def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     """Count tool invocations from an OpenCode ``--format json`` stdout artifact.
 
@@ -1411,11 +1407,19 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
 
 
 # Dispatcher: maps backend name → per-backend counter function.
+#
+# ``agy`` has no entry because there is nothing to count: its
+# ``--output-format json`` output (observed against agy 1.1.27) is a single
+# envelope -- ``conversation_id``, ``status``, ``response``, ``error`` (on
+# failure), ``duration_seconds``, ``num_turns`` and a ``usage`` block of
+# ``input_tokens`` / ``output_tokens`` / ``thinking_tokens`` /
+# ``cache_read_tokens`` / ``total_tokens`` -- with no per-tool event list.
+# ``_normalise_usage_stats`` reads the envelope's token fields directly; tool
+# events for agy stay at 0 like any backend without a dedicated counter.
 _TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = {
     "claude": _count_claude_transcript_tool_events,
     "codex": _count_codex_stdout_tool_events,
     "cursor": _count_cursor_stdout_tool_events,
-    "gemini": _count_gemini_stdout_tool_events,
     "opencode": _count_opencode_stdout_tool_events,
 }
 
@@ -1670,8 +1674,6 @@ def invoke_claude_code(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
-    if backend == "gemini":
-        backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
     if backend == "opencode" and (sandbox is None or not sandbox.enabled):
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
