@@ -15,6 +15,7 @@ a written reason -- skipping is a claim about correctness, not an omission.
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -25,13 +26,21 @@ from helix.backends import (
     CREDENTIAL_WARM_SKIP_REASONS,
     backend_credential_warm_skip_reason,
 )
-from helix.config import AgentConfig, EvaluatorConfig, HelixConfig, SandboxConfig
+from helix.config import (
+    AgentConfig,
+    EvaluatorConfig,
+    EvolutionConfig,
+    HelixConfig,
+    SandboxConfig,
+)
 from helix.evolution import _warm_generation_credential
 from helix.sandbox import (
+    CODEX_TOKEN_REFRESH_INTERVAL,
     CREDENTIAL_WARM_TIMEOUT_SECONDS,
     CredentialWarmResult,
     credential_warm_timeout,
     sandbox_auth_docker_args,
+    verify_codex_credential_fresh,
     warm_backend_credential,
 )
 
@@ -40,10 +49,73 @@ WARMED_BACKENDS = ("codex",)
 SKIPPED_BACKENDS = ("agy", "claude", "cursor", "opencode")
 
 
-def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:
+def _completed(
+    returncode: int, stderr: str = "", stdout: str = ""
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(
-        args=["docker"], returncode=returncode, stdout="", stderr=stderr
+        args=["docker"], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+NOW = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _stamp(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ") + "\n"
+
+
+class _FakeAuthCommands:
+    """Stand-in for ``run_sandbox_auth_command`` that answers the
+    ``last_refresh`` probes from a script and records the warm call.
+
+    ``timeline`` is the sequence of values the probe returns (before, after);
+    ``warm`` is the warm command's result.
+    """
+
+    def __init__(
+        self,
+        timeline: list[str | None],
+        warm: subprocess.CompletedProcess[str] | BaseException | None = None,
+    ) -> None:
+        self.timeline = list(timeline)
+        self.warm = warm if warm is not None else _completed(0)
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, backend: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        record = dict(kwargs)
+        record["backend"] = backend
+        self.calls.append(record)
+        if kwargs.get("command") is not None:
+            value = self.timeline.pop(0)
+            return _completed(0, stdout="" if value is None else value)
+        if isinstance(self.warm, BaseException):
+            raise self.warm
+        return self.warm
+
+    @property
+    def warm_calls(self) -> list[dict[str, Any]]:
+        return [c for c in self.calls if c.get("command") is None]
+
+    @property
+    def probe_calls(self) -> list[dict[str, Any]]:
+        return [c for c in self.calls if c.get("command") is not None]
+
+
+def _fresh_timeline() -> list[str | None]:
+    """A credential refreshed an hour ago: nothing to do, verifiably fresh."""
+    stamp = _stamp(NOW - timedelta(hours=1))
+    return [stamp, stamp]
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeAuthCommands) -> None:
+    monkeypatch.setattr("helix.sandbox.run_sandbox_auth_command", fake)
+    monkeypatch.setattr("helix.sandbox.datetime", _FrozenDatetime)
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz: Any = None) -> "datetime":  # type: ignore[override]
+        return NOW if tz is not None else NOW.replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +194,8 @@ class TestWarmUsesSingleWriterPath:
     def test_warm_forwards_sandbox_network_settings(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seen: dict[str, Any] = {}
-
-        def _fake(backend: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            seen.update(kwargs)
-            seen["backend"] = backend
-            return _completed(0)
-
-        monkeypatch.setattr("helix.sandbox.run_sandbox_auth_command", _fake)
+        fake = _FakeAuthCommands(_fresh_timeline())
+        _install(monkeypatch, fake)
         sandbox = SandboxConfig(
             enabled=True,
             network="none",
@@ -140,6 +206,7 @@ class TestWarmUsesSingleWriterPath:
         result = warm_backend_credential("codex", sandbox=sandbox)
 
         assert result.warmed is True
+        [seen] = fake.warm_calls
         assert seen["backend"] == "codex"
         assert seen["action"] == "warm"
         assert seen["network"] == "none"
@@ -148,6 +215,56 @@ class TestWarmUsesSingleWriterPath:
         # A configured image must win, or the warm would refresh the credential
         # with a different CLI build than the candidates use.
         assert seen["image"] == "custom:tag"
+
+    def test_operator_env_reaches_the_warm_container(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proxy / CA settings the candidates get must reach the warm too, or
+        it cannot reach the token endpoint the candidates can."""
+        fake = _FakeAuthCommands(_fresh_timeline())
+        _install(monkeypatch, fake)
+        env = {"HTTPS_PROXY": "http://proxy:3128", "SSL_CERT_FILE": "/ca.pem"}
+        warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True), env=env
+        )
+        [seen] = fake.warm_calls
+        assert seen["env"] == env
+        args = sandbox_auth_docker_args(
+            "codex", image="img:latest", action="warm", env=env
+        )
+        joined = " ".join(args)
+        assert "-e HTTPS_PROXY=http://proxy:3128" in joined
+        assert "-e SSL_CERT_FILE=/ca.pem" in joined
+        # HOME and PATH stay pinned to the container's own values.
+        assert "-e HOME=/home/node" in joined
+        assert sandbox_auth_docker_args(
+            "codex", image="img", action="warm", env={"HOME": "/x", "PATH": "/y"}
+        ).count("-e") == 2
+
+    def test_no_auth_command_uses_a_login_shell(self) -> None:
+        """``sh -l`` sources ``$HOME/.profile`` from the shared login volume
+        that every candidate can write; PATH is pinned with ``-e`` instead."""
+        for backend, actions in BACKEND_AUTH_COMMANDS.items():
+            for action, argv in actions.items():
+                if argv[0] != "sh":
+                    continue
+                assert argv[1] == "-c", (backend, action, argv)
+                assert not any(
+                    flag.startswith("-") and "l" in flag for flag in argv[1:-1]
+                ), (backend, action, argv)
+
+    def test_last_refresh_probe_runs_without_network_and_reads_one_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeAuthCommands(_fresh_timeline())
+        _install(monkeypatch, fake)
+        warm_backend_credential("codex", sandbox=SandboxConfig(enabled=True))
+        before, after = fake.probe_calls
+        for probe in (before, after):
+            assert probe["network"] == "none"
+            script = probe["command"][-1]
+            assert "last_refresh" in script
+            assert "access_token" not in script and "cat " not in script
 
 
 # ---------------------------------------------------------------------------
@@ -173,10 +290,8 @@ class TestWarmFailureIsNotFatal:
     def test_non_zero_exit_is_reported_not_raised(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(
-            "helix.sandbox.run_sandbox_auth_command",
-            lambda *a, **k: _completed(3, "warm blew up"),
-        )
+        fake = _FakeAuthCommands(_fresh_timeline(), warm=_completed(3, "warm blew up"))
+        _install(monkeypatch, fake)
         result = warm_backend_credential(
             "codex", sandbox=SandboxConfig(enabled=True)
         )
@@ -187,10 +302,8 @@ class TestWarmFailureIsNotFatal:
     def test_docker_exception_is_reported_not_raised(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _raise(*_a: Any, **_k: Any) -> None:
-            raise OSError("no docker here")
-
-        monkeypatch.setattr("helix.sandbox.run_sandbox_auth_command", _raise)
+        fake = _FakeAuthCommands([None, None], warm=OSError("no docker here"))
+        _install(monkeypatch, fake)
         result = warm_backend_credential(
             "codex", sandbox=SandboxConfig(enabled=True)
         )
@@ -198,14 +311,104 @@ class TestWarmFailureIsNotFatal:
         assert "no docker here" in result.detail
 
     def test_detail_is_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "helix.sandbox.run_sandbox_auth_command",
-            lambda *a, **k: _completed(1, "x" * 5000),
-        )
+        fake = _FakeAuthCommands(_fresh_timeline(), warm=_completed(1, "x" * 5000))
+        _install(monkeypatch, fake)
         result = warm_backend_credential(
             "codex", sandbox=SandboxConfig(enabled=True)
         )
         assert 0 < len(result.detail) <= 400
+
+
+# ---------------------------------------------------------------------------
+# ``warmed`` means verified fresh, not "exited 0"
+# ---------------------------------------------------------------------------
+
+
+class TestWarmVerifiesFreshness:
+    """``codex debug models`` swallows a rejected refresh and exits 0.
+
+    The exit code therefore proves nothing.  ``last_refresh`` is read back
+    from ``auth.json`` (one field, no network) and the warm is reported as
+    such only when the credential is verifiably inside codex's refresh
+    interval afterwards -- so no candidate will attempt a refresh.
+    """
+
+    def test_advanced_last_refresh_is_warmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stale = _stamp(NOW - CODEX_TOKEN_REFRESH_INTERVAL - timedelta(days=1))
+        fake = _FakeAuthCommands([stale, _stamp(NOW - timedelta(seconds=2))])
+        _install(monkeypatch, fake)
+        result = warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True)
+        )
+        assert result.warmed is True
+        assert result.stale is False
+        assert "refresh performed" in result.detail
+
+    def test_stale_and_unchanged_is_not_warmed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A rejected refresh: exit 0, ``last_refresh`` still past the interval."""
+        stale = _stamp(NOW - CODEX_TOKEN_REFRESH_INTERVAL - timedelta(days=1))
+        fake = _FakeAuthCommands([stale, stale])
+        _install(monkeypatch, fake)
+        result = warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True)
+        )
+        assert result.warmed is False
+        assert result.stale is True
+        assert result.failed is True
+        assert result.returncode == 0
+        assert "rejected" in result.detail
+        assert "models_cache.json" in result.detail
+
+        # The loop turns it into a WARNING that names the cause and the race.
+        monkeypatch.setattr(
+            "helix.evolution.warm_backend_credential", lambda backend, **_k: result
+        )
+        _warm_generation_credential(
+            _config("codex", sandboxed=True), gen=2, announce_skip=False
+        )
+        out = " ".join(capsys.readouterr().out.lower().split())
+        assert "not verifiably fresh" in out
+        assert "rejected" in out
+        assert "same single-use refresh token" in out
+
+    def test_unchanged_but_inside_the_interval_is_fresh(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No refresh was due (or a fresh catalog cache short-circuited one):
+        either way no candidate will refresh, so there is nothing to race."""
+        fake = _FakeAuthCommands(_fresh_timeline())
+        _install(monkeypatch, fake)
+        result = warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True)
+        )
+        assert result.warmed is True
+        assert "inside codex's 8-day refresh interval" in result.detail
+
+    def test_unreadable_last_refresh_is_unverified_not_warmed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeAuthCommands([None, None])
+        _install(monkeypatch, fake)
+        result = warm_backend_credential(
+            "codex", sandbox=SandboxConfig(enabled=True)
+        )
+        assert result.warmed is False
+        assert result.stale is True
+        assert "unverified" in result.detail
+
+    def test_verdict_function(self) -> None:
+        old = NOW - CODEX_TOKEN_REFRESH_INTERVAL - timedelta(hours=1)
+        recent = NOW - timedelta(minutes=5)
+        assert verify_codex_credential_fresh(old, recent, now=NOW)[0] is True
+        assert verify_codex_credential_fresh(old, old, now=NOW)[0] is False
+        assert verify_codex_credential_fresh(recent, recent, now=NOW)[0] is True
+        assert verify_codex_credential_fresh(None, recent, now=NOW)[0] is True
+        assert verify_codex_credential_fresh(None, None, now=NOW)[0] is False
+        assert verify_codex_credential_fresh(old, None, now=NOW)[0] is False
 
 
 # ---------------------------------------------------------------------------
@@ -241,11 +444,14 @@ class TestWarmIsBounded:
         seen: dict[str, Any] = {}
 
         def _fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if "last_refresh" in args[-1]:
+                return _completed(0, stdout=_stamp(NOW - timedelta(hours=1)))
             seen["args"] = args
             seen.update(kwargs)
             return _completed(0)
 
         monkeypatch.setattr("helix.sandbox.subprocess.run", _fake_run)
+        monkeypatch.setattr("helix.sandbox.datetime", _FrozenDatetime)
         result = warm_backend_credential(
             "codex", sandbox=SandboxConfig(enabled=True, timeout_seconds=45)
         )
@@ -281,9 +487,10 @@ class TestWarmIsBounded:
         assert "7s" in result.detail
         # Killing the docker client does not stop the container; the named
         # container must be force-removed so it stops touching the volume.
-        assert len(removed) == 1
-        assert removed[0][:3] == ["docker", "rm", "-f"]
-        assert removed[0][3].startswith("helix-warm-codex-")
+        # (The probe before the warm hung too under this fake and was removed
+        # the same way.)
+        assert all(r[:3] == ["docker", "rm", "-f"] for r in removed)
+        assert any(r[3].startswith("helix-warm-codex-") for r in removed)
 
     def test_timed_out_warm_is_a_warning_in_the_loop(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 import shlex
 import shutil
 import subprocess
@@ -1146,13 +1147,25 @@ def sandbox_auth_docker_args(
     extra_hosts: dict[str, str] | None = None,
     interactive: bool = False,
     container_name: str | None = None,
+    env: Mapping[str, str] | None = None,
+    command: Sequence[str] | None = None,
 ) -> list[str]:
-    try:
-        command = BACKEND_AUTH_COMMANDS[agent_backend][action]
-    except KeyError as exc:
-        raise ValueError(
-            f"No sandbox auth {action!r} command for backend: {agent_backend}"
-        ) from exc
+    """Build the ``docker run`` argv for one auth-related command.
+
+    *env* is forwarded with ``-e`` (``HOME`` and ``PATH`` stay pinned); it is
+    how the operator's ``passthrough_env`` / ``[env]`` proxy and CA settings
+    reach a container that has to talk to the token endpoint.  *command*
+    replaces the registered *action* argv when given -- used for read-only
+    probes against the login volume that are not auth commands in their own
+    right.
+    """
+    if command is None:
+        try:
+            command = BACKEND_AUTH_COMMANDS[agent_backend][action]
+        except KeyError as exc:
+            raise ValueError(
+                f"No sandbox auth {action!r} command for backend: {agent_backend}"
+            ) from exc
 
     args = [
         "docker",
@@ -1176,6 +1189,10 @@ def sandbox_auth_docker_args(
         "-e",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     ]
+    for key, value in (env or {}).items():
+        if key in {"HOME", "PATH"}:
+            continue
+        args.extend(["-e", f"{key}={value}"])
     if container_name:
         args.extend(["--name", container_name])
     if interactive:
@@ -1196,6 +1213,8 @@ def run_sandbox_auth_command(
     interactive: bool = False,
     timeout: float | None = None,
     container_name: str | None = None,
+    env: Mapping[str, str] | None = None,
+    command: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one auth-related command against the shared login volume.
 
@@ -1218,6 +1237,8 @@ def run_sandbox_auth_command(
         extra_hosts=extra_hosts,
         interactive=interactive,
         container_name=container_name,
+        env=env,
+        command=command,
     )
     if interactive:
         return subprocess.run(args, text=True)
@@ -1235,9 +1256,17 @@ def run_sandbox_auth_command(
 class CredentialWarmResult:
     """Outcome of one per-generation credential warm.
 
-    ``warmed`` is True only when the warm container ran and exited cleanly.
+    ``warmed`` is True only when the warm container exited cleanly **and** the
+    stored credential was verified fresh afterwards -- for codex, that its
+    ``last_refresh`` either advanced during the warm or already sits inside
+    the CLI's refresh interval, so no candidate will attempt a refresh.  The
+    exit code alone cannot say that: ``codex debug models`` swallows a
+    rejected refresh and exits 0.
+
     ``skip_reason`` is set when the backend is deliberately not warmed;
-    ``detail`` carries the diagnosis when a warm was attempted and failed.
+    ``detail`` carries the diagnosis when a warm was attempted, whether it
+    succeeded or not; ``stale`` marks a clean exit whose credential still
+    failed verification.
     """
 
     backend: str
@@ -1246,6 +1275,7 @@ class CredentialWarmResult:
     returncode: int | None = None
     detail: str = ""
     timed_out: bool = False
+    stale: bool = False
 
     @property
     def skipped(self) -> bool:
@@ -1269,6 +1299,31 @@ _WARM_DETAIL_CHARS = 400
 #: can only tighten it.
 CREDENTIAL_WARM_TIMEOUT_SECONDS = 300
 
+#: Bound on one read of ``last_refresh`` from the login volume: a ``sed`` over
+#: one file in a container with no network.
+_CREDENTIAL_PROBE_TIMEOUT_SECONDS = 60
+
+#: How old a codex credential may be before the CLI refreshes it proactively.
+#: ``TOKEN_REFRESH_INTERVAL: i64 = 8`` (days) in codex-rs
+#: ``login/src/auth/manager.rs``: ``should_refresh_proactively`` returns true
+#: when ``last_refresh < now - 8 days``.  Newer builds also refresh when the
+#: access token's JWT ``exp`` is within 5 minutes; that clock is not read
+#: here, so a credential inside the 8-day interval whose access token is about
+#: to expire is reported fresh although a refresh is imminent -- the
+#: interval, not the JWT, is what the shipped measurement used.
+CODEX_TOKEN_REFRESH_INTERVAL = timedelta(days=8)
+
+#: Extracts the ``last_refresh`` value -- and nothing else -- from codex's
+#: ``auth.json``.  The tokens beside it never leave the container.  Prints
+#: nothing when the file is absent.
+_SED_LAST_REFRESH = r's/.*"last_refresh"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+_CODEX_LAST_REFRESH_PROBE: tuple[str, ...] = (
+    "sh",
+    "-c",
+    'f="$HOME/.codex/auth.json"; [ -f "$f" ] || exit 0; '
+    "sed -n '" + _SED_LAST_REFRESH + "' \"$f\"",
+)
+
 
 def credential_warm_timeout(sandbox: SandboxConfig) -> float:
     """Return the timeout for one warm: the fixed cap, tightened by the sandbox's."""
@@ -1277,8 +1332,118 @@ def credential_warm_timeout(sandbox: SandboxConfig) -> float:
     return float(CREDENTIAL_WARM_TIMEOUT_SECONDS)
 
 
+def _parse_last_refresh(text: str) -> datetime | None:
+    value = text.strip().splitlines()[-1].strip() if text.strip() else ""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _read_codex_last_refresh(
+    *, image: str, sandbox: SandboxConfig, timeout: float
+) -> datetime | None:
+    """Read ``last_refresh`` from the codex login volume, or ``None``.
+
+    Runs under ``--network none`` through the same single-writer auth
+    container as the warm; reads one field and never the tokens.  ``None``
+    means the value could not be read (no file, no field, container failure)
+    and is reported as "unverified" by the caller, never as fresh.
+    """
+    container_name = f"helix-probe-codex-{uuid.uuid4().hex[:12]}"
+    try:
+        result = run_sandbox_auth_command(
+            "codex",
+            action="status",
+            image=image,
+            network="none",
+            add_host_gateway=sandbox.add_host_gateway,
+            extra_hosts=sandbox.extra_hosts,
+            timeout=min(timeout, _CREDENTIAL_PROBE_TIMEOUT_SECONDS),
+            container_name=container_name,
+            command=_CODEX_LAST_REFRESH_PROBE,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        logger.debug("could not read codex last_refresh: %s", exc)
+        return None
+    if result.returncode != 0:
+        logger.debug(
+            "codex last_refresh probe exited %d: %s",
+            result.returncode,
+            (result.stderr or "")[-_WARM_DETAIL_CHARS:],
+        )
+        return None
+    return _parse_last_refresh(result.stdout or "")
+
+
+def _describe_age(age: timedelta) -> str:
+    total = int(age.total_seconds())
+    if total < 0:
+        return "in the future"
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def verify_codex_credential_fresh(
+    before: datetime | None, after: datetime | None, *, now: datetime
+) -> tuple[bool, str]:
+    """Decide whether a codex warm left the credential verifiably fresh.
+
+    Returns ``(fresh, detail)``.  Fresh means no candidate in the coming
+    generation will attempt a refresh: either the warm performed one
+    (``last_refresh`` advanced) or none was due (``last_refresh`` is inside
+    :data:`CODEX_TOKEN_REFRESH_INTERVAL`).  A ``last_refresh`` that is past
+    the interval and did not move means the exchange was rejected -- ``codex
+    debug models`` exits 0 either way -- or that a ``models_cache.json``
+    younger than its 5-minute TTL short-circuited the refresh path; both
+    leave every candidate to attempt the refresh itself.
+    """
+    if after is None:
+        return (
+            False,
+            "the warm exited 0 but last_refresh could not be read back from "
+            "the login volume, so the credential is unverified",
+        )
+    age = now - after
+    if before is not None and after > before:
+        return (
+            True,
+            "refresh performed: last_refresh advanced to "
+            f"{after.isoformat(timespec='seconds')}",
+        )
+    if age < CODEX_TOKEN_REFRESH_INTERVAL:
+        return (
+            True,
+            f"credential fresh: last_refresh is {_describe_age(age)} old, inside "
+            f"codex's {CODEX_TOKEN_REFRESH_INTERVAL.days}-day refresh interval, "
+            "so no candidate will refresh it",
+        )
+    return (
+        False,
+        f"last_refresh is {_describe_age(age)} old, past codex's "
+        f"{CODEX_TOKEN_REFRESH_INTERVAL.days}-day refresh interval, and did not "
+        "advance during the warm: the token exchange was most likely rejected "
+        "(codex debug models exits 0 either way), or a models_cache.json "
+        "younger than 5 minutes short-circuited the refresh",
+    )
+
+
 def warm_backend_credential(
-    agent_backend: str, *, sandbox: SandboxConfig
+    agent_backend: str,
+    *,
+    sandbox: SandboxConfig,
+    env: Mapping[str, str] | None = None,
 ) -> CredentialWarmResult:
     """Refresh *agent_backend*'s shared credential once, under a single writer.
 
@@ -1289,10 +1454,15 @@ def warm_backend_credential(
     written back before candidates start, instead of N candidates racing to
     spend the same single-use refresh token.
 
-    The call is a no-op whenever the credential is already fresh -- the warm
-    command is chosen so the CLI does no work in that case (see
-    ``helix.backends``).  Backends that need no warm return a skipped result
-    rather than starting a container.
+    *env* is the operator's ``passthrough_env`` / ``[env]`` selection, so the
+    warm reaches the token endpoint through the same proxy and CA settings
+    the candidates get.
+
+    ``warmed`` means the credential was **verified** fresh after the warm,
+    not merely that the command exited 0 (see :class:`CredentialWarmResult`).
+    For codex, ``last_refresh`` is read from ``auth.json`` before and after
+    -- one field, no network -- and judged by
+    :func:`verify_codex_credential_fresh`.
 
     Never raises: a warm that cannot run is reported, not fatal.  Candidates
     may still succeed on the credential that is already there, so the run
@@ -1310,6 +1480,16 @@ def warm_backend_credential(
     container_name = f"helix-warm-{agent_backend}-{uuid.uuid4().hex[:12]}"
     try:
         image = resolve_sandbox_image(sandbox, agent_backend)
+    except ValueError as exc:
+        return CredentialWarmResult(
+            backend=agent_backend, warmed=False, detail=f"ValueError: {exc}"
+        )
+    before = (
+        _read_codex_last_refresh(image=image, sandbox=sandbox, timeout=timeout)
+        if agent_backend == "codex"
+        else None
+    )
+    try:
         result = run_sandbox_auth_command(
             agent_backend,
             action="warm",
@@ -1319,6 +1499,7 @@ def warm_backend_credential(
             extra_hosts=sandbox.extra_hosts,
             timeout=timeout,
             container_name=container_name,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         # Non-fatal, like every other warm failure: the candidates fall back
@@ -1340,16 +1521,35 @@ def warm_backend_credential(
             detail=f"{type(exc).__name__}: {exc}",
         )
 
-    if result.returncode == 0:
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
         return CredentialWarmResult(
-            backend=agent_backend, warmed=True, returncode=0
+            backend=agent_backend,
+            warmed=False,
+            returncode=result.returncode,
+            detail=stderr[-_WARM_DETAIL_CHARS:],
         )
-    stderr = (result.stderr or "").strip()
+
+    if agent_backend != "codex":
+        # Only codex has a warm command today; a future backend needs its own
+        # verifier before its exit code may be trusted.
+        return CredentialWarmResult(
+            backend=agent_backend,
+            warmed=False,
+            returncode=0,
+            stale=True,
+            detail="the warm exited 0 but no freshness verifier exists for this backend",
+        )
+    after = _read_codex_last_refresh(image=image, sandbox=sandbox, timeout=timeout)
+    fresh, detail = verify_codex_credential_fresh(
+        before, after, now=datetime.now(timezone.utc)
+    )
     return CredentialWarmResult(
         backend=agent_backend,
-        warmed=False,
-        returncode=result.returncode,
-        detail=stderr[-_WARM_DETAIL_CHARS:],
+        warmed=fresh,
+        returncode=0,
+        stale=not fresh,
+        detail=detail,
     )
 
 
