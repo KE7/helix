@@ -78,7 +78,11 @@ from helix.population import (
     HelixResult,
     ParetoFrontier,
 )
-from helix.sandbox import start_evaluator_sidecar
+from helix.sandbox import (
+    reset_sandbox_agent_state,
+    resolve_sandbox_image,
+    start_evaluator_sidecar,
+)
 from helix.state import (
     BudgetState,
     clear_eval_cache,
@@ -1704,6 +1708,21 @@ def _dispatch_proposals(
     return worker_results
 
 
+def _reset_sandbox_agent_state_for_generation(config: HelixConfig, gen: int) -> None:
+    """Generation-start hook: reset the sandbox backend state (sandboxed runs only)."""
+    if not config.sandbox.enabled:
+        return
+    # Resolve the image from the run's own sandbox config: an operator who
+    # points ``sandbox.image`` at a private registry may not be able to pull
+    # the public default at all, and a reset that fails to start is only a
+    # warning -- the run would keep going with the isolation silently gone.
+    reset_sandbox_agent_state(
+        config.agent.backend,
+        image=resolve_sandbox_image(config.sandbox, config.agent.backend),
+        generation=gen,
+    )
+
+
 def run_evolution(
     config: HelixConfig,
     project_root: Path,
@@ -2227,6 +2246,13 @@ def _run_evolution_impl(
             if budget_api.budget_exhausted(state, config):
                 print_warning("Budget exhausted -- stopping early.")
                 break
+
+            # Sandboxed runs: wipe the backend CLI's session state in its auth
+            # volume before any candidate of this generation is dispatched
+            # (merge or mutate), so no candidate sees another's history.
+            # Transcripts from the previous generation were already copied
+            # into the run at the end of each invocation.
+            _reset_sandbox_agent_state_for_generation(config, gen)
 
             # =============================================================
             # GEPA parity (Fix 6/7): Merge OR mutate per iteration.

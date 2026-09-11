@@ -10,7 +10,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.backends import (
+    BACKEND_AUTH_ENV,
+    BACKEND_TRANSCRIPT_SOURCES,
+    TRANSCRIPT_SESSION_ID_RE,
+    backend_display_name,
+)
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -1406,18 +1411,56 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     return count, names
 
 
-# Dispatcher: maps backend name → per-backend counter function.
+def _count_agy_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from an Antigravity ``transcript.jsonl`` file.
+
+    The native transcript (``brain/<conversation_id>/.system_generated/logs/
+    transcript.jsonl``, observed against agy 1.1.28) is one JSON object per
+    step; ``tool_calls: [{"name", "args"}]`` was observed on
+    ``PLANNER_RESPONSE`` steps.  Every ``tool_calls`` entry with a string
+    ``name`` counts as one event, whatever the step type, so a future step
+    type carrying the same field is counted rather than silently dropped.
+    """
+    count = 0
+    names: list[str] = []
+    try:
+        for raw_line in split_lf_lines(
+            path.read_text(encoding="utf-8", errors="replace")
+        ):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                step = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(step, dict):
+                continue
+            calls = step.get("tool_calls")
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                if isinstance(call, dict) and isinstance(call.get("name"), str):
+                    count += 1
+                    names.append(call["name"])
+    except OSError:
+        return 0, []
+    return count, names
+
+
+# Dispatcher: maps backend name → per-backend counter function.  These read
+# the file HELIX writes for the backend: the stdout artifact for the JSONL
+# backends (codex/cursor/opencode) and the copied native transcript for
+# claude and agy (``_collect_backend_transcript_artifacts``).
 #
-# ``agy`` has no entry because there is nothing to count: its
-# ``--output-format json`` output (observed against agy 1.1.27) is a single
-# envelope -- ``conversation_id``, ``status``, ``response``, ``error`` (on
-# failure), ``duration_seconds``, ``num_turns`` and a ``usage`` block of
-# ``input_tokens`` / ``output_tokens`` / ``thinking_tokens`` /
-# ``cache_read_tokens`` / ``total_tokens`` -- with no per-tool event list.
-# ``_normalise_usage_stats`` reads the envelope's token fields directly; tool
-# events for agy stay at 0 like any backend without a dedicated counter.
+# ``agy``'s ``--output-format json`` stdout (observed against agy 1.1.27) is a
+# single envelope -- ``conversation_id``, ``status``, ``response``, ``error``
+# (on failure), ``duration_seconds``, ``num_turns`` and a ``usage`` block --
+# with no per-tool event list, so its counter is fed the native transcript
+# and is not applied to stdout.
 _TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = {
     "claude": _count_claude_transcript_tool_events,
+    "agy": _count_agy_transcript_tool_events,
     "codex": _count_codex_stdout_tool_events,
     "cursor": _count_cursor_stdout_tool_events,
     "opencode": _count_opencode_stdout_tool_events,
@@ -1511,6 +1554,171 @@ def _copy_local_claude_transcript(
     }
 
 
+def _export_sqlite_session_rows(
+    db_path: Path,
+    *,
+    session_id: str,
+    tables: tuple[tuple[str, str], ...],
+    dst: Path,
+) -> int:
+    """Write this session's rows from ``tables`` in ``db_path`` to ``dst`` as JSONL.
+
+    One line per row, ``{"table": <name>, "row": {<column>: <value>, ...}}``,
+    ordered as the tables are listed.  ``db_path`` must be a private copy:
+    sqlite may replay the sibling ``-wal`` into it.  Returns the row count.
+    """
+    import sqlite3
+
+    written = 0
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        with dst.open("w", encoding="utf-8") as out:
+            for table, column in tables:
+                rows = conn.execute(
+                    f'SELECT * FROM "{table}" WHERE "{column}" = ? ORDER BY rowid',
+                    (session_id,),
+                )
+                for row in rows:
+                    record = {
+                        key: (
+                            value.decode("utf-8", "replace")
+                            if isinstance(value, bytes)
+                            else value
+                        )
+                        for key, value in dict(row).items()
+                    }
+                    out.write(json.dumps({"table": table, "row": record}) + "\n")
+                    written += 1
+    return written
+
+
+def _copy_local_backend_transcripts(
+    worktree_path: str,
+    *,
+    backend: str,
+    session_id: str,
+    artifact_dir: str = BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+    home: Path | None,
+    miss_level: int = logging.DEBUG,
+) -> list[dict[str, Any]]:
+    """Collect ``backend``'s native transcript for ``session_id`` into the worktree.
+
+    Driven by ``BACKEND_TRANSCRIPT_SOURCES``.  With ``home`` set (unsandboxed)
+    the files are globbed under that directory and copied; with ``home`` of
+    ``None`` (sandboxed) the sandbox helper has already staged them under the
+    artifact dir and only their presence is recorded.  An sqlite-backed store
+    is then reduced to this session's rows and the staged copy removed.  A
+    missing source yields an ``available: False`` entry with a reason, mirroring
+    the claude path, plus a debug log saying why nothing was preserved.
+    """
+    source_spec = BACKEND_TRANSCRIPT_SOURCES.get(backend)
+    if source_spec is None or not source_spec.files:
+        logger.debug(
+            "%s transcript not preserved: no known native transcript location",
+            backend,
+        )
+        return []
+    if not TRANSCRIPT_SESSION_ID_RE.match(session_id):
+        logger.debug(
+            "%s transcript not preserved: unexpected session id %r",
+            backend,
+            session_id,
+        )
+        return []
+    rel_dir = Path(artifact_dir) / backend
+    out_dir = Path(worktree_path) / rel_dir
+    artifacts: list[dict[str, Any]] = []
+    staged: list[Path] = []
+    try:
+        for pattern, dest_name in source_spec.files:
+            rel_path = rel_dir / dest_name.format(session_id=session_id)
+            dst = Path(worktree_path) / rel_path
+            entry: dict[str, Any] = {
+                "backend": backend,
+                "session_id": session_id,
+                "path": str(rel_path),
+                "source": "sandbox_auth_volume",
+                "available": dst.is_file(),
+            }
+            if home is not None and not dst.is_file():
+                glob_pattern = pattern.format(session_id=session_id)
+                matches = sorted(p for p in home.glob(glob_pattern) if p.is_file())
+                entry["source"] = str(matches[0]) if matches else str(home / glob_pattern)
+                if matches:
+                    try:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        import shutil
+
+                        shutil.copy2(matches[0], dst)
+                        entry["available"] = True
+                    except OSError as exc:
+                        entry["reason"] = f"copy_failed: {exc}"
+            if not entry["available"]:
+                entry.setdefault("reason", "transcript_not_found")
+            if dest_name.startswith("."):
+                staged.append(dst)
+            else:
+                artifacts.append(entry)
+        if source_spec.sqlite_export is not None:
+            raw_name, tables = source_spec.sqlite_export
+            raw_db = out_dir / raw_name.format(session_id=session_id)
+            rel_path = rel_dir / f"{session_id}.jsonl"
+            entry = {
+                "backend": backend,
+                "session_id": session_id,
+                "path": str(rel_path),
+                "source": str(raw_db)
+                if home is None
+                else str(home / source_spec.files[0][0]),
+                "available": False,
+            }
+            if raw_db.is_file():
+                try:
+                    rows = _export_sqlite_session_rows(
+                        raw_db,
+                        session_id=session_id,
+                        tables=tables,
+                        dst=Path(worktree_path) / rel_path,
+                    )
+                    entry["available"] = rows > 0
+                    if rows == 0:
+                        entry["reason"] = "session_rows_not_found"
+                except Exception as exc:  # noqa: BLE001 - sqlite errors are not fatal
+                    entry["reason"] = f"export_failed: {exc}"
+            else:
+                entry["reason"] = "transcript_not_found"
+            artifacts.append(entry)
+    finally:
+        # ``staged`` holds raw CLI state copied out verbatim -- for opencode
+        # the whole ``opencode.db``, whose ``account`` table carries the OAuth
+        # tokens and whose rows cover every candidate, not just this one.  It
+        # is removed here rather than after the export so that an interrupt
+        # (Ctrl-C, SIGTERM) between the copy and the export cannot leave a
+        # credential-bearing file behind in the candidate worktree.
+        for path in staged:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    for entry in artifacts:
+        if not entry["available"]:
+            logger.log(
+                miss_level,
+                "%s transcript for candidate %s not preserved: %s (expected %s from %s)",
+                backend,
+                Path(worktree_path).name,
+                entry.get("reason"),
+                entry["path"],
+                entry["source"],
+            )
+    return artifacts
+
+
+# Backends whose tool events are counted from the copied native transcript
+# rather than from the stdout artifact.
+_NATIVE_TRANSCRIPT_COUNTED_BACKENDS = frozenset({"claude", "agy"})
+
+
 def _collect_backend_transcript_artifacts(
     worktree_path: str,
     *,
@@ -1518,43 +1726,83 @@ def _collect_backend_transcript_artifacts(
     usage: UsageStats,
     sandbox: SandboxConfig | None,
 ) -> list[dict[str, Any]]:
-    if backend != "claude":
-        return []
-    if sandbox is not None and not sandbox.preserve_backend_transcripts:
-        return []
+    """Copy the backend's native transcript for this invocation into the worktree.
+
+    Claude keeps its pre-existing path (``claude_transcript_root`` /
+    ``HELIX_CLAUDE_TRANSCRIPT_ROOT``); every other backend is located through
+    ``BACKEND_TRANSCRIPT_SOURCES``.  In sandbox mode the files were copied out
+    of the auth volume by ``helix.sandbox`` before sync-back; unsandboxed they
+    are read from the operator's ``$HOME``.
+
+    The copy is always made and kept: it is the run's only durable record
+    once the sandbox resets the backend's state at the next generation, and
+    it feeds tool-event counting for the backends whose stdout carries none
+    (claude, agy).
+    """
     session_id = usage.session_id
     if not isinstance(session_id, str) or not session_id:
+        logger.debug(
+            "%s transcript not preserved: no session id in backend output", backend
+        )
         return []
     artifact_dir = (
         sandbox.transcript_artifact_dir
         if sandbox is not None
         else BACKEND_TRANSCRIPT_ARTIFACT_DIR
     )
-    transcript_root = (
-        "sandbox_auth_volume"
-        if sandbox is not None and sandbox.enabled
-        else sandbox.claude_transcript_root
-        if sandbox is not None
-        else None
-    )
-    artifact = _copy_local_claude_transcript(
-        worktree_path,
-        session_id=session_id,
-        artifact_dir=artifact_dir,
-        transcript_root=transcript_root,
-    )
-    if artifact is not None and artifact.get("available"):
-        # Claude's ``--output-format json`` summary omits per-turn tool
-        # invocations.  Now that the transcript is on disk, read it and
-        # patch the ``usage`` object with the accurate counts.  Only
-        # applied when the summary gave 0 tool events to avoid overriding
-        # a non-zero value that a future Claude version might expose.
-        dst = Path(worktree_path) / Path(artifact["path"])
-        tc, tn = _count_transcript_tool_events(dst, "claude")
-        if tc > 0 and usage.tool_event_count == 0:
-            usage.tool_event_count = tc
-            usage.tool_names = list(tn)
-    return [artifact] if artifact is not None else []
+    sandboxed = sandbox is not None and sandbox.enabled
+    # The sandbox wipes the backend's state at the next generation start, so
+    # a miss there is the last chance to notice; unsandboxed, the operator's
+    # $HOME keeps the source and debug is enough.
+    miss_level = logging.WARNING if sandboxed else logging.DEBUG
+    if backend != "claude":
+        artifacts = _copy_local_backend_transcripts(
+            worktree_path,
+            backend=backend,
+            session_id=session_id,
+            artifact_dir=artifact_dir,
+            home=None if sandboxed else Path.home(),
+            miss_level=miss_level,
+        )
+    else:
+        transcript_root = (
+            "sandbox_auth_volume"
+            if sandboxed
+            else sandbox.claude_transcript_root
+            if sandbox is not None
+            else None
+        )
+        artifact = _copy_local_claude_transcript(
+            worktree_path,
+            session_id=session_id,
+            artifact_dir=artifact_dir,
+            transcript_root=transcript_root,
+        )
+        artifacts = [artifact] if artifact is not None else []
+        if artifact is not None and not artifact.get("available"):
+            logger.log(
+                miss_level,
+                "claude transcript for candidate %s not preserved: %s (expected %s from %s)",
+                Path(worktree_path).name,
+                artifact.get("reason"),
+                artifact["path"],
+                artifact["source"],
+            )
+    if backend in _NATIVE_TRANSCRIPT_COUNTED_BACKENDS:
+        # The structured stdout of these backends omits per-turn tool
+        # invocations.  Now that the native transcript is on disk, read it
+        # and patch the ``usage`` object with the accurate counts.  Only
+        # applied when the summary gave 0 tool events to avoid overriding a
+        # non-zero value that a future CLI version might expose.  The first
+        # artifact is the primary transcript (``<session_id>.jsonl``).
+        primary = next((a for a in artifacts if a.get("available")), None)
+        if primary is not None:
+            dst = Path(worktree_path) / Path(primary["path"])
+            tc, tn = _count_transcript_tool_events(dst, backend)
+            if tc > 0 and usage.tool_event_count == 0:
+                usage.tool_event_count = tc
+                usage.tool_names = list(tn)
+    return artifacts
 
 
 def _write_backend_artifacts(
@@ -1581,12 +1829,12 @@ def _write_backend_artifacts(
             usage = fallback_usage
         else:
             usage = _normalise_usage_stats({})
-        # For non-Claude backends the stdout JSONL IS the transcript; patch
+        # For the JSONL backends the stdout stream IS the transcript; patch
         # ``usage`` with backend-specific tool-event counts now that the
-        # stdout artifact is on disk.  Claude is handled separately inside
-        # ``_collect_backend_transcript_artifacts`` where the external
+        # stdout artifact is on disk.  Claude and agy are handled inside
+        # ``_collect_backend_transcript_artifacts`` where the native
         # transcript file is copied first.
-        if backend != "claude":
+        if backend not in _NATIVE_TRANSCRIPT_COUNTED_BACKENDS:
             stdout_path = wt / BACKEND_STDOUT_ARTIFACT_NAME
             tc, tn = _count_transcript_tool_events(stdout_path, backend)
             if tc > 0:
