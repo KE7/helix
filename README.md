@@ -645,6 +645,14 @@ evaluator uses a local proxy, keep that endpoint in your evaluator code as
 usual. Docker Desktop supports `host.docker.internal`; Linux users can set
 `add_host_gateway = true`.
 
+Every candidate starts with a fresh agent session: HELIX sets
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude` (its auto-memory is keyed by
+repo root and would otherwise span candidates) and passes
+`-c features.memories=false` to `codex`; `agy`, `cursor`, and `opencode` were
+probed and read nothing from a prior session, so they need no switch.
+Transcripts and session databases remain in the `helix-auth-<backend>` volume,
+so operators can read them after a run.
+
 The container-backed tests in `tests/integration/` run real backend images,
 so a bare `pytest` does not collect them; opt in with
 `pytest -m docker_integration tests/integration/` (set

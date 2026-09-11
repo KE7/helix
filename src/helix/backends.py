@@ -73,6 +73,28 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
     "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
 }
 
+# Environment that makes every candidate start from a fresh agent session.
+#
+# Candidates share one login volume per backend (mounted at /home/node), so a
+# CLI that reads memory from an earlier session would carry state from
+# candidate N-1 into candidate N.  Probed 2026-09-10 against the real CLIs:
+# plant a fact in one one-shot session, ask for it in a fresh one, same cwd,
+# no tools.
+#   claude   recalled it -- auto-memory, keyed by repo root, so it spans
+#            worktrees and the shared HOME; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+#            stops it and no memory directory is created.
+#   codex    did not; its ``memories`` feature flag is off by default and is
+#            pinned off in argv (``-c features.memories=false``, see
+#            ``helix.mutator._build_backend_args``) because it is a config
+#            override, not an environment variable.
+#   agy, cursor, opencode   did not; they read nothing from a prior session,
+#            so there is nothing to disable and no entry here.
+# Transcripts and session databases are still written to the login volume so
+# they can be read after a run.
+BACKEND_FRESH_SESSION_ENV: dict[str, dict[str, str]] = {
+    "claude": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+}
+
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "agy": {
         # No dedicated non-interactive login subcommand; the bare interactive

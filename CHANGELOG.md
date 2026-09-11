@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Every sandboxed candidate now starts with a fresh agent session:
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude` and
+  `-c features.memories=false` for `codex` (the other backends read nothing
+  from a prior session); transcripts stay in the `helix-auth-<backend>` volume.
+
 ### Changed
 - **BREAKING**: Removed the `gemini` mutation backend and replaced it with
   `agy` (Google's Antigravity CLI). Configs with `agent.backend = "gemini"`

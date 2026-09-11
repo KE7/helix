@@ -845,6 +845,34 @@ class TestInvokeClaudeCode:
         args_list = mock_run.call_args[0][0]
         assert 'model_reasoning_effort="high\\"quoted"' in args_list
 
+    def test_codex_cli_args_pin_memories_off(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        invoke_claude_code("/tmp/wt", "the prompt", AgentConfig(backend="codex"))
+
+        args_list = mock_run.call_args[0][0]
+        idx = args_list.index("features.memories=false")
+        assert args_list[idx - 1] == "-c"
+
+    def test_claude_env_disables_auto_memory(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+
+        invoke_claude_code("/tmp/wt", "the prompt", AgentConfig(backend="claude"))
+
+        env = mock_run.call_args[1]["env"]
+        assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+
+    def test_fresh_session_env_not_injected_for_other_backends(self, mocker):
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        invoke_claude_code("/tmp/wt", "the prompt", AgentConfig(backend="codex"))
+
+        env = mock_run.call_args[1]["env"]
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in env
+
     def test_cursor_cli_args_use_stream_json(self, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
