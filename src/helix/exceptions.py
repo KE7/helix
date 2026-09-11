@@ -6,9 +6,13 @@ All HELIX modules use these for consistent, never-truncated error diagnostics.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
+
+if TYPE_CHECKING:
+    from helix.display import UsageStats
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +34,14 @@ class HelixError(Exception):
     Carries structured context (operation, phase, command, cwd, stdout,
     stderr, exit_code, suggestion) so callers can emit rich diagnostics
     without parsing exception messages.
+
+    ``usage`` carries the token usage an LLM backend had already spent when
+    the failure happened, recovered from the raw output independently of
+    whatever parse failed.  Tokens are spent whether or not a usable
+    candidate came out, so an error that discards a candidate must not also
+    discard the accounting: callers charge ``usage`` to the budget on the
+    failure path.  ``None`` means "no backend ran, or nothing was
+    recoverable" and is not the same as a zero-token ``UsageStats``.
     """
 
     def __init__(
@@ -44,6 +56,7 @@ class HelixError(Exception):
         stderr: str = "",
         exit_code: int | None = None,
         suggestion: str = "",
+        usage: UsageStats | None = None,
     ) -> None:
         self.operation = operation
         self.phase = phase
@@ -53,6 +66,7 @@ class HelixError(Exception):
         self.stderr = stderr
         self.exit_code = exit_code
         self.suggestion = suggestion
+        self.usage = usage
         super().__init__(message)
 
     def format_full(self) -> str:
@@ -68,6 +82,8 @@ class HelixError(Exception):
             lines.append(f"[HELIX ERROR] Exit code: {self.exit_code}")
         if self.cwd:
             lines.append(f"[HELIX ERROR] Working dir: {self.cwd}")
+        if self.usage is not None:
+            lines.append(f"[HELIX ERROR] Backend usage: {self._usage_summary()}")
         if self.stdout:
             lines.append(f"[HELIX ERROR] Stdout:\n{self.stdout}")
         if self.stderr:
@@ -75,6 +91,24 @@ class HelixError(Exception):
         if self.suggestion:
             lines.append(f"[HELIX ERROR] Suggestion: {self.suggestion}")
         return "\n".join(lines)
+
+    def _usage_summary(self) -> str:
+        """One-line rendering of ``usage`` for the error report.
+
+        Spelled out rather than dumped as a dict so that a failure whose
+        tokens were nonetheless charged says so plainly in the log — the
+        under-reporting this field exists to prevent was invisible precisely
+        because nothing printed it.
+        """
+        if self.usage is None:  # pragma: no cover - guarded by the caller
+            return "unavailable"
+        return (
+            f"input={self.usage.input_tokens} "
+            f"output={self.usage.output_tokens} "
+            f"cached_input={self.usage.cached_input_tokens} "
+            f"reasoning={self.usage.reasoning_tokens} "
+            "(charged to the budget despite this failure)"
+        )
 
 
 class GitError(HelixError):
@@ -175,6 +209,8 @@ def print_helix_error(exc: HelixError) -> None:
         lines.append(f"[red]Exit code:[/red] {exc.exit_code}")
     if exc.cwd:
         lines.append(f"[red]Working dir:[/red] {exc.cwd}")
+    if exc.usage is not None:
+        lines.append(f"[red]Backend usage:[/red] {exc._usage_summary()}")
     if exc.stdout:
         lines.append(f"[red]Stdout (full):[/red]\n{exc.stdout}")
     if exc.stderr:

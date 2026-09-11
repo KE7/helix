@@ -7,6 +7,7 @@ import random
 from pathlib import Path
 from typing import Callable, Mapping
 
+from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff  # noqa: F401
@@ -238,6 +239,7 @@ def merge(
     eval_result_b: EvalResult | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
     ancestor: Candidate | None = None,
+    record_usage: Callable[[UsageStats], None] | None = None,
 ) -> Candidate | None:
     """Merge *candidate_a* and *candidate_b* using Claude Code.
 
@@ -302,6 +304,10 @@ def merge(
         from :func:`helix.lineage.find_merge_triplet`).  When supplied,
         the prompt uses the two-diff (ancestor-relative) form; when
         ``None``, falls back to the single A↔B diff.
+    record_usage:
+        Optional sink called exactly once with the backend's token usage,
+        whether or not the merge produced a usable candidate — the same
+        contract as :func:`helix.mutator.mutate`'s parameter of that name.
 
     Returns
     -------
@@ -351,7 +357,13 @@ def merge(
             sandbox=config.sandbox,
         )
         child.usage = usage
+        if record_usage is not None:
+            record_usage(usage)
     except MutationError as exc:
+        # Tokens spent before the failure are still spent; hand them to the
+        # caller before the candidate and its worktree go away.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         print_helix_error(exc)
         try:
@@ -359,8 +371,10 @@ def merge(
         except Exception:
             pass
         return None
-    except RateLimitError:
+    except RateLimitError as exc:
         # Rate limit — clean up orphaned worktree, then re-raise.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         try:
             remove_worktree(child)
         except Exception:
@@ -371,7 +385,11 @@ def merge(
         # ``mutate()``: clean up the orphaned worktree and re-raise so the
         # merge call site in evolution.py can count it as a credential
         # failure and fall through to mutation instead of dying with a
-        # traceback and a leaked worktree.
+        # traceback and a leaked worktree.  The tokens spent before the
+        # credential gave out are still spent, so hand them to the sink
+        # first, exactly as the other error paths do.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id})"
         try:
             remove_worktree(child)

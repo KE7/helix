@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **BREAKING**: Removed the `gemini` mutation backend and replaced it with
+  `agy` (Google's Antigravity CLI). Configs with `agent.backend = "gemini"`
+  are rejected; migrate to `"agy"`. `helix-auth-gemini` sandbox volumes are
+  no longer read; run `helix sandbox login agy` to create `helix-auth-agy`.
+  Unlike `gemini`, `agy` propagates `agent.effort` to its CLI (`--effort`,
+  same `low`/`medium`/`high` values as `claude`) instead of silently
+  ignoring it.
 - **BREAKING**: Removed the `evaluator.score_parser` configuration field. The built-in
   `helix_result` parser is now implicit; configurations that still provide the
   removed field are rejected by Pydantic's `extra="forbid"` validation.
@@ -58,6 +65,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
+- Backend token usage is no longer discarded when the backend's output fails
+  to parse. `budget.charge_llm_usage` was reachable only from the success
+  paths of `mutate` / `merge`, so a `MutationError` raised while parsing
+  threw away the attempt's accounting along with its candidate. Usage is now
+  recovered from raw stdout by a parse that cannot raise, carried out on
+  `HelixError.usage`, and charged in the apply phase with
+  `source="mutation_failed"` / `"merge_failed"`. Measured on one 20-generation
+  run, a single parse failure left the budget 7.2% low on input tokens and
+  5.0% low on output tokens, silently. Failed invocations also now record the
+  recovered usage in `.helix_backend_result.json` instead of zeros, and the
+  error report prints it.
+- Newline-delimited backend and evaluator output is now split on U+000A only.
+  `str.splitlines()` also breaks on U+0085, U+2028 and U+2029, which JSON
+  leaves unescaped inside string literals and which agent backends therefore
+  emit verbatim, fragmenting one valid JSONL record into two invalid ones.
+  This was the root cause of the parse failure above. Applied via the new
+  `helix.lines.split_lf_lines` to the JSONL parsers, the per-backend
+  transcript tool-event counters, the `HELIX_RESULT=` scans, and the JSONL
+  dataset readers; human-authored and git-generated text still uses
+  `splitlines()`.
 - `ParetoFrontier.select_parent()` and `ParetoFrontier.get_non_dominated()`
   are now reproducible across processes for a given seed. Candidate ids are
   `str` and the per-key fronts are `set` objects, so set iteration order —

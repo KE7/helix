@@ -337,6 +337,41 @@ class TestMerge:
         mock_remove.assert_called_once_with(child)
         mock_snapshot.assert_not_called()
 
+    def test_credential_error_hands_spent_usage_to_the_sink(self, mocker):
+        """Tokens spent before the credential gave out still reach the budget.
+
+        ``invoke_claude_code`` attaches the salvaged usage to every
+        ``HelixError`` it raises; the credential path must forward it through
+        ``record_usage`` exactly as the ``MutationError`` and ``RateLimitError``
+        paths do, or a credential failure becomes a free merge.
+        """
+        from helix.display import UsageStats
+
+        ca = make_candidate("g0-s0")
+        cb = make_candidate("g0-s1")
+        config = make_config()
+
+        child = make_candidate("g1-m0")
+        mocker.patch("helix.merger.clone_candidate", return_value=child)
+        mocker.patch("helix.merger.get_diff", return_value="some diff")
+        spent_before_failure = UsageStats(input_tokens=7, output_tokens=3)
+        mocker.patch(
+            "helix.merger.invoke_claude_code",
+            side_effect=CredentialRefreshError(
+                "login is dead", usage=spent_before_failure
+            ),
+        )
+        mocker.patch("helix.merger.remove_worktree")
+        mocker.patch("helix.merger.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        with pytest.raises(CredentialRefreshError):
+            merge(
+                ca, cb, "g1-m0", config, Path("/tmp"), record_usage=spent.append
+            )
+
+        assert spent == [spent_before_failure]
+
     def test_snapshot_not_called_by_merge_on_success(self, mocker):
         """merge() must NOT call snapshot_candidate — the caller owns that step.
 

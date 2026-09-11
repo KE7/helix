@@ -1,4 +1,4 @@
-"""HELIX mutator: applies code mutations via agentic coding backends (claude, codex, cursor, gemini, opencode)."""
+"""HELIX mutator: applies code mutations via agentic coding backends (agy, claude, codex, cursor, opencode)."""
 
 from __future__ import annotations
 
@@ -22,12 +22,14 @@ from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
     CredentialRefreshError,
+    HelixError,
     MutationError,
     PromptArtifactCollisionError,
     RateLimitError,
     print_helix_error,
 )
 from helix.executor import _scrub_environment
+from helix.lines import split_lf_lines
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
@@ -104,7 +106,7 @@ def _turn_budget_section(max_turns: int | None) -> str:
       limit, and the resulting ``subtype="error_max_turns"`` response is
       detected at :func:`invoke_claude_code` and treated as partial
       success.
-    * ``codex`` / ``cursor`` / ``gemini`` / ``opencode`` — soft hint only.
+    * ``agy`` / ``codex`` / ``cursor`` / ``opencode`` — soft hint only.
       None of these CLIs expose an equivalent flag (verified against
       ``--help`` for the installed binaries), so the in-prompt request is
       the only signal the agent receives.  Whether the agent self-honors
@@ -140,7 +142,7 @@ def _strip_machine_protocol_from_evaluator_stream(text: str) -> str:
         return ""
 
     kept: list[str] = []
-    for line in text.splitlines():
+    for line in split_lf_lines(text):
         if line.strip().startswith("HELIX_RESULT="):
             continue
         kept.append(line)
@@ -923,6 +925,20 @@ def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
             env[key] = os.environ[key]
 
 
+# agy's ``--print-timeout`` is a Go ``time.Duration`` flag (default ``5m0s``)
+# that aborts a headless run when it expires; per agy's changelog a mid-turn
+# expiry returns *partial* output with only a stderr warning, so a cut-off
+# mutation could pass for a finished one.  There is no disable value: ``0``
+# and negative durations fail immediately with ``timeout waiting for
+# response``, and no env var or settings key overrides the flag.  So we pass
+# the largest duration Go can represent (``math.MaxInt64`` ns, ~292 years) --
+# ``2562048h`` is rejected as out of range, so this is the ceiling of the
+# flag's type.  Verified against agy 1.1.27.  This keeps agy on the same
+# no-timeout policy every other backend already gets (their subprocesses run
+# with no ``timeout`` at all; see ``test_no_timeout_in_subprocess``).
+_AGY_PRINT_TIMEOUT = "2562047h47m16.854775807s"
+
+
 def _build_backend_args(
     worktree_path: str,
     config: AgentConfig,
@@ -937,6 +953,30 @@ def _build_backend_args(
     variable consume it -- currently just codex.
     """
     backend = config.backend
+    if backend == "agy":
+        args = [
+            "agy",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            _AGY_PRINT_TIMEOUT,
+        ]
+        if config.model:
+            args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["--effort", config.effort])
+        # Unlike ``claude``, agy's ``-p``/``--print`` (alias ``--prompt``) is
+        # not a boolean flag: it takes the prompt as its VALUE, and a trailing
+        # positional is ignored.  ``agy --print --output-format json <prompt>``
+        # exits 2 with ``--print took "--output-format" as its prompt``
+        # (verified against agy 1.1.27).  So every other flag goes first and
+        # ``--print <prompt>`` is the final argv pair; Go's flag parser accepts
+        # the space-separated form, and the instruction text never starts
+        # with ``-``.  ``test_agy_cli_args_include_required_flags`` pins this.
+        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name)])
+        return args
+
     if backend == "claude":
         args = [
             "claude",
@@ -998,18 +1038,6 @@ def _build_backend_args(
             "--trust",
             "--workspace",
             worktree_path,
-        ]
-        if config.model:
-            args.extend(["--model", config.model])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
-        return args
-
-    if backend == "gemini":
-        args = [
-            "gemini",
-            "--yolo",
-            "--output-format",
-            "stream-json",
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -1096,7 +1124,7 @@ def _parse_jsonl_output(
 ) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     unparsable: list[str] = []
-    for raw_line in stdout.splitlines():
+    for raw_line in split_lf_lines(stdout):
         line = raw_line.strip()
         if not line:
             continue
@@ -1104,12 +1132,6 @@ def _parse_jsonl_output(
             parsed = json.loads(line)
         except json.JSONDecodeError:
             if strict:
-                # Gemini CLI may prepend advisory text such as MCP-health
-                # warnings before the JSON stream even when
-                # `--output-format stream-json` is requested.
-                if backend == "gemini":
-                    unparsable.append(line)
-                    continue
                 raise MutationError(
                     f"Failed to parse {backend_display_name(backend)} JSONL output line",
                     operation=f"{backend_display_name(backend)} invocation",
@@ -1141,7 +1163,7 @@ def _parse_backend_output(
     cmd_str: str,
     worktree_path: str,
 ) -> dict[str, Any]:
-    if backend == "claude":
+    if backend in {"agy", "claude"}:
         return _parse_json_object_output(
             result.stdout,
             backend=backend,
@@ -1150,7 +1172,7 @@ def _parse_backend_output(
             stderr=result.stderr,
             exit_code=result.returncode,
         )
-    if backend in {"codex", "cursor", "gemini", "opencode"}:
+    if backend in {"codex", "cursor", "opencode"}:
         return _parse_jsonl_output(
             result.stdout,
             backend=backend,
@@ -1161,6 +1183,63 @@ def _parse_backend_output(
             strict=result.returncode == 0,
         )
     raise ValueError(f"Unsupported backend: {backend}")
+
+
+def _salvage_backend_usage(
+    backend: str, result: subprocess.CompletedProcess[str]
+) -> UsageStats:
+    """Recover token usage from raw backend output without ever raising.
+
+    Token usage is a fact about work the backend has already done.  It must
+    therefore be recoverable independently of whether the output *also*
+    yields a usable candidate — the strict parsers above raise
+    :class:`MutationError` on a single malformed line, and until this
+    existed that error discarded a whole invocation's accounting along with
+    the candidate.
+
+    The recovery is deliberately lenient and total:
+
+    * JSONL backends reuse :func:`_parse_jsonl_output` with ``strict=False``,
+      which collects the records that *did* decode and sets the rest aside.
+      The usage record is one line of its own, so a malformed line elsewhere
+      in the stream does not hide it.
+    * Claude's single-object mode tries the object first, then falls back to
+      the same lenient line scan for a stream that was truncated mid-object.
+
+    Returns a zero-token :class:`UsageStats` when nothing is recoverable,
+    which is the honest reading of "the backend reported no usage".
+    """
+    stdout = result.stdout or ""
+    if not stdout.strip():
+        return _normalise_usage_stats({})
+
+    parsed: dict[str, Any] | None = None
+    if backend == "claude":
+        try:
+            loaded = json.loads(stdout)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            loaded = None
+        if isinstance(loaded, dict):
+            parsed = loaded
+
+    if parsed is None:
+        try:
+            parsed = _parse_jsonl_output(
+                stdout,
+                backend=backend,
+                cmd_str="",
+                worktree_path="",
+                stderr="",
+                exit_code=0,
+                strict=False,
+            )
+        except (ValueError, RecursionError):  # pragma: no cover - defensive
+            return _normalise_usage_stats({})
+
+    try:
+        return _normalise_usage_stats(parsed)
+    except (ValueError, TypeError, RecursionError):  # pragma: no cover
+        return _normalise_usage_stats({})
 
 
 def _walk_json(obj: Any) -> list[dict[str, Any]]:
@@ -1279,6 +1358,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "cacheReadInputTokens",
                     "cacheReadTokens",
                     "cacheRead",
+                    # agy: ``usage.cache_read_tokens``
+                    "cache_read_tokens",
                 ),
             ),
             (
@@ -1289,6 +1370,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "reasoning_output_tokens",
                     "thoughts",
                     "reasoning",
+                    # agy: ``usage.thinking_tokens``
+                    "thinking_tokens",
                 ),
             ),
             (
@@ -1312,6 +1395,8 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                 "chatId",
                 "thread_id",
                 "threadId",
+                # agy: top-level ``conversation_id``
+                "conversation_id",
             ):
                 value = node.get(alias)
                 if isinstance(value, str) and value:
@@ -1390,7 +1475,7 @@ def _count_claude_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1425,7 +1510,7 @@ def _count_codex_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1471,7 +1556,7 @@ def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
         "grepToolCall": "grep",
     }
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1497,36 +1582,6 @@ def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     return count, names
 
 
-def _count_gemini_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
-    """Count tool invocations from a Gemini stream-json stdout artifact.
-
-    Gemini emits ``tool_use`` events (correctly counted by
-    ``_normalise_usage_stats``) but stores the tool name in ``tool_name``
-    rather than ``name``, so ``tool_names`` remains empty after the initial
-    parse.  This function provides both the count and the names.
-    """
-    count = 0
-    names: list[str] = []
-    try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                event = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(event, dict) or event.get("type") != "tool_use":
-                continue
-            count += 1
-            name = event.get("tool_name")
-            if isinstance(name, str) and name:
-                names.append(name)
-    except OSError:
-        return 0, []
-    return count, names
-
-
 def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     """Count tool invocations from an OpenCode ``--format json`` stdout artifact.
 
@@ -1537,7 +1592,7 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1559,11 +1614,19 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
 
 
 # Dispatcher: maps backend name → per-backend counter function.
+#
+# ``agy`` has no entry because there is nothing to count: its
+# ``--output-format json`` output (observed against agy 1.1.27) is a single
+# envelope -- ``conversation_id``, ``status``, ``response``, ``error`` (on
+# failure), ``duration_seconds``, ``num_turns`` and a ``usage`` block of
+# ``input_tokens`` / ``output_tokens`` / ``thinking_tokens`` /
+# ``cache_read_tokens`` / ``total_tokens`` -- with no per-tool event list.
+# ``_normalise_usage_stats`` reads the envelope's token fields directly; tool
+# events for agy stay at 0 like any backend without a dedicated counter.
 _TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = {
     "claude": _count_claude_transcript_tool_events,
     "codex": _count_codex_stdout_tool_events,
     "cursor": _count_cursor_stdout_tool_events,
-    "gemini": _count_gemini_stdout_tool_events,
     "opencode": _count_opencode_stdout_tool_events,
 }
 
@@ -1709,13 +1772,22 @@ def _write_backend_artifacts(
     result: subprocess.CompletedProcess[str],
     parsed: dict[str, Any] | None,
     sandbox: SandboxConfig | None = None,
+    fallback_usage: UsageStats | None = None,
 ) -> None:
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
         (wt / BACKEND_STDOUT_ARTIFACT_NAME).write_text(result.stdout or "")
         (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
-        usage = _normalise_usage_stats(parsed or {})
+        # ``parsed is None`` means the strict parse failed.  Record the
+        # leniently recovered usage rather than zeros, so the on-disk
+        # artifact stays a faithful account of what the invocation spent.
+        if parsed is not None:
+            usage = _normalise_usage_stats(parsed)
+        elif fallback_usage is not None:
+            usage = fallback_usage
+        else:
+            usage = _normalise_usage_stats({})
         # For non-Claude backends the stdout JSONL IS the transcript; patch
         # ``usage`` with backend-specific tool-event counts now that the
         # stdout artifact is on disk.  Claude is handled separately inside
@@ -1752,6 +1824,30 @@ def _write_backend_artifacts(
             worktree_path,
             e,
         )
+
+
+def _combine_usage(
+    first: UsageStats | None, second: UsageStats | None
+) -> UsageStats | None:
+    """Sum two per-attempt usage records into one, tolerating ``None``.
+
+    Used when an invocation is retried after a lost refresh race: both
+    attempts spent tokens, and the caller sees only one ``UsageStats``, so the
+    first attempt's spend has to ride along with the second's.  Neither input
+    is mutated.  ``session_id`` is taken from the later attempt, which is the
+    one whose output the caller receives; the earlier one is used only when
+    the later attempt reported none.  Returns ``None`` only when both inputs
+    are ``None``, which keeps the "no backend ran" reading of a missing
+    record intact.
+    """
+    if first is None:
+        return second
+    total = UsageStats.from_dict(first.to_dict())
+    if second is not None:
+        total.add(second)
+        if second.session_id is not None:
+            total.session_id = second.session_id
+    return total
 
 
 def invoke_claude_code(
@@ -1809,8 +1905,6 @@ def invoke_claude_code(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
-    if backend == "gemini":
-        backend_env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
     if warning := cursor_credential_hazard(backend, backend_env):
         logger.warning("%s", warning)
     if backend == "opencode" and not sandbox_enabled:
@@ -1863,6 +1957,14 @@ def invoke_claude_code(
                 text=True,
                 env=backend_env,
             )
+
+        # Recover the usage record from the raw stream FIRST, with a parse
+        # that cannot raise.  Everything below this line can fail -- and
+        # when it does, the tokens have still been spent.  Charging must
+        # not be conditional on the candidate being usable, so every error
+        # raised from here carries this on ``HelixError.usage`` for the
+        # caller to charge.
+        spent_usage = _salvage_backend_usage(backend, result)
 
         parsed: dict[str, Any] | None = None
         try:
@@ -2008,6 +2110,12 @@ def invoke_claude_code(
                 exit_code=result.returncode,
                 suggestion="Check stderr for rate limits, permission errors, or model availability.",
             )
+        except HelixError as exc:
+            # Attach only when the raiser did not already supply a more
+            # precise record; never overwrite one.
+            if exc.usage is None:
+                exc.usage = spent_usage
+            raise
         finally:
             _write_backend_artifacts(
                 worktree_path,
@@ -2016,6 +2124,7 @@ def invoke_claude_code(
                 result=result,
                 parsed=parsed,
                 sandbox=sandbox,
+                fallback_usage=spent_usage,
             )
 
     try:
@@ -2023,6 +2132,10 @@ def invoke_claude_code(
     except CredentialRefreshError as exc:
         if not exc.transient:
             raise
+        # The lost attempt still spent tokens (``exc.usage`` was attached
+        # above); fold them into whatever the retry reports so the retry
+        # does not hide the first attempt's spend from the budget.
+        first_usage = exc.usage
         # Lost a refresh race: another candidate has already stored the
         # refreshed credential in the shared volume, so a second invocation
         # starts from a working login.  One retry; a second loss in a row is
@@ -2033,7 +2146,12 @@ def invoke_claude_code(
             backend_name,
             exc,
         )
-    return _attempt(retried=True)
+    try:
+        parsed, usage = _attempt(retried=True)
+    except HelixError as retry_exc:
+        retry_exc.usage = _combine_usage(first_usage, retry_exc.usage)
+        raise
+    return parsed, _combine_usage(first_usage, usage) or usage
 
 
 # ---------------------------------------------------------------------------
@@ -2049,6 +2167,7 @@ def mutate(
     base_dir: Path,
     background: str | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
+    record_usage: Callable[[UsageStats], None] | None = None,
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -2069,6 +2188,12 @@ def mutate(
         Base directory for worktrees.
     background:
         Optional background/context text injected into the prompt.
+    record_usage:
+        Optional sink called exactly once with the backend's token usage,
+        whether or not the mutation produced a usable candidate.  The tokens
+        are spent either way, so this is how a caller charges the budget for
+        an attempt that ends in ``None``.  Not called when no backend
+        invocation happened (e.g. the worktree clone raised).
 
     Returns
     -------
@@ -2107,7 +2232,13 @@ def mutate(
             prompt_artifact_name=prompt_artifact_name,
         )
         child.usage = usage
+        if record_usage is not None:
+            record_usage(usage)
     except MutationError as exc:
+        # The worktree is about to be removed and the candidate dropped, but
+        # the tokens were spent.  Hand them to the caller before both go.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
         try:
@@ -2115,10 +2246,13 @@ def mutate(
         except Exception:
             pass
         return None
-    except RateLimitError:
+    except RateLimitError as exc:
         # Rate limit — clean up orphaned worktree, then re-raise so the parallel
         # futures handler in evolution.py can log it and continue with a smaller
-        # proposal set.
+        # proposal set.  A rate-limited invocation can still have burned tokens
+        # before the limit hit, so the same handoff applies.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         try:
             remove_worktree(child)
         except Exception:

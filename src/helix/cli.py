@@ -432,10 +432,11 @@ def sandbox_login(
 
     volume = sandbox_auth_volume_name(backend)
     print_info(f"Using Docker auth volume [cyan]{volume}[/cyan].")
-    if backend == "gemini":
+    if backend == "agy":
         print_warning(
-            "Gemini CLI does not expose a dedicated login subcommand; HELIX "
-            "starts the interactive Gemini CLI so you can complete its auth flow."
+            "Antigravity CLI does not expose a dedicated login subcommand; "
+            "HELIX starts the interactive Antigravity CLI so you can "
+            "complete its auth flow."
         )
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
     result = run_sandbox_auth_command(
@@ -593,7 +594,7 @@ def sandbox_logout(
 @click.option(
     "--backend",
     default=None,
-    type=click.Choice(["claude", "codex", "cursor", "gemini", "opencode"]),
+    type=click.Choice(["agy", "claude", "codex", "cursor", "opencode"]),
     help="Override the mutation backend.",
 )
 @click.option("--model", default=None, help="Override the backend model.")
@@ -602,10 +603,10 @@ def sandbox_logout(
     default=None,
     help=(
         "Override backend reasoning-effort level. Forwarded as --effort to "
-        "the 'claude' backend (low|medium|high), as model_reasoning_effort "
-        "to the 'codex' backend, and as --variant to the 'opencode' backend; "
-        "ignored by cursor/gemini (a warning is emitted when set on a backend "
-        "that does not support it)."
+        "the 'agy' and 'claude' backends (low|medium|high), as "
+        "model_reasoning_effort to the 'codex' backend, and as --variant to "
+        "the 'opencode' backend; ignored by cursor (a warning is emitted "
+        "when set on a backend that does not support it)."
     ),
 )
 def evolve(
