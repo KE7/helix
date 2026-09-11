@@ -138,7 +138,7 @@ def backend_display_name(backend: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Native transcript stores (``sandbox.preserve_backend_transcripts``)
+# Native transcript stores
 # ---------------------------------------------------------------------------
 #
 # Every backend CLI keeps its own durable record of a session somewhere under
@@ -250,3 +250,94 @@ def transcript_session_id_keys(backend: str) -> tuple[str, ...]:
     if source is None:
         return ("session_id", "sessionId", "sessionID")
     return source.id_keys
+
+
+# ---------------------------------------------------------------------------
+# Per-generation sandbox state reset
+# ---------------------------------------------------------------------------
+#
+# Every sandboxed agent run leaves session state behind in the
+# ``helix-auth-<backend>`` volume: transcripts, memories, shell snapshots,
+# indexes.  Left alone it accumulates across a whole evolution run and leaks
+# earlier candidates' work into later ones through the CLI's own history and
+# memory features.  ``helix.sandbox.reset_sandbox_agent_state`` deletes the
+# ``$HOME``-relative paths below at the start of every generation, after the
+# previous generation's transcripts were copied into the run.  Credentials and
+# operator configuration are deliberately absent from this table; the unit
+# test ``test_sandbox_state_paths_never_match_credentials`` guards that.  The
+# entries were verified against local installs of codex 0.154, opencode 1.18,
+# agy 1.1, cursor-agent 2026.08 and claude code; unknown directories were left
+# alone rather than guessed at.
+BACKEND_STATE_PATHS: dict[str, tuple[str, ...]] = {
+    "claude": (
+        ".claude/projects",  # per-project transcripts, memory/, todo state
+        ".claude/sessions",  # session index
+        ".claude/telemetry",
+        ".claude/backups",  # settings/conversation backups
+        ".claude/history.jsonl",  # prompt history
+        ".claude/shell-snapshots",
+        ".claude/file-history",  # pre-edit file copies
+        ".claude/session-env",
+        ".claude/debug",  # per-session debug logs
+        ".claude/paste-cache",
+        # kept: .credentials.json, settings.json, plugins, skills, cache, ~/.claude.json
+    ),
+    "codex": (
+        ".codex/sessions",  # rollout JSONL transcripts
+        ".codex/archived_sessions",
+        ".codex/session_index.jsonl",
+        ".codex/history.jsonl",  # prompt history
+        ".codex/memories",  # auto-memory text
+        ".codex/memories_*.sqlite*",
+        ".codex/shell_snapshots",
+        ".codex/state_*.sqlite*",  # thread state (state_5.sqlite + wal/shm)
+        ".codex/thread_history*.sqlite*",
+        ".codex/logs_*.sqlite*",
+        ".codex/models_cache.json",
+        ".codex/log",
+        # kept: auth.json, config.toml, AGENTS.md, installation_id, version.json,
+        #       .codex-global-state.json, skills, rules, plugins
+    ),
+    "agy": (
+        ".gemini/antigravity-cli/conversations",  # per-conversation .db/.pb
+        ".gemini/antigravity-cli/brain",  # transcripts, steps, task logs
+        ".gemini/antigravity-cli/cache",
+        ".gemini/antigravity-cli/log",
+        ".gemini/antigravity-cli/cli.log",
+        ".gemini/antigravity-cli/crashes",
+        ".gemini/antigravity-cli/presence",
+        ".gemini/antigravity-cli/knowledge",  # auto-memory
+        ".gemini/antigravity-cli/history.jsonl",
+        ".gemini/antigravity-cli/conversation_summaries.db",
+        # kept: antigravity-oauth-token, settings.json, installation_id,
+        #       keybindings.json, mcp, plugins, bin, builtin, updater
+    ),
+    "cursor": (
+        ".cursor/projects",  # agent-transcripts/, per-project state
+        ".cursor/chats",  # per-session store.db + meta.json
+        ".cursor/ai-tracking",
+        ".cursor/browser-logs",
+        ".cursor/prompt_history.json",
+        ".cursor/snapshots",
+        ".cursor/worktrees",
+        # kept: cli-config.json, mcp.json, agent-cli-state.json, extensions,
+        #       plugins, skills-cursor, ~/.config/cursor/auth.json
+    ),
+    "opencode": (
+        ".local/share/opencode/storage",  # legacy per-session JSON tree
+        ".local/share/opencode/snapshot",  # per-session git snapshots
+        ".local/share/opencode/tool-output",
+        ".local/share/opencode/log",
+        ".local/state/opencode/prompt-history.jsonl",
+        # opencode.db is NOT a path here: its ``account`` table holds the
+        # opencode account's access/refresh tokens, so the file is kept and
+        # only session rows are deleted (``OPENCODE_STATE_TABLES``).
+        # kept: auth.json, account.json, bin, ~/.local/state/opencode/locks
+    ),
+}
+
+# Tables in ``~/.local/share/opencode/opencode.db`` whose rows are per-session
+# state.  ``session`` is the parent; the others reference it by ``session_id``
+# (``part`` also by ``message_id``).  Listed children-first so the deletes do
+# not depend on foreign-key enforcement being on.
+OPENCODE_STATE_TABLES: tuple[str, ...] = ("part", "message", "session")

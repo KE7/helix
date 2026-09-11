@@ -1120,7 +1120,7 @@ class TestDockerEnvRedaction:
 
 
 # ---------------------------------------------------------------------------
-# preserve_backend_transcripts for non-Claude backends (auth-volume side)
+# Native transcript collection for non-Claude backends (auth-volume side)
 # ---------------------------------------------------------------------------
 
 
@@ -1262,3 +1262,132 @@ def test_agent_skips_transcript_helper_for_unsafe_session_id(tmp_path: Path, moc
     )
 
     assert not any("helix-auth-codex:/home/node:ro" in call for call in calls)
+
+
+# ---------------------------------------------------------------------------
+# Per-generation sandbox agent state reset
+# ---------------------------------------------------------------------------
+
+# Fixed, independent of the code under test: paths that must never be wiped.
+_CREDENTIAL_PATHS = (
+    ".claude/.credentials.json",
+    ".claude/settings.json",
+    ".claude.json",
+    ".codex/auth.json",
+    ".codex/config.toml",
+    ".codex/AGENTS.md",
+    ".codex/installation_id",
+    ".config/cursor/auth.json",
+    ".cursor/cli-config.json",
+    ".cursor/mcp.json",
+    ".gemini/antigravity-cli/antigravity-oauth-token",
+    ".gemini/antigravity-cli/settings.json",
+    ".gemini/antigravity-cli/installation_id",
+    ".local/share/opencode/auth.json",
+    ".local/share/opencode/account.json",
+    ".local/share/opencode/opencode.db",
+    ".local/state/opencode/locks",
+    ".local/state/opencode/locks/auth.lock",
+)
+
+
+def test_sandbox_state_paths_never_match_credentials():
+    from fnmatch import fnmatchcase
+    from pathlib import PurePosixPath
+
+    from helix.backends import BACKEND_STATE_PATHS, BACKENDS
+
+    assert set(BACKEND_STATE_PATHS) == set(BACKENDS)
+    for backend, patterns in BACKEND_STATE_PATHS.items():
+        assert patterns, backend
+        for pattern in patterns:
+            assert not pattern.startswith(("/", "~", "..")), pattern
+            assert "$" not in pattern, pattern
+            for cred in _CREDENTIAL_PATHS:
+                cred_path = PurePosixPath(cred)
+                targets = [cred, *(str(p) for p in cred_path.parents if str(p) != ".")]
+                hits = [t for t in targets if fnmatchcase(t, pattern)]
+                assert not hits, f"{backend}: {pattern!r} would remove {cred!r}"
+
+
+def test_reset_sandbox_agent_state_runs_single_writer_container(mocker, caplog):
+    from helix.backends import BACKEND_STATE_PATHS
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    caplog.set_level("INFO", logger="helix.sandbox")
+
+    count = sandbox_module.reset_sandbox_agent_state(
+        "codex", image="helix-test:latest", generation=3
+    )
+
+    assert count == len(BACKEND_STATE_PATHS["codex"])
+    [args] = calls
+    assert args[:2] == ["docker", "run"]
+    assert "helix-auth-codex:/home/node:rw" in args
+    assert args[args.index("--network") + 1] == "none"
+    assert args[args.index("--user") + 1] == "node"
+    assert args[-3:-1] == ["sh", "-c"]
+    script = args[-1]
+    assert script.startswith("set -u; rm -rf ")
+    for path in BACKEND_STATE_PATHS["codex"]:
+        assert '"$HOME"/' + path.replace("*", "*") in script or path in script
+    assert "auth.json" not in script and "config.toml" not in script
+    assert any(
+        rec.levelname == "INFO"
+        and rec.message
+        == f"reset codex agent state in helix-auth-codex before generation 3 ({count} paths)"
+        for rec in caplog.records
+    )
+
+
+def test_reset_sandbox_agent_state_opencode_deletes_rows_not_db(mocker):
+    calls: list[list[str]] = []
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        side_effect=lambda args, **kw: (
+            calls.append(args),
+            subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+        )[1],
+    )
+
+    sandbox_module.reset_sandbox_agent_state("opencode", image="img")
+
+    script = calls[0][-1]
+    rm_part, _, py_part = script.partition("; python3 -c ")
+    assert "opencode.db" not in rm_part
+    assert "auth.json" not in rm_part
+    assert "opencode.db" in py_part
+    for table in ("part", "message", "session"):
+        assert table in py_part
+    assert "account" not in py_part
+
+
+def test_reset_sandbox_agent_state_failure_is_a_warning(mocker, caplog):
+    caplog.set_level("WARNING", logger="helix.sandbox")
+    mocker.patch(
+        "helix.sandbox.subprocess.run",
+        return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="rm: boom"),
+    )
+    assert sandbox_module.reset_sandbox_agent_state("claude", image="img") == 0
+    assert any(
+        "failed to reset claude agent state in helix-auth-claude" in rec.message
+        and "rm: boom" in rec.message
+        for rec in caplog.records
+    )
+
+    caplog.clear()
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=OSError("no docker"))
+    assert sandbox_module.reset_sandbox_agent_state("claude", image="img") == 0
+    assert any("no docker" in rec.message for rec in caplog.records)
+
+
+def test_reset_sandbox_agent_state_unknown_backend_is_noop(mocker):
+    run = mocker.patch("helix.sandbox.subprocess.run")
+    assert sandbox_module.reset_sandbox_agent_state("nope", image="img") == 0
+    run.assert_not_called()

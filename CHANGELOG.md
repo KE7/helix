@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Sandboxed runs now reset the backend CLI's session state in its
+  `helix-auth-<backend>` volume at the start of every generation
+  (`helix.sandbox.reset_sandbox_agent_state`, driven by
+  `helix.backends.BACKEND_STATE_PATHS`): transcripts, memories, shell
+  snapshots and session indexes are removed so no candidate sees another's
+  history. Credentials and operator configuration are never touched; for
+  OpenCode only the `session`/`message`/`part` rows are deleted from
+  `opencode.db` because the same file holds the account's tokens. A failed
+  wipe is a warning, never fatal. Unsandboxed runs are not affected.
+- Tool-call counts for `agy` are now read from its native
+  `transcript.jsonl` (`tool_calls[*].name` on planner steps); its JSON
+  stdout envelope carries no per-tool events.
+
 ### Changed
+- **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
+  configuration field. Every backend's native transcript is now always
+  copied out of the auth volume (or `$HOME` when unsandboxed) at the end of
+  each invocation, always kept under
+  `.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl`, and
+  always used for tool-call accounting; there is no way to opt out because
+  the sandbox resets the backend's state every generation and the copy is
+  the only record. Configurations that still set the field are rejected by
+  Pydantic's `extra="forbid"` validation. Previously turning the option off
+  also lost Claude's tool-call counts, which only the transcript carries.
 - **BREAKING**: Removed the `gemini` mutation backend and replaced it with
   `agy` (Google's Antigravity CLI). Configs with `agent.backend = "gemini"`
   are rejected; migrate to `"agy"`. `helix-auth-gemini` sandbox volumes are
@@ -65,9 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
-- `sandbox.preserve_backend_transcripts` now covers every backend. It was
-  only ever implemented for `claude`; `codex`, `opencode`, `agy`, and
-  `cursor` runs silently kept no native transcript. Each backend's own
+- Backend transcript preservation now covers every backend. It was only ever
+  implemented for `claude`; `codex`, `opencode`, `agy`, and `cursor` runs
+  silently kept no native transcript. Each backend's own
   session record is now located by a single per-backend table
   (`helix.backends.BACKEND_TRANSCRIPT_SOURCES`), copied out of the
   `helix-auth-<backend>` volume (or the operator's `$HOME` when unsandboxed)

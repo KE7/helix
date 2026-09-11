@@ -2122,7 +2122,7 @@ class TestSalvageBackendUsage:
 
 
 # ---------------------------------------------------------------------------
-# preserve_backend_transcripts for non-Claude backends
+# Native transcript collection for non-Claude backends
 # ---------------------------------------------------------------------------
 
 
@@ -2327,21 +2327,6 @@ class TestBackendTranscriptCollection:
         assert artifacts[0]["available"] is True
         assert sorted(p.name for p in out.iterdir()) == [f"{sid}.jsonl"]
 
-    def test_disabled_option_collects_nothing(self, home: Path, worktree: Path):
-        src = home / ".codex/sessions/2026/09/10/rollout-x-thr_123.jsonl"
-        src.parent.mkdir(parents=True)
-        src.write_text("host\n")
-
-        assert (
-            _collect(
-                worktree,
-                "codex",
-                "thr_123",
-                SandboxConfig(preserve_backend_transcripts=False),
-            )
-            == []
-        )
-
     def test_unsafe_session_id_is_skipped(self, home: Path, worktree: Path, caplog):
         caplog.set_level("DEBUG", logger="helix.mutator")
         assert _collect(worktree, "codex", "../../etc/passwd") == []
@@ -2374,3 +2359,153 @@ class TestBackendTranscriptCollection:
         assert payload["transcript_artifacts"]
         assert all(a["session_id"] == "thr_9" for a in payload["transcript_artifacts"])
         assert all(a["backend"] == backend for a in payload["transcript_artifacts"])
+
+
+# ---------------------------------------------------------------------------
+# Tool-event counting from the kept native transcript
+# ---------------------------------------------------------------------------
+
+
+_CLAUDE_TOOL_TRANSCRIPT = "".join(
+    json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "name": name, "input": {}}]
+            },
+        }
+    )
+    + "\n"
+    for name in ("Read", "Edit", "Bash")
+)
+
+
+class TestToolCountsFromNativeTranscript:
+    def test_claude_counts_come_from_kept_transcript(self, tmp_path: Path, mocker):
+        root = tmp_path / "claude-root"
+        root.mkdir()
+        (root / "sess_tool.jsonl").write_text(_CLAUDE_TOOL_TRANSCRIPT)
+        mock_run = mocker.patch("helix.mutator.subprocess.run")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","session_id":"sess_tool","num_turns":2}\n',
+            stderr="",
+            returncode=0,
+        )
+        wt = tmp_path / "g1-s1"
+        wt.mkdir()
+
+        invoke_claude_code(
+            str(wt),
+            "prompt",
+            AgentConfig(backend="claude"),
+            sandbox=SandboxConfig(claude_transcript_root=str(root)),
+        )
+
+        payload = json.loads((wt / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["usage"]["tool_event_count"] == 3
+        assert payload["usage"]["tool_names"] == ["Read", "Edit", "Bash"]
+        copied = wt / ".helix_artifacts" / "backend_transcripts"
+        assert (copied / "claude" / "sess_tool.jsonl").is_file()
+        assert payload["transcript_artifacts"][0]["available"] is True
+        assert (wt / BACKEND_STDOUT_ARTIFACT_NAME).read_text().startswith('{"type"')
+
+    def test_agy_counter_reads_native_transcript(self, tmp_path: Path):
+        from helix.mutator import _count_agy_transcript_tool_events
+
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "USER_INPUT", "content": "go"})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "PLANNER_RESPONSE",
+                    "tool_calls": [
+                        {"name": "view_file", "args": "{}"},
+                        {"name": "run_command", "args": "{}"},
+                    ],
+                }
+            )
+            + "\nnot json\n"
+            + json.dumps({"type": "PLANNER_RESPONSE", "tool_calls": [{"name": 3}]})
+            + "\n"
+            + json.dumps({"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "grep_search"}]})
+            + "\n"
+        )
+
+        assert _count_agy_transcript_tool_events(transcript) == (
+            3,
+            ["view_file", "run_command", "grep_search"],
+        )
+
+    def test_agy_counts_patched_from_kept_transcript(self, tmp_path: Path, monkeypatch):
+        from helix.mutator import _collect_backend_transcript_artifacts
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        sid = "conv-1"
+        logs = home / ".gemini/antigravity-cli/brain" / sid / ".system_generated/logs"
+        logs.mkdir(parents=True)
+        (logs / "transcript.jsonl").write_text(
+            json.dumps({"type": "PLANNER_RESPONSE", "tool_calls": [{"name": "list_dir"}]})
+            + "\n"
+        )
+        (logs / "transcript_full.jsonl").write_text("full\n")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        usage = UsageStats(session_id=sid)
+
+        artifacts = _collect_backend_transcript_artifacts(
+            str(wt),
+            backend="agy",
+            usage=usage,
+            sandbox=SandboxConfig(),
+        )
+
+        assert usage.tool_event_count == 1
+        assert usage.tool_names == ["list_dir"]
+        assert len(artifacts) == 2
+        assert (
+            wt / ".helix_artifacts/backend_transcripts/agy" / f"{sid}.full.jsonl"
+        ).is_file()
+
+    def test_stdout_artifacts_written_even_when_transcript_missing(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from helix.mutator import _write_backend_artifacts
+
+        monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+        stdout = '{"type":"thread.started","thread_id":"thr_1"}\n'
+        _write_backend_artifacts(
+            str(tmp_path),
+            backend="codex",
+            command="codex",
+            result=subprocess.CompletedProcess(["codex"], 0, stdout=stdout, stderr="e"),
+            parsed={"events": [json.loads(stdout)]},
+            sandbox=SandboxConfig(),
+        )
+
+        assert (tmp_path / BACKEND_STDOUT_ARTIFACT_NAME).read_text() == stdout
+        assert (tmp_path / BACKEND_STDERR_ARTIFACT_NAME).read_text() == "e"
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["transcript_artifacts"][0]["available"] is False
+
+    def test_sandboxed_miss_logs_warning_with_candidate_and_path(
+        self, tmp_path: Path, caplog
+    ):
+        from helix.mutator import _collect_backend_transcript_artifacts
+
+        wt = tmp_path / "g3-s7"
+        wt.mkdir()
+        caplog.set_level("WARNING", logger="helix.mutator")
+
+        _collect_backend_transcript_artifacts(
+            str(wt),
+            backend="codex",
+            usage=UsageStats(session_id="thr_missing"),
+            sandbox=SandboxConfig(enabled=True),
+        )
+
+        [rec] = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert "codex transcript for candidate g3-s7 not preserved" in rec.message
+        assert "transcript_not_found" in rec.message
+        assert "backend_transcripts/codex/thr_missing.jsonl" in rec.message

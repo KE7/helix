@@ -104,10 +104,9 @@ For backend diagnostics in a candidate worktree, inspect:
 The backend result JSON includes normalized usage metadata and
 `transcript_artifacts` entries describing the backend CLI's own transcript
 for the invocation (`available: false` plus a `reason` when it could not be
-found).  With `preserve_backend_transcripts = true` (the default) HELIX copies
-that native transcript for every backend, in Docker sandbox mode out of the
-`helix-auth-<backend>` volume before syncing changes back, otherwise from the
-operator's `$HOME`:
+found).  HELIX always copies that native transcript for every backend, in
+Docker sandbox mode out of the `helix-auth-<backend>` volume before syncing
+changes back, otherwise from the operator's `$HOME`:
 
 | backend | native source (relative to `$HOME`) | artifact |
 | --- | --- | --- |
@@ -121,6 +120,13 @@ The structured stdout of the JSONL backends is still kept verbatim in
 `.helix_backend_stdout.txt`; the native transcript is preserved in addition
 because it carries the full per-turn record (tool payloads, reasoning items)
 that the streamed events elide.
+
+In Docker sandbox mode the backend's session state in `helix-auth-<backend>`
+is wiped at the start of every generation (see `helix.backends.
+BACKEND_STATE_PATHS`; one `reset <backend> agent state in ...` INFO line per
+generation, a WARNING if the wipe fails), so a transcript that could not be
+copied is logged at WARNING with the candidate id and the path looked for,
+and cannot be recovered from the volume afterwards.
 
 ## Resuming
 

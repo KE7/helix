@@ -21,8 +21,10 @@ from typing import Literal
 
 from helix.backends import (
     BACKEND_AUTH_COMMANDS,
+    BACKEND_STATE_PATHS,
     BACKEND_TRANSCRIPT_SOURCES,
     DEFAULT_BACKEND_IMAGES,
+    OPENCODE_STATE_TABLES,
     TRANSCRIPT_SESSION_ID_RE,
     transcript_session_id_keys,
 )
@@ -269,8 +271,11 @@ def _copy_backend_transcript_from_auth_volume(
     ``BACKEND_TRANSCRIPT_SOURCES`` (or ``claude_transcript_root`` for claude)
     into ``<transcript_artifact_dir>/<backend>/`` so the regular sync-back
     carries them to the candidate worktree.
+
+    This always runs: the mutator needs the copy to count tool events, and
+    the volume is reset at the next generation, so the copy is the record.
     """
-    if agent_backend is None or not sandbox.preserve_backend_transcripts:
+    if agent_backend is None:
         return
     session_id = _extract_session_id_from_json_output(
         stdout, transcript_session_id_keys(agent_backend)
@@ -321,6 +326,114 @@ def _copy_backend_transcript_from_auth_volume(
         command,
     ]
     _run_docker(args, check=False)
+
+
+_OPENCODE_STATE_ROWS_SCRIPT = (
+    "import os, sqlite3\n"
+    "db = os.path.expanduser('~/.local/share/opencode/opencode.db')\n"
+    "if os.path.isfile(db):\n"
+    "    con = sqlite3.connect(db)\n"
+    "    names = {r[0] for r in con.execute(\"select name from sqlite_master where type='table'\")}\n"
+    "    for t in %s:\n"
+    "        if t in names: con.execute('delete from \"%%s\"' %% t)\n"
+    "    con.commit(); con.close()\n"
+) % (OPENCODE_STATE_TABLES,)
+
+
+def _backend_state_reset_script(agent_backend: str) -> str | None:
+    """Build the ``sh`` script that deletes ``agent_backend``'s session state.
+
+    Returns ``None`` when the table has nothing for the backend.  Paths are
+    ``$HOME``-relative globs from ``BACKEND_STATE_PATHS``; for opencode the
+    session rows are additionally deleted from ``opencode.db`` in place so the
+    credential rows in the same file survive.
+    """
+    paths = BACKEND_STATE_PATHS.get(agent_backend)
+    if not paths:
+        return None
+    words = " ".join('"$HOME"/' + _shell_glob_word(path) for path in paths)
+    script = f"set -u; rm -rf {words}"
+    if agent_backend == "opencode":
+        script += "; python3 -c " + shlex.quote(_OPENCODE_STATE_ROWS_SCRIPT)
+    return script
+
+
+def reset_sandbox_agent_state(
+    agent_backend: str,
+    *,
+    image: str | None = None,
+    generation: int | None = None,
+) -> int:
+    """Delete the backend CLI's session state from its sandbox auth volume.
+
+    Runs once per generation from ``run_evolution`` (sandboxed runs only) in a
+    single-writer container that mounts ``helix-auth-<backend>`` read-write
+    with no network, so each generation's candidates start from a CLI with no
+    memory of earlier candidates.  Transcripts were already copied into the
+    run at the end of each invocation, so nothing HELIX keeps is lost.  Credentials and operator configuration are
+    never touched (see ``BACKEND_STATE_PATHS``).  Returns the number of state
+    paths in the table; a failure is logged as a warning and never raised.
+    """
+    script = _backend_state_reset_script(agent_backend)
+    if script is None:
+        logger.debug("no sandbox state paths known for backend %s", agent_backend)
+        return 0
+    volume = sandbox_auth_volume_name(agent_backend)
+    docker_image = image or resolve_sandbox_image(
+        SandboxConfig(enabled=True), agent_backend
+    )
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--workdir",
+        "/home/node",
+        "--user",
+        "node",
+        "--network",
+        "none",
+        "--security-opt",
+        "no-new-privileges",
+        "-v",
+        f"{volume}:/home/node:rw",
+        "-e",
+        "HOME=/home/node",
+        docker_image,
+        "sh",
+        "-c",
+        script,
+    ]
+    count = len(BACKEND_STATE_PATHS[agent_backend])
+    label = f" before generation {generation}" if generation is not None else ""
+    try:
+        result = _run_docker(args, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "failed to reset %s agent state in %s%s: %s",
+            agent_backend,
+            volume,
+            label,
+            exc,
+        )
+        return 0
+    if result.returncode != 0:
+        logger.warning(
+            "failed to reset %s agent state in %s%s (exit %s): %s",
+            agent_backend,
+            volume,
+            label,
+            result.returncode,
+            (result.stderr or "").strip()[-500:],
+        )
+        return 0
+    logger.info(
+        "reset %s agent state in %s%s (%d paths)",
+        agent_backend,
+        volume,
+        label,
+        count,
+    )
+    return count
 
 
 def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
