@@ -34,7 +34,7 @@ from helix.exceptions import (
 )
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
-from helix.state import load_state, save_state
+from helix.state import load_state, save_state, state_file_exists
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,28 @@ _HELIX_DIR = ".helix"
 
 def _helix_dir(project_root: Path) -> Path:
     return project_root / _HELIX_DIR
+
+
+def _print_credential_failure_hint(
+    project_root: Path, backend: str, exc: CredentialRefreshError
+) -> None:
+    """Say what to do after a credential failure -- truthfully about state.
+
+    Seedless seed generation is the one path that reaches the CLI handler,
+    and it fails before the first ``save_state``; promising ``helix resume``
+    then sends the operator to a command that starts a fresh run.
+    """
+    from helix.evolution import _credential_remedy
+
+    remedy = _credential_remedy(backend, transient=exc.transient)
+    if state_file_exists(project_root):
+        print_error(f"Evolution state has been saved. {remedy}")
+        return
+    print_error(
+        "No evolution state was saved: the failure happened before the first "
+        "generation completed, so there is nothing to resume. "
+        + remedy.replace("[cyan]helix resume[/cyan]", "[cyan]helix evolve[/cyan]")
+    )
 
 
 def _print_cleanup_hint() -> None:
@@ -702,15 +724,13 @@ def evolve(
         raise SystemExit(2)
     except CredentialRefreshError as exc:
         # Every in-loop path handles this itself (the slot is skipped and the
-        # run continues), so reaching here means a path that does not.  Show
-        # the panel with its suggestion instead of a raw traceback.
+        # run continues), so reaching here means a path that does not -- in
+        # practice seedless seed generation, which runs before any state has
+        # been saved.  Show the panel with its suggestion instead of a raw
+        # traceback, and only promise a resume when there is a state file.
         logger.error("Credential failure escaped the evolution loop: %s", exc)
         print_helix_error(exc)
-        print_error(
-            "Evolution state has been saved. Re-authenticate with "
-            f"[cyan]helix sandbox login {config.agent.backend}[/cyan] if the "
-            "login is stale, then run [cyan]helix resume[/cyan]."
-        )
+        _print_credential_failure_hint(project_root, config.agent.backend, exc)
         raise SystemExit(2)
     except KeyboardInterrupt:
         _handle_keyboard_interrupt(project_root)
@@ -1257,11 +1277,7 @@ def resume(config_path: str, project_dir: Path | None) -> None:
     except CredentialRefreshError as exc:
         logger.error("Credential failure escaped the resumed loop: %s", exc)
         print_helix_error(exc)
-        print_error(
-            "Evolution state has been saved. Re-authenticate with "
-            f"[cyan]helix sandbox login {config.agent.backend}[/cyan] if the "
-            "login is stale, then run [cyan]helix resume[/cyan] again."
-        )
+        _print_credential_failure_hint(project_root, config.agent.backend, exc)
         raise SystemExit(2)
     except KeyboardInterrupt:
         _handle_keyboard_interrupt(project_root)
