@@ -625,6 +625,36 @@ def _looks_like_rate_limit(text: str) -> bool:
 # "auth") is the false-positive trap this repo has already paid for once --
 # a candidate whose own diff or test output mentions tokens must never be
 # reported to the operator as a broken login.
+#
+# Which backends can actually lose a refresh race.  Every candidate container
+# mounts the same login volume read-write, so when a credential goes stale the
+# candidates in flight may each decide a refresh is due at the same moment.
+# Whether that is a hazard depends on how the CLI performs the refresh:
+#
+#   codex     YES.  Single-use refresh token, and no cross-process
+#             serialisation.  Measured against codex-cli 0.130.0 with a
+#             synthetic credential and a local single-use token endpoint: five
+#             simultaneous candidates produced five token exchanges, one
+#             granted and four rejected with "your refresh token was already
+#             used" -- and all five processes exited 0 with empty stderr.
+#   opencode  YES, and unmitigated.  It refreshes an ``oauth`` credential only
+#             from inside the fetch wrapper that issues a model request
+#             (opencode-ai 1.14.24), writing the new credential back unlocked.
+#             No free command takes the refresh path, so there is nothing that
+#             could serialise it short of a model call.  (``api``-type
+#             credentials never refresh and are not at risk.)
+#   claude    NO.  Claude Code takes a real cross-process lock file, retries
+#             while another process holds it, and re-reads the credential
+#             afterwards, so two candidates cannot spend the same grant.
+#   cursor    NO.  It re-exchanges an API key rather than spending a stored
+#             refresh token; there is no single-use grant to race for.
+#   agy       UNMEASURED.  No agy credential was available to test against,
+#             so this is unknown rather than safe.
+#
+# Nothing pre-empts the race: what recovers a lost one is the caller-level
+# one-shot retry (``invoke_with_refresh_race_retry``), which re-runs the
+# invocation from a fresh worktree against the credential the winner stored.
+#
 # Markers whose failure is *transient*: the credential is not broken, this
 # invocation merely lost a refresh race.  Checked before the general markers so
 # the more specific wording is what gets reported, and so the caller can retry

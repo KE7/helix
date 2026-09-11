@@ -81,12 +81,6 @@ testpaths = ["tests"]
 # (a now-fixed NB-2-style infinite loop that wedged CI for 24 minutes).
 timeout = 60
 timeout_method = "thread"
-# tests/integration/ runs real backend containers and is not run in CI.  Keep
-# a bare `pytest` from collecting it by default; opt in with
-# `pytest -m docker_integration tests/integration/` (a command-line -m
-# overrides this).
-addopts = "-m 'not docker_integration'"
 markers = [
     "diff_harness: differential-testing harness (phases 2-4)",
-    "docker_integration: runs real containers; needs a Docker daemon and the backend images",
 ]
