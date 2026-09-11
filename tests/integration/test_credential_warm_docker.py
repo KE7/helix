@@ -6,11 +6,13 @@ change is worse than useless:
 
 (a) it costs nothing -- no model call, no quota, on an operator's paid account
     that would otherwise be charged once per generation; and
-(b) it does nothing at all when the credential is already fresh.
+(b) it does not touch the credential when it is already fresh.
 
 Both are asserted here by running the registered warm command with
 ``--network none``.  A command that completes with no network cannot have
-reached a model; a warm that leaves the volume byte-identical did no work.
+reached a model; a warm that leaves ``auth.json`` byte-identical spent no
+refresh token.  (The CLI may still write its own catalog cache,
+``~/.codex/models_cache.json``, beside it; that file is not the credential.)
 
 Credentials are synthetic and live in throwaway volumes (see ``conftest``); no
 test logs in, and none can reach a real ``helix-auth-*`` volume.
@@ -19,6 +21,7 @@ test logs in, and none can reach a real ``helix-auth-*`` volume.
 from __future__ import annotations
 
 import subprocess
+import uuid
 
 import pytest
 
@@ -67,6 +70,10 @@ def _run_warm(*, image: str, volume: str, backend: str, timeout: int = 180):
         "docker",
         "run",
         "--rm",
+        # Named so a hang can be stopped by name; the volume fixture removes
+        # its volume in teardown, which fails while a container holds it.
+        "--name",
+        f"helix-integration-warm-{uuid.uuid4().hex[:12]}",
         "--network",
         "none",
         "--security-opt",
@@ -161,8 +168,9 @@ def test_codex_warm_is_a_no_op_on_a_fresh_credential(
     before_files = _files(volume_listing(volume, image))
     before_digest = _auth_digest(volume, image)
 
-    _run_warm(image=image, volume=volume, backend="codex")
+    result = _run_warm(image=image, volume=volume, backend="codex")
 
+    assert result.returncode == 0, result.stderr
     assert _auth_digest(volume, image) == before_digest
     assert _files(volume_listing(volume, image)) == before_files
 
@@ -181,12 +189,14 @@ def test_repeated_codex_warms_leave_no_residue(
     image = require_image(CODEX_IMAGE)
     volume = throwaway_volume(image, SYNTHETIC_FRESH_CODEX_AUTH)
 
-    _run_warm(image=image, volume=volume, backend="codex")
+    first = _run_warm(image=image, volume=volume, backend="codex")
+    assert first.returncode == 0, first.stderr
     after_first = volume_listing(volume, image)
     digest_first = _auth_digest(volume, image)
 
     for _ in range(2):
-        _run_warm(image=image, volume=volume, backend="codex")
+        again = _run_warm(image=image, volume=volume, backend="codex")
+        assert again.returncode == 0, again.stderr
 
     assert volume_listing(volume, image) == after_first
     assert _auth_digest(volume, image) == digest_first
