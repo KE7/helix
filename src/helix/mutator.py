@@ -10,7 +10,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.backends import BACKEND_AUTH_ENV, backend_display_name
+from helix.backends import (
+    BACKEND_AUTH_ENV,
+    BACKEND_FRESH_SESSION_ENV,
+    backend_display_name,
+)
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
@@ -990,6 +994,11 @@ def _build_backend_args(
             "exec",
             "--json",
             "--dangerously-bypass-approvals-and-sandbox",
+            # Pin codex's cross-session memory off (default off, but a flag)
+            # so no candidate reads a prior candidate's session; see
+            # ``helix.backends.BACKEND_FRESH_SESSION_ENV``.
+            "-c",
+            "features.memories=false",
         ]
         if config.model:
             args.extend(["--model", config.model])
@@ -1885,6 +1894,7 @@ def invoke_claude_code(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
+    backend_env.update(BACKEND_FRESH_SESSION_ENV.get(backend, {}))
     if backend == "opencode" and (sandbox is None or not sandbox.enabled):
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
