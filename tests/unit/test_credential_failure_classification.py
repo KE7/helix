@@ -679,6 +679,7 @@ class _RetryHarness:
         self.removed: list[Candidate] = []
         self.run_cwds: list[str] = []
         self.spent: list[UsageStats] = []
+        self.wasted: list[UsageStats] = []
         self.recovered: list[str] = []
         self.parent = _candidate("g0-s0", tmp_path / "parent")
 
@@ -716,7 +717,14 @@ class _RetryHarness:
 
         return self.mocker.patch("helix.mutator.subprocess.run", side_effect=_run)
 
-    def mutate(self) -> Candidate | None:
+    def mutate(self, *, split_waste: bool = True) -> Candidate | None:
+        """Run the mutation.
+
+        ``split_waste`` mirrors what ``evolution.py`` does: it supplies the
+        second sink, so an attempt lost to a refresh race is reported apart
+        from the work that was actually kept.  Pass ``False`` to exercise the
+        fallback a caller without a second sink gets.
+        """
         return mutate(
             self.parent,
             make_eval_result("g0-s0"),
@@ -724,6 +732,7 @@ class _RetryHarness:
             _codex_config(),
             self.tmp_path,
             record_usage=self.spent.append,
+            record_wasted_usage=self.wasted.append if split_waste else None,
             on_refresh_race_recovered=self.recovered.append,
         )
 
@@ -808,9 +817,16 @@ class TestLostRefreshRaceIsRetried:
         ):
             assert name in gitignore
 
-    def test_recovered_race_is_reported_and_charged_once(
+    def test_recovered_race_reports_the_lost_attempt_apart_from_the_kept_one(
         self, mocker: Any, tmp_path: Path
     ) -> None:
+        """Both attempts are reported once — but not as the same spend.
+
+        Folding them together made the lost attempt look like part of a
+        productive mutation.  The two sinks split it: the retry's tokens are
+        the mutation's, the lost attempt's are their own record, and the sum
+        is what it always was.
+        """
         h = _RetryHarness(tmp_path, mocker)
         h.run_backend(
             [
@@ -822,16 +838,47 @@ class TestLostRefreshRaceIsRetried:
         child = h.mutate()
         assert child is not None
 
-        # The caller sees the sum, exactly once, and the child carries it.
+        # The kept work is billed for its own tokens only.
         assert len(h.spent) == 1
-        assert h.spent[0].input_tokens == 5 + 12
-        assert h.spent[0].output_tokens == 2 + 8
+        assert h.spent[0].input_tokens == 12
+        assert h.spent[0].output_tokens == 8
         assert h.spent[0].session_id == "won"
-        assert child.usage.input_tokens == 5 + 12
+        assert child.usage.input_tokens == 12
+        # The thrown-away attempt is reported once, separately.
+        assert len(h.wasted) == 1
+        assert h.wasted[0].input_tokens == 5
+        assert h.wasted[0].output_tokens == 2
+        # And the total is unchanged.
+        assert h.spent[0].input_tokens + h.wasted[0].input_tokens == 5 + 12
+        assert h.spent[0].output_tokens + h.wasted[0].output_tokens == 2 + 8
         # The race is visible to whoever keeps the end-of-run summary.
         assert len(h.recovered) == 1
         assert "recovered after a lost refresh race" in h.recovered[0]
         assert "g1-s0" in h.recovered[0]
+
+    def test_without_a_waste_sink_the_first_attempt_still_rides_along(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """A caller with nowhere to put the second record must not lose it.
+
+        Separating the two spends is an attribution improvement; it must
+        never become a way for tokens to go uncharged.
+        """
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend(
+            [
+                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+                _completed(0, stdout=CODEX_SUCCESS_STREAM),
+            ]
+        )
+
+        child = h.mutate(split_waste=False)
+        assert child is not None
+        assert h.wasted == []
+        assert len(h.spent) == 1
+        assert h.spent[0].input_tokens == 5 + 12
+        assert h.spent[0].output_tokens == 2 + 8
+        assert child.usage.input_tokens == 5 + 12
 
     def test_zero_exit_codex_error_event_is_retried_too(
         self, mocker: Any, tmp_path: Path
@@ -853,7 +900,7 @@ class TestLostRefreshRaceIsRetried:
         assert h.mutate() is h.clones[1]
         assert run.call_count == 2
 
-    def test_second_loss_is_raised_with_the_sum_and_no_relogin_instruction(
+    def test_second_loss_charges_both_attempts_once_and_no_relogin_instruction(
         self, mocker: Any, tmp_path: Path
     ) -> None:
         h = _RetryHarness(tmp_path, mocker)
@@ -877,20 +924,27 @@ class TestLostRefreshRaceIsRetried:
         # operator to throw it away.
         assert "sandbox login" not in err.suggestion
         assert "helix resume" in err.suggestion
-        # Both attempts' spend, attached to the error and handed to the sink.
+        # Each attempt's spend is reported exactly once: the retry's on the
+        # error it raised, the lost first attempt's on its own sink.  Their
+        # sum is what a single combined record used to carry.
         assert err.usage is not None
-        assert err.usage.input_tokens == 5 + 3
-        assert err.usage.output_tokens == 2 + 1
+        assert err.usage.input_tokens == 3
+        assert err.usage.output_tokens == 1
         assert err.usage.session_id == "lost-2"
         assert h.spent == [err.usage]
+        assert len(h.wasted) == 1
+        assert h.wasted[0].input_tokens == 5
+        assert h.wasted[0].output_tokens == 2
+        assert err.usage.input_tokens + h.wasted[0].input_tokens == 5 + 3
+        assert err.usage.output_tokens + h.wasted[0].output_tokens == 2 + 1
         # Neither worktree leaks.
         assert h.removed == h.clones
         assert h.recovered == []
 
-    def test_retry_failing_for_another_reason_still_carries_the_sum(
+    def test_retry_failing_for_another_reason_still_charges_both_attempts(
         self, mocker: Any, tmp_path: Path
     ) -> None:
-        """The retry's error class does not matter; the first spend rides along."""
+        """The retry's error class does not matter; neither spend goes missing."""
         h = _RetryHarness(tmp_path, mocker)
         h.run_backend(
             [
@@ -904,16 +958,22 @@ class TestLostRefreshRaceIsRetried:
         )
         assert h.mutate() is None  # MutationError -> None, by contract
         assert len(h.spent) == 1
-        assert h.spent[0].input_tokens == 5 + 4
-        assert h.spent[0].output_tokens == 2
+        assert h.spent[0].input_tokens == 4
+        assert h.spent[0].output_tokens == 0
+        assert len(h.wasted) == 1
+        assert h.wasted[0].input_tokens == 5
+        assert h.wasted[0].output_tokens == 2
+        assert h.spent[0].input_tokens + h.wasted[0].input_tokens == 5 + 4
+        assert h.spent[0].output_tokens + h.wasted[0].output_tokens == 2
         assert h.removed == h.clones
 
-    def test_timeout_on_the_retry_records_the_first_spend_and_cleans_up(
+    def test_timeout_on_the_retry_records_the_wasted_spend_and_cleans_up(
         self, mocker: Any, tmp_path: Path
     ) -> None:
         """A sandbox ``TimeoutExpired`` is not a HelixError and carries no
-        usage: the first attempt's spend must still reach the sink, and the
-        retry's worktree must not leak."""
+        usage: the first attempt's spend must still be reported — as waste,
+        since nothing productive came of it — and the retry's worktree must
+        not leak."""
         h = _RetryHarness(tmp_path, mocker)
         h.run_backend(
             [
@@ -923,9 +983,10 @@ class TestLostRefreshRaceIsRetried:
         )
         with pytest.raises(subprocess.TimeoutExpired):
             h.mutate()
-        assert len(h.spent) == 1
-        assert h.spent[0].input_tokens == 5
-        assert h.spent[0].output_tokens == 2
+        assert h.spent == []
+        assert len(h.wasted) == 1
+        assert h.wasted[0].input_tokens == 5
+        assert h.wasted[0].output_tokens == 2
         assert h.removed == h.clones
 
     def test_timeout_on_the_first_attempt_cleans_up(
@@ -954,6 +1015,8 @@ class TestLostRefreshRaceIsRetried:
         # Item: the credential path records usage like its siblings.
         assert len(h.spent) == 1
         assert h.spent[0].input_tokens == 5
+        # No retry happened, so nothing was wasted on a lost race.
+        assert h.wasted == []
         assert h.removed == h.clones
 
 

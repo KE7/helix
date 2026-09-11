@@ -51,17 +51,30 @@ class MutationFailedProposal:
     under-reports the run's cost by however much the failed attempt burned.
     ``None`` means no backend invocation happened — a parent eval that
     raised, or a worker that died before the LLM call.
+
+    ``child_wasted_usage`` is the spend of an attempt thrown away after a
+    lost refresh race (see
+    :func:`helix.mutator.invoke_with_refresh_race_retry`).  It is charged in
+    the apply phase alongside ``child_usage`` but under ``source=
+    "refresh_race_retry"``, so the run's total is unchanged while the cost of
+    losing races stays visible instead of hiding inside a mutation's bill.
+    ``None`` means no attempt was lost.
     """
 
     presample_ctx: ProposalContext
     parent_eval_result: EvalResult | None
     parent_n_uncached: int = 0
     child_usage: UsageStats | None = None
+    child_wasted_usage: UsageStats | None = None
 
 
 @dataclass
 class TamperedProposal:
-    """The child modified protected evaluator files and must be rejected."""
+    """The child modified protected evaluator files and must be rejected.
+
+    ``child_wasted_usage`` carries a lost refresh race's wasted spend, as on
+    :class:`MutationFailedProposal`.
+    """
 
     presample_ctx: ProposalContext
     parent_eval_result: EvalResult
@@ -69,11 +82,16 @@ class TamperedProposal:
     tampered_paths: list[str]
     parent_n_uncached: int = 0
     child_usage: UsageStats | None = None
+    child_wasted_usage: UsageStats | None = None
 
 
 @dataclass
 class EvaluatedProposal:
-    """Every step completed; ``child_eval_result`` is None on the no-minibatch path."""
+    """Every step completed; ``child_eval_result`` is None on the no-minibatch path.
+
+    ``child_wasted_usage`` carries a lost refresh race's wasted spend, as on
+    :class:`MutationFailedProposal`.
+    """
 
     presample_ctx: ProposalContext
     parent_eval_result: EvalResult
@@ -82,6 +100,7 @@ class EvaluatedProposal:
     parent_n_uncached: int = 0
     child_n_uncached: int = 0
     child_usage: UsageStats | None = None
+    child_wasted_usage: UsageStats | None = None
 
 
 ProposalResult: TypeAlias = (

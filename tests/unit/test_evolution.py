@@ -1132,6 +1132,187 @@ class TestLlmUsageBudgetIntegration:
         assert state.budget.output_tokens == 8000
         assert state.budget.cost_usd == pytest.approx(0.44)
 
+    # ---- Lost refresh races: same total, its own line item ----
+    #
+    # When an invocation loses a refresh race the retry's spend is real work
+    # and the lost attempt's is not, but both used to arrive as one
+    # ``UsageStats`` charged under ``source="mutation"``.  Over a long run
+    # that makes the cost of racing invisible.  These three pin the split:
+    # the totals in ``state.budget`` are exactly what they were when the two
+    # were summed, and the wasted half is now charged under its own source.
+
+    def test_lost_refresh_race_is_charged_under_its_own_source(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """A retried mutation charges twice: the waste, then the work."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        child.usage = UsageStats(input_tokens=12, output_tokens=8, cost_usd=0.30)
+        wasted = UsageStats(input_tokens=5, output_tokens=2, cost_usd=0.10)
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def retried_mutate(*, record_usage, record_wasted_usage, **kwargs):
+            # What ``mutate`` does after ``invoke_with_refresh_race_retry``
+            # lost a race and its retry succeeded: the thrown-away attempt's
+            # spend goes to one sink, the kept attempt's to the other.
+            record_wasted_usage(wasted)
+            record_usage(child.usage)
+            return child
+
+        all_mocks["mutate"].side_effect = retried_mutate
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9})
+            return make_eval_result(candidate.id, {"i1": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        waste_calls = _filter_charge_calls(
+            spy, source="refresh_race_retry", candidate_id="g1-s1"
+        )
+        mutation_calls = _filter_charge_calls(
+            spy, source="mutation", candidate_id="g1-s1"
+        )
+        assert len(waste_calls) == 1, (
+            "expected exactly one refresh_race_retry charge for g1-s1, "
+            f"got {len(waste_calls)}: {waste_calls!r}"
+        )
+        assert len(mutation_calls) == 1, (
+            "expected exactly one mutation charge for g1-s1, "
+            f"got {len(mutation_calls)}: {mutation_calls!r}"
+        )
+        # Two records, two sources — and the mutation is billed for its own
+        # attempt only, not for the one the race threw away.
+        assert waste_calls[0].args[1].input_tokens == 5
+        assert waste_calls[0].args[1].output_tokens == 2
+        assert mutation_calls[0].args[1].input_tokens == 12
+        assert mutation_calls[0].args[1].output_tokens == 8
+
+        # The arithmetic is untouched: the run's totals are the sum, exactly
+        # what a single combined charge produced before the split.
+        state = mutation_calls[0].args[0]
+        assert state.budget.input_tokens == 5 + 12
+        assert state.budget.output_tokens == 2 + 8
+        assert state.budget.cost_usd == pytest.approx(0.10 + 0.30)
+
+    def test_failed_retry_charges_both_attempts_exactly_once(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """A retry that fails too still bills both attempts, and only once.
+
+        The failed retry's own spend rides on the exception into
+        ``mutation_failed``; the lost attempt's arrives through the waste
+        sink.  Neither may be dropped and neither may be counted twice.
+        """
+        seed = make_candidate("g0-s0")
+        retry_usage = UsageStats(input_tokens=4, output_tokens=1, cost_usd=0.09)
+        wasted = UsageStats(input_tokens=5, output_tokens=2, cost_usd=0.10)
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def failing_retry(*, record_usage, record_wasted_usage, **kwargs):
+            record_wasted_usage(wasted)
+            record_usage(retry_usage)
+            return None
+
+        all_mocks["mutate"].side_effect = failing_retry
+        all_mocks["run_evaluator"].return_value = make_eval_result(
+            "g0-s0", {"i1": 0.3}
+        )
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        waste_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "refresh_race_retry"
+        ]
+        failed_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "mutation_failed"
+        ]
+        assert len(waste_calls) == 1, (
+            f"expected exactly one refresh_race_retry charge, got {waste_calls!r}"
+        )
+        assert len(failed_calls) == 1, (
+            f"expected exactly one mutation_failed charge, got {failed_calls!r}"
+        )
+        assert waste_calls[0].args[1].input_tokens == 5
+        assert failed_calls[0].args[1].input_tokens == 4
+        state = failed_calls[0].args[0]
+        assert state.budget.input_tokens == 5 + 4
+        assert state.budget.output_tokens == 2 + 1
+        assert state.budget.cost_usd == pytest.approx(0.10 + 0.09)
+
+    def test_mutation_without_a_race_is_charged_exactly_as_before(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """No race, no second record — the common path is untouched."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        child.usage = UsageStats(input_tokens=22, output_tokens=13, cost_usd=0.42)
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        def clean_mutate(*, record_usage, record_wasted_usage, **kwargs):
+            # The sink is offered on every mutation; a mutation that never
+            # lost a race simply never calls it.
+            record_usage(child.usage)
+            return child
+
+        all_mocks["mutate"].side_effect = clean_mutate
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9})
+            return make_eval_result(candidate.id, {"i1": 0.3})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(
+            make_config(max_generations=1, perfect_score_threshold=None),
+            tmp_path,
+            tmp_path / ".helix",
+        )
+
+        # The waste sink was wired in, and stayed silent.
+        assert "record_wasted_usage" in all_mocks["mutate"].call_args.kwargs
+        assert [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "refresh_race_retry"
+        ] == []
+        mutation_calls = _filter_charge_calls(
+            spy, source="mutation", candidate_id="g1-s1"
+        )
+        assert len(mutation_calls) == 1
+        state = mutation_calls[0].args[0]
+        assert state.budget.input_tokens == 22
+        assert state.budget.output_tokens == 13
+        assert state.budget.cost_usd == pytest.approx(0.42)
+
     def test_failed_mutation_without_usage_charges_nothing(
         self, mocker, tmp_path, all_mocks
     ):
