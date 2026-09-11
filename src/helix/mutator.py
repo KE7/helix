@@ -15,12 +15,14 @@ from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, SandboxConfig
 from helix.exceptions import (
+    HelixError,
     MutationError,
     PromptArtifactCollisionError,
     RateLimitError,
     print_helix_error,
 )
 from helix.executor import _scrub_environment
+from helix.lines import split_lf_lines
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
@@ -133,7 +135,7 @@ def _strip_machine_protocol_from_evaluator_stream(text: str) -> str:
         return ""
 
     kept: list[str] = []
-    for line in text.splitlines():
+    for line in split_lf_lines(text):
         if line.strip().startswith("HELIX_RESULT="):
             continue
         kept.append(line)
@@ -915,7 +917,7 @@ def _parse_jsonl_output(
 ) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     unparsable: list[str] = []
-    for raw_line in stdout.splitlines():
+    for raw_line in split_lf_lines(stdout):
         line = raw_line.strip()
         if not line:
             continue
@@ -974,6 +976,63 @@ def _parse_backend_output(
             strict=result.returncode == 0,
         )
     raise ValueError(f"Unsupported backend: {backend}")
+
+
+def _salvage_backend_usage(
+    backend: str, result: subprocess.CompletedProcess[str]
+) -> UsageStats:
+    """Recover token usage from raw backend output without ever raising.
+
+    Token usage is a fact about work the backend has already done.  It must
+    therefore be recoverable independently of whether the output *also*
+    yields a usable candidate — the strict parsers above raise
+    :class:`MutationError` on a single malformed line, and until this
+    existed that error discarded a whole invocation's accounting along with
+    the candidate.
+
+    The recovery is deliberately lenient and total:
+
+    * JSONL backends reuse :func:`_parse_jsonl_output` with ``strict=False``,
+      which collects the records that *did* decode and sets the rest aside.
+      The usage record is one line of its own, so a malformed line elsewhere
+      in the stream does not hide it.
+    * Claude's single-object mode tries the object first, then falls back to
+      the same lenient line scan for a stream that was truncated mid-object.
+
+    Returns a zero-token :class:`UsageStats` when nothing is recoverable,
+    which is the honest reading of "the backend reported no usage".
+    """
+    stdout = result.stdout or ""
+    if not stdout.strip():
+        return _normalise_usage_stats({})
+
+    parsed: dict[str, Any] | None = None
+    if backend == "claude":
+        try:
+            loaded = json.loads(stdout)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            loaded = None
+        if isinstance(loaded, dict):
+            parsed = loaded
+
+    if parsed is None:
+        try:
+            parsed = _parse_jsonl_output(
+                stdout,
+                backend=backend,
+                cmd_str="",
+                worktree_path="",
+                stderr="",
+                exit_code=0,
+                strict=False,
+            )
+        except (ValueError, RecursionError):  # pragma: no cover - defensive
+            return _normalise_usage_stats({})
+
+    try:
+        return _normalise_usage_stats(parsed)
+    except (ValueError, TypeError, RecursionError):  # pragma: no cover
+        return _normalise_usage_stats({})
 
 
 def _walk_json(obj: Any) -> list[dict[str, Any]]:
@@ -1209,7 +1268,7 @@ def _count_claude_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1244,7 +1303,7 @@ def _count_codex_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1290,7 +1349,7 @@ def _count_cursor_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
         "grepToolCall": "grep",
     }
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1326,7 +1385,7 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     count = 0
     names: list[str] = []
     try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
             raw = raw.strip()
             if not raw:
                 continue
@@ -1506,13 +1565,22 @@ def _write_backend_artifacts(
     result: subprocess.CompletedProcess[str],
     parsed: dict[str, Any] | None,
     sandbox: SandboxConfig | None = None,
+    fallback_usage: UsageStats | None = None,
 ) -> None:
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
         (wt / BACKEND_STDOUT_ARTIFACT_NAME).write_text(result.stdout or "")
         (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
-        usage = _normalise_usage_stats(parsed or {})
+        # ``parsed is None`` means the strict parse failed.  Record the
+        # leniently recovered usage rather than zeros, so the on-disk
+        # artifact stays a faithful account of what the invocation spent.
+        if parsed is not None:
+            usage = _normalise_usage_stats(parsed)
+        elif fallback_usage is not None:
+            usage = fallback_usage
+        else:
+            usage = _normalise_usage_stats({})
         # For non-Claude backends the stdout JSONL IS the transcript; patch
         # ``usage`` with backend-specific tool-event counts now that the
         # stdout artifact is on disk.  Claude is handled separately inside
@@ -1651,6 +1719,13 @@ def invoke_claude_code(
             env=backend_env,
         )
 
+    # Recover the usage record from the raw stream FIRST, with a parse that
+    # cannot raise.  Everything below this line can fail — and when it does,
+    # the tokens have still been spent.  Charging must not be conditional on
+    # the candidate being usable, so every error raised from here carries
+    # this on ``HelixError.usage`` for the caller to charge.
+    spent_usage = _salvage_backend_usage(backend, result)
+
     parsed: dict[str, Any] | None = None
     try:
         if result.returncode == 0:
@@ -1745,6 +1820,12 @@ def invoke_claude_code(
             exit_code=result.returncode,
             suggestion="Check stderr for rate limits, permission errors, or model availability.",
         )
+    except HelixError as exc:
+        # Attach only when the raiser did not already supply a more precise
+        # record; never overwrite one.
+        if exc.usage is None:
+            exc.usage = spent_usage
+        raise
     finally:
         _write_backend_artifacts(
             worktree_path,
@@ -1753,6 +1834,7 @@ def invoke_claude_code(
             result=result,
             parsed=parsed,
             sandbox=sandbox,
+            fallback_usage=spent_usage,
         )
 
 
@@ -1769,6 +1851,7 @@ def mutate(
     base_dir: Path,
     background: str | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
+    record_usage: Callable[[UsageStats], None] | None = None,
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -1789,6 +1872,12 @@ def mutate(
         Base directory for worktrees.
     background:
         Optional background/context text injected into the prompt.
+    record_usage:
+        Optional sink called exactly once with the backend's token usage,
+        whether or not the mutation produced a usable candidate.  The tokens
+        are spent either way, so this is how a caller charges the budget for
+        an attempt that ends in ``None``.  Not called when no backend
+        invocation happened (e.g. the worktree clone raised).
 
     Returns
     -------
@@ -1827,7 +1916,13 @@ def mutate(
             prompt_artifact_name=prompt_artifact_name,
         )
         child.usage = usage
+        if record_usage is not None:
+            record_usage(usage)
     except MutationError as exc:
+        # The worktree is about to be removed and the candidate dropped, but
+        # the tokens were spent.  Hand them to the caller before both go.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         exc.operation = f"mutate {new_id} (parent: {parent.id})"
         print_helix_error(exc)
         try:
@@ -1835,10 +1930,13 @@ def mutate(
         except Exception:
             pass
         return None
-    except RateLimitError:
+    except RateLimitError as exc:
         # Rate limit — clean up orphaned worktree, then re-raise so the parallel
         # futures handler in evolution.py can log it and continue with a smaller
-        # proposal set.
+        # proposal set.  A rate-limited invocation can still have burned tokens
+        # before the limit hit, so the same handoff applies.
+        if record_usage is not None and exc.usage is not None:
+            record_usage(exc.usage)
         try:
             remove_worktree(child)
         except Exception:
