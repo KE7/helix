@@ -2239,6 +2239,30 @@ class TestBackendTranscriptCollection:
         assert (out / f"{sid}.jsonl").read_text() == "short\n"
         assert (out / f"{sid}.full.jsonl").read_text() == "full\n"
 
+    def test_opencode_staged_database_is_removed_even_when_interrupted(
+        self, home: Path, worktree: Path, mocker
+    ):
+        """An interrupt must not strand the raw database in the worktree.
+
+        The staged copy is the whole ``opencode.db``: its ``account`` table
+        carries the OAuth access/refresh tokens and its rows cover every
+        candidate, not just this one.  Cleanup therefore has to survive a
+        ``BaseException`` (Ctrl-C, SIGTERM) raised between the copy and the
+        export, not only the sqlite errors the export itself catches.
+        """
+        sid = "ses_000000000000TestSession01"
+        _make_opencode_db(home / ".local/share/opencode/opencode.db", [sid])
+        mocker.patch(
+            "helix.mutator._export_sqlite_session_rows",
+            side_effect=KeyboardInterrupt,
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            _collect(worktree, "opencode", sid)
+
+        out = worktree / ".helix_artifacts/backend_transcripts/opencode"
+        assert sorted(p.name for p in out.glob("*")) == []
+
     def test_opencode_exports_only_this_sessions_rows(self, home: Path, worktree: Path):
         sid = "ses_000000000000TestSession01"
         db = home / ".local/share/opencode/opencode.db"

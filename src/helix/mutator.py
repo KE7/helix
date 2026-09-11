@@ -1416,8 +1416,10 @@ def _count_agy_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
 
     The native transcript (``brain/<conversation_id>/.system_generated/logs/
     transcript.jsonl``, observed against agy 1.1.28) is one JSON object per
-    step; ``PLANNER_RESPONSE`` steps carry ``tool_calls: [{"name", "args"}]``.
-    Every ``tool_calls`` entry with a string ``name`` counts as one event.
+    step; ``tool_calls: [{"name", "args"}]`` was observed on
+    ``PLANNER_RESPONSE`` steps.  Every ``tool_calls`` entry with a string
+    ``name`` counts as one event, whatever the step type, so a future step
+    type carrying the same field is counted rather than silently dropped.
     """
     count = 0
     names: list[str] = []
@@ -1627,69 +1629,77 @@ def _copy_local_backend_transcripts(
     out_dir = Path(worktree_path) / rel_dir
     artifacts: list[dict[str, Any]] = []
     staged: list[Path] = []
-    for pattern, dest_name in source_spec.files:
-        rel_path = rel_dir / dest_name.format(session_id=session_id)
-        dst = Path(worktree_path) / rel_path
-        entry: dict[str, Any] = {
-            "backend": backend,
-            "session_id": session_id,
-            "path": str(rel_path),
-            "source": "sandbox_auth_volume",
-            "available": dst.is_file(),
-        }
-        if home is not None and not dst.is_file():
-            glob_pattern = pattern.format(session_id=session_id)
-            matches = sorted(p for p in home.glob(glob_pattern) if p.is_file())
-            entry["source"] = str(matches[0]) if matches else str(home / glob_pattern)
-            if matches:
-                try:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    import shutil
+    try:
+        for pattern, dest_name in source_spec.files:
+            rel_path = rel_dir / dest_name.format(session_id=session_id)
+            dst = Path(worktree_path) / rel_path
+            entry: dict[str, Any] = {
+                "backend": backend,
+                "session_id": session_id,
+                "path": str(rel_path),
+                "source": "sandbox_auth_volume",
+                "available": dst.is_file(),
+            }
+            if home is not None and not dst.is_file():
+                glob_pattern = pattern.format(session_id=session_id)
+                matches = sorted(p for p in home.glob(glob_pattern) if p.is_file())
+                entry["source"] = str(matches[0]) if matches else str(home / glob_pattern)
+                if matches:
+                    try:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        import shutil
 
-                    shutil.copy2(matches[0], dst)
-                    entry["available"] = True
-                except OSError as exc:
-                    entry["reason"] = f"copy_failed: {exc}"
-        if not entry["available"]:
-            entry.setdefault("reason", "transcript_not_found")
-        if dest_name.startswith("."):
-            staged.append(dst)
-        else:
+                        shutil.copy2(matches[0], dst)
+                        entry["available"] = True
+                    except OSError as exc:
+                        entry["reason"] = f"copy_failed: {exc}"
+            if not entry["available"]:
+                entry.setdefault("reason", "transcript_not_found")
+            if dest_name.startswith("."):
+                staged.append(dst)
+            else:
+                artifacts.append(entry)
+        if source_spec.sqlite_export is not None:
+            raw_name, tables = source_spec.sqlite_export
+            raw_db = out_dir / raw_name.format(session_id=session_id)
+            rel_path = rel_dir / f"{session_id}.jsonl"
+            entry = {
+                "backend": backend,
+                "session_id": session_id,
+                "path": str(rel_path),
+                "source": str(raw_db)
+                if home is None
+                else str(home / source_spec.files[0][0]),
+                "available": False,
+            }
+            if raw_db.is_file():
+                try:
+                    rows = _export_sqlite_session_rows(
+                        raw_db,
+                        session_id=session_id,
+                        tables=tables,
+                        dst=Path(worktree_path) / rel_path,
+                    )
+                    entry["available"] = rows > 0
+                    if rows == 0:
+                        entry["reason"] = "session_rows_not_found"
+                except Exception as exc:  # noqa: BLE001 - sqlite errors are not fatal
+                    entry["reason"] = f"export_failed: {exc}"
+            else:
+                entry["reason"] = "transcript_not_found"
             artifacts.append(entry)
-    if source_spec.sqlite_export is not None:
-        raw_name, tables = source_spec.sqlite_export
-        raw_db = out_dir / raw_name.format(session_id=session_id)
-        rel_path = rel_dir / f"{session_id}.jsonl"
-        entry = {
-            "backend": backend,
-            "session_id": session_id,
-            "path": str(rel_path),
-            "source": str(raw_db)
-            if home is None
-            else str(home / source_spec.files[0][0]),
-            "available": False,
-        }
-        if raw_db.is_file():
-            try:
-                rows = _export_sqlite_session_rows(
-                    raw_db,
-                    session_id=session_id,
-                    tables=tables,
-                    dst=Path(worktree_path) / rel_path,
-                )
-                entry["available"] = rows > 0
-                if rows == 0:
-                    entry["reason"] = "session_rows_not_found"
-            except Exception as exc:  # noqa: BLE001 - sqlite errors are not fatal
-                entry["reason"] = f"export_failed: {exc}"
-        else:
-            entry["reason"] = "transcript_not_found"
+    finally:
+        # ``staged`` holds raw CLI state copied out verbatim -- for opencode
+        # the whole ``opencode.db``, whose ``account`` table carries the OAuth
+        # tokens and whose rows cover every candidate, not just this one.  It
+        # is removed here rather than after the export so that an interrupt
+        # (Ctrl-C, SIGTERM) between the copy and the export cannot leave a
+        # credential-bearing file behind in the candidate worktree.
         for path in staged:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
-        artifacts.append(entry)
     for entry in artifacts:
         if not entry["available"]:
             logger.log(

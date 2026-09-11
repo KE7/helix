@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix import budget as budget_api
+from helix.backends import DEFAULT_BACKEND_IMAGES
 from helix.config import (
     DatasetConfig,
     EvolutionConfig,
@@ -2719,7 +2720,11 @@ class TestSandboxAgentStateResetPerGeneration:
 
         assert reset.call_count == 2
         assert reset.call_args_list[0].args == (make_config().agent.backend,)
-        assert reset.call_args_list[0].kwargs == {"generation": 1}
+        assert reset.call_args_list[0].kwargs["generation"] == 1
+        assert (
+            reset.call_args_list[0].kwargs["image"]
+            == DEFAULT_BACKEND_IMAGES[make_config().agent.backend]
+        )
         # Generation 1's copy completes before generation 2's reset.
         assert events == [
             ("reset", 1),
@@ -2727,6 +2732,27 @@ class TestSandboxAgentStateResetPerGeneration:
             ("reset", 2),
             ("candidate-transcript-copy", 2),
         ]
+
+    def test_reset_uses_the_runs_configured_sandbox_image(
+        self, tmp_path, all_mocks, mocker
+    ):
+        """A private ``sandbox.image`` must reach the reset container.
+
+        Resolving from a default ``SandboxConfig`` instead would run the reset
+        on the public image, which an operator pinned to their own registry may
+        not be able to pull at all -- and a reset that cannot start is only a
+        warning, so the run would continue with the isolation silently gone.
+        """
+        _, reset = self._run(
+            tmp_path,
+            all_mocks,
+            mocker,
+            SandboxConfig(enabled=True, image="registry.internal/runner:v9"),
+        )
+
+        assert reset.call_count == 2
+        for call in reset.call_args_list:
+            assert call.kwargs["image"] == "registry.internal/runner:v9"
 
     def test_no_reset_when_unsandboxed(self, tmp_path, all_mocks, mocker):
         events, reset = self._run(tmp_path, all_mocks, mocker, SandboxConfig(enabled=False))
