@@ -506,6 +506,120 @@ class TestInvocationClassification:
         assert "sandbox login" not in exc.value.suggestion
 
 
+class TestRateLimitClassification:
+    """A rate limit is what the *backend* said, never what the agent read.
+
+    The same conflation the credential markers avoid applied to the rate-limit
+    check, which scanned ``stderr or stdout``: for the JSONL backends stdout is
+    the whole transcript, so a candidate working on a repository whose source
+    contains the words "rate limit" -- this one does -- plus any unrelated
+    non-zero exit with an empty stderr was reported to the operator as a quota
+    failure and sent to a dashboard.
+    """
+
+    def test_transcript_tool_output_mentioning_a_rate_limit_is_not_one(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Exit 1 with an empty stderr, after the candidate read this repo's
+        own rate-limit keywords into a command's output, is a code failure."""
+        stream = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            _codex_command_output(
+                "src/helix/mutator.py:599:_RATE_LIMIT_KEYWORDS = [\n"
+                '    "rate limit",\n    "overloaded",\n    "529",\n]'
+            ),
+        )
+        _patch_backend(mocker, returncode=1, stdout=stream, stderr="")
+        with pytest.raises(MutationError) as exc:
+            invoke_claude_code(str(tmp_path), "p", AgentConfig(backend="codex"))
+        assert not isinstance(exc.value, RateLimitError)
+
+    def test_a_real_rate_limit_on_stderr_is_unchanged(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """stderr is the CLI's own channel and is always in scope."""
+        _patch_backend(
+            mocker,
+            returncode=1,
+            stdout=_jsonl({"type": "thread.started", "thread_id": "t1"}),
+            stderr="stream error: rate limit exceeded; retry after 60s",
+        )
+        with pytest.raises(RateLimitError):
+            invoke_claude_code(str(tmp_path), "p", AgentConfig(backend="codex"))
+
+    @pytest.mark.parametrize(
+        ("backend", "event"),
+        [
+            ("codex", _codex_error_event("stream error: rate limit exceeded")),
+            ("codex", _codex_turn_failed("rate limit exceeded; retry after 60s")),
+            ("opencode", _opencode_error_event("Overloaded: retry later")),
+        ],
+    )
+    def test_structured_error_event_wording_is_a_rate_limit(
+        self, mocker: Any, tmp_path: Path, backend: str, event: dict[str, Any]
+    ) -> None:
+        """The backend's own error event counts even when stderr says something
+        unrelated -- which used to hide it, since stdout was read only when
+        stderr was empty."""
+        _patch_backend(
+            mocker,
+            returncode=1,
+            stdout=_jsonl({"type": "thread.started", "thread_id": "t1"}, event),
+            stderr="error: exit status 1",
+        )
+        with pytest.raises(RateLimitError):
+            invoke_claude_code(str(tmp_path), "p", AgentConfig(backend=backend))
+
+    def test_claude_api_error_status_is_a_rate_limit(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Claude reports the HTTP status structurally; 429 appears in no prose."""
+        envelope = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "api_error_status": 429,
+                "result": "The request failed.",
+            }
+        )
+        _patch_backend(mocker, returncode=1, stdout=envelope, stderr="")
+        with pytest.raises(RateLimitError):
+            invoke_claude_code(str(tmp_path), "p", AgentConfig(backend="claude"))
+
+    def test_claude_errored_envelope_wording_is_a_rate_limit(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """Regression guard: the envelope's ``errors`` list and, when it flags
+        ``is_error``, its ``result`` are structured fields, so they stay in
+        scope now that the raw stream is not."""
+        envelope = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "errors": ["API Error: 429 rate limit exceeded"],
+            }
+        )
+        _patch_backend(mocker, returncode=1, stdout=envelope, stderr="")
+        with pytest.raises(RateLimitError):
+            invoke_claude_code(str(tmp_path), "p", AgentConfig(backend="claude"))
+
+    def test_a_dead_stream_still_has_its_stdout_read(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """The one carve-out: a CLI that emitted no parseable output at all and
+        nothing on stderr has said it nowhere else."""
+        _patch_backend(
+            mocker,
+            returncode=1,
+            stdout="error: rate limit exceeded for this organization",
+            stderr="",
+        )
+        with pytest.raises(RateLimitError):
+            invoke_claude_code(str(tmp_path), "p", AgentConfig(backend="codex"))
+
+
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
