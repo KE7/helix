@@ -1662,7 +1662,11 @@ def _run_proposal_worker(
     # not it returns a candidate, so a failed slot still carries its usage
     # into the sequential apply phase for charging.  The list is worker-local
     # — no shared state is touched here, per the thread-safety contract above.
+    # ``_wasted_usage`` is the same handoff for tokens burned by an attempt
+    # that lost a refresh race and was thrown away: spent, but not productive
+    # work, so the apply phase charges it under its own source.
     _spent_usage: list[UsageStats] = []
+    _wasted_usage: list[UsageStats] = []
     try:
         _child = mutate(
             parent=_parent,
@@ -1677,6 +1681,7 @@ def _run_proposal_worker(
                 )
             ),
             record_usage=_spent_usage.append,
+            record_wasted_usage=_wasted_usage.append,
             on_refresh_race_recovered=lambda msg: (
                 credential_failures.record_recovered(_new_id, msg)
             ),
@@ -1734,6 +1739,7 @@ def _run_proposal_worker(
             parent_eval_result=_parent_eval,
             parent_n_uncached=_parent_n_uncached,
             child_usage=_spent_usage[-1] if _spent_usage else None,
+            child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
         )
 
     if _child is None:
@@ -1742,6 +1748,7 @@ def _run_proposal_worker(
             parent_eval_result=_parent_eval,
             parent_n_uncached=_parent_n_uncached,
             child_usage=_spent_usage[-1] if _spent_usage else None,
+            child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
         )
 
     # ---- Step W5: Tamper check ----
@@ -1756,6 +1763,7 @@ def _run_proposal_worker(
             tampered_paths=_tampered,
             parent_n_uncached=_parent_n_uncached,
             child_usage=_child.usage if _child.usage else None,
+            child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
         )
 
     # ---- Step W6: Child minibatch eval ----
@@ -1782,6 +1790,7 @@ def _run_proposal_worker(
         parent_n_uncached=_parent_n_uncached,
         child_n_uncached=_child_n_uncached,
         child_usage=_child.usage if _child.usage else None,
+        child_wasted_usage=_wasted_usage[-1] if _wasted_usage else None,
     )
 
 def _dispatch_proposals(
@@ -2563,6 +2572,7 @@ def _run_evolution_impl(
                         )
 
                     merge_usage: list[UsageStats] = []
+                    merge_wasted_usage: list[UsageStats] = []
                     merge_credential_failed = False
                     try:
                         merged = merge(
@@ -2581,6 +2591,7 @@ def _run_evolution_impl(
                             ),
                             ancestor=ancestor_candidate,
                             record_usage=merge_usage.append,
+                            record_wasted_usage=merge_wasted_usage.append,
                             on_refresh_race_recovered=lambda msg: (
                                 credential_failures.record_recovered(merge_id, msg)
                             ),
@@ -2614,6 +2625,20 @@ def _run_evolution_impl(
                                 subject="the merged code",
                             )
                             + " Falling through to mutation."
+                        )
+
+                    # An attempt thrown away by a lost refresh race spent
+                    # real tokens on nothing, whether or not the retry went on
+                    # to produce a candidate.  Charge it here, once, under its
+                    # own source, so the merge below is billed for its own
+                    # work only.
+                    if merge_wasted_usage:
+                        live.update(usage=merge_wasted_usage[-1])
+                        budget_api.charge_llm_usage(
+                            state,
+                            merge_wasted_usage[-1],
+                            candidate_id=merge_id,
+                            source="refresh_race_retry",
                         )
 
                     if merged is None:
@@ -3003,6 +3028,27 @@ def _run_evolution_impl(
             retryable_semantic_skip_count = 0
             _acceptance_memo = AcceptanceMemo(acceptance)
 
+            def _charge_refresh_race_waste(
+                wasted: "UsageStats | None", candidate_id: str
+            ) -> None:
+                """Charge an attempt that lost a refresh race, under its own source.
+
+                Its tokens are part of the run's real spend — the total here
+                is the same as when they rode along inside the successful
+                attempt's record — but they bought nothing, so charging them
+                as ``"mutation"`` hides what races cost.  Sequential, like
+                every other ``budget_api`` call in this phase.
+                """
+                if not wasted:
+                    return
+                live.update(usage=wasted)
+                budget_api.charge_llm_usage(
+                    state,
+                    wasted,
+                    candidate_id=candidate_id,
+                    source="refresh_race_retry",
+                )
+
             def _gate_proposal(
                 _p_idx: int, wr: "ProposalResult | None"
             ) -> GatedProposal | None:
@@ -3037,6 +3083,7 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
+                    _charge_refresh_race_waste(wr.child_wasted_usage, _new_id)
                     # Charge LLM usage: the mutation failed, but its tokens
                     # were still spent.  Skipping this is how a run's budget
                     # silently under-reports by a whole generation.
@@ -3098,6 +3145,7 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
+                    _charge_refresh_race_waste(wr.child_wasted_usage, wr.child.id)
                     # Charge LLM usage (mutation happened, even if rejected)
                     if wr.child_usage:
                         live.update(usage=wr.child_usage)
@@ -3142,6 +3190,7 @@ def _run_evolution_impl(
                     _budget_break = True
                     return None
 
+                _charge_refresh_race_waste(wr.child_wasted_usage, child.id)
                 # Charge LLM usage
                 if wr.child_usage:
                     live.update(usage=wr.child_usage)

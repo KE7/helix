@@ -377,7 +377,8 @@ class TestMerge:
     ):
         """``merge()`` gets the same one-shot retry as ``mutate()``: a
         transient credential failure re-clones the merge worktree and
-        invokes again; the first attempt's spend rides along."""
+        invokes again.  The lost attempt's spend is reported through the
+        waste sink, not folded into the merge that was kept."""
         from helix.display import UsageStats
 
         ca = make_candidate("g0-s0")
@@ -408,6 +409,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate")
         recovered: list[str] = []
         spent: list[UsageStats] = []
+        wasted: list[UsageStats] = []
 
         result = merge(
             ca,
@@ -416,6 +418,7 @@ class TestMerge:
             config,
             Path("/tmp"),
             record_usage=spent.append,
+            record_wasted_usage=wasted.append,
             on_refresh_race_recovered=recovered.append,
         )
 
@@ -428,7 +431,14 @@ class TestMerge:
         assert invoke.call_args_list[1].args[0] == clones[1].worktree_path
         assert invoke.call_args_list[1].kwargs["retried"] is True
         assert removed == [clones[0]]
-        assert spent[0].input_tokens == 5 + 12 and spent[0].output_tokens == 2 + 8
+        # The merge is billed for the attempt that produced it; the attempt
+        # the race threw away is its own record, and the two still sum to
+        # what one combined record used to carry.
+        assert spent[0].input_tokens == 12 and spent[0].output_tokens == 8
+        assert len(wasted) == 1
+        assert wasted[0].input_tokens == 5 and wasted[0].output_tokens == 2
+        assert spent[0].input_tokens + wasted[0].input_tokens == 5 + 12
+        assert spent[0].output_tokens + wasted[0].output_tokens == 2 + 8
         assert recovered and "g1-m0" in recovered[0]
 
     def test_snapshot_not_called_by_merge_on_success(self, mocker):

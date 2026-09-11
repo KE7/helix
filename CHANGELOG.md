@@ -21,8 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A credential failure is now its own error kind (`CredentialRefreshError`)
   rather than being scored as a bad mutation, and an invocation that loses a
   refresh race against another candidate is retried once from a fresh
-  worktree. Both attempts' usage is charged, and failures and recoveries are
-  named in the end-of-run summary.
+  worktree. Both attempts' usage is charged and the totals are unchanged, but
+  the lost attempt is now charged under its own budget source
+  (`source="refresh_race_retry"`) instead of being folded into the retry's
+  record, so what refresh races cost over a run is visible rather than
+  hidden inside ordinary mutation spend. Failures and recoveries are named in
+  the end-of-run summary.
 - Sandboxed `opencode` candidates each get their own session database:
   `OPENCODE_DB` points into the per-candidate workspace copy instead of the
   shared login volume.
