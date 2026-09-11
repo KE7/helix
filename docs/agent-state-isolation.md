@@ -1,4 +1,4 @@
-# Per-candidate agent state, and why claude is not isolated
+# Per-candidate agent state, and why claude and agy are not isolated
 
 HELIX mounts one login volume per backend (`helix-auth-<backend>`) at
 `/home/node`, read-write, in every candidate container. That mount is shared on
@@ -9,7 +9,7 @@ The problem this document is about is everything *else* the CLIs write into
 that volume. `helix.agent_state` relocates what it safely can to a
 per-candidate directory mounted at `/helix-state`; the README's "Per-candidate
 agent state" section covers the three backends that worked. This note records
-the reasoning for the one that did not, so it does not get re-litigated from
+the reasoning for the two that did not, so it does not get re-litigated from
 scratch.
 
 On the host, `/helix-state` is a directory inside the candidate's
@@ -87,12 +87,27 @@ reports exactly the same thing), but it does mean the only way to prove a
 claude change is safe is to run it against a live login. Proving isolation by
 risking the credential it is supposed to protect is a bad trade.
 
+## agy: the same all-or-nothing problem, with no second knob
+
+Antigravity CLI (`agy`, observed at 1.1.27 on a real install) keeps everything
+under `~/.gemini/antigravity-cli/`: `conversations/`,
+`conversation_summaries.db`, `brain/`, `cache/`, `history.jsonl`, `log/`,
+`knowledge/`, `presence/` and `settings.json` all live in the same directory
+as its OAuth token, `antigravity-oauth-token`. No knob is known that relocates
+the state without also relocating the credential, which is exactly the
+`CLAUDE_CONFIG_DIR` problem above. `ANTIGRAVITY_EXECUTABLE_DATA_DIR` exists in
+the binary but its semantics are unverified, so it is not used. agy is not
+relocated; its residue is recorded under the `agy` key of
+`helix.agent_state.UNRELOCATED_AGENT_STATE`, and
+`tests/integration/test_agent_state_isolation.py` skips it with that reason
+rather than pretending to verify a knob that does not exist.
+
 ## Conclusion
 
-Claude is left exactly as it is. Its cross-candidate residue is recorded in
-`helix.agent_state.UNRELOCATED_AGENT_STATE` under the `claude` key so that it
-is discoverable rather than forgotten. Three of four backends are isolated;
-this one is documented instead.
+Claude and agy are left exactly as they are. Their cross-candidate residue is
+recorded in `helix.agent_state.UNRELOCATED_AGENT_STATE` under the `claude` and
+`agy` keys so that it is discoverable rather than forgotten. Three of five
+backends are isolated; these two are documented instead.
 
 Anyone revisiting this should start by re-running the footprint check against
 the current CLI, because the specific directories named above are version

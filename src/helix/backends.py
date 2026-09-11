@@ -191,12 +191,15 @@ CREDENTIAL_WARM_SKIP_REASONS: dict[str, str] = {
         "an API key instead, so there is no single-use grant for candidates to "
         "compete over."
     ),
-    "gemini": (
-        "No free Gemini CLI command is known to take the refresh path. The "
-        "registered status command is `gemini --version`, which reports the "
-        "version and touches no credential, so warming with it would be a "
-        "placebo; and no Gemini credential exists to measure a real refresh "
-        "against. Left unwarmed deliberately rather than warmed on a guess."
+    "agy": (
+        "No free Antigravity CLI command is known to take the refresh path. "
+        "The registered status probe is a file test "
+        "(`test -s ~/.gemini/antigravity-cli/antigravity-oauth-token`), which "
+        "touches no credential path, so warming with it would be a placebo. "
+        "`agy models` exits 0 even when logged out, and whether it takes the "
+        "refresh path has not been measured; no agy credential exists to "
+        "measure one against. Left unwarmed deliberately rather than warmed "
+        "on a guess."
     ),
     "opencode": (
         "OpenCode refreshes an `oauth`-type credential only from inside the "

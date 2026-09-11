@@ -28,6 +28,7 @@ from helix.agent_state import (
 pytestmark = pytest.mark.docker_integration
 
 
+AGY_IMAGE = "ghcr.io/ke7/helix-evo-runner-agy:latest"
 CODEX_IMAGE = "ghcr.io/ke7/helix-evo-runner-codex:latest"
 CURSOR_IMAGE = "ghcr.io/ke7/helix-evo-runner-cursor:latest"
 OPENCODE_IMAGE = "ghcr.io/ke7/helix-evo-runner-opencode:latest"
@@ -278,6 +279,33 @@ def test_opencode_xdg_data_home_would_hide_the_credential(
 # ---------------------------------------------------------------------------
 # The invariant that outranks all of the above
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# agy
+# ---------------------------------------------------------------------------
+
+
+def test_agy_state_is_not_relocated() -> None:
+    """agy has no knob to verify; its residue is documented instead.
+
+    Antigravity CLI 1.1.27 keeps its working state (``conversations/``,
+    ``conversation_summaries.db``, ``brain/``, ``cache/``, ``history.jsonl``,
+    ``log/``, ``knowledge/``, ``presence/``, ``settings.json``) in
+    ``~/.gemini/antigravity-cli/``, the same directory as its OAuth token, and
+    no knob is known that moves the one without the other -- the same
+    all-or-nothing problem as claude.  There is therefore no relocation to
+    prove in a container (``AGY_IMAGE``); the three assertions this suite
+    makes would need a knob that does not exist.  What *can* be pinned
+    without a container is that HELIX emits nothing for agy.
+    """
+    assert agent_state_env("agy", state_root=AGENT_STATE_CONTAINER_ROOT) == {}
+    assert agent_state_cli_args("agy", state_root=AGENT_STATE_CONTAINER_ROOT) == []
+    pytest.skip(
+        "agy exposes no knob that separates its state from its credential "
+        "(see helix.agent_state.UNRELOCATED_AGENT_STATE['agy']); nothing to "
+        "verify against the container until one exists"
+    )
 
 
 def test_real_auth_volumes_are_never_addressed() -> None:

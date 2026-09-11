@@ -636,6 +636,14 @@ and complete provider login in one setup session.
 
 The volume names are `helix-auth-agy`, `helix-auth-claude`, `helix-auth-codex`,
 `helix-auth-cursor`, and `helix-auth-opencode`.
+This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
+browser-login tokens may live in Keychain; on Linux they may live in
+Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
+Those stores are session- and OS-specific, so copying their databases into a
+Linux Docker image is not a reliable authentication mechanism. If your
+evaluator uses a local proxy, keep that endpoint in your evaluator code as
+usual. Docker Desktop supports `host.docker.internal`; Linux users can set
+`add_host_gateway = true`.
 
 #### Per-candidate agent state
 
@@ -700,14 +708,6 @@ significant cases:
   the state without also moving the credential: the same all-or-nothing
   problem as claude. (`ANTIGRAVITY_EXECUTABLE_DATA_DIR` exists in the binary
   but its semantics are unverified, so it is not used.)
-This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
-browser-login tokens may live in Keychain; on Linux they may live in
-Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
-Those stores are session- and OS-specific, so copying their databases into a
-Linux Docker image is not a reliable authentication mechanism. If your
-evaluator uses a local proxy, keep that endpoint in your evaluator code as
-usual. Docker Desktop supports `host.docker.internal`; Linux users can set
-`add_host_gateway = true`.
 
 By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,
