@@ -18,6 +18,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from rich.markup import escape
+
 
 from helix.batch_sampler import (
     BatchSampler,
@@ -1461,16 +1463,30 @@ class CredentialFailureLog:
     lock.  The log exists so a run that dies from an unusable login says so
     once, plainly, in the permanent end-of-run summary -- not only in a
     per-slot error that has already scrolled past by the time the run ends.
+
+    ``recovered`` holds the invocations that lost a refresh race and
+    succeeded on their one retry: not failures, but the only evidence an
+    operator gets that the warm is not protecting the run.
     """
 
-    entries: list[tuple[str, str, bool]] = field(default_factory=list)
+    entries: list[tuple[str, str, bool, str]] = field(default_factory=list)
+    recovered: list[tuple[str, str]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def record(
-        self, candidate_id: str, message: str, *, transient: bool = False
+        self,
+        candidate_id: str,
+        message: str,
+        *,
+        transient: bool = False,
+        kind: str = "mutation",
     ) -> None:
         with self._lock:
-            self.entries.append((candidate_id, message, transient))
+            self.entries.append((candidate_id, message, transient, kind))
+
+    def record_recovered(self, candidate_id: str, message: str) -> None:
+        with self._lock:
+            self.recovered.append((candidate_id, message))
 
     def __len__(self) -> int:
         with self._lock:
@@ -1478,7 +1494,11 @@ class CredentialFailureLog:
 
     def candidate_ids(self) -> list[str]:
         with self._lock:
-            return [candidate_id for candidate_id, _, _ in self.entries]
+            return [candidate_id for candidate_id, _, _, _ in self.entries]
+
+    def recovered_ids(self) -> list[str]:
+        with self._lock:
+            return [candidate_id for candidate_id, _ in self.recovered]
 
     def last_message(self) -> str:
         with self._lock:
@@ -1487,7 +1507,81 @@ class CredentialFailureLog:
     def all_transient(self) -> bool:
         """True when every failure was a lost refresh race, not a dead login."""
         with self._lock:
-            return bool(self.entries) and all(t for _, _, t in self.entries)
+            return bool(self.entries) and all(t for _, _, t, _ in self.entries)
+
+    def describe_failed(self) -> str:
+        """``"2 mutation(s) and 1 merge(s)"`` -- what failed, by kind."""
+        with self._lock:
+            kinds = [kind for _, _, _, kind in self.entries]
+        parts = [
+            f"{kinds.count(kind)} {kind}(s)"
+            for kind in ("mutation", "merge")
+            if kind in kinds
+        ]
+        return " and ".join(parts) if parts else "0 invocation(s)"
+
+
+def _credential_failure_verdict(
+    backend: str, *, transient: bool, subject: str
+) -> str:
+    """The one operator-facing sentence for a credential failure.
+
+    Used by the proposal worker and the merge gate so the cause is worded
+    once (the CLI and the summary share :func:`_credential_remedy`);
+    *subject* names what the failure is **not** about ("the candidate's
+    code", "the merged code").
+    """
+    display = backend_display_name(backend)
+    if transient:
+        cause = (
+            f"the shared {display} credential was refreshed by another "
+            "candidate first and the retry also failed"
+        )
+    else:
+        cause = f"the shared {display} credential could not be used or refreshed"
+    return (
+        f"failed because {cause} — this is a login failure, "
+        f"not a failure of {subject}."
+    )
+
+
+def _credential_remedy(backend: str, *, transient: bool) -> str:
+    """What the operator should do about a credential failure."""
+    if transient:
+        return (
+            "The stored login is most likely usable: run "
+            "[cyan]helix resume[/cyan] first, and only re-authenticate if "
+            "this keeps recurring."
+        )
+    return (
+        f"Re-authenticate with [cyan]helix sandbox login {backend}[/cyan], "
+        "then [cyan]helix resume[/cyan]."
+    )
+
+
+def _generation_concurrent_writers(config: HelixConfig) -> int:
+    """How many candidates can write the shared login at once in a generation.
+
+    ``num_parallel_proposals * mutations_per_parent`` slots, run under a pool
+    of at most ``max_workers``; a single slot takes the in-thread path with no
+    pool at all.  The merge branch is one invocation.
+    """
+    slots = (
+        config.evolution.num_parallel_proposals
+        * config.evolution.mutations_per_parent
+    )
+    return max(1, min(slots, config.evolution.max_workers))
+
+
+def _operator_env(config: HelixConfig) -> dict[str, str]:
+    """The operator's ``passthrough_env`` / ``[env]`` selection, as a mapping."""
+    env = {
+        key: os.environ[key]
+        for key in config.passthrough_env
+        if key in os.environ
+    }
+    env.update(config.env)
+    return env
 
 
 def _warm_generation_credential(
@@ -1496,32 +1590,58 @@ def _warm_generation_credential(
     """Refresh the agent backend's shared credential once for generation *gen*.
 
     Called once per generation, before any candidate is dispatched, so that a
-    refresh which has come due happens under one writer and every candidate in
-    the generation then starts from an already-fresh credential.
+    refresh which has come due happens under one writer and the credential is
+    fresh at the start of the generation.  That is the extent of the
+    protection: a token that crosses its refresh threshold *during* the
+    generation -- each worker runs the parent evaluation before its mutation,
+    and slots beyond ``max_workers`` start later still -- can still be raced
+    by the candidates in flight.
 
     Per *generation* rather than once per run on purpose: a long run outlives
     any refresh interval, so a single warm at startup stops protecting the run
     the moment the credential next goes stale mid-flight.
 
+    Skipped when at most one candidate can write the shared login at a time
+    (``_generation_concurrent_writers``): a single writer cannot race itself,
+    and the warm would only add a container per generation.
+
     Returns ``None`` when there is nothing to warm -- an unsandboxed run has no
     HELIX-managed login volume, because the backend runs directly against the
     operator's own CLI state and HELIX never mounts or arbitrates it.
 
-    Never fatal.  A warm that could not run leaves exactly today's behaviour in
-    place (candidates refresh for themselves and may race), and candidates may
-    still succeed on the credential already stored -- so the run continues and
-    the operator is told, in those terms, what protection was lost.
+    Never fatal.  A warm that could not run, or that left the credential
+    unverified, leaves exactly today's behaviour in place (candidates refresh
+    for themselves and may race), and candidates may still succeed on the
+    credential already stored -- so the run continues and the operator is
+    told, in those terms, what protection was lost.
     """
     if not config.sandbox.enabled:
         return None
 
     backend = config.agent.backend
     display = backend_display_name(backend)
-    result = warm_backend_credential(backend, sandbox=config.sandbox)
+    writers = _generation_concurrent_writers(config)
+    if writers <= 1:
+        result = CredentialWarmResult(
+            backend=backend,
+            warmed=False,
+            skip_reason=(
+                "at most one candidate writes the shared login at a time "
+                f"(num_parallel_proposals × mutations_per_parent = "
+                f"{config.evolution.num_parallel_proposals * config.evolution.mutations_per_parent}, "
+                f"max_workers = {config.evolution.max_workers}); a single "
+                "writer cannot lose a refresh race to itself"
+            ),
+        )
+    else:
+        result = warm_backend_credential(
+            backend, sandbox=config.sandbox, env=_operator_env(config)
+        )
 
     if result.skipped:
-        # The reason is a property of the backend, not of this generation, so
-        # say it once per run instead of once per generation.
+        # The reason is a property of the backend or the run's concurrency,
+        # not of this generation, so say it once per run instead of once per
+        # generation.
         if announce_skip:
             logger.info(
                 "No credential warm for %s: %s", display, result.skip_reason
@@ -1530,13 +1650,18 @@ def _warm_generation_credential(
 
     if result.warmed:
         logger.debug(
-            "Credential warm for %s completed before generation %d.", display, gen
+            "Credential warm for %s completed before generation %d: %s",
+            display,
+            gen,
+            result.detail,
         )
         return result
 
-    detail = f" Detail: {result.detail}" if result.detail else ""
+    detail = f" Detail: {escape(result.detail)}" if result.detail else ""
     if result.timed_out:
         cause = "timed out"
+    elif result.stale:
+        cause = "exited 0 but the credential is not verifiably fresh"
     elif result.returncode is not None:
         cause = f"exit {result.returncode}"
     else:
@@ -1672,6 +1797,9 @@ def _run_proposal_worker(
                 )
             ),
             record_usage=_spent_usage.append,
+            on_refresh_race_recovered=lambda msg: (
+                credential_failures.record_recovered(_new_id, msg)
+            ),
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
@@ -1709,16 +1837,12 @@ def _run_proposal_worker(
                     backend_display_name(config.agent.backend), _mu_exc,
                 )
                 print_error(
-                    f"Mutation [bold]{_new_id}[/bold] failed because the shared "
-                    f"{backend_display_name(config.agent.backend)} credential "
-                    + (
-                        "was refreshed by another candidate first and the "
-                        "retry also failed"
-                        if _mu_exc.transient
-                        else "could not be used or refreshed"
+                    f"Mutation [bold]{_new_id}[/bold] "
+                    + _credential_failure_verdict(
+                        config.agent.backend,
+                        transient=_mu_exc.transient,
+                        subject="the candidate's code",
                     )
-                    + " — this is a login failure, not a failure of the "
-                    "candidate's code."
                 )
         else:
             print_error(
@@ -1823,7 +1947,8 @@ def _dispatch_proposals(
                         f"Worker for proposal {_wid} "
                         f"(parent: {_wparent.id}, gen {gen}) "
                         f"raised an unexpected exception: "
-                        f"{type(_wexc).__name__}: {_wexc} — proposal slot dropped."
+                        f"{type(_wexc).__name__}: {escape(str(_wexc))} — "
+                        "proposal slot dropped."
                     )
                     worker_results[_widx] = MutationFailedProposal(
                         presample_ctx=_wpctx,
@@ -2222,7 +2347,18 @@ def _run_evolution_impl(
                     candidate_id=seed.id,
                     source="seed_generation",
                 )
-            except Exception:
+            except Exception as _seed_exc:
+                # The tokens the seed invocation spent before it failed are
+                # still spent; charge them before the worktree goes, exactly
+                # as ``merge()`` / ``mutate()`` hand a failed attempt's usage
+                # to their sink.
+                if isinstance(_seed_exc, HelixError) and _seed_exc.usage is not None:
+                    budget_api.charge_llm_usage(
+                        state,
+                        _seed_exc.usage,
+                        candidate_id=seed.id,
+                        source="seed_generation_failed",
+                    )
                 _safe_remove_worktree(seed, label="failed seed generation")
                 raise
             print_success("Seed generation complete.")
@@ -2368,9 +2504,10 @@ def _run_evolution_impl(
 
             # ---- Credential warm (once per generation) -------------------
             # Sits above the merge/mutate split so it covers every path that
-            # dispatches a candidate this generation, and above every
-            # candidate so the shared login is already fresh by the time any
-            # of them could start refreshing it themselves.
+            # dispatches a candidate this generation.  It makes the shared
+            # login fresh at the start of the generation; a token that
+            # crosses its refresh threshold while candidates are in flight
+            # can still be raced.  Skipped when only one writer exists.
             _warm = _warm_generation_credential(
                 config, gen=gen, announce_skip=not credential_warm_skip_announced
             )
@@ -2539,6 +2676,7 @@ def _run_evolution_impl(
                         )
 
                     merge_usage: list[UsageStats] = []
+                    merge_credential_failed = False
                     try:
                         merged = merge(
                             candidate_a=a,
@@ -2556,17 +2694,22 @@ def _run_evolution_impl(
                             ),
                             ancestor=ancestor_candidate,
                             record_usage=merge_usage.append,
+                            on_refresh_race_recovered=lambda msg: (
+                                credential_failures.record_recovered(merge_id, msg)
+                            ),
                         )
                     except CredentialRefreshError as _merge_cred_exc:
                         # Same treatment the proposal worker gives a
                         # mutation: the merge worktree is already cleaned
-                        # up by merge(); count and name the failure, then
-                        # fall through to mutation so the run continues.
+                        # up by merge(); count and name the failure once,
+                        # then fall through to mutation so the run continues.
                         merged = None
+                        merge_credential_failed = True
                         credential_failures.record(
                             merge_id,
                             str(_merge_cred_exc),
                             transient=_merge_cred_exc.transient,
+                            kind="merge",
                         )
                         print_helix_error(_merge_cred_exc)
                         logger.error(
@@ -2577,11 +2720,13 @@ def _run_evolution_impl(
                             _merge_cred_exc,
                         )
                         print_error(
-                            f"Merge [bold]{merge_id}[/bold] failed because the "
-                            f"shared {backend_display_name(config.agent.backend)} "
-                            f"credential could not be used or refreshed — this "
-                            f"is a login failure, not a failure of the merged "
-                            f"code. Falling through to mutation."
+                            f"Merge [bold]{merge_id}[/bold] "
+                            + _credential_failure_verdict(
+                                config.agent.backend,
+                                transient=_merge_cred_exc.transient,
+                                subject="the merged code",
+                            )
+                            + " Falling through to mutation."
                         )
 
                     if merged is None:
@@ -2596,12 +2741,17 @@ def _run_evolution_impl(
                                 candidate_id=merge_id,
                                 source="merge_failed",
                             )
-                        print_error(
-                            f"Merge {merge_id} failed "
-                            f"(candidates: {a.id} + {b.id}, gen {gen}). "
-                            f"Claude Code returned no output or the merge subprocess errored. "
-                            f"Check the HELIX ERROR panel above for full diagnostics."
-                        )
+                        # A credential failure has already been diagnosed
+                        # above; the generic wording would contradict it.
+                        if not merge_credential_failed:
+                            print_error(
+                                f"Merge {merge_id} failed "
+                                f"(candidates: {a.id} + {b.id}, gen {gen}). "
+                                f"{backend_display_name(config.agent.backend)} "
+                                "returned no output or the merge subprocess "
+                                "errored. Check the HELIX ERROR panel above "
+                                "for full diagnostics."
+                            )
                     else:
                         if merged.usage:
                             live.update(usage=merged.usage)
@@ -3653,34 +3803,45 @@ def _run_evolution_impl(
     # able to tell them apart after the fact.  The per-slot errors above have
     # long scrolled away by now; this line is part of the permanent summary
     # that outlives the live display.
+    _display = backend_display_name(config.agent.backend)
+    if credential_failures.recovered_ids():
+        # Not failures -- but the only visible sign that candidates are
+        # still racing to refresh the shared login despite the warm.
+        _recovered_ids = ", ".join(credential_failures.recovered_ids())
+        print_warning(
+            f"{len(credential_failures.recovered_ids())} invocation(s) "
+            f"recovered after a lost refresh race on the shared {_display} "
+            f"credential: {_recovered_ids}. Each was retried once from a "
+            "fresh worktree and succeeded; both attempts' tokens are charged "
+            "and the first attempt's output is kept beside the retry's "
+            "(`.attempt1` artifacts). The credential is being refreshed by "
+            "candidates in flight, which the per-generation warm does not "
+            "prevent."
+        )
     if credential_failures:
         _failed_ids = ", ".join(credential_failures.candidate_ids())
-        _display = backend_display_name(config.agent.backend)
-        if credential_failures.all_transient():
+        _transient = credential_failures.all_transient()
+        if _transient:
             # Every failure was a lost refresh race: the shared login was
             # refreshed by another candidate and is most likely fine.  Telling
             # the operator to re-login here would throw away a working
             # credential and teach them to distrust a healthy run.
-            print_error(
-                f"{len(credential_failures)} mutation(s) failed on the shared "
-                f"{_display} credential, not on their code: {_failed_ids}. "
-                f"Each lost a refresh race (another candidate refreshed the "
-                f"shared login first) and failed again on its one retry. The "
-                f"stored login is most likely usable: run "
-                f"[cyan]helix resume[/cyan] first, and only re-authenticate "
-                f"if this keeps recurring. Last report: "
-                f"{credential_failures.last_message()}"
+            _cause = (
+                "Each lost a refresh race (another candidate refreshed the "
+                "shared login first) and failed again on its one retry."
             )
         else:
-            print_error(
-                f"{len(credential_failures)} mutation(s) failed on the shared "
-                f"{_display} credential, not on their code: {_failed_ids}. "
-                f"The backend reported that its stored login could not be "
-                f"used or refreshed. Re-authenticate with "
-                f"[cyan]helix sandbox login {config.agent.backend}[/cyan], "
-                f"then [cyan]helix resume[/cyan]. Last report: "
-                f"{credential_failures.last_message()}"
+            _cause = (
+                "The backend reported that its stored login could not be "
+                "used or refreshed."
             )
+        print_error(
+            f"{credential_failures.describe_failed()} failed on the shared "
+            f"{_display} credential, not on their code: {_failed_ids}. "
+            f"{_cause} "
+            + _credential_remedy(config.agent.backend, transient=_transient)
+            + f" Last report: {escape(credential_failures.last_message())}"
+        )
 
     best = frontier.best()
 

@@ -516,13 +516,103 @@ class TestWarmIsBounded:
 # ---------------------------------------------------------------------------
 
 
-def _config(backend: str, *, sandboxed: bool) -> HelixConfig:
+def _config(
+    backend: str,
+    *,
+    sandboxed: bool,
+    num_parallel_proposals: int = 2,
+    mutations_per_parent: int = 1,
+    max_workers: int = 4,
+) -> HelixConfig:
     return HelixConfig(
         objective="Improve the code",
         evaluator=EvaluatorConfig(command="pytest -q"),
         agent=AgentConfig(backend=backend),  # type: ignore[arg-type]
         sandbox=SandboxConfig(enabled=sandboxed),
+        evolution=EvolutionConfig(
+            num_parallel_proposals=num_parallel_proposals,
+            mutations_per_parent=mutations_per_parent,
+            max_workers=max_workers,
+        ),
     )
+
+
+class TestWarmIsGatedOnConcurrency:
+    """A single writer cannot lose a refresh race to itself."""
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(num_parallel_proposals=1, mutations_per_parent=1, max_workers=8),
+            dict(num_parallel_proposals=4, mutations_per_parent=1, max_workers=1),
+            dict(num_parallel_proposals=1, mutations_per_parent=1, max_workers=1),
+        ],
+    )
+    def test_single_writer_skips_the_warm_and_says_why(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        kwargs: dict[str, int],
+    ) -> None:
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise AssertionError("no warm with a single writer")
+
+        monkeypatch.setattr("helix.evolution.warm_backend_credential", _boom)
+        with caplog.at_level("INFO", logger="helix.evolution"):
+            result = _warm_generation_credential(
+                _config("codex", sandboxed=True, **kwargs), gen=1, announce_skip=True
+            )
+        assert result is not None and result.skipped
+        assert "single writer" in (result.skip_reason or "")
+        assert "single writer" in caplog.text
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(num_parallel_proposals=2, mutations_per_parent=1, max_workers=8),
+            dict(num_parallel_proposals=1, mutations_per_parent=2, max_workers=2),
+        ],
+    )
+    def test_two_writers_warm(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, int]
+    ) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "helix.evolution.warm_backend_credential",
+            lambda backend, **_k: (
+                calls.append(backend),
+                CredentialWarmResult(backend=backend, warmed=True, returncode=0),
+            )[1],
+        )
+        _warm_generation_credential(
+            _config("codex", sandboxed=True, **kwargs), gen=1, announce_skip=True
+        )
+        assert calls == ["codex"]
+
+    def test_operator_env_is_passed_to_the_warm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
+        monkeypatch.setattr(
+            "helix.evolution.warm_backend_credential",
+            lambda backend, **k: (
+                seen.update(k),
+                CredentialWarmResult(backend=backend, warmed=True, returncode=0),
+            )[1],
+        )
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        monkeypatch.delenv("NOT_SET", raising=False)
+        config = _config("codex", sandboxed=True).model_copy(
+            update={
+                "passthrough_env": ["HTTPS_PROXY", "NOT_SET"],
+                "env": {"SSL_CERT_FILE": "/ca.pem"},
+            }
+        )
+        _warm_generation_credential(config, gen=1, announce_skip=True)
+        assert seen["env"] == {
+            "HTTPS_PROXY": "http://proxy:3128",
+            "SSL_CERT_FILE": "/ca.pem",
+        }
 
 
 class TestGenerationWarm:
@@ -576,3 +666,24 @@ class TestGenerationWarm:
         printed = capsys.readouterr().out
         assert "refresh" in printed.lower()
         assert "run continues" in printed.lower()
+
+    def test_container_output_with_rich_markup_does_not_crash_the_run(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A stderr tail like ``could not read [/home/node/.codex/auth.json]``
+        or a truncated ``[/bold]`` raised ``rich.errors.MarkupError`` on the
+        main thread before any candidate was dispatched."""
+        detail = "could not read [/home/node/.codex/auth.json] [/] [/bold] [auth]"
+        monkeypatch.setattr(
+            "helix.evolution.warm_backend_credential",
+            lambda backend, **_k: CredentialWarmResult(
+                backend=backend, warmed=False, returncode=1, detail=detail
+            ),
+        )
+        result = _warm_generation_credential(
+            _config("codex", sandboxed=True), gen=2, announce_skip=False
+        )
+        assert result is not None and result.failed
+        out = capsys.readouterr().out
+        assert "[/bold]" in out
+        assert "[auth]" in out

@@ -220,6 +220,29 @@ class TestRunEvolutionSeedlessFailFast:
 
         assert exc_info.value is exc
 
+    def test_failed_seed_generation_still_charges_its_usage(
+        self, tmp_path, seedless_mocks, mocker
+    ):
+        """A seed invocation that dies on the shared credential spent tokens
+        first; they are charged before the worktree goes and the error
+        propagates, mirroring ``merge()`` / ``mutate()``."""
+        from helix.exceptions import CredentialRefreshError
+
+        config = make_config(seedless=True)
+        usage = UsageStats(input_tokens=9, output_tokens=3)
+        seedless_mocks["generate_seed"].side_effect = CredentialRefreshError(
+            "login is dead", usage=usage
+        )
+        charge = mocker.patch("helix.evolution.budget_api.charge_llm_usage")
+
+        with pytest.raises(CredentialRefreshError):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        [call] = [c for c in charge.call_args_list if c.args[1] is usage]
+        assert call.kwargs["candidate_id"] == "g0-s0"
+        assert call.kwargs["source"] == "seed_generation_failed"
+        seedless_mocks["remove_worktree"].assert_called_once()
+
     def test_generate_seed_called_only_once_on_failure(self, tmp_path, seedless_mocks):
         """generate_seed must only be called once even on failure (no retry)."""
         config = make_config(seedless=True)

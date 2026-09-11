@@ -201,11 +201,15 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
 # independently that a refresh is due, and each posts the same single-use
 # refresh token.  One wins; the rest are told the token was already consumed.
 #
-# ``helix.sandbox.warm_backend_credential`` closes that window by running the
+# ``helix.sandbox.warm_backend_credential`` narrows that window by running the
 # command below once, in one container, before a generation dispatches any
-# candidate -- so whatever refresh is due happens under a single writer and
-# every candidate then starts from an already-fresh credential with nothing
-# left to race for.
+# candidate -- so a refresh that is due at that moment happens under a single
+# writer.  The credential is then fresh at the *start* of the generation; a
+# token that crosses its refresh threshold during the generation (parent
+# evaluations run before each mutation, and queued slots start later still)
+# can still be raced by the candidates in flight.  The warm is skipped when
+# at most one candidate can write the shared login at a time, since a single
+# writer cannot race itself.
 #
 # A backend is warmed only when a command exists here that (a) actually takes
 # the CLI's refresh path and (b) costs nothing.  Both halves are load-bearing:

@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from helix.config import SandboxConfig
+from helix.config import AgentConfig, SandboxConfig
 from helix.evolution import run_evolution
 from helix.exceptions import CredentialRefreshError
 from helix.sandbox import CredentialWarmResult
@@ -30,7 +30,21 @@ from tests.unit.test_evolution import (  # type: ignore[import-untyped]
 
 
 def _sandboxed(config: Any) -> Any:
-    return config.model_copy(update={"sandbox": SandboxConfig(enabled=True)})
+    """Sandboxed, on the one backend the code actually warms (codex)."""
+    return config.model_copy(
+        update={
+            "sandbox": SandboxConfig(enabled=True),
+            "agent": AgentConfig(backend="codex"),
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def two_writers(mocker: Any) -> None:
+    """The warm is skipped for a single writer; that gate has its own tests
+    (``test_credential_warm.py``).  Here the loop shape is what matters, so
+    pretend every generation has two concurrent writers."""
+    mocker.patch("helix.evolution._generation_concurrent_writers", return_value=2)
 
 
 @pytest.fixture()
@@ -69,7 +83,7 @@ class TestWarmRunsOncePerGeneration:
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        assert warm_calls == ["claude", "claude", "claude"]
+        assert warm_calls == ["codex", "codex", "codex"]
 
     def test_warm_precedes_every_mutation(
         self, mocker, tmp_path, all_mocks  # noqa: F811
@@ -218,9 +232,59 @@ class TestCredentialFailureIsVisible:
         assert "merge" in out
         assert "credential" in out
         assert "not a failure of the merged code" in out
-        # The end-of-run summary names the merge slot, not just the mutation.
-        assert "1 mutation(s) failed on the shared" in out
+        # Exactly one diagnosis at the merge site: the generic "returned no
+        # output" wording must not follow and contradict it.
+        assert out.count("not a failure of the merged code") == 1
+        assert "returned no output" not in out
+        # The end-of-run summary labels the merge slot as a merge.
+        assert "1 merge(s) failed on the shared" in out
+        assert "mutation(s) failed" not in out
         assert "helix sandbox login" in out
+
+    def test_merge_lost_refresh_race_is_worded_as_transient(
+        self,
+        mocker,  # noqa: F811
+        tmp_path,
+        all_mocks,  # noqa: F811
+        warm_calls,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        exc = CredentialRefreshError(
+            "Codex CLI lost a refresh race on the shared credential "
+            "(matched 'because your refresh token was already used' in "
+            "stderr; failed again on retry)",
+            suggestion="Run `helix resume`.",
+        )
+        exc.transient = True
+        all_mocks["merge"].side_effect = exc
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"i1": 0.9, "i2": 0.5})
+            return make_eval_result(candidate.id, {"i1": 0.5, "i2": 0.8})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _sandboxed(
+            make_config(
+                max_generations=2,
+                merge_enabled=True,
+                max_merge_invocations=5,
+                merge_val_overlap_floor=1,
+                max_evaluations=10000,
+            )
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        out = " ".join(capsys.readouterr().out.lower().split())
+        assert "refreshed by another candidate first" in out
+        assert "could not be used or refreshed" not in out
+        assert "helix sandbox login" not in out
+        assert "helix resume" in out
 
     def test_lost_refresh_race_does_not_demand_a_relogin(
         self,
@@ -283,3 +347,45 @@ class TestCredentialFailureIsVisible:
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         assert "credential" not in capsys.readouterr().out.lower()
+
+    def test_recovered_refresh_race_reaches_the_summary(
+        self,
+        mocker,  # noqa: F811
+        tmp_path,
+        all_mocks,  # noqa: F811
+        warm_calls,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A race the retry recovered from is not a failure, but it is the
+        only sign the operator gets that candidates are still refreshing the
+        shared login for themselves."""
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, *a, **k: make_eval_result(
+                candidate.id, {"i1": 0.5, "i2": 0.5}
+            )
+        )
+
+        def _mutate(*args: Any, **kwargs: Any) -> None:
+            kwargs["on_refresh_race_recovered"](
+                f"{kwargs['new_id']} recovered after a lost refresh race on the "
+                "shared Codex CLI credential"
+            )
+            return None
+
+        all_mocks["mutate"].side_effect = _mutate
+        config = _sandboxed(
+            make_config(max_generations=2, perfect_score_threshold=None)
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert all_mocks["mutate"].call_count >= 1
+        # ``all_mocks`` stubs ``print_warning``; the summary goes through it
+        # because a recovered race is a warning, not a failure.
+        warnings = " ".join(
+            str(call.args[0]) for call in all_mocks["print_warning"].call_args_list
+        ).lower()
+        assert "recovered after a lost refresh race" in warnings
+        assert "g1-s1" in warnings
+        assert "failed on the shared" not in capsys.readouterr().out.lower()
