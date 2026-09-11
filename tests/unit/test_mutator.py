@@ -1918,6 +1918,36 @@ class TestOpenCodeSubprocessIsolation:
             "XDG_DATA_HOME must not be set for opencode; it moves auth.json too"
         )
 
+    def test_sandboxed_opencode_gets_a_per_candidate_database_too(
+        self, tmp_path: Path, mocker
+    ):
+        """Every sandboxed container shares one ``/home/node`` (the
+        ``helix-auth-opencode`` volume with ``HOME`` forced), so without the
+        knob all concurrent candidates open the same ``opencode.db``.  The
+        database goes under the per-candidate workspace copy instead."""
+        mock_run = mocker.patch("helix.mutator.run_sandboxed_command")
+        mock_run.return_value = MagicMock(
+            stdout='{"type":"result","sessionID":"ses_abc"}\n',
+            stderr="",
+            returncode=0,
+        )
+
+        invoke_claude_code(
+            str(tmp_path),
+            "fix the bug",
+            AgentConfig(backend="opencode"),
+            sandbox=SandboxConfig(enabled=True, image="img:latest"),
+        )
+
+        env = mock_run.call_args[1]["env"]
+        assert env["OPENCODE_DB"] == (
+            "/workspace/.helix_opencode_state/opencode/opencode.db"
+        )
+        assert "XDG_DATA_HOME" not in env
+        # The host worktree is untouched: the directory is created in the
+        # workspace copy by the sandbox, not here.
+        assert not (tmp_path / ".helix_opencode_state").exists()
+
     def test_opencode_subprocess_isolation_unique_per_candidate(
         self, tmp_path: Path, mocker
     ):
@@ -2106,6 +2136,60 @@ class TestMutateRecordsUsageOnFailure:
 
         assert result is None
         assert spent == []
+
+    def test_usage_is_reported_when_the_credential_fails(
+        self, tmp_path: Path, mocker
+    ):
+        """A credential failure is not free: the tokens spent before the
+        login gave out reach the sink like the sibling error paths."""
+        from helix.exceptions import CredentialRefreshError
+
+        usage = UsageStats(input_tokens=11, output_tokens=4)
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=CredentialRefreshError("login is dead", usage=usage),
+        )
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
+        mocker.patch("helix.mutator.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        with pytest.raises(CredentialRefreshError):
+            mutate(
+                parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+            )
+
+        assert spent == [usage]
+        mock_remove.assert_called_once_with(child)
+
+    def test_worktree_is_removed_on_a_non_helix_exception(
+        self, tmp_path: Path, mocker
+    ):
+        import subprocess as _sp
+
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=_sp.TimeoutExpired(cmd=["codex"], timeout=1),
+        )
+        mock_remove = mocker.patch("helix.mutator.remove_worktree")
+
+        with pytest.raises(_sp.TimeoutExpired):
+            mutate(parent, er, "g1-s0", config, Path("/tmp"))
+
+        mock_remove.assert_called_once_with(child)
 
 
 class TestSalvageBackendUsage:

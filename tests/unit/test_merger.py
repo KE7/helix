@@ -372,6 +372,65 @@ class TestMerge:
 
         assert spent == [spent_before_failure]
 
+    def test_lost_refresh_race_is_retried_once_from_a_fresh_worktree(
+        self, mocker, tmp_path: Path
+    ):
+        """``merge()`` gets the same one-shot retry as ``mutate()``: a
+        transient credential failure re-clones the merge worktree and
+        invokes again; the first attempt's spend rides along."""
+        from helix.display import UsageStats
+
+        ca = make_candidate("g0-s0")
+        cb = make_candidate("g0-s1")
+        config = make_config()
+        clones: list = []
+
+        def _clone(parent, new_id, base_dir):
+            path = tmp_path / f"clone{len(clones) + 1}"
+            path.mkdir()
+            child = make_candidate(new_id)
+            child.worktree_path = str(path)
+            clones.append(child)
+            return child
+
+        mocker.patch("helix.merger.clone_candidate", side_effect=_clone)
+        mocker.patch("helix.merger.get_diff", return_value="some diff")
+        lost = CredentialRefreshError(
+            "lost a refresh race", usage=UsageStats(input_tokens=5, output_tokens=2)
+        )
+        lost.transient = True
+        invoke = mocker.patch(
+            "helix.merger.invoke_claude_code",
+            side_effect=[lost, ({}, UsageStats(input_tokens=12, output_tokens=8))],
+        )
+        removed: list = []
+        mocker.patch("helix.merger.remove_worktree", side_effect=removed.append)
+        mocker.patch("helix.merger.snapshot_candidate")
+        recovered: list[str] = []
+        spent: list[UsageStats] = []
+
+        result = merge(
+            ca,
+            cb,
+            "g1-m0",
+            config,
+            Path("/tmp"),
+            record_usage=spent.append,
+            on_refresh_race_recovered=recovered.append,
+        )
+
+        assert invoke.call_count == 2
+        assert len(clones) == 2
+        assert result is clones[1]
+        assert result.operation == "merge"
+        assert result.parent_ids == ["g0-s0", "g0-s1"]
+        # The retry ran in the fresh clone, and the first one was removed.
+        assert invoke.call_args_list[1].args[0] == clones[1].worktree_path
+        assert invoke.call_args_list[1].kwargs["retried"] is True
+        assert removed == [clones[0]]
+        assert spent[0].input_tokens == 5 + 12 and spent[0].output_tokens == 2 + 8
+        assert recovered and "g1-m0" in recovered[0]
+
     def test_snapshot_not_called_by_merge_on_success(self, mocker):
         """merge() must NOT call snapshot_candidate — the caller owns that step.
 
