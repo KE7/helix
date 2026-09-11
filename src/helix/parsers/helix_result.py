@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import Any
 
 from helix.exceptions import EvaluatorError
+from helix.lines import split_lf_lines
 
 
 def _read_helix_batch(worktree_path: str | Path) -> list[str]:
@@ -130,7 +131,7 @@ def _extract_helix_result_line(stdout: str) -> str | None:
     so the two agree on "which line wins" when (buggy) evaluators emit
     more than one.
     """
-    for line in reversed(stdout.splitlines()):
+    for line in reversed(split_lf_lines(stdout)):
         if line.startswith("HELIX_RESULT="):
             return line
     return None

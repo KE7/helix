@@ -56,6 +56,7 @@ from helix.exceptions import (
 )
 from helix.executor import run_evaluator
 from helix.lineage import LineageEntry, find_merge_triplet, load_lineage, record_entry
+from helix.lines import split_lf_lines
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.proposals import (
@@ -697,7 +698,7 @@ def _load_dataset_ids(path: Path) -> list[str]:
         return [str(i) for i in range(len(data))]
     # JSONL
     count = 0
-    for line in raw.splitlines():
+    for line in split_lf_lines(raw):
         if line.strip():
             count += 1
     return [str(i) for i in range(count)]
@@ -1543,6 +1544,11 @@ def _run_proposal_worker(
         )
 
     # ---- Step W4: LLM mutation ----
+    # ``mutate`` reports what the backend spent through this sink whether or
+    # not it returns a candidate, so a failed slot still carries its usage
+    # into the sequential apply phase for charging.  The list is worker-local
+    # — no shared state is touched here, per the thread-safety contract above.
+    _spent_usage: list[UsageStats] = []
     try:
         _child = mutate(
             parent=_parent,
@@ -1556,6 +1562,7 @@ def _run_proposal_worker(
                     cand, config, project_root
                 )
             ),
+            record_usage=_spent_usage.append,
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
@@ -1588,6 +1595,7 @@ def _run_proposal_worker(
             presample_ctx=pre_ctx,
             parent_eval_result=_parent_eval,
             parent_n_uncached=_parent_n_uncached,
+            child_usage=_spent_usage[-1] if _spent_usage else None,
         )
 
     if _child is None:
@@ -1595,6 +1603,7 @@ def _run_proposal_worker(
             presample_ctx=pre_ctx,
             parent_eval_result=_parent_eval,
             parent_n_uncached=_parent_n_uncached,
+            child_usage=_spent_usage[-1] if _spent_usage else None,
         )
 
     # ---- Step W5: Tamper check ----
@@ -2380,6 +2389,7 @@ def _run_evolution_impl(
                             f"diff form for this merge."
                         )
 
+                    merge_usage: list[UsageStats] = []
                     merged = merge(
                         candidate_a=a,
                         candidate_b=b,
@@ -2395,11 +2405,21 @@ def _run_evolution_impl(
                             )
                         ),
                         ancestor=ancestor_candidate,
+                        record_usage=merge_usage.append,
                     )
 
                     if merged is None:
                         # GEPA parity (M2/B3): merge operator failed before
                         # any eval; no attempt, fall through to mutation.
+                        # The failed merge still spent tokens — charge them.
+                        if merge_usage:
+                            live.update(usage=merge_usage[-1])
+                            budget_api.charge_llm_usage(
+                                state,
+                                merge_usage[-1],
+                                candidate_id=merge_id,
+                                source="merge_failed",
+                            )
                         print_error(
                             f"Merge {merge_id} failed "
                             f"(candidates: {a.id} + {b.id}, gen {gen}). "
@@ -2802,6 +2822,17 @@ def _run_evolution_impl(
                             candidate_id=_parent.id,
                             split="train",
                             source="parent_minibatch",
+                        )
+                    # Charge LLM usage: the mutation failed, but its tokens
+                    # were still spent.  Skipping this is how a run's budget
+                    # silently under-reports by a whole generation.
+                    if wr.child_usage:
+                        live.update(usage=wr.child_usage)
+                        budget_api.charge_llm_usage(
+                            state,
+                            wr.child_usage,
+                            candidate_id=_new_id,
+                            source="mutation_failed",
                         )
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
                     return None

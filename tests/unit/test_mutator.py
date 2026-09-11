@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from helix.display import UsageStats
+from helix.exceptions import RateLimitError
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
 from helix.mutator import (
@@ -1994,3 +1997,155 @@ class TestOpenCodeSubprocessIsolation:
         assert ".helix_opencode_state/" in gitignore_text, (
             ".helix_opencode_state/ must be gitignored to keep it out of candidate history"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: mutate hands back usage even when it hands back no candidate
+# ---------------------------------------------------------------------------
+
+
+class TestMutateRecordsUsageOnFailure:
+    """``record_usage`` is the only way a failed slot's tokens reach the budget.
+
+    ``mutate`` returns ``None`` on :class:`MutationError` by contract, so
+    without this channel the caller has nothing to charge and the run's
+    budget silently under-reports by whatever the attempt spent.
+    """
+
+    def _mutate(self, tmp_path: Path, mocker, side_effect) -> tuple:
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=side_effect)
+        mocker.patch("helix.mutator.remove_worktree")
+        mocker.patch("helix.mutator.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        result = mutate(
+            parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+        )
+        return result, spent
+
+    def test_usage_is_reported_when_the_mutation_fails(self, tmp_path: Path, mocker):
+        usage = UsageStats(input_tokens=2500000, output_tokens=8000)
+        result, spent = self._mutate(
+            tmp_path,
+            mocker,
+            MutationError("Failed to parse Codex CLI JSONL output line", usage=usage),
+        )
+
+        assert result is None, "the None-on-failure contract still holds"
+        assert spent == [usage]
+
+    def test_usage_is_reported_when_the_mutation_is_rate_limited(
+        self, tmp_path: Path, mocker
+    ):
+        usage = UsageStats(input_tokens=7, output_tokens=3)
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            side_effect=RateLimitError("429", usage=usage),
+        )
+        mocker.patch("helix.mutator.remove_worktree")
+        mocker.patch("helix.mutator.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        with pytest.raises(RateLimitError):
+            mutate(
+                parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+            )
+
+        assert spent == [usage]
+
+    def test_usage_is_reported_exactly_once_on_success(self, tmp_path: Path, mocker):
+        """The success path reports through the same channel, and only once."""
+        usage = UsageStats(input_tokens=5, output_tokens=2)
+        parent = make_candidate("g0-s0")
+        er = make_eval_result()
+        config = make_config()
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch(
+            "helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, usage)
+        )
+        mocker.patch("helix.mutator.remove_worktree")
+        mocker.patch("helix.mutator.snapshot_candidate")
+
+        spent: list[UsageStats] = []
+        result = mutate(
+            parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+        )
+
+        assert result is child
+        assert spent == [usage]
+
+    def test_nothing_is_reported_when_the_error_carries_no_usage(
+        self, tmp_path: Path, mocker
+    ):
+        """No invocation happened — a zero charge would be a fabricated one."""
+        result, spent = self._mutate(tmp_path, mocker, MutationError("timeout"))
+
+        assert result is None
+        assert spent == []
+
+
+class TestSalvageBackendUsage:
+    """The lenient recovery used before the strict parse can fail."""
+
+    def test_recovers_usage_from_a_stream_with_an_unparsable_line(self):
+        from helix.mutator import _salvage_backend_usage
+
+        stdout = "\n".join(
+            [
+                "{not json",
+                '{"type":"turn.completed","usage":{"input_tokens":11,'
+                '"output_tokens":7}}',
+            ]
+        )
+        usage = _salvage_backend_usage(
+            "codex",
+            subprocess.CompletedProcess(
+                args=["codex"], returncode=0, stdout=stdout, stderr=""
+            ),
+        )
+
+        assert usage.input_tokens == 11
+        assert usage.output_tokens == 7
+
+    def test_falls_back_to_a_line_scan_for_a_truncated_claude_object(self):
+        from helix.mutator import _salvage_backend_usage
+
+        stdout = '{"type":"result","usage":{"input_tokens":3,"output_tokens":1}}\n{"trunc'
+        usage = _salvage_backend_usage(
+            "claude",
+            subprocess.CompletedProcess(
+                args=["claude"], returncode=1, stdout=stdout, stderr=""
+            ),
+        )
+
+        assert usage.input_tokens == 3
+        assert usage.output_tokens == 1
+
+    def test_returns_zeros_rather_than_raising_on_junk(self):
+        from helix.mutator import _salvage_backend_usage
+
+        for stdout in ("", "   ", "total garbage", "[]"):
+            usage = _salvage_backend_usage(
+                "codex",
+                subprocess.CompletedProcess(
+                    args=["codex"], returncode=0, stdout=stdout, stderr=""
+                ),
+            )
+            assert usage == UsageStats(), stdout

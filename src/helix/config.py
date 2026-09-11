@@ -18,6 +18,7 @@ from helix.backends import (
     EFFORT_VALID_VALUES,
     backend_display_name,
 )
+from helix.lines import split_lf_lines
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -272,7 +273,7 @@ def load_dataset_examples(train_path: Path, max_examples: int = 3) -> list[str]:
                 )
         else:
             # Treat as JSONL — one JSON object per non-blank line.
-            for line in raw.splitlines():
+            for line in split_lf_lines(raw):
                 line = line.strip()
                 if line:
                     items.append(json.loads(line))

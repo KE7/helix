@@ -19,7 +19,8 @@ from helix.config import (
     SandboxConfig,
 )
 from helix.display import UsageStats
-from helix.mutator import invoke_claude_code
+from helix.exceptions import MutationError
+from helix.mutator import BACKEND_RESULT_ARTIFACT_NAME, invoke_claude_code
 from helix.state import BudgetState, EvolutionState
 from helix.trace import TRACE, EventType
 
@@ -729,3 +730,188 @@ def test_evolution_counter_mutations_route_through_budget_api() -> None:
     ]
     for pattern in forbidden_patterns:
         assert re.search(pattern, source) is None
+
+
+# ---------------------------------------------------------------------------
+# Usage accounting must survive a backend-output parse failure
+# ---------------------------------------------------------------------------
+#
+# Regression cover for a real under-report: a run lost one generation's
+# entire usage because the backend's JSONL stream had one unparsable line
+# and ``_parse_jsonl_output`` raised before anything charged the budget.
+# The generation in question was the most expensive of its run, and nothing
+# in the run output said its tokens had gone missing.
+
+
+# Per-backend (malformed line, usage line) streams.  In each the usage
+# record is intact and a *different* line is unparsable, which is what the
+# real failure looked like: the tokens were fully reported, the stream as a
+# whole just would not parse.
+_MALFORMED_STREAMS = {
+    "codex": "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"t1"}',
+            "{this line is not JSON",
+            (
+                '{"type":"turn.completed","usage":{"input_tokens":2500000,'
+                '"cached_input_tokens":2400000,"output_tokens":8000,'
+                '"reasoning_output_tokens":3500}}'
+            ),
+        ]
+    ),
+    "cursor": "\n".join(
+        [
+            "{truncated",
+            '{"type":"assistant","usage":{"inputTokens":13,"outputTokens":9,'
+            '"costUsd":0.33}}',
+        ]
+    ),
+    "opencode": "\n".join(
+        [
+            "not json at all",
+            '{"type":"step_finish","part":{"tokens":{"input":15,"output":11},'
+            '"cost":0.35}}',
+        ]
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_input", "expected_output"),
+    [
+        pytest.param("codex", 2500000, 8000, id="codex"),
+        pytest.param("cursor", 13, 9, id="cursor"),
+        pytest.param("opencode", 15, 11, id="opencode"),
+    ],
+)
+def test_malformed_backend_output_still_charges_llm_budget(
+    backend: str,
+    expected_input: int,
+    expected_output: int,
+    tmp_path: Path,
+    mocker,
+) -> None:
+    """A parse failure must not take the token accounting down with it."""
+    assert backend in BACKENDS
+    worktree = tmp_path / backend
+    worktree.mkdir()
+    mock_run = mocker.patch("helix.mutator.subprocess.run")
+    # Exit code 0 is the case that bites: it puts ``_parse_jsonl_output`` in
+    # strict mode, so one bad line raises instead of being set aside.
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[_BACKEND_EXECUTABLE[backend]],
+        returncode=0,
+        stdout=_MALFORMED_STREAMS[backend],
+        stderr="",
+    )
+    state = make_state()
+
+    with pytest.raises(MutationError) as excinfo:
+        invoke_claude_code(
+            str(worktree),
+            "read the prompt artifact",
+            AgentConfig(backend=backend),
+        )
+
+    # The error carries the usage recovered from the raw stream.
+    recovered = excinfo.value.usage
+    assert recovered is not None
+    assert recovered.input_tokens == expected_input
+    assert recovered.output_tokens == expected_output
+
+    budget.charge_llm_usage(
+        state,
+        recovered,
+        candidate_id=f"{backend}-candidate",
+        source="mutation_failed",
+    )
+
+    assert state.budget.input_tokens == expected_input
+    assert state.budget.output_tokens == expected_output
+
+
+def test_recovered_usage_matches_the_successful_parse_of_the_same_stream(
+    tmp_path: Path, mocker
+) -> None:
+    """Recovery is lossless for the records that did decode.
+
+    Charging a partial number would be its own quiet under-report, so the
+    salvage path is pinned against the strict path on an identical stream
+    that differs only by one appended junk line.
+    """
+    worktree = tmp_path / "codex"
+    worktree.mkdir()
+    good = _MALFORMED_STREAMS["codex"].replace("{this line is not JSON\n", "")
+    mock_run = mocker.patch("helix.mutator.subprocess.run")
+
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout=good, stderr=""
+    )
+    _parsed, clean_usage = invoke_claude_code(
+        str(worktree), "prompt", AgentConfig(backend="codex")
+    )
+
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["codex"],
+        returncode=0,
+        stdout=_MALFORMED_STREAMS["codex"],
+        stderr="",
+    )
+    with pytest.raises(MutationError) as excinfo:
+        invoke_claude_code(str(worktree), "prompt", AgentConfig(backend="codex"))
+
+    assert excinfo.value.usage == clean_usage
+    assert clean_usage.input_tokens == 2500000
+    assert clean_usage.cached_input_tokens == 2400000
+    assert clean_usage.reasoning_tokens == 3500
+
+
+def test_failed_invocation_records_recovered_usage_in_the_backend_artifact(
+    tmp_path: Path, mocker
+) -> None:
+    """``.helix_backend_result.json`` must not report zeros for spent tokens."""
+    worktree = tmp_path / "codex"
+    worktree.mkdir()
+    mocker.patch("helix.mutator.subprocess.run").return_value = (
+        subprocess.CompletedProcess(
+            args=["codex"],
+            returncode=0,
+            stdout=_MALFORMED_STREAMS["codex"],
+            stderr="",
+        )
+    )
+
+    with pytest.raises(MutationError):
+        invoke_claude_code(str(worktree), "prompt", AgentConfig(backend="codex"))
+
+    artifact = json.loads(
+        (worktree / BACKEND_RESULT_ARTIFACT_NAME).read_text(encoding="utf-8")
+    )
+    assert artifact["parsed"] is None
+    assert artifact["usage"]["input_tokens"] == 2500000
+    assert artifact["usage"]["output_tokens"] == 8000
+
+
+def test_usage_is_none_when_no_backend_output_is_recoverable(
+    tmp_path: Path, mocker
+) -> None:
+    """A zero-token charge and "nothing ran" must stay distinguishable.
+
+    ``HelixError.usage`` is ``None`` only where no invocation produced a
+    usable record; a backend that ran and reported nothing yields a
+    zero-token ``UsageStats``, which ``charge_llm_usage`` still records as a
+    real (empty) backend response.
+    """
+    worktree = tmp_path / "codex"
+    worktree.mkdir()
+    mocker.patch("helix.mutator.subprocess.run").return_value = (
+        subprocess.CompletedProcess(
+            args=["codex"], returncode=0, stdout="{bad", stderr=""
+        )
+    )
+
+    with pytest.raises(MutationError) as excinfo:
+        invoke_claude_code(str(worktree), "prompt", AgentConfig(backend="codex"))
+
+    assert excinfo.value.usage == UsageStats()
+    assert MutationError("no backend ran").usage is None
