@@ -17,7 +17,7 @@ import pytest
 
 
 REAL_AUTH_VOLUME_PREFIX = "helix-auth-"
-TEST_VOLUME_PREFIX = "helix-agent-state-test-"
+TEST_VOLUME_PREFIX = "helix-integration-test-"
 
 
 def _strict() -> bool:
