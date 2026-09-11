@@ -42,11 +42,21 @@ class SkippedProposal:
 
 @dataclass
 class MutationFailedProposal:
-    """``mutate()`` raised or returned None; ``parent_eval_result`` may be None."""
+    """``mutate()`` raised or returned None; ``parent_eval_result`` may be None.
+
+    ``child_usage`` is the token usage the backend spent before it failed,
+    recovered from the raw output independently of the parse that failed.
+    It is charged in the apply phase exactly like a successful proposal's:
+    the tokens are gone either way, and leaving them uncharged silently
+    under-reports the run's cost by however much the failed attempt burned.
+    ``None`` means no backend invocation happened — a parent eval that
+    raised, or a worker that died before the LLM call.
+    """
 
     presample_ctx: ProposalContext
     parent_eval_result: EvalResult | None
     parent_n_uncached: int = 0
+    child_usage: UsageStats | None = None
 
 
 @dataclass

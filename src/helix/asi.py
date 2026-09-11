@@ -71,6 +71,11 @@ def _render_field_value(value: Any) -> str:
 def read_text(raw: str) -> str:
     """Render raw HELIX ASI log text."""
     lines: list[str] = []
+    # ``splitlines()`` (not ``helix.lines.split_lf_lines``) is safe here and
+    # only here among HELIX's JSONL readers: ``log`` above writes every record
+    # with ``json.dumps``'s default ``ensure_ascii=True``, so this file is pure
+    # ASCII by construction and cannot contain a U+0085 / U+2028 / U+2029 that
+    # would fragment a record.
     for raw_line in raw.splitlines():
         line = raw_line.strip()
         if not line:

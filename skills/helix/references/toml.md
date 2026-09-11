@@ -155,7 +155,7 @@ Important choices:
 
 ```toml
 [agent]
-backend = "claude"  # claude | codex | cursor | gemini | opencode
+backend = "claude"  # agy | claude | codex | cursor | opencode
 model = "sonnet"
 effort = "medium"
 max_turns = 20
@@ -169,9 +169,10 @@ network boundary, not from telling the agent not to edit evaluator files.
 
 Backend notes:
 
+- Agy: usually `agy`, optional model/effort.
 - Claude: usually `claude`, `max_turns`, optional model/effort.
 - Codex: usually `codex`, model optional.
-- Cursor/Gemini/OpenCode: check CLI support and model naming before pinning.
+- Cursor/OpenCode: check CLI support and model naming before pinning.
 
 ## Sandbox
 

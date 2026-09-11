@@ -18,6 +18,7 @@ from helix.asi import (
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.exceptions import EvaluatorError, format_error_context
+from helix.lines import split_lf_lines
 from helix.parsers.helix_result import parse as parse_helix_result
 from helix.sandbox import (
     current_evaluator_sidecar_runtime,
@@ -367,7 +368,7 @@ def run_evaluator(
     # missing batch file, etc.).  The ``helix_result`` parser does its
     # own reverse-scan before the parser runs.
     result_line_count = 0
-    for line in reversed(stdout.splitlines()):
+    for line in reversed(split_lf_lines(stdout)):
         if line.startswith("HELIX_RESULT="):
             result_line_count += 1
             if result_line_count > 1:

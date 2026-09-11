@@ -399,3 +399,123 @@ class TestLostRefreshRaceIsRetried:
         assert run.call_count == 1
         assert exc.value.transient is False
         assert "helix sandbox login codex" in exc.value.suggestion
+
+
+def _codex_stream(*, session: str, input_tokens: int, output_tokens: int) -> str:
+    return "\n".join(
+        [
+            json.dumps({"type": "session.started", "session_id": session}),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    },
+                }
+            ),
+        ]
+    )
+
+
+class TestRetryUsageAccounting:
+    """A retried invocation spent tokens twice; the caller must see both.
+
+    The lost attempt raises a transient ``CredentialRefreshError`` carrying
+    the usage salvaged from its output.  Whatever the retry then reports --
+    a candidate or another error -- has to include that first spend, or the
+    budget silently under-counts every lost race.
+    """
+
+    def test_retry_success_includes_the_lost_attempts_usage(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        run = mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _completed(
+                    1,
+                    stdout=_codex_stream(
+                        session="lost", input_tokens=5, output_tokens=2
+                    ),
+                    stderr=CODEX_ALREADY_USED,
+                ),
+                _completed(
+                    0,
+                    stdout=_codex_stream(
+                        session="won", input_tokens=12, output_tokens=8
+                    ),
+                ),
+            ],
+        )
+        parsed, usage = invoke_claude_code(
+            str(tmp_path), "p", AgentConfig(backend="codex")
+        )
+        assert run.call_count == 2
+        assert parsed["events"]
+        assert usage.input_tokens == 5 + 12
+        assert usage.output_tokens == 2 + 8
+        # The session the caller receives output from is the retry's.
+        assert usage.session_id == "won"
+
+    def test_second_loss_carries_the_sum_of_both_attempts(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _completed(
+                    1,
+                    stdout=_codex_stream(
+                        session="lost-1", input_tokens=5, output_tokens=2
+                    ),
+                    stderr=CODEX_ALREADY_USED,
+                ),
+                _completed(
+                    1,
+                    stdout=_codex_stream(
+                        session="lost-2", input_tokens=3, output_tokens=1
+                    ),
+                    stderr=CODEX_ALREADY_USED,
+                ),
+            ],
+        )
+        with pytest.raises(CredentialRefreshError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert exc.value.usage is not None
+        assert exc.value.usage.input_tokens == 5 + 3
+        assert exc.value.usage.output_tokens == 2 + 1
+        assert exc.value.usage.session_id == "lost-2"
+
+    def test_retry_failing_for_another_reason_still_carries_the_sum(
+        self, mocker: Any, tmp_path: Path
+    ) -> None:
+        """The retry's error class does not matter; the first spend rides along."""
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            side_effect=[
+                _completed(
+                    1,
+                    stdout=_codex_stream(
+                        session="lost", input_tokens=5, output_tokens=2
+                    ),
+                    stderr=CODEX_ALREADY_USED,
+                ),
+                _completed(
+                    2,
+                    stdout=_codex_stream(
+                        session="crashed", input_tokens=4, output_tokens=0
+                    ),
+                    stderr="segfault",
+                ),
+            ],
+        )
+        with pytest.raises(MutationError) as exc:
+            invoke_claude_code(
+                str(tmp_path), "p", AgentConfig(backend="codex")
+            )
+        assert exc.value.usage is not None
+        assert exc.value.usage.input_tokens == 5 + 4
+        assert exc.value.usage.output_tokens == 2

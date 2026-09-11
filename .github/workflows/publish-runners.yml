@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # Weekly rebuild of `latest` so the images track the agent CLIs' own
+  # release cadence instead of waiting for the next HELIX version tag.
+  # 12:00 UTC Monday matches the "before 6am on monday" America/Los_Angeles
+  # window in the repo's Renovate config (PR #54), so both land together.
+  schedule:
+    - cron: "0 12 * * 1"
   workflow_dispatch:
 
 env:
@@ -11,6 +17,32 @@ env:
   IMAGE_PREFIX: ghcr.io/ke7/helix-evo-runner
 
 jobs:
+  # ── 0. Pick the image tag every later job builds against and publishes ───
+  # A `v*` tag publishes its version; `main` (a scheduled or manual run)
+  # publishes `latest`; any other branch publishes its own name, so a manual
+  # dispatch from a feature branch has a tag to push instead of failing at
+  # the manifest step with "can't push with no tags specified".
+  resolve-tag:
+    name: Resolve image tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+      is-branch: ${{ steps.tag.outputs.is-branch }}
+    steps:
+      - id: tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "is-branch=false" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "value=latest" >> "$GITHUB_OUTPUT"
+            echo "is-branch=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+            echo "is-branch=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # ── 1. Build base image, one job per arch, push by digest ─────────────────
   build-base:
     name: Build base image (${{ matrix.platform }})
@@ -66,7 +98,7 @@ jobs:
   merge-base:
     name: Merge base image manifests
     runs-on: ubuntu-latest
-    needs: build-base
+    needs: [build-base, resolve-tag]
     permissions:
       contents: read
       packages: write
@@ -97,6 +129,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=semver,pattern={{version}}
+            type=raw,value=${{ needs.resolve-tag.outputs.tag }},enable=${{ needs.resolve-tag.outputs.is-branch }}
 
       - name: Create and push merged manifest list
         working-directory: /tmp/digests
@@ -108,7 +141,7 @@ jobs:
   # ── 3. Build each backend (5 images × 2 arches = 10 jobs), push by digest ─
   build-backends:
     name: Build ${{ matrix.image.name }} (${{ matrix.platform }})
-    needs: merge-base
+    needs: [merge-base, resolve-tag]
     permissions:
       contents: read
       packages: write
@@ -116,14 +149,14 @@ jobs:
       fail-fast: false
       matrix:
         image:
+          - name: agy
+            dockerfile: docker/agy.Dockerfile
           - name: claude
             dockerfile: docker/claude.Dockerfile
           - name: codex
             dockerfile: docker/codex.Dockerfile
           - name: cursor
             dockerfile: docker/cursor.Dockerfile
-          - name: gemini
-            dockerfile: docker/gemini.Dockerfile
           - name: opencode
             dockerfile: docker/opencode.Dockerfile
         platform:
@@ -148,16 +181,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Choose base tag
-        id: base-tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=latest" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push backend by digest
         id: build
         uses: docker/build-push-action@v6
@@ -166,7 +189,7 @@ jobs:
           file: ${{ matrix.image.dockerfile }}
           platforms: ${{ matrix.platform }}
           build-args: |
-            BASE_IMAGE=${{ env.IMAGE_PREFIX }}-base:${{ steps.base-tag.outputs.value }}
+            BASE_IMAGE=${{ env.IMAGE_PREFIX }}-base:${{ needs.resolve-tag.outputs.tag }}
           outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -186,7 +209,7 @@ jobs:
   # ── 4. Merge each backend's 2 arch digests into a multi-arch manifest ─────
   merge-backends:
     name: Merge ${{ matrix.image.name }} image manifests
-    needs: build-backends
+    needs: [build-backends, resolve-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -195,10 +218,10 @@ jobs:
       fail-fast: false
       matrix:
         image:
+          - name: agy
           - name: claude
           - name: codex
           - name: cursor
-          - name: gemini
           - name: opencode
     steps:
       - name: Download digests
@@ -227,6 +250,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
             type=semver,pattern={{version}}
+            type=raw,value=${{ needs.resolve-tag.outputs.tag }},enable=${{ needs.resolve-tag.outputs.is-branch }}
 
       - name: Create and push merged manifest list
         working-directory: /tmp/digests
@@ -239,7 +263,7 @@ jobs:
   verify:
     name: Verify published runner images
     runs-on: ubuntu-latest
-    needs: merge-backends
+    needs: [merge-backends, resolve-tag]
     permissions:
       packages: read
     strategy:
@@ -248,28 +272,18 @@ jobs:
         image:
           - name: base
             command: "python --version && uv --version && git --version"
+          - name: agy
+            command: "agy --version"
           - name: claude
             command: "claude --version"
           - name: codex
             command: "codex --version"
           - name: cursor
             command: "cursor agent --version"
-          - name: gemini
-            command: "gemini --version"
           - name: opencode
             command: "opencode --version"
 
     steps:
-      - name: Choose tag
-        id: tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=latest" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -277,9 +291,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Probe as `node`, the unprivileged user HELIX runs every agent
+      # container as (`_docker_args` in src/helix/sandbox.py). An installer
+      # that leaves its binary under /root passes this check as root and
+      # fails for every real run.
       - name: Pull and verify
         shell: bash
         run: |
-          image="${IMAGE_PREFIX}-${{ matrix.image.name }}:${{ steps.tag.outputs.value }}"
+          image="${IMAGE_PREFIX}-${{ matrix.image.name }}:${{ needs.resolve-tag.outputs.tag }}"
           docker pull "$image"
-          docker run --rm "$image" sh -lc '${{ matrix.image.command }}'
+          docker run --rm --user node "$image" sh -lc '${{ matrix.image.command }}'
