@@ -49,7 +49,7 @@ STATE_RELOCATING_BACKENDS: frozenset[str] = frozenset(
 )
 """Backends with a knob that moves state without moving the credential.
 
-``claude`` and ``gemini`` are absent on purpose; see
+``claude`` and ``agy`` are absent on purpose; see
 :data:`UNRELOCATED_AGENT_STATE`.
 """
 
@@ -80,7 +80,23 @@ UNRELOCATED_AGENT_STATE: dict[str, tuple[str, ...]] = {
         ".claude/backups/",
         ".claude.json",
     ),
-    "gemini": (".gemini/", ".config/google-gemini/"),
+    # agy (Antigravity CLI 1.1.27) keeps every piece of working state in the
+    # same directory as its OAuth token, ``.gemini/antigravity-cli/``.  No knob
+    # is known that relocates the state without also relocating the
+    # credential -- the same all-or-nothing problem as claude.
+    # ``ANTIGRAVITY_EXECUTABLE_DATA_DIR`` exists in the binary but its
+    # semantics are unverified, so it is not used.
+    "agy": (
+        ".gemini/antigravity-cli/conversations/",  # full transcripts
+        ".gemini/antigravity-cli/conversation_summaries.db",
+        ".gemini/antigravity-cli/brain/",
+        ".gemini/antigravity-cli/cache/",
+        ".gemini/antigravity-cli/history.jsonl",
+        ".gemini/antigravity-cli/log/",
+        ".gemini/antigravity-cli/knowledge/",
+        ".gemini/antigravity-cli/presence/",
+        ".gemini/antigravity-cli/settings.json",
+    ),
 }
 
 

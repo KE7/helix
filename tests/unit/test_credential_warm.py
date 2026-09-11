@@ -37,7 +37,7 @@ from helix.sandbox import (
 
 
 WARMED_BACKENDS = ("codex",)
-SKIPPED_BACKENDS = ("claude", "cursor", "gemini", "opencode")
+SKIPPED_BACKENDS = ("agy", "claude", "cursor", "opencode")
 
 
 def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:

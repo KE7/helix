@@ -66,9 +66,9 @@ def test_cursor_relocates_state_via_config_dir() -> None:
     assert env == {"CURSOR_CONFIG_DIR": "/helix-state/cursor"}
 
 
-@pytest.mark.parametrize("backend", ["claude", "gemini"])
+@pytest.mark.parametrize("backend", ["agy", "claude"])
 def test_backends_without_a_safe_knob_get_nothing(backend: str) -> None:
-    """claude and gemini have no knob that separates state from credential."""
+    """agy and claude have no knob that separates state from credential."""
     assert agent_state_env(backend, state_root=AGENT_STATE_CONTAINER_ROOT) == {}
     assert agent_state_cli_args(backend, state_root=AGENT_STATE_CONTAINER_ROOT) == []
     assert agent_state_subdirs(backend) == ()
@@ -300,7 +300,7 @@ def test_codex_argv_unchanged_without_a_sandbox() -> None:
     assert not any("sqlite_home" in a for a in args)
 
 
-@pytest.mark.parametrize("backend", ["claude", "cursor", "gemini", "opencode"])
+@pytest.mark.parametrize("backend", ["agy", "claude", "cursor", "opencode"])
 def test_non_codex_argv_never_carries_a_state_override(backend: str) -> None:
     args = _build_backend_args(
         "/workspace",
