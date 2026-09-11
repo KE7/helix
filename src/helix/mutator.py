@@ -10,12 +10,6 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from helix.agent_state import (
-    AGENT_STATE_CONTAINER_ROOT,
-    agent_state_cli_args,
-    agent_state_env,
-    cursor_credential_hazard,
-)
 from helix.backends import BACKEND_AUTH_ENV, backend_display_name
 from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
@@ -943,15 +937,7 @@ def _build_backend_args(
     worktree_path: str,
     config: AgentConfig,
     prompt_artifact_name: str,
-    agent_state_root: str | None = None,
 ) -> list[str]:
-    """Build the backend CLI argv.
-
-    *agent_state_root* is the container path of the per-candidate state
-    directory when the command runs sandboxed, and ``None`` otherwise.  Only
-    backends whose state knob is a CLI override rather than an environment
-    variable consume it -- currently just codex.
-    """
     backend = config.backend
     if backend == "agy":
         args = [
@@ -1016,12 +1002,6 @@ def _build_backend_args(
             # the full ``-c`` interface.
             args.extend(
                 ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
-            )
-        if agent_state_root is not None:
-            # Points codex's state databases at the per-candidate directory.
-            # ``auth.json`` is not affected and stays in the shared volume.
-            args.extend(
-                agent_state_cli_args(backend, state_root=agent_state_root)
             )
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
@@ -1892,49 +1872,49 @@ def invoke_claude_code(
         return _MUTATOR_OVERRIDE(worktree_path, prompt, config)
     backend = config.backend
     backend_name = backend_display_name(backend)
-    sandbox_enabled = sandbox is not None and sandbox.enabled
-    backend_worktree_path = "/workspace" if sandbox_enabled else worktree_path
+    backend_worktree_path = (
+        "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
+    )
     args = _build_backend_args(
         backend_worktree_path,
         config,
         prompt_artifact_name,
-        agent_state_root=AGENT_STATE_CONTAINER_ROOT if sandbox_enabled else None,
     )
     cmd_str = shlex.join(args)
     backend_env = _scrub_environment(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
-    if warning := cursor_credential_hazard(backend, backend_env):
-        logger.warning("%s", warning)
-    if backend == "opencode" and not sandbox_enabled:
+    if backend == "opencode" and (sandbox is None or not sandbox.enabled):
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
+        #
+        # OpenCode stores its session database at:
+        #   macOS: ~/Library/Application Support/opencode/opencode.db
+        #   Linux: $XDG_DATA_HOME/opencode/opencode.db  (default ~/.local/share/opencode/)
         #
         # When multiple proposals run in parallel (num_parallel_proposals > 1),
         # every worker spawns a fresh `opencode run` subprocess that issues
-        # `PRAGMA journal_mode = WAL` against a shared database at startup.
+        # `PRAGMA journal_mode = WAL` against this shared database at startup.
         # Concurrent WAL-mode requests on the same file produce:
         #   "Failed to run the query 'PRAGMA journal_mode = WAL'"
-        # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while
-        # g1-s2 succeeded).
+        # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while g1-s2 succeeded).
         #
-        # The knob is OPENCODE_DB, which relocates opencode.db and its
-        # -wal/-shm companions and nothing else.  XDG_DATA_HOME would also
-        # work for the locking problem but moves auth.json with the database,
-        # which makes an existing opencode login invisible -- verified against
-        # the real CLI, where `opencode auth list` then reports 0 credentials.
+        # Fix: point OPENCODE_DB at a per-candidate database.  OPENCODE_DB
+        # relocates opencode.db and its -wal/-shm companions and nothing else.
+        # XDG_DATA_HOME would also solve the locking problem but moves
+        # auth.json along with the database, which makes an existing opencode
+        # login invisible -- verified against the real CLI, where
+        # `opencode auth list` then reports 0 credentials.  The on-disk layout
+        # is unchanged from the earlier XDG_DATA_HOME approach:
+        #   <worktree>/.helix_opencode_state/opencode/opencode.db
+        # Each parallel worker gets its own fresh database; no contention.
         #
-        # The resulting layout is unchanged from the previous XDG_DATA_HOME
-        # approach: <worktree>/.helix_opencode_state/opencode/opencode.db.
-        #
-        # The sandbox branch is excluded because the sandbox applies the same
-        # knob itself, against a container path; see
-        # ``helix.sandbox._prepare_agent_state_dir``.
-        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
-        (opencode_state_dir / backend).mkdir(parents=True, exist_ok=True)
-        backend_env.update(
-            agent_state_env(backend, state_root=str(opencode_state_dir))
-        )
+        # The sandbox branch is excluded: container isolation already provides
+        # per-candidate filesystem separation, so the knob would be redundant.
+        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state" / "opencode"
+        opencode_state_dir.mkdir(parents=True, exist_ok=True)
+        backend_env["OPENCODE_DB"] = str(opencode_state_dir / "opencode.db")
+
     def _attempt(*, retried: bool) -> tuple[dict[str, Any], UsageStats]:
         """Run the backend once and classify the outcome."""
         if sandbox is not None and sandbox.enabled:
