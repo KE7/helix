@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The agent CLIs' own cross-session memory is switched off for every
+  candidate, sandboxed or not: `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude`
+  and `-c features.memories=false` for `codex` (the other backends recalled
+  nothing from a prior session on their own). An explicit `[env]` value for
+  the same key wins. This is not a session-isolation guarantee: the login
+  volume is shared by design, and a candidate with shell access can still
+  write the shared HOME's config files (`~/.claude/CLAUDE.md`,
+  `~/.claude/settings.json`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`),
+  which later sessions load. Transcripts stay in the `helix-auth-<backend>`
+  volume.
+- A credential failure is now its own error kind (`CredentialRefreshError`)
+  rather than being scored as a bad mutation, and an invocation that loses a
+  refresh race against another candidate is retried once from a fresh
+  worktree. Both attempts' usage is charged and the totals are unchanged, but
+  the lost attempt is now charged under its own budget source
+  (`source="refresh_race_retry"`) instead of being folded into the retry's
+  record, so what refresh races cost over a run is visible rather than
+  hidden inside ordinary mutation spend. Failures and recoveries are named in
+  the end-of-run summary.
+- Sandboxed `opencode` candidates each get their own session database:
+  `OPENCODE_DB` points into the per-candidate workspace copy instead of the
+  shared login volume.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by

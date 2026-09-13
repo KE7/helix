@@ -75,6 +75,43 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
     "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
 }
 
+# Environment that stops the agent CLIs' own cross-session memory.
+#
+# Candidates share one login volume per backend (mounted at /home/node), so a
+# CLI that reads memory from an earlier session would carry state from
+# candidate N-1 into candidate N.  Probed 2026-09-10 against the real CLIs:
+# plant a fact in one one-shot session, ask for it in a fresh one, same cwd,
+# no tools.  That probe measures the spontaneous channel only -- what a CLI
+# recalls on its own.  It is not a session-isolation guarantee: a candidate
+# with shell access can still write the shared HOME's config files
+# (``~/.claude/CLAUDE.md``, ``~/.claude/settings.json``, ``~/.codex/AGENTS.md``,
+# ``~/.codex/config.toml``), which later sessions load.  That channel is
+# deliberately left open, because the volume is shared by design so that
+# transcripts and a refreshed login persist across candidates.
+#
+# Applies to sandboxed and unsandboxed runs alike (``invoke_claude_code``
+# sets it on the backend environment either way).  An operator who names the
+# same key in ``[env]`` wins: the value here is a default, not an override.
+#   claude   recalled it -- auto-memory, keyed by repo root, so it spans
+#            worktrees and the shared HOME; CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+#            stops it and no memory directory is created.
+#   codex    did not; its ``memories`` feature flag is off by default and is
+#            pinned off in argv (``-c features.memories=false``, see
+#            ``helix.mutator._build_backend_args``) because it is a config
+#            override, not an environment variable.
+#   agy, cursor, opencode   did not; they read nothing from a prior session,
+#            so there is nothing to disable and no entry here.
+# Transcripts and session databases are still written to the login volume so
+# they can be read after a run.
+BACKEND_FRESH_SESSION_ENV: dict[str, dict[str, str]] = {
+    "claude": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+}
+
+# Every shell entry below is ``sh -c``, never ``sh -lc``: a login shell sources
+# ``/etc/profile`` and ``$HOME/.profile`` from the shared login volume, which
+# every candidate container mounts read-write, so ``-l`` would let a candidate
+# plant code that runs in the next auth command.  PATH is pinned with ``-e`` by
+# ``helix.sandbox.sandbox_auth_docker_args``; nothing here needs a profile.
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
     "agy": {
         # No dedicated non-interactive login subcommand; the bare interactive
@@ -87,7 +124,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # confirmed against a completed sign-in.
         "status": [
             "sh",
-            "-lc",
+            "-c",
             'set -eu; test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"',
         ],
         # Surgical: only remove agy's own state directory. ``~/.gemini`` also
@@ -95,7 +132,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # would destroy state this backend does not own.
         "logout": [
             "sh",
-            "-lc",
+            "-c",
             'set -eu; rm -rf "${HOME:-/home/node}/.gemini/antigravity-cli"',
         ],
     },
@@ -108,7 +145,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # localised in some CLI versions).
         "status": [
             "sh",
-            "-lc",
+            "-c",
             "set -eu; "
             "claude auth status --text 2>&1 || true; "
             'test -s "${HOME:-/home/node}/.claude/.credentials.json"',

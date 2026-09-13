@@ -6,8 +6,9 @@ import json
 import logging
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import click
 from rich.table import Table
@@ -17,7 +18,11 @@ from helix import __version__
 from helix.backends import BACKENDS
 from helix.config import load_config
 from helix.logging_config import setup_file_logging
-from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
+from helix.sandbox import (
+    SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS,
+    run_sandbox_auth_command,
+    sandbox_auth_volume_name,
+)
 from helix.display import (
     console,
     print_error,
@@ -26,10 +31,15 @@ from helix.display import (
     print_warning,
     render_frontier_table,
 )
-from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_helix_error
+from helix.exceptions import (
+    CredentialRefreshError,
+    RateLimitError,
+    ResumeIncompatibleError,
+    print_helix_error,
+)
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
-from helix.state import load_state, save_state
+from helix.state import load_state, save_state, state_file_exists
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
@@ -107,6 +117,28 @@ _HELIX_DIR = ".helix"
 
 def _helix_dir(project_root: Path) -> Path:
     return project_root / _HELIX_DIR
+
+
+def _print_credential_failure_hint(
+    project_root: Path, backend: str, exc: CredentialRefreshError
+) -> None:
+    """Say what to do after a credential failure -- truthfully about state.
+
+    Seedless seed generation is the one path that reaches the CLI handler,
+    and it fails before the first ``save_state``; promising ``helix resume``
+    then sends the operator to a command that starts a fresh run.
+    """
+    from helix.evolution import _credential_remedy
+
+    remedy = _credential_remedy(backend, transient=exc.transient)
+    if state_file_exists(project_root):
+        print_error(f"Evolution state has been saved. {remedy}")
+        return
+    print_error(
+        "No evolution state was saved: the failure happened before the first "
+        "generation completed, so there is nothing to resume. "
+        + remedy.replace("[cyan]helix resume[/cyan]", "[cyan]helix evolve[/cyan]")
+    )
 
 
 def _print_cleanup_hint() -> None:
@@ -393,6 +425,49 @@ def sandbox_cli() -> None:
     """Manage HELIX Docker sandbox helpers."""
 
 
+def _run_bounded_auth_command(
+    backend: str,
+    *,
+    action: Literal["status", "logout"],
+    image: str | None,
+    network: str,
+    add_host_gateway: bool,
+    extra_hosts: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Run a non-interactive sandbox auth command under a bound.
+
+    ``status`` and ``logout`` are unattended probes against the login volume,
+    so a container that never exits must not hang the CLI forever with no
+    output.  The container is named so that killing the ``docker run`` client
+    on timeout can be followed by removing the container it started, and the
+    timeout is reported as a non-zero result rather than a traceback.
+    (``login`` gets no bound: it waits on a human finishing a device flow.)
+    """
+    container_name = f"helix-auth-{action}-{backend}-{uuid.uuid4().hex[:12]}"
+    try:
+        return run_sandbox_auth_command(
+            backend,
+            action=action,
+            image=image,
+            network=network,
+            add_host_gateway=add_host_gateway,
+            extra_hosts=extra_hosts,
+            timeout=SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS,
+            container_name=container_name,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr=(
+                f"sandbox {action} for {backend} did not finish within "
+                f"{SANDBOX_AUTH_COMMAND_TIMEOUT_SECONDS}s; the container was "
+                "stopped."
+            ),
+        )
+
+
 @sandbox_cli.command(name="login")
 @click.argument("backend", type=click.Choice(BACKENDS))
 @click.option("--image", default=None, help="Override the backend runner image.")
@@ -483,7 +558,7 @@ def sandbox_status(
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
     for item in backends:
         console.print(f"[bold]{item}[/bold] ({sandbox_auth_volume_name(item)})")
-        result = run_sandbox_auth_command(
+        result = _run_bounded_auth_command(
             item,
             action="status",
             image=image if backend is not None else None,
@@ -530,7 +605,7 @@ def sandbox_logout(
 ) -> None:
     """Log out a backend from its persistent sandbox auth volume."""
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
-    result = run_sandbox_auth_command(
+    result = _run_bounded_auth_command(
         backend,
         action="logout",
         image=image,
@@ -694,6 +769,16 @@ def evolve(
             "Evolution state has been saved. "
             "Run [cyan]helix resume[/cyan] to continue when rate limits clear."
         )
+        raise SystemExit(2)
+    except CredentialRefreshError as exc:
+        # Every in-loop path handles this itself (the slot is skipped and the
+        # run continues), so reaching here means a path that does not -- in
+        # practice seedless seed generation, which runs before any state has
+        # been saved.  Show the panel with its suggestion instead of a raw
+        # traceback, and only promise a resume when there is a state file.
+        logger.error("Credential failure escaped the evolution loop: %s", exc)
+        print_helix_error(exc)
+        _print_credential_failure_hint(project_root, config.agent.backend, exc)
         raise SystemExit(2)
     except KeyboardInterrupt:
         _handle_keyboard_interrupt(project_root)
@@ -1236,6 +1321,11 @@ def resume(config_path: str, project_dir: Path | None) -> None:
             "Evolution state has been saved. "
             "Run [cyan]helix resume[/cyan] again when rate limits clear."
         )
+        raise SystemExit(2)
+    except CredentialRefreshError as exc:
+        logger.error("Credential failure escaped the resumed loop: %s", exc)
+        print_helix_error(exc)
+        _print_credential_failure_hint(project_root, config.agent.backend, exc)
         raise SystemExit(2)
     except KeyboardInterrupt:
         _handle_keyboard_interrupt(project_root)

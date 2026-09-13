@@ -156,6 +156,11 @@ def _eval_cache_path(base_dir: Path) -> Path:
     return base_dir / _STATE_DIR / _EVAL_CACHE_FILENAME
 
 
+def state_file_exists(base_dir: Path) -> bool:
+    """True when ``<base_dir>/.helix/state.json`` has been written."""
+    return _state_path(base_dir).is_file()
+
+
 def save_state(state: EvolutionState, base_dir: Path) -> None:
     """Atomically write the evolution state to .helix/state.json."""
     target = _state_path(base_dir)

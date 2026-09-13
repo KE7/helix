@@ -654,6 +654,27 @@ evaluator uses a local proxy, keep that endpoint in your evaluator code as
 usual. Docker Desktop supports `host.docker.internal`; Linux users can set
 `add_host_gateway = true`.
 
+HELIX stops the agent CLIs' own cross-session memory: it sets
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for `claude` (its auto-memory is keyed by
+repo root and would otherwise span candidates) and passes
+`-c features.memories=false` to `codex`; `agy`, `cursor`, and `opencode` were
+probed and recalled nothing from a prior session on their own, so they need no
+switch. Both switches apply to sandboxed and unsandboxed runs, and an explicit
+`[env]` value for the same key wins. This is not a session-isolation guarantee:
+the login volume is shared by design, so a candidate with shell access can
+still write the shared HOME's config files (`~/.claude/CLAUDE.md`,
+`~/.claude/settings.json`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`),
+which later sessions load. Transcripts and session databases remain in the
+`helix-auth-<backend>` volume, so operators can read them after a run.
+
+Candidates share that login volume, so when a credential goes stale they can
+each decide a refresh is due at the same moment and compete to spend one
+single-use refresh grant. `codex` is measurably vulnerable to this (and
+`opencode` is too, with no free command that could serialise it); `claude` and
+`cursor` are not. An invocation that loses such a race is retried once from a
+fresh worktree against the credential the winner stored, both attempts' tokens
+are charged, and the recovery is named in the end-of-run summary.
+
 By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,
 `ghcr.io/ke7/helix-evo-runner-claude`,
