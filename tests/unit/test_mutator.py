@@ -31,6 +31,14 @@ from helix.mutator import (
 # ---------------------------------------------------------------------------
 
 
+def _no_waste(_usage: UsageStats) -> None:
+    """Throwaway waste sink for tests that never lose a refresh race.
+
+    ``record_wasted_usage`` has no default, so a test that does not care
+    where a thrown-away attempt's spend goes still has to name a sink.
+    """
+
+
 def make_eval_result(
     candidate_id: str = "g0-s0",
     scores: dict | None = None,
@@ -610,12 +618,12 @@ class TestMutationPromptArtifact:
             return {"result": "ok"}, {}
 
         mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
-        mutate(parent, er, "g1-s0", config, tmp_path)
+        mutate(parent, er, "g1-s0", config, tmp_path, record_wasted_usage=_no_waste)
         assert exists_at_invoke == [True]
 
     def test_artifact_contains_rendered_prompt(self, tmp_path: Path, mocker):
         parent, er, config, wt = self._build(tmp_path, mocker)
-        mutate(parent, er, "g1-s0", config, tmp_path)
+        mutate(parent, er, "g1-s0", config, tmp_path, record_wasted_usage=_no_waste)
 
         if (wt / ".agent_task_prompt.md").exists():
             artifact_path = wt / ".agent_task_prompt.md"
@@ -632,7 +640,7 @@ class TestMutationPromptArtifact:
         file AND ``helix_batch.json`` so neither file enters the
         candidate diff on the next generation."""
         parent, er, config, wt = self._build(tmp_path, mocker)
-        mutate(parent, er, "g1-s0", config, tmp_path)
+        mutate(parent, er, "g1-s0", config, tmp_path, record_wasted_usage=_no_waste)
 
         gi = (wt / ".gitignore").read_text()
         assert ".agent_task_prompt.md" in gi
@@ -652,7 +660,7 @@ class TestMutationPromptArtifact:
             ".agent_internal/\n"
             "helix_batch.json\n"
         )
-        mutate(parent, er, "g1-s0", config, tmp_path)
+        mutate(parent, er, "g1-s0", config, tmp_path, record_wasted_usage=_no_waste)
 
         gi = (wt / ".gitignore").read_text()
         assert gi.count(".agent_task_prompt.md") == 1
@@ -664,7 +672,7 @@ class TestMutationPromptArtifact:
         parent, er, config, wt = self._build(tmp_path, mocker)
         # Ensure no pre-existing gitignore.
         assert not (wt / ".gitignore").exists()
-        mutate(parent, er, "g1-s0", config, tmp_path)
+        mutate(parent, er, "g1-s0", config, tmp_path, record_wasted_usage=_no_waste)
         assert (wt / ".gitignore").exists()
 
 
@@ -1263,7 +1271,9 @@ class TestMutate:
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(
+            parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         assert result is child
 
@@ -1280,7 +1290,9 @@ class TestMutate:
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(
+            parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
         assert result.operation == "mutate"
 
     def test_returns_none_on_mutation_error(self, tmp_path: Path, mocker):
@@ -1299,7 +1311,9 @@ class TestMutate:
         mock_remove = mocker.patch("helix.mutator.remove_worktree")
         mocker.patch("helix.mutator.snapshot_candidate")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(
+            parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         assert result is None
         mock_remove.assert_called_once_with(child)
@@ -1320,7 +1334,7 @@ class TestMutate:
         mock_remove = mocker.patch("helix.mutator.remove_worktree")
         mocker.patch("helix.mutator.snapshot_candidate")
 
-        mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        mutate(parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste)
 
         mock_remove.assert_called_once_with(child)
 
@@ -1344,7 +1358,9 @@ class TestMutate:
         )
         mocker.patch("helix.mutator.remove_worktree")
 
-        result = mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        result = mutate(
+            parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         # mutate() returns the child but does NOT snapshot internally
         assert result is child
@@ -1366,7 +1382,7 @@ class TestMutate:
         mock_snapshot = mocker.patch("helix.mutator.snapshot_candidate")
         mocker.patch("helix.mutator.remove_worktree")
 
-        mutate(parent, er, "g1-s0", config, Path("/tmp"))
+        mutate(parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste)
 
         mock_snapshot.assert_not_called()
 
@@ -1385,7 +1401,15 @@ class TestMutate:
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
 
-        mutate(parent, er, "g1-s0", config, Path("/tmp"), background="special context")
+        mutate(
+            parent,
+            er,
+            "g1-s0",
+            config,
+            Path("/tmp"),
+            background="special context",
+            record_wasted_usage=_no_waste,
+        )
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "special context" in prompt_arg
@@ -2063,7 +2087,13 @@ class TestMutateRecordsUsageOnFailure:
 
         spent: list[UsageStats] = []
         result = mutate(
-            parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+            parent,
+            er,
+            "g1-s0",
+            config,
+            Path("/tmp"),
+            record_usage=spent.append,
+            record_wasted_usage=_no_waste,
         )
         return result, spent
 
@@ -2099,7 +2129,13 @@ class TestMutateRecordsUsageOnFailure:
         spent: list[UsageStats] = []
         with pytest.raises(RateLimitError):
             mutate(
-                parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+                parent,
+                er,
+                "g1-s0",
+                config,
+                Path("/tmp"),
+                record_usage=spent.append,
+                record_wasted_usage=_no_waste,
             )
 
         assert spent == [usage]
@@ -2122,7 +2158,13 @@ class TestMutateRecordsUsageOnFailure:
 
         spent: list[UsageStats] = []
         result = mutate(
-            parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+            parent,
+            er,
+            "g1-s0",
+            config,
+            Path("/tmp"),
+            record_usage=spent.append,
+            record_wasted_usage=_no_waste,
         )
 
         assert result is child
@@ -2162,7 +2204,13 @@ class TestMutateRecordsUsageOnFailure:
         spent: list[UsageStats] = []
         with pytest.raises(CredentialRefreshError):
             mutate(
-                parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
+                parent,
+                er,
+                "g1-s0",
+                config,
+                Path("/tmp"),
+                record_usage=spent.append,
+                record_wasted_usage=_no_waste,
             )
 
         assert spent == [usage]
@@ -2187,7 +2235,9 @@ class TestMutateRecordsUsageOnFailure:
         mock_remove = mocker.patch("helix.mutator.remove_worktree")
 
         with pytest.raises(_sp.TimeoutExpired):
-            mutate(parent, er, "g1-s0", config, Path("/tmp"))
+            mutate(
+                parent, er, "g1-s0", config, Path("/tmp"), record_wasted_usage=_no_waste
+            )
 
         mock_remove.assert_called_once_with(child)
 
