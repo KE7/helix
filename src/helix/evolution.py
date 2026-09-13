@@ -2626,6 +2626,42 @@ def _run_evolution_impl(
                             )
                             + " Falling through to mutation."
                         )
+                    except Exception:
+                        # ``merge()`` re-raises a ``RateLimitError`` and any
+                        # unexpected exception after cleaning up its worktree.
+                        # Both charges below sit on the fall-through path, so
+                        # an escaping error skipped them and the tokens the
+                        # attempt really spent never reached ``state.budget``
+                        # -- a resumed run would restart from a total that
+                        # under-reports the spend.  Charge whatever the two
+                        # sinks hold, under the same sources the non-raising
+                        # paths use, then re-raise unchanged.
+                        #
+                        # This cannot be a ``finally`` around the whole block:
+                        # ``merge()`` reports its *success* spend through
+                        # ``record_usage`` too, and the success path below
+                        # already charges ``merged.usage`` under ``merge``, so
+                        # a ``finally`` would bill a successful merge twice.
+                        # ``Exception``, not ``BaseException``: a Ctrl-C
+                        # mid-merge is a separate concern, and the budget is
+                        # not persisted mid-generation anyway.
+                        if merge_wasted_usage:
+                            live.update(usage=merge_wasted_usage[-1])
+                            budget_api.charge_llm_usage(
+                                state,
+                                merge_wasted_usage[-1],
+                                candidate_id=merge_id,
+                                source="refresh_race_retry",
+                            )
+                        if merge_usage:
+                            live.update(usage=merge_usage[-1])
+                            budget_api.charge_llm_usage(
+                                state,
+                                merge_usage[-1],
+                                candidate_id=merge_id,
+                                source="merge_failed",
+                            )
+                        raise
 
                     # An attempt thrown away by a lost refresh race spent
                     # real tokens on nothing, whether or not the retry went on
