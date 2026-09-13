@@ -38,6 +38,7 @@ from helix.budget import (
     evaluation_budget_units as _evaluation_budget_units,
 )
 from helix.display import UsageStats
+from helix.exceptions import RateLimitError
 from helix.evolution import (
     _load_evaluation,
     degrades,
@@ -1382,6 +1383,178 @@ class TestLlmUsageBudgetIntegration:
         assert len(merge_calls) == 1, (
             "expected exactly one merge charge for g2-m1, "
             f"got {len(merge_calls)}: {merge_calls!r}"
+        )
+        state = merge_calls[0].args[0]
+        assert state.budget.input_tokens == 23
+        assert state.budget.output_tokens == 14
+        assert state.budget.cost_usd == pytest.approx(0.43)
+
+    # ---- A merge whose error escapes ----
+    #
+    # ``merge()`` re-raises a ``RateLimitError`` (and anything unexpected)
+    # after reporting what the attempt spent.  Both of the merge gate's
+    # charges sit on the fall-through path, so an escaping error used to skip
+    # them and those tokens never reached ``state.budget`` -- a resumed run
+    # would restart from a total that under-reports the spend.
+
+    def _merge_config(self):
+        return make_config(
+            max_generations=2,
+            perfect_score_threshold=None,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            merge_subsample_size=2,
+        )
+
+    def _merge_gate_run_eval(self):
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            if candidate.id == "g1-s1":
+                return make_eval_result("g1-s1", {"1": 0.9, "2": 0.9})
+            if candidate.id == "g2-m1":
+                return make_eval_result("g2-m1", {"1": 1.0, "2": 1.0})
+            return make_eval_result(candidate.id, {"1": 0.3, "2": 0.3})
+
+        return run_eval
+
+    def test_merge_rate_limit_charges_its_spend_before_propagating(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """A rate-limited merge's tokens reach the budget, and it still raises."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        spent = UsageStats(input_tokens=31, output_tokens=9, cost_usd=0.51)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def rate_limited_merge(*, record_usage, record_wasted_usage, **kwargs):
+            # What ``merge()`` does on a rate limit: hand the sink what the
+            # attempt burned before the limit hit, then re-raise.
+            record_usage(spent)
+            raise RateLimitError("429 from the backend")
+
+        all_mocks["merge"].side_effect = rate_limited_merge
+        all_mocks["run_evaluator"].side_effect = self._merge_gate_run_eval()
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        with pytest.raises(RateLimitError):
+            run_evolution(self._merge_config(), tmp_path, tmp_path / ".helix")
+
+        failed_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "merge_failed"
+        ]
+        assert len(failed_calls) == 1, (
+            "a rate-limited merge's spend must be charged before the error "
+            f"propagates, got {failed_calls!r}"
+        )
+        assert failed_calls[0].args[1].input_tokens == 31
+        assert failed_calls[0].args[1].output_tokens == 9
+        assert failed_calls[0].kwargs["candidate_id"] == "g2-m1"
+        state = failed_calls[0].args[0]
+        assert state.budget.input_tokens >= 31
+        assert state.budget.cost_usd == pytest.approx(0.51)
+
+    def test_merge_rate_limit_after_a_lost_race_charges_both_once(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """A lost race then a rate limit: two records, two sources, once each."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        wasted = UsageStats(input_tokens=5, output_tokens=2, cost_usd=0.10)
+        spent = UsageStats(input_tokens=17, output_tokens=6, cost_usd=0.33)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def raced_then_rate_limited(*, record_usage, record_wasted_usage, **kwargs):
+            record_wasted_usage(wasted)
+            record_usage(spent)
+            raise RateLimitError("429 on the retry")
+
+        all_mocks["merge"].side_effect = raced_then_rate_limited
+        all_mocks["run_evaluator"].side_effect = self._merge_gate_run_eval()
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        with pytest.raises(RateLimitError):
+            run_evolution(self._merge_config(), tmp_path, tmp_path / ".helix")
+
+        waste_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "refresh_race_retry"
+        ]
+        failed_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "merge_failed"
+        ]
+        assert len(waste_calls) == 1, (
+            f"expected exactly one refresh_race_retry charge, got {waste_calls!r}"
+        )
+        assert len(failed_calls) == 1, (
+            f"expected exactly one merge_failed charge, got {failed_calls!r}"
+        )
+        assert waste_calls[0].args[1].input_tokens == 5
+        assert failed_calls[0].args[1].input_tokens == 17
+        assert waste_calls[0].kwargs["candidate_id"] == "g2-m1"
+        assert failed_calls[0].kwargs["candidate_id"] == "g2-m1"
+        state = failed_calls[0].args[0]
+        assert state.budget.cost_usd == pytest.approx(0.10 + 0.33)
+
+    def test_successful_merge_is_charged_once_and_never_as_merge_failed(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """The escaping-error charge must not become a blanket ``finally``.
+
+        ``merge()`` reports its success spend through ``record_usage`` too,
+        so charging ``merge_usage`` unconditionally would bill a merge that
+        worked a second time, under the wrong source.
+        """
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        merged.operation = "merge"
+        merged.parent_ids = ["g0-s0", "g1-s1"]
+        merged.usage = UsageStats(input_tokens=23, output_tokens=14, cost_usd=0.43)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def succeeding_merge(*, record_usage, record_wasted_usage, **kwargs):
+            # The real ``merge()`` reports the success path through the same
+            # sink the failure paths use.
+            record_usage(merged.usage)
+            return merged
+
+        all_mocks["merge"].side_effect = succeeding_merge
+        all_mocks["run_evaluator"].side_effect = self._merge_gate_run_eval()
+        spy = mocker.patch(
+            "helix.evolution.budget_api.charge_llm_usage",
+            wraps=budget_api.charge_llm_usage,
+        )
+
+        run_evolution(self._merge_config(), tmp_path, tmp_path / ".helix")
+
+        merge_calls = _filter_charge_calls(spy, source="merge", candidate_id="g2-m1")
+        failed_calls = [
+            call
+            for call in spy.call_args_list
+            if call.kwargs.get("source") == "merge_failed"
+        ]
+        assert len(merge_calls) == 1, (
+            f"expected exactly one merge charge, got {merge_calls!r}"
+        )
+        assert failed_calls == [], (
+            f"a successful merge must not be billed again, got {failed_calls!r}"
         )
         state = merge_calls[0].args[0]
         assert state.budget.input_tokens == 23
