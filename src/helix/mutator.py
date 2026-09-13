@@ -2269,8 +2269,8 @@ def _combine_usage(
 
     Used when an invocation is retried after a lost refresh race and both
     attempts' spend has to travel as one ``UsageStats``: the total written
-    into the result artifact, and the fallback for a caller that supplies no
-    ``record_wasted_usage`` sink to charge the lost attempt separately.
+    into the result artifact, which records what the whole invocation cost
+    even though the two attempts are charged to the budget separately.
     Neither input is mutated.  ``session_id`` is taken from the later
     attempt, which is the one whose output the caller receives; the earlier
     one is used only when the later attempt reported none.  Returns ``None``
@@ -2387,8 +2387,7 @@ def invoke_with_refresh_race_retry(
     fresh_child: Callable[[], Candidate],
     remove_child: Callable[[Candidate], None],
     on_child_replaced: Callable[[Candidate], None],
-    record_usage: Callable[[UsageStats], None] | None = None,
-    record_wasted_usage: Callable[[UsageStats], None] | None = None,
+    record_wasted_usage: Callable[[UsageStats], None],
     on_refresh_race_recovered: Callable[[str], None] | None = None,
 ) -> tuple[Candidate, UsageStats]:
     """Run *invoke* on *child*, retrying once on a lost refresh race.
@@ -2417,13 +2416,8 @@ def invoke_with_refresh_race_retry(
     absent on anything else (a sandbox ``TimeoutExpired``, an ``OSError``).
     The caller charges the two under different ``source``s; the sum is
     unchanged.  The result artifact still records the total of both attempts.
-
-    ``record_wasted_usage`` is optional only so that a caller with nowhere to
-    put a second record does not silently drop the lost attempt's tokens:
-    without it the historical behaviour applies and the first attempt's spend
-    rides along with the second's (summed into the returned usage, into the
-    raised :class:`HelixError`'s, or handed to ``record_usage`` directly).
-    The total is the same either way; only the attribution differs.
+    ``record_wasted_usage`` is required: a caller that cannot say where the
+    lost attempt's tokens go would otherwise drop them silently.
 
     A recovered race is reported through ``on_refresh_race_recovered`` so it
     reaches the operator (the end-of-run summary), not only the log file.
@@ -2454,23 +2448,12 @@ def invoke_with_refresh_race_retry(
         on_child_replaced(child)
         _restore_attempt_artifacts(child.worktree_path, Path(stash), attempt=1)
 
-    # Did the lost attempt's spend get its own record?  When it did, the
-    # retry's outcome carries only the retry's own tokens; when it did not,
-    # the two are summed as before so the total still reaches the budget.
-    charged_separately = record_wasted_usage is not None
-    if record_wasted_usage is not None and first_usage is not None:
+    # The lost attempt's spend gets its own record, so the retry's outcome
+    # from here on carries only the retry's own tokens.
+    if first_usage is not None:
         record_wasted_usage(first_usage)
 
-    try:
-        _, usage = invoke(child, True)
-    except HelixError as retry_exc:
-        if not charged_separately:
-            retry_exc.usage = _combine_usage(first_usage, retry_exc.usage)
-        raise
-    except Exception:
-        if not charged_separately and record_usage is not None and first_usage is not None:
-            record_usage(first_usage)
-        raise
+    _, usage = invoke(child, True)
 
     combined = _combine_usage(first_usage, usage)
     assert combined is not None  # ``usage`` is never None
@@ -2489,7 +2472,7 @@ def invoke_with_refresh_race_retry(
         on_refresh_race_recovered(message)
     # The lost attempt has its own record; do not fold it into the retry's,
     # or the caller charges wasted tokens as productive work.
-    return child, (usage if charged_separately else combined)
+    return child, usage
 
 
 def invoke_claude_code(
@@ -2814,7 +2797,8 @@ def mutate(
     background: str | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
-    record_wasted_usage: Callable[[UsageStats], None] | None = None,
+    *,
+    record_wasted_usage: Callable[[UsageStats], None],
     on_refresh_race_recovered: Callable[[str], None] | None = None,
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
@@ -2845,13 +2829,14 @@ def mutate(
         refresh race forced a retry, this reports the *retry's* spend only;
         the lost attempt's goes to ``record_wasted_usage``.
     record_wasted_usage:
-        Optional sink called once with the spend of an attempt that lost a
+        Required sink called once with the spend of an attempt that lost a
         refresh race and was thrown away (see
         :func:`invoke_with_refresh_race_retry`).  Never called when no retry
         happened.  It exists so the caller can charge wasted tokens under
         their own budget ``source`` instead of billing them as productive
-        mutation work; the sum charged is the same either way.  Omitting it
-        keeps the old behaviour of folding that spend into ``record_usage``.
+        mutation work; the sum charged is the same either way.  It has no
+        default: a caller with nowhere to put the record would drop those
+        tokens silently.
     on_refresh_race_recovered:
         Optional sink told, in operator-facing words, when the invocation lost
         a refresh race on the shared credential and succeeded on its one retry
@@ -2924,7 +2909,6 @@ def mutate(
             fresh_child=_fresh_child,
             remove_child=remove_worktree,
             on_child_replaced=_replace,
-            record_usage=record_usage,
             record_wasted_usage=record_wasted_usage,
             on_refresh_race_recovered=on_refresh_race_recovered,
         )

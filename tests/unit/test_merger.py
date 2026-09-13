@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig, EvaluatorConfig
 from helix.exceptions import CredentialRefreshError
@@ -21,6 +22,14 @@ from helix.merger import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _no_waste(_usage: UsageStats) -> None:
+    """Throwaway waste sink for tests that never lose a refresh race.
+
+    ``record_wasted_usage`` has no default, so a test that does not care
+    where a thrown-away attempt's spend goes still has to name a sink.
+    """
 
 
 def make_eval_result(
@@ -232,7 +241,9 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(
+            ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         assert result is child
 
@@ -248,7 +259,9 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(
+            ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         assert result.operation == "merge"
 
@@ -264,7 +277,9 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(
+            ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         assert "g0-s0" in result.parent_ids
         assert "g0-s1" in result.parent_ids
@@ -284,7 +299,9 @@ class TestMerge:
         mock_remove = mocker.patch("helix.merger.remove_worktree")
         mocker.patch("helix.merger.snapshot_candidate")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(
+            ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         assert result is None
         mock_remove.assert_called_once_with(child)
@@ -304,7 +321,7 @@ class TestMerge:
         mock_remove = mocker.patch("helix.merger.remove_worktree")
         mocker.patch("helix.merger.snapshot_candidate")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        merge(ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste)
 
         mock_remove.assert_called_once_with(child)
 
@@ -331,7 +348,7 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate")
 
         with pytest.raises(CredentialRefreshError) as exc:
-            merge(ca, cb, "g1-m0", config, Path("/tmp"))
+            merge(ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste)
 
         assert exc.value.operation == "merge g1-m0 (g0-s0 + g0-s1)"
         mock_remove.assert_called_once_with(child)
@@ -367,7 +384,13 @@ class TestMerge:
         spent: list[UsageStats] = []
         with pytest.raises(CredentialRefreshError):
             merge(
-                ca, cb, "g1-m0", config, Path("/tmp"), record_usage=spent.append
+                ca,
+                cb,
+                "g1-m0",
+                config,
+                Path("/tmp"),
+                record_usage=spent.append,
+                record_wasted_usage=_no_waste,
             )
 
         assert spent == [spent_before_failure]
@@ -458,7 +481,9 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(
+            ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste
+        )
 
         # merge() returns the child but does NOT snapshot internally
         assert result is child
@@ -479,7 +504,7 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        merge(ca, cb, "g1-m0", config, Path("/tmp"), record_wasted_usage=_no_waste)
 
         mock_snapshot.assert_not_called()
 
@@ -495,7 +520,15 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"), background="unique_context_xyz")
+        merge(
+            ca,
+            cb,
+            "g1-m0",
+            config,
+            Path("/tmp"),
+            background="unique_context_xyz",
+            record_wasted_usage=_no_waste,
+        )
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "unique_context_xyz" in prompt_arg
@@ -530,7 +563,15 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g2-m0", config, Path("/tmp"), ancestor=ancestor)
+        merge(
+            ca,
+            cb,
+            "g2-m0",
+            config,
+            Path("/tmp"),
+            ancestor=ancestor,
+            record_wasted_usage=_no_waste,
+        )
 
         # Two get_diff calls, both anchored on the ancestor.
         assert diff_calls == [("g0-s0", "g1-s0"), ("g0-s0", "g1-s1")], (
@@ -570,7 +611,8 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g2-m0", config, Path("/tmp"))  # no ancestor
+        # no ancestor
+        merge(ca, cb, "g2-m0", config, Path("/tmp"), record_wasted_usage=_no_waste)
 
         # Single get_diff call with A↔B arguments.
         assert diff_calls == [("g1-s0", "g1-s1")], (

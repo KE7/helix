@@ -246,7 +246,8 @@ def merge(
     prepare_worktree: Callable[[Candidate], None] | None = None,
     ancestor: Candidate | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
-    record_wasted_usage: Callable[[UsageStats], None] | None = None,
+    *,
+    record_wasted_usage: Callable[[UsageStats], None],
     on_refresh_race_recovered: Callable[[str], None] | None = None,
 ) -> Candidate | None:
     """Merge *candidate_a* and *candidate_b* using Claude Code.
@@ -317,7 +318,7 @@ def merge(
         whether or not the merge produced a usable candidate — the same
         contract as :func:`helix.mutator.mutate`'s parameter of that name.
     record_wasted_usage:
-        Optional sink called once with the spend of an attempt thrown away
+        Required sink called once with the spend of an attempt thrown away
         after a lost refresh race, so the caller can charge it under its own
         budget ``source`` rather than as productive merge work; the same
         contract as :func:`helix.mutator.mutate`'s parameter of that name.
@@ -399,7 +400,6 @@ def merge(
             fresh_child=_fresh_child,
             remove_child=remove_worktree,
             on_child_replaced=_replace,
-            record_usage=record_usage,
             record_wasted_usage=record_wasted_usage,
             on_refresh_race_recovered=on_refresh_race_recovered,
         )

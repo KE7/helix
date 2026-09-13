@@ -717,13 +717,11 @@ class _RetryHarness:
 
         return self.mocker.patch("helix.mutator.subprocess.run", side_effect=_run)
 
-    def mutate(self, *, split_waste: bool = True) -> Candidate | None:
-        """Run the mutation.
+    def mutate(self) -> Candidate | None:
+        """Run the mutation, with both sinks ``evolution.py`` supplies.
 
-        ``split_waste`` mirrors what ``evolution.py`` does: it supplies the
-        second sink, so an attempt lost to a refresh race is reported apart
-        from the work that was actually kept.  Pass ``False`` to exercise the
-        fallback a caller without a second sink gets.
+        An attempt lost to a refresh race is reported through the second
+        sink, apart from the work that was actually kept.
         """
         return mutate(
             self.parent,
@@ -732,7 +730,7 @@ class _RetryHarness:
             _codex_config(),
             self.tmp_path,
             record_usage=self.spent.append,
-            record_wasted_usage=self.wasted.append if split_waste else None,
+            record_wasted_usage=self.wasted.append,
             on_refresh_race_recovered=self.recovered.append,
         )
 
@@ -855,30 +853,6 @@ class TestLostRefreshRaceIsRetried:
         assert len(h.recovered) == 1
         assert "recovered after a lost refresh race" in h.recovered[0]
         assert "g1-s0" in h.recovered[0]
-
-    def test_without_a_waste_sink_the_first_attempt_still_rides_along(
-        self, mocker: Any, tmp_path: Path
-    ) -> None:
-        """A caller with nowhere to put the second record must not lose it.
-
-        Separating the two spends is an attribution improvement; it must
-        never become a way for tokens to go uncharged.
-        """
-        h = _RetryHarness(tmp_path, mocker)
-        h.run_backend(
-            [
-                _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
-                _completed(0, stdout=CODEX_SUCCESS_STREAM),
-            ]
-        )
-
-        child = h.mutate(split_waste=False)
-        assert child is not None
-        assert h.wasted == []
-        assert len(h.spent) == 1
-        assert h.spent[0].input_tokens == 5 + 12
-        assert h.spent[0].output_tokens == 2 + 8
-        assert child.usage.input_tokens == 5 + 12
 
     def test_zero_exit_codex_error_event_is_retried_too(
         self, mocker: Any, tmp_path: Path
@@ -1073,6 +1047,7 @@ class TestRetryOnARealWorktree:
             "g1-s0",
             _codex_config(),
             base_dir,
+            record_wasted_usage=lambda _u: None,
             on_refresh_race_recovered=recovered.append,
         )
 
