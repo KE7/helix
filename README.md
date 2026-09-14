@@ -396,6 +396,12 @@ minibatch_size = 3               # train-set minibatch size for reflective mutat
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate; passing results carry into the tail
+sibling_history = false          # show the mutator every child already proposed from the same
+                                 # parent: each one's score, whether it was kept, and a note on
+                                 # what it changed. No cap on how many.
+                                 # Advisory only — HELIX never filters a proposal on it.
+sibling_summary_max_words = 150  # budget for each of those notes; quoted to the summarising
+                                 # call and enforced when its answer is read back
 frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType parity):
                                  # "instance" | "objective" | "hybrid" | "cartesian".
                                  # The four modes mirror GEPA optimize_anything;

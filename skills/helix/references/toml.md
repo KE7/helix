@@ -125,6 +125,8 @@ max_workers = 32
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
 val_stage_size = 10
+sibling_history = false  # show the mutator every earlier child of the same parent
+sibling_summary_max_words = 150  # word budget for each of those summaries
 
 batch_sampler = "epoch_shuffled"  # or "stratified"
 group_key_separator = "__"

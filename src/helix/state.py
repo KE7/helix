@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from helix.population import FrontierType
+from helix.sibling_history import normalize_history
 
 
 # GEPA parity (rng-state-persist audit D1):
@@ -22,7 +23,7 @@ from helix.population import FrontierType
 # ``state.json``; subsequent bumps mark explicit JSON-native schema
 # additions (the unversioned predecessor is treated as v0; ``load_state``
 # migrates by default-filling missing fields).
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 
 @dataclass
@@ -128,6 +129,12 @@ class EvolutionState:
     # a GEPA-style single pickled artifact: HELIX still persists worktrees,
     # evaluations, lineage, and state as separate artifacts.
     resume_semantics: dict[str, Any] = field(default_factory=dict)
+    # Children already proposed from each parent, keyed by parent candidate id
+    # — what the mutating agent is shown when that parent is sampled again.
+    # Written only when ``evolution.sibling_history`` is on; every child a
+    # parent produces is kept, with no cap.  See ``helix.sibling_history``
+    # for the entry shape.
+    sibling_history: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # GEPA parity (rng-state-persist audit D1): persisted schema version.
     # Mirrors GEPA's ``validation_schema_version`` field, stamped from the
     # ``GEPAState._VALIDATION_SCHEMA_VERSION`` class-var (``core/state.py``).
@@ -181,6 +188,7 @@ def save_state(state: EvolutionState, base_dir: Path) -> None:
         "active_frontier": state.active_frontier,
         "frontier_type": state.frontier_type,
         "resume_semantics": state.resume_semantics,
+        "sibling_history": state.sibling_history,
     }
 
     # Atomic write: write to tmp file in same directory, then rename
@@ -257,6 +265,9 @@ def load_state(base_dir: Path) -> EvolutionState | None:
         active_frontier=data.get("active_frontier", {}),
         frontier_type=frontier_type,
         resume_semantics=data.get("resume_semantics", {}),
+        # Absent before v3, and hand-editable like the rest of state.json, so
+        # the shape is re-derived rather than trusted.
+        sibling_history=normalize_history(data.get("sibling_history")),
         schema_version=SCHEMA_VERSION,
     )
 

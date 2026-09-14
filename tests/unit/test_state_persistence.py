@@ -77,6 +77,22 @@ def _make_full_state() -> EvolutionState:
             "g2-m1": 28,
         },
         active_frontier={"task_a": ["g2-m1"], "task_b": ["g2-m1"]},
+        sibling_history={
+            "g0-s0": [
+                {
+                    "child_id": "g1-s1",
+                    "score": 0.6,
+                    "accepted": True,
+                    "summary": "widened the search window",
+                },
+                {
+                    "child_id": "g1-s2",
+                    "score": 0.2,
+                    "accepted": False,
+                    "summary": "memoised the inner loop; it regressed",
+                },
+            ]
+        },
     )
 
 
@@ -160,6 +176,55 @@ def test_load_legacy_state_populates_defaults(tmp_path: Path) -> None:
     assert loaded.budget.cache_creation_input_tokens == 0
     assert loaded.budget.cache_read_input_tokens == 0
     assert loaded.budget.reasoning_tokens == 0
+
+
+def test_legacy_state_defaults_sibling_history(tmp_path: Path) -> None:
+    """A state.json predating v3 must load with an empty per-parent record.
+
+    Audit ref: D1 — the same default-fill migration path the other additions
+    use.  A resumed pre-feature run simply starts accumulating history from
+    the next child onward.
+    """
+    _write_legacy_state_json(tmp_path)
+
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert loaded.sibling_history == {}
+
+
+def test_sibling_history_survives_roundtrip(tmp_path: Path) -> None:
+    """The record is the feature's only durable state; losing it on resume
+    would silently let a parent re-propose approaches it had already tried."""
+    state = _make_full_state()
+    save_state(state, tmp_path)
+
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert loaded.sibling_history == state.sibling_history
+    entries = loaded.sibling_history["g0-s0"]
+    assert [e["accepted"] for e in entries] == [True, False]
+    assert entries[1]["summary"] == "memoised the inner loop; it regressed"
+
+
+def test_malformed_sibling_history_is_dropped_not_raised(tmp_path: Path) -> None:
+    """state.json is hand-editable; a corrupted record must cost the history,
+    never the ability to resume the run."""
+    helix_dir = tmp_path / ".helix"
+    helix_dir.mkdir(parents=True)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "generation": 0,
+        "frontier": [],
+        "instance_scores": {},
+        "budget": {"evaluations": 0},
+        "config_hash": "h",
+        "sibling_history": {"p": "not a list", "q": ["not a dict"]},
+    }
+    (helix_dir / "state.json").write_text(json.dumps(payload))
+
+    loaded = load_state(tmp_path)
+    assert loaded is not None
+    assert loaded.sibling_history == {}
 
 
 def test_load_state_rejects_newer_schema_version(tmp_path: Path) -> None:
@@ -374,6 +439,7 @@ def test_state_json_keys_when_val_stage_disabled(tmp_path: Path) -> None:
         "active_frontier",
         "frontier_type",
         "resume_semantics",
+        "sibling_history",
     }
     assert set(raw.keys()) == expected_keys, (
         f"state.json keys diverged from schema_version={SCHEMA_VERSION} "

@@ -7,6 +7,7 @@ import logging
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,12 @@ from helix.exceptions import (
 from helix.executor import _scrub_environment
 from helix.lines import split_lf_lines
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
+from helix.sibling_history import (
+    SUMMARY_ARTIFACT_NAME,
+    capture_summary,
+    history_instruction,
+    summary_prompt,
+)
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -532,6 +539,7 @@ def build_mutation_prompt(
     eval_result: EvalResult,
     background: str | None = None,
     max_turns: int | None = None,
+    sibling_history: str | None = None,
 ) -> str:
     """Construct the mutation prompt for the configured agent backend.
 
@@ -546,8 +554,33 @@ def build_mutation_prompt(
 
     ``## Your Task`` and the system prompt are always emitted; they are
     the only sections that don't depend on caller-provided content.
+
+    ``sibling_history`` carries the sibling-tracking feature's prompt side,
+    and only a *non-empty* rendered section changes the prompt at all.
+    ``None`` (off) and ``""`` (on, but this parent has no recorded children
+    yet) both produce a prompt byte-identical to one built before the feature
+    existed.  With nothing to show there is nothing useful to say, and
+    emitting the directive anyway would nudge the agent on every mutation
+    while a comparison run got no such nudge — a difference that would be
+    measured as if it were the feature.  A non-empty string is a rendered
+    section from :func:`helix.sibling_history.render_history`, and brings its
+    directive with it.
+
+    Nothing here asks the agent to describe its own work.  That description is
+    produced afterwards by :func:`generate_change_summary`, which reads the
+    diff instead — a closing instruction is the first casualty of an exhausted
+    turn budget, and every backend leaves a diff whether or not it leaves a
+    note.
     """
-    sections: list[str] = [AUTONOMOUS_SYSTEM_PROMPT.rstrip()]
+    # The directive to consult the sibling record rides on the task
+    # instructions: it says how to work, not what the data is.  Gated on the
+    # section being non-empty -- the SAME condition that emits the section --
+    # so the agent is never told to consult a list that isn't there, and a
+    # parent with no children yet gets a prompt identical to a feature-off run.
+    system_prompt = AUTONOMOUS_SYSTEM_PROMPT.rstrip()
+    if sibling_history:
+        system_prompt = f"{system_prompt}\n{history_instruction()}"
+    sections: list[str] = [system_prompt]
 
     if objective:
         sections.append(f"## Objective\n{objective}")
@@ -574,6 +607,11 @@ def build_mutation_prompt(
 
     if background:
         sections.append(f"## Background / Context\n{background}")
+
+    # What earlier children of this same parent already tried, ahead of the
+    # task so the agent has it before deciding what to do.
+    if sibling_history:
+        sections.append(sibling_history)
 
     sections.append(MUTATION_TASK_INSTRUCTIONS)
 
@@ -614,9 +652,34 @@ def _looks_like_rate_limit(text: str) -> bool:
 #: git tree.
 MUTATION_PROMPT_ARTIFACT_NAME = ".agent_task_prompt.md"
 MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/task_prompt.md"
+#: Prompt artifact for the separate change-summary call.  Kept distinct from
+#: the mutation prompt so both survive for post-hoc inspection.
+SUMMARY_PROMPT_ARTIFACT_NAME = ".agent_summary_prompt.md"
+SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/summary_prompt.md"
 BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
 BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
 BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
+
+#: Artifact infix for the change-summary invocation.  A worktree can host more
+#: than one backend call, and these files exist for post-hoc inspection: with a
+#: single set of names the second call silently overwrites the first, so a run
+#: with sibling tracking on would lose every mutation's usage, stop reason and
+#: transcript pointers to a 3-turn summary call.  The infix gives that call its
+#: own files and leaves the mutation's exactly where they were.
+SUMMARY_BACKEND_ARTIFACT_INFIX = "_summary"
+
+
+def _backend_artifact_names(infix: str = "") -> tuple[str, str, str]:
+    """Return the ``(result, stdout, stderr)`` artifact names for one call.
+
+    The empty default reproduces the historical names byte for byte, so a run
+    that never invokes a second backend call is unaffected.
+    """
+    return (
+        f".helix_backend{infix}_result.json",
+        f".helix_backend{infix}_stdout.txt",
+        f".helix_backend{infix}_stderr.txt",
+    )
 BACKEND_TRANSCRIPT_ARTIFACT_DIR = ".helix_artifacts/backend_transcripts"
 
 
@@ -649,8 +712,16 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         BACKEND_RESULT_ARTIFACT_NAME,
         BACKEND_STDOUT_ARTIFACT_NAME,
         BACKEND_STDERR_ARTIFACT_NAME,
+        # The change-summary call's own copies of the three above.
+        *_backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX),
         ".helix_artifacts/",
         "helix_batch.json",
+        # The change summary and its prompt are notes about the diff, not part
+        # of it.  Ignored unconditionally: HELIX reads them straight out of the
+        # worktree and never wants them committed, whichever way the feature is
+        # toggled.
+        SUMMARY_ARTIFACT_NAME,
+        SUMMARY_PROMPT_ARTIFACT_NAME,
         # Per-candidate OpenCode SQLite state (XDG_DATA_HOME isolation).
         # Each parallel opencode worker gets a fresh database here; keeps
         # the candidate git tree free of opencode's session/session files.
@@ -664,7 +735,13 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
 
 
-def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
+def _write_mutation_prompt_artifact(
+    worktree_path: str,
+    prompt: str,
+    *,
+    primary_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
+    fallback_name: str = MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
+) -> str:
     """Persist the rendered mutation prompt to the worktree for post-hoc inspection.
 
     Writes to a reserved stable path (``<worktree>/.agent_task_prompt.md``)
@@ -699,13 +776,13 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
-        primary_path = wt / MUTATION_PROMPT_ARTIFACT_NAME
-        fallback_path = wt / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+        primary_path = wt / primary_name
+        fallback_path = wt / fallback_name
         if _try_write(primary_path):
-            return MUTATION_PROMPT_ARTIFACT_NAME
+            return primary_name
         fallback_path.parent.mkdir(parents=True, exist_ok=True)
         if _try_write(fallback_path):
-            return MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME
+            return fallback_name
         # Both paths exist with content that differs from the new prompt;
         # treat as a user collision so we never silently overwrite.
         raise FileExistsError(
@@ -718,8 +795,8 @@ def _write_mutation_prompt_artifact(worktree_path: str, prompt: str) -> str:
             operation="write mutation prompt artifact",
             cwd=worktree_path,
             suggestion=(
-                f"Remove or rename {MUTATION_PROMPT_ARTIFACT_NAME} and "
-                f"{MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME}, or choose a different "
+                f"Remove or rename {primary_name} and "
+                f"{fallback_name}, or choose a different "
                 "reserved prompt artifact path."
             ),
         ) from e
@@ -1814,12 +1891,14 @@ def _write_backend_artifacts(
     parsed: dict[str, Any] | None,
     sandbox: SandboxConfig | None = None,
     fallback_usage: UsageStats | None = None,
+    artifact_infix: str = "",
 ) -> None:
+    result_name, stdout_name, stderr_name = _backend_artifact_names(artifact_infix)
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
-        (wt / BACKEND_STDOUT_ARTIFACT_NAME).write_text(result.stdout or "")
-        (wt / BACKEND_STDERR_ARTIFACT_NAME).write_text(result.stderr or "")
+        (wt / stdout_name).write_text(result.stdout or "")
+        (wt / stderr_name).write_text(result.stderr or "")
         # ``parsed is None`` means the strict parse failed.  Record the
         # leniently recovered usage rather than zeros, so the on-disk
         # artifact stays a faithful account of what the invocation spent.
@@ -1835,7 +1914,7 @@ def _write_backend_artifacts(
         # ``_collect_backend_transcript_artifacts`` where the native
         # transcript file is copied first.
         if backend not in _NATIVE_TRANSCRIPT_COUNTED_BACKENDS:
-            stdout_path = wt / BACKEND_STDOUT_ARTIFACT_NAME
+            stdout_path = wt / stdout_name
             tc, tn = _count_transcript_tool_events(stdout_path, backend)
             if tc > 0:
                 usage.tool_event_count = tc
@@ -1852,13 +1931,13 @@ def _write_backend_artifacts(
             "command": command,
             "cwd": worktree_path,
             "returncode": result.returncode,
-            "stdout_artifact": BACKEND_STDOUT_ARTIFACT_NAME,
-            "stderr_artifact": BACKEND_STDERR_ARTIFACT_NAME,
+            "stdout_artifact": stdout_name,
+            "stderr_artifact": stderr_name,
             "usage": usage.to_dict(),
             "transcript_artifacts": transcript_artifacts,
             "parsed": parsed,
         }
-        (wt / BACKEND_RESULT_ARTIFACT_NAME).write_text(json.dumps(payload, indent=2))
+        (wt / result_name).write_text(json.dumps(payload, indent=2))
     except OSError as e:
         logger.debug(
             "failed to write backend artifacts to %s: %s",
@@ -1875,6 +1954,7 @@ def invoke_claude_code(
     fixed_env: dict[str, str] | None = None,
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
+    artifact_infix: str = "",
 ) -> tuple[dict[str, Any], UsageStats]:
     """Invoke the configured backend CLI in *worktree_path*.
 
@@ -2083,7 +2163,271 @@ def invoke_claude_code(
             parsed=parsed,
             sandbox=sandbox,
             fallback_usage=spent_usage,
+            artifact_infix=artifact_infix,
         )
+
+
+# ---------------------------------------------------------------------------
+# Change summary
+# ---------------------------------------------------------------------------
+
+#: Turn budget for the change-summary call.  It reads a diff and writes one
+#: file, so this is generous on purpose: exhausting it degrades to *no summary*
+#: rather than an error -- silently, which is the exact failure this whole
+#: design exists to avoid -- and the downside of a spare turn is a few tokens.
+#: Only the claude backend enforces it as a hard cap (``--max-turns``); the
+#: others have no equivalent flag, so ``summary_prompt`` also states the limit
+#: in words, which is their only bound.
+SUMMARY_MAX_TURNS = 5
+
+#: Ceiling on the diff text handed to the summary call.  A mutation that
+#: rewrote half the tree would otherwise push this prompt past the context
+#: window and turn a cheap call into an expensive failure.
+_MAX_DIFF_CHARS = 20_000
+
+_DIFF_TRUNCATION_MARKER = "\n[... diff truncated ...]"
+
+
+def _git_stdout(worktree_path: str, *args: str) -> str:
+    """Run a git command in *worktree_path*, returning stdout or ``""``."""
+    try:
+        done = subprocess.run(
+            ["git", *args],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return done.stdout if done.returncode == 0 else ""
+
+
+def capture_base_commit(worktree_path: str) -> str | None:
+    """Return the worktree's current commit, or ``None`` if git can't say.
+
+    Called before the backend runs so :func:`_child_diff` has a fixed point to
+    diff from afterwards.  See that function for why ``HEAD`` is not usable
+    once the agent has finished.
+    """
+    sha = _git_stdout(worktree_path, "rev-parse", "HEAD").strip()
+    return sha or None
+
+
+def _child_diff(worktree_path: str, base_sha: str | None) -> str:
+    """Return what this mutation changed, as a diff against its parent.
+
+    Diffed from *base_sha* — the commit the worktree sat at before the backend
+    ran — and NOT from ``HEAD``.  Agents commit their own work: they are handed
+    a real git worktree with permissions skipped, and claude-code was observed
+    running ``git add``/``git commit`` unprompted on a mutation that rewrote
+    ``solver.py``.  Every committed change then sits *behind* ``HEAD``, so
+    ``git diff HEAD`` reports nothing and the summary call, shown an empty
+    diff, faithfully writes "no changes were made" about a mutation that
+    changed a great deal.  Diffing from the captured base covers committed and
+    uncommitted work alike, so it does not matter what the agent chose to do.
+
+    Untracked new files are listed by name: a mutation that adds a module is a
+    real change, and ``git diff`` alone would not mention it.
+
+    Returns ``""`` on any git failure or when nothing changed; the caller then
+    builds a diff-less prompt rather than failing the mutation.
+    """
+    ref = base_sha or "HEAD"
+    patch = _git_stdout(worktree_path, "diff", "--no-color", ref)
+    untracked = [
+        name
+        for name in _git_stdout(
+            worktree_path, "ls-files", "--others", "--exclude-standard"
+        ).splitlines()
+        if name.strip()
+    ]
+    if not patch.strip() and not untracked:
+        return ""
+    if len(patch) > _MAX_DIFF_CHARS:
+        patch = patch[:_MAX_DIFF_CHARS] + _DIFF_TRUNCATION_MARKER
+
+    parts: list[str] = []
+    stat = _git_stdout(worktree_path, "diff", "--stat", ref).strip()
+    if stat:
+        parts.append(stat)
+    if untracked:
+        parts.append("new files: " + ", ".join(sorted(untracked)))
+    if patch.strip():
+        parts.append(patch.strip())
+    return "\n\n".join(parts)
+
+
+def _content_tree_hash(worktree_path: str) -> str | None:
+    """Hash every non-ignored file in *worktree_path*, or ``None`` if git can't.
+
+    Staged into a TEMPORARY index: the worktree's real index belongs to the
+    mutation and to ``snapshot_candidate`` afterwards, and must not be
+    disturbed by a read-only integrity check.
+
+    Ignored files are excluded by construction, so the change summary and the
+    backend artifacts -- all gitignored -- never register as changes.
+    """
+    fd, tmp_index = tempfile.mkstemp(prefix="helix-idx-")
+    os.close(fd)
+    try:
+        os.unlink(tmp_index)  # git wants to create it itself
+    except OSError:
+        pass
+    env = {**os.environ, "GIT_INDEX_FILE": tmp_index}
+    try:
+        add = subprocess.run(
+            ["git", "add", "-A"],
+            cwd=worktree_path, capture_output=True, text=True, env=env, check=False,
+        )
+        if add.returncode != 0:
+            return None
+        wrote = subprocess.run(
+            ["git", "write-tree"],
+            cwd=worktree_path, capture_output=True, text=True, env=env, check=False,
+        )
+        if wrote.returncode != 0:
+            return None
+        return wrote.stdout.strip() or None
+    except OSError:
+        return None
+    finally:
+        try:
+            os.unlink(tmp_index)
+        except OSError:
+            pass
+
+
+def _restore_paths_from_tree(worktree_path: str, tree: str, paths: list[str]) -> None:
+    """Put *paths* back to their content in *tree*, deleting ones absent there.
+
+    Writes the working-tree files directly from git objects rather than using
+    ``git checkout``, which would also rewrite the index.
+    """
+    for rel in paths:
+        blob = subprocess.run(
+            ["git", "cat-file", "-p", f"{tree}:{rel}"],
+            cwd=worktree_path, capture_output=True, env=None, check=False,
+        )
+        target = Path(worktree_path) / rel
+        if blob.returncode == 0:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob.stdout)
+        else:
+            # Absent from the pre-call tree: the summary call created it.
+            try:
+                target.unlink()
+            except OSError:
+                pass
+
+
+def _revert_summary_side_effects(worktree_path: str, before_tree: str | None) -> list[str]:
+    """Undo any candidate-content change made by the change-summary call.
+
+    The summary call runs in the live candidate worktree, BEFORE
+    ``snapshot_candidate`` and before evaluation, so anything it edits would be
+    committed into the candidate and scored as if the mutation had done it.
+    Its prompt forbids touching code, and compliance has held in practice --
+    but the rest of HELIX does not leave this class of risk to instruction-
+    following either (see the evaluator-integrity manifest), and a summary is
+    never worth corrupting a candidate for.
+
+    Returns the paths it had to restore (empty when the call behaved).
+    """
+    if before_tree is None:
+        return []
+    after_tree = _content_tree_hash(worktree_path)
+    if after_tree is None or after_tree == before_tree:
+        return []
+    listing = subprocess.run(
+        ["git", "diff", "--name-only", before_tree, after_tree],
+        cwd=worktree_path, capture_output=True, text=True, check=False,
+    )
+    changed = [p for p in listing.stdout.splitlines() if p.strip()]
+    if not changed:
+        return []
+    _restore_paths_from_tree(worktree_path, before_tree, changed)
+    logger.warning(
+        "change-summary call modified candidate content in %s (%s); reverted. "
+        "The summary is advisory and must never alter what gets scored.",
+        worktree_path,
+        ", ".join(changed[:5]) + ("..." if len(changed) > 5 else ""),
+    )
+    return changed
+
+
+def generate_change_summary(
+    worktree_path: str,
+    config: HelixConfig,
+    base_sha: str | None = None,
+) -> tuple[str | None, UsageStats | None]:
+    """Describe the change just made in *worktree_path* via one extra call.
+
+    Deliberately a separate invocation rather than an instruction appended to
+    the mutation prompt.  The mutating agent is bounded by ``agent.max_turns``
+    and routinely spends every turn on the optimization itself, so a closing
+    "write a summary" instruction is the first thing lost -- and it is lost
+    silently.  Working from the diff depends on nothing the agent chose to do,
+    so it behaves the same on every backend.
+
+    Best-effort by construction: any failure yields ``(None, usage)`` and the
+    mutation carries on unsummarised.  Usage is still returned when known,
+    because a summary call that failed has still spent its tokens.
+
+    ``base_sha`` is the commit the worktree sat at before the backend ran, from
+    :func:`capture_base_commit`.  Passing it is what makes the diff survive an
+    agent that commits its own work; ``None`` falls back to ``HEAD``, which
+    only sees uncommitted changes.
+    """
+    # One number drives both the request and the read-back truncation; passing
+    # it to only one of them would cut every long summary mid-sentence.
+    max_words = config.evolution.sibling_summary_max_words
+    prompt = summary_prompt(
+        objective=config.objective,
+        diff=_child_diff(worktree_path, base_sha),
+        max_words=max_words,
+    )
+    # A fresh turn budget: the mutation's own limit governs editing code and is
+    # routinely exhausted, which is the very failure this call exists to route
+    # around.
+    agent_config = config.agent.model_copy(update={"max_turns": SUMMARY_MAX_TURNS})
+    try:
+        artifact_name = _write_mutation_prompt_artifact(
+            worktree_path,
+            prompt,
+            primary_name=SUMMARY_PROMPT_ARTIFACT_NAME,
+            fallback_name=SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
+        )
+        # Taken after the prompt artifact and .gitignore are settled, so only
+        # the summary call's own doing can move this hash.
+        before_tree = _content_tree_hash(worktree_path)
+        _, usage = invoke_claude_code(
+            worktree_path,
+            prompt,
+            agent_config,
+            passthrough_env=config.passthrough_env,
+            fixed_env=config.env,
+            sandbox=config.sandbox,
+            prompt_artifact_name=artifact_name,
+            # Own set of backend artifacts: this is the worktree's second
+            # invocation, and the mutation's record must survive it.
+            artifact_infix=SUMMARY_BACKEND_ARTIFACT_INFIX,
+        )
+    except HelixError as exc:
+        # Includes RateLimitError and prompt-artifact collisions: neither is a
+        # reason to discard a mutation that already succeeded.  A call that
+        # raised may still have edited files before it did, so the revert runs
+        # on this path too.
+        logger.debug("change summary failed: %s: %s", type(exc).__name__, exc)
+        _revert_summary_side_effects(worktree_path, before_tree)
+        spent = getattr(exc, "usage", None)
+        return None, spent if isinstance(spent, UsageStats) else None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("change summary failed: %s: %s", type(exc).__name__, exc)
+        _revert_summary_side_effects(worktree_path, before_tree)
+        return None, None
+    _revert_summary_side_effects(worktree_path, before_tree)
+    return capture_summary(worktree_path, max_words=max_words), usage
 
 
 # ---------------------------------------------------------------------------
@@ -2100,6 +2444,7 @@ def mutate(
     background: str | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
+    sibling_history: str | None = None,
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -2126,6 +2471,11 @@ def mutate(
         are spent either way, so this is how a caller charges the budget for
         an attempt that ends in ``None``.  Not called when no backend
         invocation happened (e.g. the worktree clone raised).
+    sibling_history:
+        Rendered account of the children already proposed from *parent*, or
+        ``None`` to disable sibling tracking for this mutation entirely (see
+        :func:`build_mutation_prompt`).  When it is not ``None``, the agent's
+        self-report is read back into ``child.summary`` before returning.
 
     Returns
     -------
@@ -2142,6 +2492,7 @@ def mutate(
         eval_result,
         background,
         config.agent.max_turns,
+        sibling_history,
     )
 
     # Persist the rendered prompt to the worktree for post-hoc inspection:
@@ -2152,6 +2503,12 @@ def mutate(
     # every subsequent mutation's diff and the mutator would see its own
     # prior prompt file as part of the codebase.
     prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
+
+    # Fixed point for the change summary's diff, taken before the backend can
+    # move HEAD by committing its own work.  See ``_child_diff``.
+    base_sha = (
+        capture_base_commit(child.worktree_path) if sibling_history is not None else None
+    )
 
     try:
         _, usage = invoke_claude_code(
@@ -2166,6 +2523,22 @@ def mutate(
         child.usage = usage
         if record_usage is not None:
             record_usage(usage)
+        if sibling_history is not None:
+            # Done now, while the worktree is guaranteed to exist: a child the
+            # gate rejects has its worktree removed immediately after, and by
+            # default that content is unrecoverable.
+            child.summary, summary_usage = generate_change_summary(
+                child.worktree_path, config, base_sha
+            )
+            if summary_usage is not None:
+                # Accumulate into a copy.  ``child.usage`` IS the object already
+                # handed to ``record_usage`` above, so adding in place would
+                # charge the summary's tokens twice.
+                combined = UsageStats.from_dict(child.usage.to_dict())
+                combined.add(summary_usage)
+                child.usage = combined
+                if record_usage is not None:
+                    record_usage(summary_usage)
     except MutationError as exc:
         # The worktree is about to be removed and the candidate dropped, but
         # the tokens were spent.  Hand them to the caller before both go.

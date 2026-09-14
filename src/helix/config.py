@@ -19,6 +19,7 @@ from helix.backends import (
     backend_display_name,
 )
 from helix.lines import split_lf_lines
+from helix.sibling_history import MAX_SUMMARY_WORDS
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -544,6 +545,37 @@ class EvolutionConfig(BaseModel):
             "uses 5."
         ),
     )
+    sibling_history: bool = Field(
+        default=False,
+        description=(
+            "Show the mutating agent the children already proposed from the "
+            "parent it is mutating: each one's score, whether it was kept, and "
+            "a short self-report the agent wrote saying what it changed.\n\n"
+            "``false`` (the default) disables the feature outright: no history "
+            "is rendered, no summary is requested of the agent, nothing is "
+            "recorded, and the mutation prompt is identical to one built "
+            "without it.\n\n"
+            "Every child a parent produces is remembered, with no cap — a "
+            "parent sampled many times is the case the feature exists for. "
+            "The record is advisory: it is shown to the agent and never used "
+            "to filter a proposal, because an approach that lost on one "
+            "minibatch can win on another. Safe to switch on mid-run; a "
+            "resume simply starts recording from the next child."
+        ),
+    )
+    sibling_summary_max_words: int = Field(
+        default=MAX_SUMMARY_WORDS,
+        description=(
+            "Word budget for each sibling summary. The same number is quoted "
+            "to the summarising call and enforced when its answer is read back, "
+            "so the request and the truncation cannot drift apart.\n\n"
+            "Only consulted when ``sibling_history`` is on. Raising it makes "
+            "each recorded attempt more informative and every later prompt that "
+            "renders the history correspondingly longer — a parent with ten "
+            "children carries ten of these, so the cost is per-parent, not "
+            "per-summary."
+        ),
+    )
 
     def model_post_init(self, __context: object) -> None:
         if self.max_workers < 1:
@@ -584,6 +616,11 @@ class EvolutionConfig(BaseModel):
                 "evolution.proposal_top_k is only valid when "
                 "evolution.proposal_selection='top_k' (got "
                 f"proposal_selection={self.proposal_selection!r})"
+            )
+        if self.sibling_summary_max_words < 1:
+            raise ValueError(
+                "evolution.sibling_summary_max_words must be >= 1 "
+                f"(got {self.sibling_summary_max_words})"
             )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(

@@ -635,3 +635,98 @@ class TestCandidateSelectionConfig:
         else:
             with pytest.raises(ValidationError, match=error_match):
                 EvolutionConfig(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# evolution.sibling_history — per-parent record shown to the mutator
+# ---------------------------------------------------------------------------
+
+
+class TestSiblingHistory:
+    """A plain on/off switch, with no companion limit.
+
+    There is no cap on how many children a parent remembers, so the config
+    carries one boolean rather than a count doing double duty as an off value.
+    """
+
+    def test_defaults_to_off(self):
+        """Off by default: a run that never sets this must behave exactly as
+        it did before the feature existed."""
+        assert EvolutionConfig().sibling_history is False
+
+    def test_can_be_enabled(self):
+        assert EvolutionConfig(sibling_history=True).sibling_history is True
+
+    def test_rejects_non_boolean(self):
+        with pytest.raises(ValidationError):
+            EvolutionConfig(sibling_history="sometimes")
+
+    def test_toml_round_trip(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "python evaluate.py"
+
+            [evolution]
+            sibling_history = true
+        """)
+        )
+        assert load_config(toml).evolution.sibling_history is True
+
+    def test_toml_default_when_omitted(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "python evaluate.py"
+        """)
+        )
+        assert load_config(toml).evolution.sibling_history is False
+
+    def test_model_dump_roundtrip(self):
+        cfg = HelixConfig(
+            objective="Test",
+            evaluator={"command": "python evaluate.py"},
+            evolution={"sibling_history": True},
+        )
+        restored = HelixConfig.model_validate(cfg.model_dump())
+        assert restored.evolution.sibling_history is True
+
+    def test_summary_word_budget_defaults_to_the_module_constant(self):
+        """The default lives in one place so the prompt's request and the
+        read-back truncation cannot drift apart."""
+        from helix.sibling_history import MAX_SUMMARY_WORDS
+
+        assert EvolutionConfig().sibling_summary_max_words == MAX_SUMMARY_WORDS
+        assert EvolutionConfig().sibling_summary_max_words == 150
+
+    def test_summary_word_budget_is_settable(self):
+        assert EvolutionConfig(sibling_summary_max_words=40).sibling_summary_max_words == 40
+
+    def test_summary_word_budget_rejects_non_positive(self):
+        for bad in (0, -1):
+            with pytest.raises(ValidationError, match="must be >= 1"):
+                EvolutionConfig(sibling_summary_max_words=bad)
+
+    def test_summary_word_budget_toml_round_trip(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "python evaluate.py"
+
+            [evolution]
+            sibling_history = true
+            sibling_summary_max_words = 60
+        """)
+        )
+        cfg = load_config(toml)
+        assert cfg.evolution.sibling_history is True
+        assert cfg.evolution.sibling_summary_max_words == 60

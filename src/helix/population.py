@@ -54,6 +54,12 @@ class Candidate:
     parent_ids: list[str]
     operation: str
     usage: UsageStats = field(default_factory=UsageStats)
+    # Self-report the mutating agent left in the worktree describing what it
+    # changed, captured while that worktree still exists (see
+    # ``helix.sibling_history``).  ``None`` whenever the feature is off or the
+    # agent wrote nothing.  In-memory only: it is persisted under the parent in
+    # ``EvolutionState.sibling_history``, not with the candidate.
+    summary: str | None = None
 
 
 @dataclass
