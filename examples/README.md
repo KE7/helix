@@ -5,7 +5,7 @@ A small gallery of end-to-end HELIX projects you can run, modify, and learn from
 ## Index
 
 - **[circle_packing/](circle_packing/)** — Pack 26 circles in the unit square to maximize the sum of radii, a geometric optimization benchmark also used by GEPA. HELIX evolves a Python solver starting from a naive seed (sum of radii 0.979764). [`docs/experiments/circle-packing.md`](../docs/experiments/circle-packing.md) describes the evaluation protocol and reference values.
-- **[web_researcher/](web_researcher/)** — A small QA agent that answers software-engineering questions requiring up-to-date knowledge (current package versions, API behaviors). HELIX evolves the agent from stale training-data answers toward live web lookups.
+- **[web_researcher/](web_researcher/)** — A small QA agent that answers software-engineering questions requiring up-to-date knowledge (current package versions, API behaviors). The seed asks Claude Haiku directly, with no web access. [`docs/experiments/web-researcher/reference_agent.py`](../docs/experiments/web-researcher/reference_agent.py) is a reference agent that answers version questions from live sources (PyPI, endoflife.date) and returns fixed answers for the stable questions.
 
 ## Running an example
 

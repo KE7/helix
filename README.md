@@ -774,6 +774,7 @@ stderr as fallback debug context.
 | Example | Task | Seed |
 |---|---|---|
 | [`examples/circle_packing/`](examples/circle_packing/) | Pack 26 non-overlapping circles in the unit square, maximizing the sum of radii | `solve.py`, a concentric-ring layout with a sum of radii of 0.979764 |
+| [`examples/web_researcher/`](examples/web_researcher/) | Answer software-engineering questions whose answers change over time, such as current package versions | `agent.py`, which asks Claude Haiku directly with no web access |
 
 Run an example to produce results. [`docs/experiments/circle-packing.md`](docs/experiments/circle-packing.md) describes the circle-packing evaluation protocol and lists published reference values for the task.
 
