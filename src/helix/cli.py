@@ -349,7 +349,7 @@ def init() -> None:
         "     evaluator dependencies (for example [cyan]uv run python evaluate.py[/cyan]\n"
         "     or [cyan]bash run_eval.sh[/cyan], not whichever [cyan]python3[/cyan] happens\n"
         "     to be on PATH).\n"
-        "     If you enable Docker sandboxing, add [cyan][evaluator.sidecar][/cyan]\n"
+        "     If you enable Docker sandboxing, add [cyan]\\[evaluator.sidecar][/cyan]\n"
         "     and use an evaluator-runner command instead.\n"
         "  2. Run [cyan]helix evolve[/cyan] to start evolution.\n"
     )
