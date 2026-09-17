@@ -251,6 +251,9 @@ def run_evaluator(
     )
     if evaluation_phase is not None:
         env["HELIX_EVALUATION_PHASE"] = evaluation_phase
+    # Lets an evaluator (or a sidecar's ledger) attribute each evaluation to
+    # the HELIX candidate it scored.
+    env["HELIX_CANDIDATE_ID"] = candidate.id
     helix_log_name = f".helix_asi_log_{uuid.uuid4().hex}.jsonl"
     helix_log_path = Path(candidate.worktree_path) / helix_log_name
     # Absolute path inside the sidecar — the evaluator command may run

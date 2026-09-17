@@ -94,6 +94,10 @@ def main() -> int:
         "protocol": PROTOCOL,
         "split": os.environ.get("HELIX_SPLIT", ""),
         "ids": ids,
+        # Attribution only: which HELIX candidate (and staged-validation phase,
+        # if any) this request scores.  The service never uses them to score.
+        "candidate_id": os.environ.get("HELIX_CANDIDATE_ID"),
+        "phase": os.environ.get("HELIX_EVALUATION_PHASE"),
     }
     try:
         archive, files_sha256 = build_archive(root)
@@ -101,8 +105,7 @@ def main() -> int:
         request["archive_sha256"] = hashlib.sha256(archive).hexdigest()
         request["files_sha256"] = files_sha256
     except (OSError, ValueError) as exc:
-        # The service still records this as an execution that scored 0, so the
-        # ledger and HELIX's evaluation count stay in step.
+        # The service still records this as an execution that scored 0.
         request["client_error"] = f"{type(exc).__name__}: {exc}"
     data = json.dumps(request).encode("utf-8")
     http_request = urllib.request.Request(

@@ -13,7 +13,7 @@ rng_seed = 0
 # Agent containers reach the model API only through the egress gateway, which
 # injects the real credential.  The placeholder below is all an agent sees.
 ANTHROPIC_BASE_URL = "http://anthropic-gateway:8080"
-ANTHROPIC_API_KEY = "placeholder-the-gateway-injects-the-credential"
+CLAUDE_CODE_OAUTH_TOKEN = "placeholder-the-gateway-injects-the-subscription-token"
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
 DISABLE_AUTOUPDATER = "1"
 DISABLE_TELEMETRY = "1"
@@ -30,8 +30,7 @@ include_stderr = true
 
 [evaluator.sidecar]
 image = "helix-circle-clean/evaluator:1"
-# CP_MAX_EXECUTIONS is a backstop above HELIX's own cap; it is set on the
-# sidecar's command line so it never reaches an agent or runner environment.
+# CP_MAX_EXECUTIONS is the exact execution cap; cached requests cost no executions.
 command = "env CP_MAX_EXECUTIONS=@MAX_EXECUTIONS@ python3 /opt/cpeval/private/evaluator_server.py"
 endpoint = "http://helix-evaluator:8080/evaluate"
 startup_timeout_seconds = 120
@@ -45,15 +44,12 @@ train_size = 1
 val_size = 1
 
 [evolution]
-# Budget: executions of the scoring function, optimize_anything's
-# max_metric_calls unit.  With minibatch_size = 1 every HELIX evaluation unit
-# is exactly one execution (optimize_anything also uses a minibatch of 1 in
-# single-task mode).
-max_evaluations = @MAX_EVALUATIONS@
-# Every generation executes the scoring function at least once (the parent is
-# re-scored), so this cap cannot bind before max_evaluations; it only guards
-# against a loop that spends tokens without evaluating.
-max_generations = 300
+# The sidecar owns the exact @MAX_EVALUATIONS@-execution budget. HELIX counts
+# answered requests, including cache hits, so its request cap is disabled.
+# The watchdog stops on the sidecar's cap refusal. A generation guard can
+# stop a run early if mutations fail or produce no new trees; summary flags it.
+max_evaluations = 0
+max_generations = @MAX_GENERATIONS@
 minibatch_size = 1
 num_parallel_proposals = 1
 mutations_per_parent = 1
@@ -94,5 +90,6 @@ image = "helix-circle-clean/agent-claude:1"
 network = "helix-circle-clean-agent"
 auth_volume = "helix-circle-clean-claude-home"
 skip_special_files = true
+cpus = @AGENT_CPUS@
 # Hang guard for one agent session or one evaluator-runner call.
 timeout_seconds = 5400

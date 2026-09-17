@@ -2533,3 +2533,49 @@ class TestToolCountsFromNativeTranscript:
         assert "codex transcript for candidate g3-s7 not preserved" in rec.message
         assert "transcript_not_found" in rec.message
         assert "backend_transcripts/codex/thr_missing.jsonl" in rec.message
+
+
+# ---------------------------------------------------------------------------
+# .gitignore handling never writes through a symlink
+# ---------------------------------------------------------------------------
+
+
+def test_ignore_helix_artifacts_replaces_a_symlink_to_a_host_file(tmp_path: Path) -> None:
+    import os
+
+    from helix.mutator import _ignore_helix_artifacts
+
+    host = tmp_path / "host"
+    host.mkdir()
+    victim = host / "victim.txt"
+    victim.write_text("do not touch\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    os.symlink(str(victim), worktree / ".gitignore")
+
+    _ignore_helix_artifacts(worktree)
+
+    assert victim.read_text() == "do not touch\n"
+    gitignore = worktree / ".gitignore"
+    assert not gitignore.is_symlink()
+    text = gitignore.read_text()
+    assert "helix_batch.json" in text and "do not touch" not in text
+
+
+def test_ignore_helix_artifacts_keeps_content_of_an_in_tree_link(tmp_path: Path) -> None:
+    import os
+
+    from helix.mutator import _ignore_helix_artifacts
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / "ignore_rules").write_text("__pycache__/\n")
+    os.symlink("ignore_rules", worktree / ".gitignore")
+
+    _ignore_helix_artifacts(worktree)
+
+    gitignore = worktree / ".gitignore"
+    assert not gitignore.is_symlink()
+    assert gitignore.read_text().startswith("__pycache__/\n")
+    assert "helix_batch.json" in gitignore.read_text()
+    assert (worktree / "ignore_rules").read_text() == "__pycache__/\n"

@@ -32,10 +32,21 @@ caffeinate -i env -i \
 helix_pid=$!
 echo "${helix_pid}" > "${LOGS}/helix.pid"
 set +m
-/usr/bin/python3 "${PRIVATE}/bin/watchdog.py" "${LOGS}/gateway/gateway_requests.jsonl" \
-  "${LOGS}/helix.pid" "${LOGS}/watchdog_stop.json" >> "${LOGS}/watchdog.log" 2>&1 &
+/usr/bin/python3 "${PRIVATE}/bin/watchdog.py" \
+  --gateway-log "${LOGS}/gateway/gateway_requests.jsonl" \
+  --pid-file "${LOGS}/helix.pid" --stop-record "${LOGS}/watchdog_stop.json" \
+  --ledger-dir "${PRIVATE}/ledger" --helix-state "${RUN_DIR}/.helix/state.json" \
+  --helix-log "${LOGS}/helix_stdout.log" >> "${LOGS}/watchdog.log" 2>&1 &
+watchdog_pid=$!
+docker_host="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+/usr/bin/python3 "${PRIVATE}/bin/agent_monitor.py" --docker-host "${docker_host}" \
+  --network "${AGENT_NETWORK}" --out "${LOGS}/agent_containers.jsonl" \
+  --pid-file "${LOGS}/helix.pid" >> "${LOGS}/agent_monitor.log" 2>&1 &
+monitor_pid=$!
 wait "${helix_pid}"
 rc=$?
+wait "${monitor_pid}" || true
+kill "${watchdog_pid}" 2>/dev/null || true
 
 ended_epoch="$(date +%s)"
 printf '{"event":"end","mode":"%s","utc":"%s","epoch":%s,"exit_code":%s,"wall_seconds":%s}\n' \

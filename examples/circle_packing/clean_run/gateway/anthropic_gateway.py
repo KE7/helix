@@ -4,29 +4,42 @@ Agent containers sit on an ``--internal`` Docker network with no route out.
 This gateway is the only other container on that network, and it is also
 attached to a normal bridge network.  Claude Code in the agent container is
 pointed at it with ``ANTHROPIC_BASE_URL=http://anthropic-gateway:8080`` and a
-placeholder key; the gateway forwards allowed requests to
-``https://api.anthropic.com`` with the real key, which never enters an agent
-container.
+placeholder OAuth token; the gateway forwards allowed Claude Code requests to
+``https://api.anthropic.com`` with the subscription token from HELIX's login
+volume. The login volume mounts only in the gateway, never in an agent.
+Expired tokens refresh in place in that volume.
 
 Policy (``check_request``):
 
 * only ``POST /v1/messages`` and ``POST /v1/messages/count_tokens``;
-* the body must be a JSON object naming an allowed model;
-* no ``mcp_servers`` (MCP connector) and no ``container`` (skills / hosted
-  code-execution containers);
+* no ``anthropic-beta`` value that names a remote-content feature (files,
+  MCP, skills, containers, code execution, web search or fetch);
+* the body must be a JSON object naming an allowed model, with only known
+  top-level parameters; ``mcp_servers`` (MCP connector), ``container``
+  (skills / hosted code-execution containers) and ``fallbacks`` (other
+  models) are refused;
 * every tool must be a client tool (no ``type``, or ``type == "custom"``):
   server tools such as ``web_search_*``, ``web_fetch_*`` and
   ``code_execution_*`` would let Anthropic's servers reach the web or run
   code on the agent's behalf;
-* no tool named ``WebSearch`` / ``WebFetch`` / ``web_search`` / ``web_fetch``.
+* no tool named ``WebSearch`` / ``WebFetch`` / ``web_search`` / ``web_fetch``;
+* every content block in ``system`` and ``messages`` (recursively, including
+  ``tool_result`` content and ``document`` sources of type ``content``) must
+  be of an allowlisted type that carries its data inline.  Image and document
+  blocks may only use ``base64``, ``text`` or ``content`` sources: a ``url``
+  source makes Anthropic's servers download that URL, and a ``file`` source
+  reads a Files API upload.  Server-tool result blocks, MCP blocks and
+  ``container_upload`` are refused.
 
 There is no CONNECT support and no other upstream host, so a request for any
 other site from the agent container has nowhere to go.
 
 Every request is logged as one JSON line (method, path, decision, model,
 effort, thinking mode, tool names, top-level body keys, ``anthropic-beta``
-values, HTTP status, token usage parsed from the response, timings).
-Request and response bodies and credentials are never logged.
+values, counts of content-block and source types, context-management edit
+types, the location of a refused block, HTTP status, token usage parsed from
+the response, timings).  Request and response bodies and credentials are
+never logged.
 
 With ``GATEWAY_CAPTURE_ONLY=1`` the gateway records every request that passes
 the policy and then refuses it (403) without contacting the upstream.  The
@@ -37,6 +50,7 @@ at no API cost.
 from __future__ import annotations
 
 import http.client
+import urllib.request
 import json
 import os
 import ssl
@@ -48,7 +62,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-UPSTREAM_HOST = os.environ.get("GATEWAY_UPSTREAM_HOST", "api.anthropic.com")
+UPSTREAM_HOST = "api.anthropic.com"
+CREDENTIAL_PATH = Path(os.environ.get("GATEWAY_CREDENTIAL_PATH", "/auth/.claude/.credentials.json"))
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_auth_lock = threading.Lock()
 LISTEN_PORT = int(os.environ.get("GATEWAY_PORT", "8080"))
 LOG_PATH = Path(os.environ.get("GATEWAY_LOG", "/logs/gateway_requests.jsonl"))
 ALLOWED_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
@@ -81,13 +98,231 @@ DROPPED_REQUEST_HEADERS = HOP_BY_HOP | {
 _log_lock = threading.Lock()
 
 
+class CredentialError(RuntimeError):
+    """Subscription credentials are unavailable; never include their contents."""
+
+
+def subscription_token() -> str:
+    """Read/refresh HELIX's login volume in place; no credential leaves the gateway.
+
+    Endpoint and public client id match Claude Code 2.1.274. Refresh writes only
+    to the existing auth volume. Agent requests cannot select an auth endpoint.
+    """
+    with _auth_lock:
+        try:
+            document = json.loads(CREDENTIAL_PATH.read_text())
+            oauth = document["claudeAiOauth"]
+            if oauth.get("expiresAt", 0) <= (time.time() + 120) * 1000:
+                refresh = oauth.get("refreshToken")
+                if not refresh:
+                    raise CredentialError("subscription login needs renewal")
+                data = json.dumps({"grant_type": "refresh_token", "refresh_token": refresh,
+                                   "client_id": OAUTH_CLIENT_ID,
+                                   "scope": " ".join(oauth["scopes"])}).encode()
+                request = urllib.request.Request(
+                    "https://platform.claude.com/v1/oauth/token", data=data,
+                    headers={"Content-Type": "application/json", "User-Agent": "axios/1.8.4"}, method="POST")
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    renewed = json.load(response)
+                oauth.update(accessToken=renewed["access_token"],
+                             refreshToken=renewed.get("refresh_token", refresh),
+                             expiresAt=int((time.time() + renewed["expires_in"]) * 1000))
+                if renewed.get("scope"):
+                    oauth["scopes"] = renewed["scope"].split()
+                temporary = CREDENTIAL_PATH.with_suffix(".refresh-tmp")
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as handle:
+                    json.dump(document, handle)
+                os.replace(temporary, CREDENTIAL_PATH)
+                write_log({"event": "subscription_refresh", "success": True})
+            token = oauth["accessToken"]
+            if not isinstance(token, str) or not token:
+                raise CredentialError("subscription login needs renewal")
+            return token
+        except CredentialError:
+            raise
+        except Exception:
+            # OAuth errors may contain request data: neither log nor chain them.
+            raise CredentialError("subscription login unavailable; run helix sandbox login claude") from None
+
+
 def allowed_models() -> frozenset[str]:
     raw = os.environ.get("GATEWAY_ALLOWED_MODELS", "")
     return frozenset(m.strip() for m in raw.split(",") if m.strip())
 
 
+# Top-level Messages API parameters the gateway forwards.  Anything else is
+# refused, so a parameter added to the API later cannot open a path the
+# policy has not reviewed.  ``mcp_servers``, ``container``, ``fallbacks`` and
+# ``fallback_credit_token`` are deliberately absent.
+ALLOWED_TOP_LEVEL_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "system",
+        "max_tokens",
+        "metadata",
+        "stop_sequences",
+        "stream",
+        "temperature",
+        "top_k",
+        "top_p",
+        "tools",
+        "tool_choice",
+        "thinking",
+        "output_config",
+        "context_management",
+        "cache_control",
+        "compaction",
+        "diagnostics",
+        "service_tier",
+        "speed",
+        "inference_geo",
+    }
+)
+# Content-block types whose data is inline in the request.  Everything else
+# (server-tool use and result blocks, MCP blocks, container_upload, tool
+# additions and removals, fallback markers, browser state) is refused.
+ALLOWED_BLOCK_TYPES = frozenset(
+    {
+        "text",
+        "image",
+        "document",
+        "search_result",
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+        "tool_result",
+        "compaction",
+    }
+)
+ALLOWED_TOOL_RESULT_BLOCK_TYPES = frozenset(
+    {"text", "image", "document", "search_result", "tool_reference"}
+)
+# ``url`` sources are downloaded by Anthropic's servers; ``file`` sources read
+# Files API uploads.  Only inline sources pass.
+ALLOWED_SOURCE_TYPES = {
+    "image": frozenset({"base64"}),
+    "document": frozenset({"base64", "text", "content"}),
+}
+ALLOWED_MESSAGE_ROLES = frozenset({"user", "assistant", "system"})
+# ``anthropic-beta`` values that name features able to pull remote content or
+# run code on Anthropic's side.  The body checks above already refuse the
+# request shapes these features need; refusing the flags as well keeps a
+# future request shape from slipping past.
+BLOCKED_BETA_MARKERS = (
+    "files-api",
+    "mcp",
+    "skills",
+    "container",
+    "code-execution",
+    "web-search",
+    "web-fetch",
+    "computer-use",
+    "managed-agents",
+    "server-side-fallback",
+    "advisor",
+    "browser",
+)
+
+
+class PolicyError(ValueError):
+    """A request part the policy refuses; the message names where."""
+
+
+def _check_source(block: dict[str, Any], where: str, counts: dict[str, Any]) -> None:
+    source = block.get("source")
+    kind = block.get("type")
+    if not isinstance(source, dict):
+        raise PolicyError(f"{where}.source is not an object")
+    source_type = source.get("type")
+    _count(counts, "source_types", f"{kind}:{source_type}")
+    if source_type not in ALLOWED_SOURCE_TYPES[str(kind)]:
+        raise PolicyError(
+            f"{where}.source.type={source_type!r} is not allowed for {kind} blocks"
+        )
+    if source_type == "content":
+        _check_blocks(
+            source.get("content"),
+            f"{where}.source.content",
+            counts,
+            frozenset({"text", "image"}),
+        )
+
+
+def _count(counts: dict[str, Any], key: str, name: str) -> None:
+    bucket = counts.setdefault(key, {})
+    bucket[name] = bucket.get(name, 0) + 1
+
+
+def _check_blocks(
+    content: Any, where: str, counts: dict[str, Any], allowed: frozenset[str]
+) -> None:
+    """Walk one ``content`` value (a string or a list of blocks)."""
+    if isinstance(content, str) or content is None:
+        return
+    if not isinstance(content, list):
+        raise PolicyError(f"{where} is neither a string nor a list of blocks")
+    for index, block in enumerate(content):
+        here = f"{where}[{index}]"
+        if not isinstance(block, dict):
+            raise PolicyError(f"{here} is not an object")
+        kind = block.get("type")
+        _count(counts, "block_types", str(kind))
+        if kind not in allowed:
+            raise PolicyError(f"{here}.type={kind!r} is not allowed")
+        if kind in ALLOWED_SOURCE_TYPES:
+            _check_source(block, here, counts)
+        elif kind == "tool_result":
+            _check_blocks(
+                block.get("content"),
+                f"{here}.content",
+                counts,
+                ALLOWED_TOOL_RESULT_BLOCK_TYPES,
+            )
+        elif kind == "search_result":
+            _check_blocks(
+                block.get("content"), f"{here}.content", counts, frozenset({"text"})
+            )
+
+
+def check_content(payload: dict[str, Any], counts: dict[str, Any]) -> None:
+    """Refuse any content that is not inline, counting block and source types.
+
+    Raises ``PolicyError`` naming the first refused location; ``counts`` then
+    holds the types seen up to and including the refused block.
+    """
+    _check_blocks(payload.get("system"), "system", counts, frozenset({"text"}))
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        raise PolicyError("messages is not a list")
+    for index, message in enumerate(messages):
+        where = f"messages[{index}]"
+        if not isinstance(message, dict):
+            raise PolicyError(f"{where} is not an object")
+        role = message.get("role")
+        if role not in ALLOWED_MESSAGE_ROLES:
+            raise PolicyError(f"{where}.role={role!r} is not allowed")
+        allowed = frozenset({"text"}) if role == "system" else ALLOWED_BLOCK_TYPES
+        _check_blocks(message.get("content"), f"{where}.content", counts, allowed)
+
+
+def joined_header(values: list[str] | None) -> str | None:
+    """All values of a repeated header, comma-joined (every copy is forwarded)."""
+    return ",".join(values) if values else None
+
+
+def blocked_betas(header: str | None) -> list[str]:
+    values = [v.strip() for v in (header or "").split(",") if v.strip()]
+    return [v for v in values if any(m in v.lower() for m in BLOCKED_BETA_MARKERS)]
+
+
 def check_request(
-    method: str, path: str, body: bytes, models: frozenset[str]
+    method: str,
+    path: str,
+    body: bytes,
+    models: frozenset[str],
+    beta_header: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Return ``(allowed, reason, metadata)`` for one agent request."""
     meta: dict[str, Any] = {}
@@ -96,7 +331,7 @@ def check_request(
         return False, f"route not allowed: {method} {route}", meta
     try:
         payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return False, "body is not JSON", meta
     if not isinstance(payload, dict):
         return False, "body is not a JSON object", meta
@@ -109,14 +344,38 @@ def check_request(
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         meta["thinking"] = thinking.get("type")
+    context_management = payload.get("context_management")
+    if isinstance(context_management, dict) and isinstance(
+        context_management.get("edits"), list
+    ):
+        meta["context_edits"] = sorted(
+            str(edit.get("type"))
+            for edit in context_management["edits"]
+            if isinstance(edit, dict)
+        )
     meta["stream"] = bool(payload.get("stream"))
     meta["max_tokens"] = payload.get("max_tokens")
+    refused_betas = blocked_betas(beta_header)
+    if refused_betas:
+        return False, f"anthropic-beta not allowed: {','.join(refused_betas)}", meta
     if not isinstance(model, str) or model not in models:
         return False, f"model not allowed: {model!r}", meta
     if "mcp_servers" in payload:
         return False, "mcp_servers is not allowed", meta
     if "container" in payload:
         return False, "container is not allowed", meta
+    unknown = sorted(str(k) for k in payload if k not in ALLOWED_TOP_LEVEL_KEYS)
+    if unknown:
+        return False, f"top-level parameter not allowed: {','.join(unknown)}", meta
+    counts: dict[str, Any] = {}
+    try:
+        check_content(payload, counts)
+    except PolicyError as exc:
+        meta.update(counts)
+        return False, f"content not allowed: {exc}", meta
+    except RecursionError:
+        return False, "content nests too deeply", meta
+    meta.update(counts)
     tools = payload.get("tools", [])
     if not isinstance(tools, list):
         return False, "tools must be a list", meta
@@ -257,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
             "method": self.command,
             "path": self.path.split("?", 1)[0],
             "query": self.path.split("?", 1)[1] if "?" in self.path else "",
-            "anthropic_beta": self.headers.get("anthropic-beta"),
+            "anthropic_beta": joined_header(self.headers.get_all("anthropic-beta")),
             "user_agent": self.headers.get("user-agent"),
         }
         if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -273,7 +532,11 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         record["request_bytes"] = len(body)
         allowed, reason, meta = check_request(
-            self.command, self.path, body, allowed_models()
+            self.command,
+            self.path,
+            body,
+            allowed_models(),
+            beta_header=joined_header(self.headers.get_all("anthropic-beta")),
         )
         record.update(meta)
         if not allowed:
@@ -282,9 +545,10 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("GATEWAY_CAPTURE_ONLY") == "1":
             self._deny(record, 403, "capture only: request recorded, not forwarded")
             return
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            self._deny(record, 503, "gateway has no upstream credential")
+        try:
+            token = subscription_token()
+        except CredentialError as exc:
+            self._deny(record, 503, str(exc))
             return
 
         headers = {
@@ -292,7 +556,11 @@ class Handler(BaseHTTPRequestHandler):
             for key, value in self.headers.items()
             if key.lower() not in DROPPED_REQUEST_HEADERS
         }
-        headers["x-api-key"] = api_key
+        headers["authorization"] = "Bearer " + token
+        betas = joined_header(self.headers.get_all("anthropic-beta")) or ""
+        headers["anthropic-beta"] = ",".join(dict.fromkeys(
+            [b.strip() for b in betas.split(",") if b.strip()] + ["oauth-2025-04-20"]))
+        record["auth_mode"] = "claude_subscription"
         headers["accept-encoding"] = "identity"
         headers["content-length"] = str(len(body))
         connection = http.client.HTTPSConnection(
@@ -332,6 +600,8 @@ class Handler(BaseHTTPRequestHandler):
                     "response_model": parser.response_model,
                     "stop_reason": parser.stop_reason,
                     "usage": parser.usage,
+                    "subscription_limits": {key.lower(): value for key, value in upstream.getheaders()
+                        if key.lower().startswith("anthropic-ratelimit-unified-")},
                     "error_type": parser.error_type,
                     "error_message": parser.error_message,
                 }
@@ -377,7 +647,8 @@ def main() -> int:
             "utc": datetime.now(timezone.utc).isoformat(),
             "upstream": UPSTREAM_HOST,
             "allowed_models": sorted(allowed_models()),
-            "credential_present": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "credential_present": CREDENTIAL_PATH.is_file(),
+            "auth_mode": "claude_subscription",
             "capture_only": os.environ.get("GATEWAY_CAPTURE_ONLY") == "1",
         }
     )

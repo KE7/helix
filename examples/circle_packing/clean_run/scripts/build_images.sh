@@ -4,22 +4,26 @@
 set -euo pipefail
 CLEAN_RUN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${HELIX_CIRCLE_CLEAN_TAG:-1}"
+REVISION="$(git -C "${CLEAN_RUN}" rev-parse HEAD)"
+[ -z "$(git -C "${CLEAN_RUN}" status --porcelain)" ] || {
+  echo "refusing to build run images from uncommitted source" >&2; exit 1;
+}
 
-docker build --label helix-circle-clean=1 -t "helix-circle-clean/base:${TAG}" \
+docker build --label helix-circle-clean=1 --label "org.opencontainers.image.revision=${REVISION}" -t "helix-circle-clean/base:${TAG}" \
   -f "${CLEAN_RUN}/docker/base.Dockerfile" "${CLEAN_RUN}"
-docker build --label helix-circle-clean=1 --build-arg "BASE_IMAGE=helix-circle-clean/base:${TAG}" \
+docker build --label helix-circle-clean=1 --label "org.opencontainers.image.revision=${REVISION}" --build-arg "BASE_IMAGE=helix-circle-clean/base:${TAG}" \
   -t "helix-circle-clean/agent-claude:${TAG}" \
   -f "${CLEAN_RUN}/docker/agent-claude.Dockerfile" "${CLEAN_RUN}"
-docker build --label helix-circle-clean=1 --build-arg "BASE_IMAGE=helix-circle-clean/base:${TAG}" \
+docker build --label helix-circle-clean=1 --label "org.opencontainers.image.revision=${REVISION}" --build-arg "BASE_IMAGE=helix-circle-clean/base:${TAG}" \
   -t "helix-circle-clean/evaluator:${TAG}" \
   -f "${CLEAN_RUN}/docker/evaluator.Dockerfile" "${CLEAN_RUN}"
-docker build --label helix-circle-clean=1 -t "helix-circle-clean/gateway:${TAG}" \
+docker build --label helix-circle-clean=1 --label "org.opencontainers.image.revision=${REVISION}" -t "helix-circle-clean/gateway:${TAG}" \
   -f "${CLEAN_RUN}/docker/gateway.Dockerfile" "${CLEAN_RUN}"
 
 for image in base agent-claude evaluator gateway; do
   docker image inspect --format "helix-circle-clean/${image}:${TAG} {{.Id}}" \
     "helix-circle-clean/${image}:${TAG}"
 done
-docker run --rm --network none "helix-circle-clean/agent-claude:${TAG}" claude --version
-docker run --rm --network none "helix-circle-clean/base:${TAG}" \
+docker run --rm --label helix-circle-clean=build --network none "helix-circle-clean/agent-claude:${TAG}" claude --version
+docker run --rm --label helix-circle-clean=build --network none "helix-circle-clean/base:${TAG}" \
   python3 -c "import sys, numpy, scipy; print(sys.version.split()[0], numpy.__version__, scipy.__version__)"

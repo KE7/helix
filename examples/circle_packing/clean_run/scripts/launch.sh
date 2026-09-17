@@ -5,10 +5,10 @@
 #   cd <run dir> && .helix-run/bin/launch.sh --preflight-only [--api-auth-check]
 #   cd <run dir> && .helix-run/bin/launch.sh --dry-run
 #
-# Requires ANTHROPIC_API_KEY in this shell.  The key is handed only to the
-# egress-gateway container (docker run -e NAME, so it never appears in an argv
-# or a file); HELIX itself runs with a scrubbed environment that contains no
-# Anthropic credential, so HELIX cannot forward one into agent containers.
+# Requires an existing subscription login in SUBSCRIPTION_AUTH_VOLUME
+# (helix sandbox login claude). Only the gateway mounts this volume; the
+# mutation agent has a separate empty home and a non-secret placeholder token.
+# HELIX runs with a scrubbed environment.
 #
 # Steps:
 #   1. check preconditions (fresh run dir or --resume, clean HELIX checkout,
@@ -22,7 +22,7 @@
 #
 # --preflight-only stops after step 3 and leaves the infrastructure up
 # (stop.sh removes it); --api-auth-check adds one Messages request with
-# max_tokens 16 through the gateway from an agent container.
+# at most 64 output tokens through the gateway from an agent container.
 #
 # --dry-run runs the whole pipeline with the gateway in capture-only mode and
 # no credential: every model request is recorded and refused, so mutations
@@ -69,7 +69,10 @@ fi
 if [ "${DRY_RUN}" = "1" ]; then
   unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
 else
-  [ -n "${ANTHROPIC_API_KEY:-}" ] || die "ANTHROPIC_API_KEY must be set in this shell"
+  docker volume inspect "${SUBSCRIPTION_AUTH_VOLUME}" >/dev/null 2>&1 \
+    || die "subscription volume missing; run helix sandbox login claude"
+  [ "${AUTH_VOLUME}" != "${SUBSCRIPTION_AUTH_VOLUME}" ] \
+    || die "agent home must differ from subscription auth volume"
 fi
 docker info >/dev/null 2>&1 || die "Docker is not running"
 command -v uv >/dev/null || die "uv is required"
@@ -104,6 +107,10 @@ check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/private/packing_rules.py "${CL
 check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/harness/candidate_harness.py "${CLEAN_SRC}/evaluator/candidate_harness.py"
 check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/runner/evaluator_client.py "${CLEAN_SRC}/evaluator/evaluator_client.py"
 check_image_file "${GATEWAY_IMAGE}" /opt/gateway/anthropic_gateway.py "${CLEAN_SRC}/gateway/anthropic_gateway.py"
+for image in "${AGENT_IMAGE}" "${EVALUATOR_IMAGE}" "${GATEWAY_IMAGE}"; do
+  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${image}")"
+  [ "${revision}" = "${HELIX_COMMIT}" ] || die "${image} is not built from ${HELIX_COMMIT}"
+done
 CLAUDE_VERSION="$(docker run --rm --label "${LABEL}=launch" --network none "${AGENT_IMAGE}" claude --version)"
 PY_VERSIONS="$(docker run --rm --label "${LABEL}=launch" --network none "${EVALUATOR_IMAGE}" \
   python3 -c 'import sys, numpy, scipy; print(sys.version.split()[0], numpy.__version__, scipy.__version__)')"
@@ -164,15 +171,16 @@ for name in "${GATEWAY_CONTAINER}" "${ARCHIVER_CONTAINER}"; do
     docker rm -f "${name}" >/dev/null
   fi
 done
+GATEWAY_MOUNTS=()
 GATEWAY_ENV=(-e "GATEWAY_ALLOWED_MODELS=${GATEWAY_ALLOWED_MODELS}")
 if [ "${DRY_RUN}" = "1" ]; then
   GATEWAY_ENV+=(-e GATEWAY_CAPTURE_ONLY=1)
 else
-  GATEWAY_ENV+=(-e ANTHROPIC_API_KEY)
+  GATEWAY_MOUNTS+=(-v "${SUBSCRIPTION_AUTH_VOLUME}:/auth:rw")
 fi
 docker run -d --name "${GATEWAY_CONTAINER}" --label "${LABEL}=1" \
   --network "${EGRESS_NETWORK}" --security-opt no-new-privileges \
-  "${GATEWAY_ENV[@]}" -v "${LOGS}/gateway:/logs" "${GATEWAY_IMAGE}" >/dev/null
+  "${GATEWAY_ENV[@]}" ${GATEWAY_MOUNTS[@]+"${GATEWAY_MOUNTS[@]}"} -v "${LOGS}/gateway:/logs" "${GATEWAY_IMAGE}" >/dev/null
 docker network connect --alias "${GATEWAY_ALIAS}" "${AGENT_NETWORK}" "${GATEWAY_CONTAINER}"
 docker run -d --name "${ARCHIVER_CONTAINER}" --label "${LABEL}=1" --network none \
   --security-opt no-new-privileges \
@@ -192,12 +200,12 @@ say "infrastructure ready (gateway on ${EGRESS_NETWORK} + ${AGENT_NETWORK} as ${
 # ------------------------------------------------------- 3. isolation checks
 if [ "${PREFLIGHT}" = "1" ]; then
   if [ "${PREFLIGHT_ONLY}" = "0" ] && [ "${DRY_RUN}" = "0" ]; then
-    # A real launch first proves the credential works (one max_tokens=16
+    # A real launch first proves the credential works (one 64-output-token
     # request), so a dead key cannot burn the evaluation budget.
     PROBE_ARGS+=(--api-auth-check)
   fi
   say "running isolation checks (${PROBE_ARGS[*]:-no API spend})"
-  if ! (cd "${PRIVATE}" && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+  if ! (cd "${PRIVATE}" && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN \
         uv run --project "${HELIX_SRC}" python "${PRIVATE}/bin/isolation_probe.py" \
         --run-dir "${RUN_DIR}" ${PROBE_ARGS[@]+"${PROBE_ARGS[@]}"} >> "${LOGS}/launch.log" 2>&1); then
     say "isolation checks FAILED; see ${LOGS}/launch.log and ${PRIVATE}/isolation/"

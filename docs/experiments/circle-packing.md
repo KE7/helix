@@ -115,126 +115,205 @@ tmp_dir=$(mktemp -d) && cp "$(git rev-parse --show-toplevel)/examples/circle_pac
 
 ## Clean-Run Protocol
 
-The protocol turns the example into a test of what HELIX finds on its own, under the evaluation budget optimize_anything used. It removes three problems that made earlier runs of the example unsuitable for reporting:
+The protocol uses a standalone seed repository, a private scoring service, an
+isolated Claude Code mutation container, and a gateway that permits model
+inference without remote-content tools. The implementation is in
+[`examples/circle_packing/clean_run/`](../../examples/circle_packing/clean_run/).
+No HELIX experiment results are reported here.
 
-- **Leaks.** Earlier backgrounds gave the target score and winning strategies. Without the sandbox the mutation agent can read any file on the host, including the reference packing above, and HELIX passes the backend its web tools, so an agent can look up published packings and solvers.
-- **Budget accounting.** Without the sandbox the agent can run the evaluator itself during a mutation, and those runs do not count toward `max_evaluations`. HELIX's default `minibatch_size = 3` also charges 3 units for one evaluator run when there is a single task.
-- **Scoring.** The earlier evaluator scored invalid packings by their radius sum.
+### Reference experiment and budget
 
-The protocol lives in [`examples/circle_packing/clean_run/`](../../examples/circle_packing/clean_run/): the evaluator service, egress gateway, Dockerfiles, `helix.toml.template` and the scripts named below.
+The bundled optimize_anything circle-packing state is byte-identical to
+[`gepa` commit `133d185a`](https://github.com/gepa-ai/gepa/tree/133d185a/examples/circle_packing).
+That source configures `max_metric_calls = 200`, an `openai/gpt-5` proposer
+and a GPT-5.1 refiner. Its fitness function caches code executions and its
+refiner caches `(code, refiner_prompt)` pairs. Unchanged parents do not execute
+again. The bundled StateTracker records 133 executions, first reaches the
+reported 2.63598 threshold at execution 63, and reaches its final best at
+execution 114. GEPA's internal counter is 89; it is a different quantity.
+The state SHA-256 is
+`ca0ec9aef9e77e02b6947e54134054b198b4c8a2228be8ab439c4977e020b06d`.
 
-### optimize_anything's circle-packing setup
+The [artifact's fresh-run source](https://github.com/gepa-ai/optimize-anything-artifact/tree/main/acm_cais_artifact_evaluation/domains/circle_packing)
+sets 150 and GPT-5.1. This is the provenance of the 150 setting in the build
+configuration; its 152 sidecar backstop allows two additional executions.
+Neither number is this protocol's budget. The protocol caps the scoring
+service at **exactly 200 executions**, including failed and interrupted
+executions. There is no overshoot allowance.
 
-Verified on 2026-09-16 from the arXiv source of [2605.19633](https://arxiv.org/abs/2605.19633) (the CAIS'26 research paper), the launch blog post (appendix B), `gepa-ai/gepa` `examples/circle_packing/`, and `gepa-ai/optimize-anything-artifact` `acm_cais_artifact_evaluation/domains/circle_packing/` (code, `logs/state_tracker_logs.json`, `logs/gepa_state.bin`).
+The reference task has 26 circles, absolute tolerance `1e-6`, a 600-second
+candidate limit, and a warm-start input containing the best packing so far.
+Its score is the raw radius sum of a valid packing and zero on failure.
+The [paper](https://arxiv.org/abs/2605.19633) reports 2.63598+ and a controlled
+comparison reaching 2.63598 in 63 evaluations for approximately $3.18;
+it also lists $6 for a GPT-5.1 circle-packing run. It gives no wall-clock time.
+Those paper tables and the bundled trace are distinct evidence sources.
 
-| Item | optimize_anything |
-|---|---|
-| n | 26 |
-| Validity | `validate_packing(n, circles, atol=1e-6)`: shape (26, 3), no NaN, no negative radius, `x - r ≥ -atol`, `x + r ≤ 1 + atol` (same for y), `dist < r_i + r_j - atol` counts as overlap |
-| Score | `validation_details["sum_radii"]` when execution and validation succeed, otherwise `0.0` (artifact `main.py`). The current `gepa` example's refactored `utils.py` (at `15ee314`) instead returns the radius sum of a packing that fails the containment or overlap check |
-| Candidate | Python code defining `main(timeout, current_best_solution)`; the evaluator passes the best circles found so far (warm start) and a 600 s timeout |
-| Proposer | `openai/gpt-5.1` in the artifact `main.py` and the paper's controlled comparison; `openai/gpt-5` in the blog appendix, the `gepa` example and the paper's summary table. `RefinerConfig()` is on: after each evaluation a refiner LLM call (same model) proposes a refined candidate that is evaluated too |
-| Engine | `max_metric_calls=150`, `cache_evaluation=True`, `frontier_type="objective"`; single-task mode, `reflection_minibatch_size` defaults to 1 |
-| Budget unit | metric calls: evaluator (fitness function) invocations. Seed evaluation, parent and child minibatch evaluations, full-validation evaluations and refiner re-evaluations all run the evaluator |
-| Reported score | 2.63598+ (§5.6); controlled comparison vs OpenEvolve: "2.63598 in just 63 evaluations (costing ~$3.18)", table "Evaluations 63 / 100" |
-| Bundled run log | The example's `StateTracker` counts every evaluator call: best first ≥ 2.63598 at call 63, 133 calls in total, best 2.635983362593453. GEPA's own `total_num_evals` in the same state file is 89, and 43 at the first candidate ≥ 2.63598, so it did not count every evaluator call in that run; the paper's 63 is the `StateTracker` count |
-| Cost | $3.18 at 63 evaluations (controlled comparison); $6.00 for the circle-packing run (proposer-sensitivity and cost tables); GPT-5-nano run $0.50. No wall-clock figure is given |
+The private sidecar is the authority for this run's execution count:
 
-### Budget
+- `execution_starts.jsonl` durably allocates a number before execution;
+  `evaluations.jsonl` stores the result, packing, candidate id and archive.
+  Crashes leave an identifiable unfinished start; restarts never reuse it.
+- A deterministic archive digest caches identical trees across parent,
+  child and validation requests. `requests.jsonl` records every answer,
+  including cache hits and its originating execution. Cache hits consume
+  zero executions. Every new scoring execution consumes one.
+- At the cap, the service refuses new executions and new proposal rounds.
+  Cached validation of the last candidate remains possible. The watchdog
+  stops HELIX on the budget refusal and checks evaluator failures,
+  deadline aborts and unexplained request-counter divergence.
+- HELIX counts answered requests, including sidecar cache hits. Its own
+  `max_evaluations = 0` disables that separate request cap. The external
+  `MAX_EVALUATIONS=200` renders `CP_MAX_EXECUTIONS=200`. The 1,000-generation
+  guard can stop earlier when proposals fail or repeat; summary marks an
+  incomplete budget explicitly. `minibatch_size=1`, one proposal per
+  generation, and disabled merges keep attribution unambiguous.
+- The summary records the entire best-so-far curve, checkpoints at 63, 133
+  and 200, and a curve indexed by first execution of distinct candidate
+  trees. Unreached checkpoints are null, never extrapolated.
 
-The budget unit is optimize_anything's: **one execution of the scoring function**. The budget is `max_evaluations = 150`, optimize_anything's configured `max_metric_calls`. Every execution counts: the seed evaluation, each parent re-evaluation, each child's gate evaluation and each full validation.
+**The execution budget does not bound agent-side search.** The mutation
+agent can compute radius sums and run local solvers. It cannot contact the
+private evaluator, so it cannot trigger an unledgered execution of that
+service. This is an evaluation-budget comparison with different proposer
+compute, not a compute-matched comparison with optimize_anything.
 
-- **The agent cannot trigger an execution.** The scoring function runs only in the private evaluator sidecar, on a Docker network the agent containers are not attached to. Agents check validity with `check_packing.py`, which reports rule violations and the residual violation `s` but computes no score. This matches optimize_anything, whose proposer cannot call the evaluator, and it means no execution can happen outside the count.
-- **HELIX's counter equals the number of executions.** The template sets `minibatch_size = 1` (optimize_anything's single-task default), so one evaluator run is one unit. HELIX also charges a child's gate evaluation and the mutation's tokens when a parent's re-evaluation exhausts the budget; before that fix the last child evaluation of a run went uncounted (`tests/unit/test_budget.py`).
-- **An independent ledger counts too.** The sidecar appends one record per execution to its private ledger (`evaluations.jsonl`, with the packing and the scored candidate tree), and refuses any request beyond `max_evaluations + 2` (HELIX may finish the proposal it admitted just below its cap).
-- **Headline metric.** The best valid score among the first 150 ledger executions. `summarize.sh` also reports the best score after 25, 50, 63, 100 and 133 executions, the best overall, and HELIX's best accepted candidate.
+### Mutation and subscription authentication
 
-With one proposal per generation, each generation runs the scoring function two or three times (parent, child, and the child's full validation if it passes the gate). optimize_anything's engine does the same, plus one refiner evaluation per evaluation when the refiner produces a candidate.
+Claude Code 2.1.274 runs with `--model claude-sonnet-5 --effort xhigh
+--max-turns 40 --disallowedTools=WebSearch,WebFetch`. The agent container has
+2 CPUs and a 5,400-second session limit. The monitor records sampled
+container CPU-seconds, memory, timing and CPU limits; transcripts supply
+Bash/Python counts and tool-result latency. CPU totals are lower bounds:
+short sessions and the unsampled tail can be missed. Tool latency can
+include scheduling and does not measure background subprocess lifetime.
+The best candidate's source is checked for coordinate literals; this is a
+heuristic, not proof of how its packing is produced.
 
-### Mutation agent
+Authentication uses the subscription login created by
+`helix sandbox login claude` in Docker volume `helix-auth-claude`.
+The gateway mounts that volume at `/auth`; its credential file is
+`/auth/.claude/.credentials.json` (uid 1000, mode 0600). It reads the OAuth
+access token, renews it through Claude Code's fixed refresh endpoint, and
+writes refreshed credentials only in that same volume. It never logs
+credentials or mounts this volume into the mutation agent. A failed refresh
+requires a renewed login and prevents successful inference.
 
-HELIX's `claude` backend runs Claude Code 2.1.274 in the agent container with `--model claude-sonnet-5 --effort xhigh --max-turns 40 --disallowedTools=WebSearch,WebFetch`. HELIX forwards `[agent].effort` to `claude --effort` unchanged. Claude Code 2.1.274 accepts `low`, `medium`, `high`, `xhigh` and `max`, and Anthropic's API documentation lists all five for Claude Sonnet 5. HELIX's config validation now lists `xhigh` and `max` for `claude`; before, it warned on `xhigh` but still passed it through. The isolation checks capture the request Claude Code sends under HELIX: `model: claude-sonnet-5`, `output_config.effort: xhigh`, `thinking: adaptive`, with no WebSearch or WebFetch tool.
+The agent mounts a separate home volume, `helix-circle-clean-claude-home`,
+containing no login credentials. Its `CLAUDE_CODE_OAUTH_TOKEN` is a literal
+non-secret placeholder, which selects Claude Code's subscription request
+format. The gateway replaces the placeholder with the real subscription
+Bearer token and preserves the subscription beta header. No API key is used.
+The launcher scrubs inherited credentials before starting HELIX and probes.
+`stop.sh --purge` removes only the run's home volume, never the subscription
+login volume. See [Claude Code authentication](https://code.claude.com/docs/en/authentication).
 
-`max_turns = 40` is this protocol's choice; optimize_anything's proposer is a single LLM call per proposal.
+### Isolation and evaluator
 
-### Isolation
+The candidate repository contains only `solve.py`, `check_packing.py` and
+`.gitignore`. The objective/background describe the task, rules, interface
+and available libraries without targets, sources or strategy suggestions.
+Config, state, ledger, scripts and logs live under excluded `.helix*` paths.
+Agent containers mount a temporary candidate copy and their separate home,
+with no Docker socket, host directories, evaluator, ledger or HELIX state.
+Sync-back drops new links that escape the worktree, skips transcript links,
+and replaces a symlinked `.gitignore` without reading or writing its target.
 
-| Layer | Mechanism |
-|---|---|
-| Run directory | A fresh git repository outside any HELIX clone whose only commit holds `solve.py`, `check_packing.py` and `.gitignore`. Config, ledger, logs and scripts live in `.helix-run/`, excluded from the candidate tree and never copied into agent workspaces |
-| Agent-visible text | The objective and background give the task, constraints, scoring rule, interface and available libraries, with no target value, reference, source or strategy |
-| Filesystem | Docker sandbox (`[sandbox].enabled`); an agent container mounts only a temporary copy of its candidate worktree and a dedicated home volume (`[sandbox].auth_volume`), with no credential in either |
-| Web | `[agent].disallowed_tools = ["WebSearch", "WebFetch"]`, plus an `--internal` agent network (`[sandbox].network`) whose only other member is an egress gateway. The gateway forwards only `POST /v1/messages` and `/v1/messages/count_tokens` for allowed models to `api.anthropic.com`, refuses server tools (web search, web fetch, code execution), MCP servers and containers, and injects the API key, which never enters an agent container |
-| Evaluator | `[sandbox].evaluator = true` with `[evaluator.sidecar]`: the scoring code, the ledger (`[evaluator.sidecar].volumes`) and the budget counter live only in the sidecar. Candidate code runs there as an unprivileged user that cannot read the scoring code or the ledger, reach the web, or request evaluations |
+The agent network is Docker `--internal`. Only the gateway connects it to
+an egress network. Direct HTTP, HTTPS and DNS requests to example.com,
+Packomania, GitHub, PyPI and api.anthropic.com fail. The gateway forwards only
+Messages and count_tokens to a fixed Anthropic host and allowed models.
+It refuses WebSearch/WebFetch, hosted tools, MCP, containers, remote URL/file
+sources (including nested document and tool-result content), unknown body
+parameters and remote-content beta features. Logs contain policy metadata,
+content/source types, status, usage and timing; request/response bodies and
+authorization headers are omitted.
 
-`isolation_probe.py` verifies all of this through HELIX's own code paths before every launch, at no API cost, and writes a JSON report to `.helix-run/isolation/`. Among its checks:
+The evaluator occupies another internal network, unreachable from agents.
+Candidate code runs as uid 2000 with a 600-second limit, resource limits,
+single-threaded BLAS and deterministic Python hashing. Root-only parent
+paths protect the evaluator code and ledger even on Docker Desktop mounts.
+After execution the service kills candidate processes, removes candidate
+files from all writable directories, and deletes owned System V IPC state.
+Output files must be regular files and open nonblocking without following
+links. A service-wide deadline records an aborted execution and exits if
+postprocessing stalls. Host-stored stdout/stderr tails are capped at 256 KiB
+each; full streams exist only temporarily inside the container.
 
-- the agent sees only the seed files;
-- no host mounts or Docker socket, and no evaluator code, ledger or HELIX state on the agent filesystem;
-- no credential in the agent's environment or home volume;
-- `example.com`, Packomania, GitHub, PyPI, `api.anthropic.com` and `1.1.1.1` are unreachable, and external names do not resolve;
-- the gateway refuses to proxy, refuses other routes, web tools, MCP servers and other models;
-- the evaluator cannot be reached from an agent container;
-- seed, valid, within-tolerance, invalid, NaN, huge/negative-radius, crashing and timed-out candidates score as the rules say;
-- candidate code cannot read or write the ledger or read the scoring code;
-- no candidate process survives an evaluation, and the execution cap refuses the next request;
-- the fully rendered first mutation prompt carries no target or source;
-- Claude Code's captured request has the configured model and effort and no web tools.
+The validity rule matches the reference tolerance. Invalid packings score
+zero. Valid packings use the certified radius sum described in
+[Evaluation](#evaluation), so numerical slack cannot increase the score.
+The seed uses no embedded reference packing. Python 3.11, numpy 2.3.3 and
+scipy 1.16.2 are shared between agent and evaluator images.
 
-A real launch adds one `max_tokens=16` request through the gateway to prove the credential works.
+`isolation_probe.py` exercises real containers through HELIX's launch paths:
+network/host/evaluator probes, web-tool and remote-source denials,
+agent-planted symlinks, FIFO output, persistence, invalid geometry, timeout,
+ledger and execution cap. It renders the first mutation prompt from a
+separate seed evaluation using the production 600-second setting. Capture
+checks observe the first Claude Code Messages request only; later turns
+rely on gateway enforcement. The optional auth probe verifies a small real
+subscription request through the gateway.
 
-### Record keeping
+### Records and summaries
 
-| Record | Location |
-|---|---|
-| HELIX state, lineage, evaluations, rejected attempts, `helix.log` | `<run dir>/.helix/` |
-| Candidate worktrees (with each accepted mutation's prompt and transcript) | `<run dir>/.helix/worktrees/` |
-| Every scoring execution, with packing, score, validity details, timing and the scored tree | `.helix-run/ledger/evaluations.jsonl`, `.helix-run/ledger/candidate_archives/` |
-| Refused evaluator requests, sidecar starts | `.helix-run/ledger/rejected_requests.jsonl`, `service_events.jsonl` |
-| Every model API request: decision, model, effort, tools, status, token usage | `.helix-run/logs/gateway/gateway_requests.jsonl` |
-| Every Claude Code session transcript (including rejected mutations) | `.helix-run/transcripts/` |
-| HELIX console output, wall-clock start/end, provenance (commit, image ids, versions) | `.helix-run/logs/` |
-| Isolation reports, summary | `.helix-run/isolation/`, `.helix-run/summary/` |
+`.helix/` holds HELIX state, evaluations, lineage and attempts.
+`.helix-run/ledger/` holds execution starts, results, requests, service events
+and scored candidate archives. `.helix-run/logs/` holds gateway metadata,
+container compute, watchdog decisions, launch provenance and wall times.
+`.helix-run/transcripts/` holds native sessions, including rejected proposals.
+Candidate ids in the ledger preserve generation attribution after worktree
+removal. The build records the source commit and verifies image file hashes.
+
+The summary independently checks the best packing using exact arithmetic
+and, by default, reruns its archive in a fresh networkless evaluator
+container with no host mounts. Failed checks produce an INVALID or NOT
+REPRODUCED headline and nonzero exit. It reports incomplete budgets,
+unfinished/gapped ledger entries, counter mismatches and unreached
+checkpoints. Fresh-container reproduction is an audit execution outside the
+search budget and is identified separately. `--no-rerun` skips it explicitly.
+
+Usage is reported as subscription token counts and any provider-supplied
+subscription limit headers. Dollar estimates from Claude Code are identified
+as API-equivalent estimates, not subscription charges; token totals alone
+do not establish subscription allowance consumption.
 
 ### Running it
 
 ```bash
-cd "$(git rev-parse --show-toplevel)/examples/circle_packing/clean_run"
-scripts/build_images.sh                  # helix-circle-clean/{base,agent-claude,evaluator,gateway}:1
-scripts/setup_run_dir.sh /path/to/helix-circle-packing-clean-run   # MAX_EVALUATIONS, MODEL, EFFORT, MAX_TURNS
-
-cd /path/to/helix-circle-packing-clean-run
-export ANTHROPIC_API_KEY=...             # handed only to the gateway container
-.helix-run/bin/launch.sh                 # checks, isolation probe, auth check, then HELIX in the background
-tail -f .helix-run/logs/helix_stdout.log
-.helix-run/bin/summarize.sh --rerun-best # best score, generation, budget, cost, time, independent re-check
-.helix-run/bin/stop.sh [--purge]         # stop (resumable with launch.sh --resume); --purge removes the run's Docker objects
+cd /path/to/helix-checkout
+uv run helix sandbox login claude
+examples/circle_packing/clean_run/scripts/build_images.sh
+examples/circle_packing/clean_run/scripts/setup_run_dir.sh /path/to/circle-run
+cd /path/to/circle-run
+.helix-run/bin/launch.sh --preflight-only --api-auth-check
+.helix-run/bin/stop.sh --purge
+.helix-run/bin/launch.sh
+.helix-run/bin/summarize.sh
+.helix-run/bin/stop.sh
 ```
 
-`launch.sh --preflight-only` stops after the isolation checks. `launch.sh --dry-run` runs the whole pipeline against a capture-only gateway, so every mutation fails and no API budget is spent; use it on a throwaway run directory with a small `MAX_EVALUATIONS`. A watchdog stops HELIX (resumably) after three consecutive authentication or billing failures from the API, so a dead credential cannot burn the evaluation budget. `summarize.sh` checks the best packing with `independent_check.py`, which shares no code with the evaluator: it verifies validity in exact rational arithmetic and that the score does not exceed the certified exactly-valid radius sum. `--rerun-best` re-executes that candidate once in a network-less container, outside the budget, to check that it reproduces its packing.
+The checkout must be clean and images must match its committed source.
+`launch.sh` starts evolution in the background after preflight. A separate
+capped smoke uses a temporary configuration and separate Docker objects;
+it leaves the committed full-run configuration untouched.
 
-The HELIX checkout must be clean at launch; the commit is recorded with the run.
+### Comparison limits
 
-### Differences from optimize_anything's setup
+HELIX uses a tool-enabled Sonnet mutator and an entire repository;
+the reference uses GPT-5 reflection plus a GPT-5.1 refiner and code strings.
+HELIX supplies no warm-start argument to `pack_circles(26)` and removes
+candidate state between executions. Parent feedback still carries the
+parent's circles. Identical trees reuse their first result, so nondeterministic
+solvers are not resampled; fresh-container reproduction can fail.
+The scoring certification and available libraries also differ.
 
-The budget unit, budget size, n, validity rule and invalid-packing score match. What differs is inherent to HELIX or chosen for this protocol:
-
-- **Proposer.** HELIX's proposer is a multi-turn Claude Code session (Claude Sonnet 5, effort `xhigh`, up to 40 turns) that edits a repository and can run code, including its own packing searches, in its container. optimize_anything's proposer and refiner are single GPT-5.1 calls that cannot run code. Agent-side compute is bounded by the turn cap and the container, not by the evaluation budget.
-- **No refiner, no warm start.** optimize_anything evaluates a refiner-proposed variant after each evaluation and passes the best circles found so far into every candidate. HELIX's candidates call `pack_circles(26)` with no prior solution.
-- **Score.** Certified (see [Evaluation](#evaluation)), so tolerance slack earns nothing.
-- **Environment.** Python 3.11, numpy 2.3.3 and scipy 1.16.2 in both agent and evaluator containers, and a 600 s limit for `pack_circles(26)`. optimize_anything's requirements list many more packages (optuna, cvxpy, numba and others).
-- **Cost accounting.** Token cost is measured at the gateway at Anthropic list prices and reported next to Claude Code's own cost estimate; optimize_anything reports OpenAI proposer costs.
-
-### Residual risks
-
-- **Pretraining knowledge.** Claude Sonnet 5 may have seen published n=26 packings, their coordinates, or solver code from before its training cutoff. No isolation can remove what the model already knows.
-- **The background states the scoring rule.** That is part of the task definition, not a hint, but it does tell the agent that the score is a radius sum.
-- **Agent-side search.** The agent can compute radius sums of its own packings; only calls to the scoring function are budgeted, as in optimize_anything.
-- **Home volume persists within the run.** HELIX resets Claude Code's session state every generation, but other files an agent writes under its home directory persist to later generations of the same run.
-- **Candidate code shares the sidecar.** It runs as an unprivileged user in the evaluator container; kernel-level escapes are out of scope. Its stdout and stderr tails reach the agent as feedback.
-- **Transcript archiving is best effort for very short sessions.** The archiver polls every 0.5 s; a session that fails within milliseconds can be wiped by the next generation's reset before it is copied.
-- **Gateway trust.** The gateway enforces the request shape; Anthropic-side behavior of an allowed request is not observable beyond the logged usage.
-- **Nondeterministic candidates.** The evaluator is deterministic for a given packing, but a candidate that searches until a time limit can return different packings on different runs; parents are re-scored every generation.
+Pretraining knowledge of published coordinates cannot be removed.
+Agent-side search and files retained in its home can carry knowledge across
+sessions, even though HELIX resets native session state. Container kernel
+escapes are outside this experiment's isolation model. Gateway policy
+constrains API shapes; it cannot inspect Anthropic's internal behavior.
+Transcript archiving and CPU sampling are best effort for very short sessions.
 
 ---
 

@@ -475,12 +475,13 @@ class TestEvaluatorService:
         monkeypatch.setattr(server.pwd, "getpwnam", lambda name: me)
         monkeypatch.setattr(server, "chown_tree", lambda *a: None)
         monkeypatch.setattr(server, "kill_user_processes", lambda *a, **k: 0)
+        monkeypatch.setattr(server, "remove_owned_ipc", lambda uid: [])
         monkeypatch.setattr(server, "run_candidate", lambda *a, **k: dict(run_result))
         ledger = server.Ledger(tmp_path / "ledger")
         response = server.evaluate_request(body, ledger, "172.20.0.9")
         return response, ledger
 
-    def _body(self, tree: dict[str, bytes]) -> dict[str, Any]:
+    def _body(self, tree: dict[str, bytes], split: str = "train") -> dict[str, Any]:
         infos = []
         for name, data in tree.items():
             info = tarfile.TarInfo(name)
@@ -489,8 +490,9 @@ class TestEvaluatorService:
         archive = _targz(infos, tree)
         return {
             "protocol": 1,
-            "split": "train",
+            "split": split,
             "ids": ["0"],
+            "candidate_id": "g1-s1",
             "archive_b64": base64.b64encode(archive).decode(),
             "archive_sha256": hashlib.sha256(archive).hexdigest(),
             "files_sha256": "f" * 64,
@@ -498,6 +500,7 @@ class TestEvaluatorService:
 
     def test_every_execution_is_ledgered_in_order(self, tmp_path: Path, monkeypatch) -> None:
         body = self._body({"solve.py": b"# candidate"})
+        body2 = self._body({"solve.py": b"# another candidate"})
         ok = {
             "payload": {"status": "ok", "circles": grid_packing()},
             "timed_out": False,
@@ -509,7 +512,7 @@ class TestEvaluatorService:
         assert score == 26 / 16 and side_info["valid"] is True
         timeout = {"payload": None, "timed_out": True, "output_error": "timed out"}
         monkeypatch.setattr(server, "run_candidate", lambda *a, **k: dict(timeout))
-        response2 = server.evaluate_request(body, ledger, "172.20.0.9")
+        response2 = server.evaluate_request(body2, ledger, "172.20.0.9")
         assert response2["results"][0][0] == 0.0
         assert "timed out" in response2["results"][0][1]["feedback"]
         lines = [
@@ -523,9 +526,161 @@ class TestEvaluatorService:
         archive = tmp_path / "ledger" / lines[0]["archive"]
         assert archive.read_bytes() == base64.b64decode(body["archive_b64"])
         assert lines[0]["rules"]["tolerance"] == rules.TOLERANCE
+        assert lines[0]["candidate_id"] == "g1-s1"
         assert not (tmp_path / "work" / response["evaluation_id"]).exists()
         # A restarted service continues the count.
         assert server.Ledger(tmp_path / "ledger").seq == 2
+        starts = (tmp_path / "ledger" / "execution_starts.jsonl").read_text().splitlines()
+        assert [json.loads(line)["seq"] for line in starts] == [1, 2]
+
+    def _ok(self, score_rows: list[list[float]] | None = None) -> dict[str, Any]:
+        return {"payload": {"status": "ok", "circles": score_rows or grid_packing()},
+                "timed_out": False, "exit_code": 0, "wall_seconds": 0.5}
+
+    def test_identical_tree_is_answered_from_cache_without_executing(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        body = self._body({"solve.py": b"# candidate"})
+        first, ledger = self._evaluate(tmp_path, monkeypatch, body, self._ok())
+        calls = {"n": 0}
+
+        def must_not_run(*a: Any, **k: Any) -> dict[str, Any]:
+            calls["n"] += 1
+            raise AssertionError("a cached tree must not be executed again")
+
+        monkeypatch.setattr(server, "run_candidate", must_not_run)
+        # The same tree as a parent re-evaluation, then as a validation call.
+        again = server.evaluate_request(body, ledger, "172.20.0.9")
+        val = server.evaluate_request({**body, "split": "val"}, ledger, "172.20.0.9")
+        assert calls["n"] == 0
+        assert again["results"] == first["results"] == val["results"]
+        assert again["cached_from_seq"] == 1 and ledger.seq == 1
+        records = (tmp_path / "ledger" / "evaluations.jsonl").read_text().splitlines()
+        assert len(records) == 1
+        requests = [json.loads(t) for t in (tmp_path / "ledger" / "requests.jsonl").read_text().splitlines()]
+        assert [(r["kind"], r["seq"], r["split"]) for r in requests] == [
+            ("execution", 1, "train"), ("cache_hit", 1, "train"), ("cache_hit", 1, "val")]
+        # The cache survives a restart of the service.
+        assert server.Ledger(tmp_path / "ledger").cached(body["archive_sha256"]) is not None
+
+    def test_a_tampered_archive_is_never_served_from_cache(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        body = self._body({"solve.py": b"# candidate"})
+        _, ledger = self._evaluate(tmp_path, monkeypatch, body, self._ok())
+        other = self._body({"solve.py": b"# other"})
+        forged = {**other, "archive_sha256": body["archive_sha256"]}
+        response = server.evaluate_request(forged, ledger, "172.20.0.9")
+        assert ledger.seq == 2 and response["results"][0][0] == 0.0
+        assert "checksum mismatch" in response["results"][0][1]["feedback"]
+
+    def test_spent_budget_refuses_new_rounds_but_finishes_the_last_validation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(server, "MAX_EXECUTIONS", 2)
+        seed = self._body({"solve.py": b"# seed"}, split="val")
+        _, ledger = self._evaluate(tmp_path, monkeypatch, seed, self._ok())
+        child = self._body({"solve.py": b"# child"})
+        server.evaluate_request(child, ledger, "172.20.0.9")
+        assert ledger.exhausted() and (tmp_path / "ledger" / server.BUDGET_MARKER).exists()
+        # The child that used the last execution still gets its validation.
+        val = server.evaluate_request({**child, "split": "val"}, ledger, "172.20.0.9")
+        assert val["cached_from_seq"] == 2
+        # A new round (a parent re-evaluation, even a cached one) is refused,
+        # and so is anything that would need another execution.
+        with pytest.raises(server.BudgetExhausted):
+            server.evaluate_request(child, ledger, "172.20.0.9")
+        with pytest.raises(server.BudgetExhausted):
+            server.evaluate_request(self._body({"solve.py": b"# new"}, split="val"), ledger, "172.20.0.9")
+        assert ledger.seq == 2
+
+    def test_an_unfinished_execution_number_is_never_reused(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        ledger = server.Ledger(tmp_path / "ledger")
+        assert ledger.start_execution({"split": "train"}) == 1
+        # The service dies before recording seq 1.
+        restarted = server.Ledger(tmp_path / "ledger")
+        assert restarted.seq == 1 and restarted.executions == 0
+        assert restarted.start_execution({"split": "train"}) == 2
+
+    def test_a_raising_evaluation_is_still_recorded(self, tmp_path: Path, monkeypatch) -> None:
+        def boom(*a: Any, **k: Any) -> dict[str, Any]:
+            raise RuntimeError("disk full")
+
+        body = self._body({"solve.py": b"#"})
+        monkeypatch.setattr(server, "run_candidate", boom)
+        monkeypatch.setattr(server, "LEDGER_DIR", tmp_path / "ledger")
+        monkeypatch.setattr(server, "WORK_ROOT", tmp_path / "work")
+        (tmp_path / "work").mkdir()
+        import pwd
+
+        me = pwd.getpwuid(os.getuid())
+        monkeypatch.setattr(server.pwd, "getpwnam", lambda name: me)
+        monkeypatch.setattr(server, "chown_tree", lambda *a: None)
+        monkeypatch.setattr(server, "kill_user_processes", lambda *a, **k: 0)
+        monkeypatch.setattr(server, "remove_owned_ipc", lambda uid: [])
+        ledger = server.Ledger(tmp_path / "ledger")
+        response = server.evaluate_request(body, ledger, "172.20.0.9")
+        assert response["results"][0][0] == 0.0
+        [record] = [json.loads(t) for t in (tmp_path / "ledger" / "evaluations.jsonl").read_text().splitlines()]
+        assert record["seq"] == 1 and "RuntimeError: disk full" in record["internal_error"]
+        # An internal error is not cached: the tree is executed again next time.
+        assert ledger.cached(body["archive_sha256"]) is None
+
+    def test_deadline_monitor_records_the_overdue_execution_and_exits(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        ledger = server.Ledger(tmp_path / "ledger")
+        seq = ledger.start_execution({"split": "train"})
+        in_flight = server.InFlight()
+        in_flight.begin({"seq": seq, "split": "train", "evaluation_id": "e"})
+        in_flight.started -= 1000
+        monkeypatch.setattr(server, "IN_FLIGHT", in_flight)
+
+        class Exited(Exception):
+            pass
+
+        def fake_exit(code: int) -> None:
+            raise Exited(code)
+
+        monkeypatch.setattr(server.os, "_exit", fake_exit)
+        with pytest.raises(Exited):
+            server.deadline_monitor(ledger, limit=10.0, poll=0.01)
+        [record] = [json.loads(t) for t in (tmp_path / "ledger" / "evaluations.jsonl").read_text().splitlines()]
+        assert record["seq"] == seq and record["score"] == 0.0
+        assert "deadline" in record["errors"][0]
+        events = (tmp_path / "ledger" / "service_events.jsonl").read_text()
+        assert "evaluation_aborted" in events
+
+    @pytest.mark.parametrize("kind", ["fifo", "directory", "missing"])
+    def test_candidate_output_that_is_not_a_regular_file_never_blocks(
+        self, tmp_path: Path, kind: str
+    ) -> None:
+        import threading
+
+        out = tmp_path / "out.json"
+        if kind == "fifo":
+            os.mkfifo(out)
+        elif kind == "directory":
+            out.mkdir()
+        result: dict[str, Any] = {}
+        thread = threading.Thread(
+            target=lambda: result.update(value=server._read_candidate_output(out)), daemon=True
+        )
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "reading the candidate output blocked"
+        payload, error = result["value"]
+        assert payload is None and error
+
+    def test_stored_stream_is_capped_to_its_tail(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(server, "STORED_STREAM_BYTES", 10)
+        full = tmp_path / "stdout.txt"
+        full.write_bytes(b"0123456789abcdefghij")
+        stored = tmp_path / "stored.txt"
+        assert server._store_stream(full, stored) == 20
+        assert stored.read_bytes() == b"abcdefghij"
 
     def test_stale_output_file_in_tree_is_removed(self, tmp_path: Path, monkeypatch) -> None:
         body = self._body({"solve.py": b"#", server.OUTPUT_NAME: b'{"status":"ok"}'})
@@ -535,7 +690,7 @@ class TestEvaluatorService:
             seen["stale_present"] = (workdir / server.OUTPUT_NAME).exists()
             return {"payload": None, "output_error": "no output"}
 
-        response, _ = self._evaluate(tmp_path, monkeypatch, body, {})
+        self._evaluate(tmp_path, monkeypatch, self._body({"solve.py": b"# first"}), {})
         monkeypatch.setattr(server, "run_candidate", fake_run)
         server.evaluate_request(body, server.Ledger(tmp_path / "ledger"), "172.20.0.9")
         assert seen == {"stale_present": False}
@@ -572,36 +727,39 @@ class TestEvaluatorService:
 
 
 class TestEvaluatorHttp:
-    """The HTTP front: local-peer refusal and the execution cap."""
+    """The HTTP front: local-peer refusal and the execution budget."""
 
     def _serve(self, tmp_path: Path, monkeypatch, *, cap: int, seq: int) -> tuple[Any, Any]:
+        import pwd
         import threading
         from http.server import ThreadingHTTPServer
 
+        me = pwd.getpwuid(os.getuid())
+        monkeypatch.setattr(server, "LEDGER_DIR", tmp_path / "ledger")
+        monkeypatch.setattr(server, "WORK_ROOT", tmp_path / "work")
+        (tmp_path / "work").mkdir(exist_ok=True)
+        monkeypatch.setattr(server.pwd, "getpwnam", lambda name: me)
+        monkeypatch.setattr(server, "chown_tree", lambda *a: None)
+        monkeypatch.setattr(server, "kill_user_processes", lambda *a, **k: 0)
+        monkeypatch.setattr(server, "remove_owned_ipc", lambda uid: [])
+        monkeypatch.setattr(server, "run_candidate", lambda *a, **k: {
+            "payload": {"status": "ok", "circles": grid_packing()}, "timed_out": False})
         ledger = server.Ledger(tmp_path / "ledger")
         ledger.seq = seq
         monkeypatch.setattr(server, "MAX_EXECUTIONS", cap)
-        monkeypatch.setattr(
-            server, "evaluate_request",
-            lambda body, led, peer: {"evaluation_id": "x", "results": [[1.0, {}]]},
-        )
         server.Handler.ledger = ledger
         server.Handler.local = {"127.0.0.2"}
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         return httpd, ledger
 
-    def _post(self, httpd: Any) -> int:
-        import urllib.error
-        import urllib.request
+    def _post(self, httpd: Any, body: dict[str, Any] | None = None) -> int:
+        import http.client
 
-        url = f"http://127.0.0.1:{httpd.server_address[1]}/evaluate"
-        request = urllib.request.Request(url, data=b'{"protocol": 1}', method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                return int(response.status)
-        except urllib.error.HTTPError as exc:
-            return int(exc.code)
+        data = json.dumps(body if body is not None else {"protocol": 1}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+        conn.request("POST", "/evaluate", body=data, headers={"Content-Type": "application/json"})
+        return int(conn.getresponse().status)
 
     def test_local_peers_are_refused(self, tmp_path: Path, monkeypatch) -> None:
         httpd, _ = self._serve(tmp_path, monkeypatch, cap=0, seq=0)
@@ -612,25 +770,75 @@ class TestEvaluatorHttp:
         rejections = (tmp_path / "ledger" / "rejected_requests.jsonl").read_text()
         assert "inside the evaluator" in rejections
 
-    def test_execution_cap_refuses_further_requests(self, tmp_path: Path, monkeypatch) -> None:
+    def test_spent_budget_is_refused_with_429(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(server, "is_local_peer", lambda peer, local: False)
         httpd, ledger = self._serve(tmp_path, monkeypatch, cap=3, seq=2)
+        make = TestEvaluatorService()._body
         try:
-            assert self._post(httpd) == 200
-            ledger.seq = 3
-            assert self._post(httpd) == 429
+            assert self._post(httpd, make({"solve.py": b"# a"})) == 200
+            assert ledger.seq == 3
+            assert self._post(httpd, make({"solve.py": b"# b"})) == 429
         finally:
             httpd.shutdown()
         rejections = (tmp_path / "ledger" / "rejected_requests.jsonl").read_text()
-        assert "execution cap of 3" in rejections
+        assert "budget of 3 scoring executions is spent" in rejections
+        assert ledger.seq == 3
 
     def test_cap_zero_is_unlimited(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(server, "is_local_peer", lambda peer, local: False)
         httpd, _ = self._serve(tmp_path, monkeypatch, cap=0, seq=10_000)
         try:
-            assert self._post(httpd) == 200
+            body = TestEvaluatorService()._body({"solve.py": b"# a"})
+            assert self._post(httpd, body) == 200
         finally:
             httpd.shutdown()
+
+
+class TestCandidateStateScrub:
+    """Nothing a candidate writes outside its working directory survives."""
+
+    def test_writable_directory_scan_finds_world_writable_dirs(self, tmp_path: Path) -> None:
+        (tmp_path / "shm").mkdir()
+        (tmp_path / "shm").chmod(0o1777)
+        (tmp_path / "private").mkdir()
+        (tmp_path / "private").chmod(0o755)
+        (tmp_path / "excluded").mkdir()
+        (tmp_path / "excluded").chmod(0o777)
+        found = server.candidate_writable_dirs(
+            99999, 99999, exclude=[tmp_path / "excluded"], root=str(tmp_path)
+        )
+        assert str(tmp_path / "shm") in found
+        assert str(tmp_path / "private") not in found
+        assert str(tmp_path / "excluded") not in found
+
+    def test_removes_owned_entries_including_very_deep_trees(self, tmp_path: Path) -> None:
+        scratch = tmp_path / "tmp"
+        scratch.mkdir()
+        (scratch / "warm_start.npy").write_bytes(b"state")
+        deep = scratch / "deep"
+        deep.mkdir()
+        # Deeper than PATH_MAX and than Python's recursion limit.
+        fd = os.open(deep, os.O_RDONLY)
+        for _ in range(1500):
+            os.mkdir("d", dir_fd=fd)
+            child = os.open("d", os.O_RDONLY, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        os.close(os.open("leaf", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=fd))
+        os.close(fd)
+        (scratch / "link").symlink_to(tmp_path / "outside")
+        (tmp_path / "outside").mkdir()
+        (tmp_path / "outside" / "keep.txt").write_text("keep")
+        removed, remaining = server.remove_owned_entries([str(scratch)], os.getuid())
+        assert remaining == []
+        assert sorted(Path(p).name for p in removed) == ["deep", "link", "warm_start.npy"]
+        assert list(scratch.iterdir()) == []
+        assert (tmp_path / "outside" / "keep.txt").read_text() == "keep"
+
+    def test_entries_of_other_owners_are_left_alone(self, tmp_path: Path) -> None:
+        (tmp_path / "mine.txt").write_text("x")
+        removed, remaining = server.remove_owned_entries([str(tmp_path)], os.getuid() + 12345)
+        assert removed == [] and remaining == [] and (tmp_path / "mine.txt").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +968,168 @@ class TestGatewayPolicy:
         assert ok and meta["body_keys"] == ["max_tokens", "messages", "model", "system"]
 
 
+def _user(*blocks: Any) -> dict[str, Any]:
+    return {"role": "user", "content": list(blocks)}
+
+
+PDF_URL = "https://arxiv.org/pdf/2605.19633"
+IMAGE_URL = "http://hydra.nat.uni-magdeburg.de/packing/csq/csq26.png"
+B64_PNG = {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}
+
+
+def _tool_result(*content: Any) -> dict[str, Any]:
+    return {"type": "tool_result", "tool_use_id": "toolu_1", "content": list(content)}
+
+
+class TestGatewayContentPolicy:
+    """Anthropic's servers must never fetch anything on the agent's behalf."""
+
+    @pytest.mark.parametrize(
+        "messages,where",
+        [
+            ([_user({"type": "document", "source": {"type": "url", "url": PDF_URL}})],
+             "messages[0].content[0].source.type='url'"),
+            ([_user({"type": "image", "source": {"type": "url", "url": IMAGE_URL}})],
+             "messages[0].content[0].source.type='url'"),
+            ([_user({"type": "text", "text": "hi"},
+                    _tool_result({"type": "document", "source": {"type": "url", "url": PDF_URL}}))],
+             "messages[0].content[1].content[0].source.type='url'"),
+            ([_user(_tool_result({"type": "image", "source": {"type": "url", "url": IMAGE_URL}}))],
+             "messages[0].content[0].content[0].source.type='url'"),
+            ([_user({"type": "document", "source": {"type": "file", "file_id": "file_1"}})],
+             "source.type='file'"),
+            ([_user({"type": "image", "source": {"type": "file", "file_id": "file_1"}})],
+             "source.type='file'"),
+            ([_user({"type": "document", "source": {"type": "content", "content": [
+                {"type": "image", "source": {"type": "url", "url": IMAGE_URL}}]}})],
+             "source.content[0].source.type='url'"),
+            ([_user({"type": "container_upload", "file_id": "file_1"})], "type='container_upload'"),
+            ([{"role": "assistant", "content": [
+                {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_fetch",
+                 "input": {"url": PDF_URL}}]}], "type='server_tool_use'"),
+            ([_user({"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_1", "content": {}})],
+             "type='web_fetch_tool_result'"),
+            ([_user({"type": "mcp_tool_use", "id": "x", "name": "fetch", "server_name": "s", "input": {}})],
+             "type='mcp_tool_use'"),
+            ([{"role": "system", "content": [{"type": "document", "source": {"type": "url", "url": PDF_URL}}]}],
+             "type='document'"),
+            ([{"role": "tool", "content": "x"}], "role='tool'"),
+            ([_user({"source": {"type": "url", "url": PDF_URL}})], "type=None"),
+            ([_user("not a block")], "is not an object"),
+        ],
+    )
+    @pytest.mark.parametrize("path", ["/v1/messages?beta=true", "/v1/messages/count_tokens?beta=true"])
+    def test_refuses_remote_content(self, messages: list[Any], where: str, path: str) -> None:
+        ok, reason, meta = gateway.check_request("POST", path, _msg(messages=messages), MODELS)
+        assert not ok
+        assert reason.startswith("content not allowed") and where in reason, reason
+        if "source.type" in where:
+            # The refused block's source type is logged for auditing.
+            assert any(k.endswith(":url") or k.endswith(":file") for k in meta["source_types"])
+
+    def test_refuses_remote_content_in_system(self) -> None:
+        body = _msg(system=[{"type": "document", "source": {"type": "url", "url": PDF_URL}}])
+        ok, reason, _ = gateway.check_request("POST", "/v1/messages", body, MODELS)
+        assert not ok and "system[0].type='document'" in reason
+
+    def test_allows_inline_content_claude_code_sends(self) -> None:
+        messages = [
+            {"role": "user", "content": "Read .agent_task_prompt.md"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "...", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "abc"},
+                {"type": "text", "text": "Reading."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "plot.png"}},
+            ]},
+            _user(
+                _tool_result({"type": "text", "text": "image follows"},
+                             {"type": "image", "source": B64_PNG},
+                             {"type": "tool_reference", "tool_name": "Bash"}),
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="}},
+                {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "notes"}},
+                {"type": "document", "source": {"type": "content", "content": [
+                    {"type": "text", "text": "a"}, {"type": "image", "source": B64_PNG}]}},
+                {"type": "search_result", "source": "local notes", "title": "t",
+                 "content": [{"type": "text", "text": "x"}]},
+                {"type": "text", "text": "continue", "cache_control": {"type": "ephemeral"}},
+            ),
+            {"role": "system", "content": "mid-conversation reminder"},
+            {"role": "assistant", "content": [{"type": "compaction", "content": "summary"}]},
+        ]
+        body = _msg(messages=messages, system=[{"type": "text", "text": "You are Claude Code."}],
+                    context_management={"edits": [{"type": "clear_thinking_20251015"}]})
+        ok, reason, meta = gateway.check_request("POST", "/v1/messages?beta=true", body, MODELS)
+        assert ok, reason
+        assert meta["block_types"]["image"] == 2
+        assert meta["source_types"] == {"image:base64": 2, "document:base64": 1,
+                                        "document:text": 1, "document:content": 1}
+        assert meta["context_edits"] == ["clear_thinking_20251015"]
+
+    @pytest.mark.parametrize(
+        "header",
+        ["files-api-2025-04-14", "mcp-client-2025-11-20", "skills-2025-10-02",
+         "code-execution-2025-08-25", "web-fetch-2025-09-10",
+         "claude-code-20250219,web-search-2025-03-05"],
+    )
+    def test_refuses_remote_content_betas(self, header: str) -> None:
+        ok, reason, meta = gateway.check_request("POST", "/v1/messages", _msg(), MODELS, beta_header=header)
+        assert not ok and reason.startswith("anthropic-beta not allowed")
+        assert meta["model"] == "claude-sonnet-5"
+
+    def test_allows_the_betas_claude_code_sends(self) -> None:
+        header = ("claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,"
+                  "context-management-2025-06-27,prompt-caching-scope-2026-01-05,"
+                  "mid-conversation-system-2026-04-07,effort-2025-11-24")
+        ok, reason, _ = gateway.check_request("POST", "/v1/messages", _msg(), MODELS, beta_header=header)
+        assert ok, reason
+
+    def test_joins_repeated_beta_headers(self) -> None:
+        assert gateway.joined_header(["claude-code-20250219", "files-api-2025-04-14"]) == (
+            "claude-code-20250219,files-api-2025-04-14"
+        )
+        assert gateway.joined_header(None) is None
+
+    @pytest.mark.parametrize("key", ["fallbacks", "fallback_credit_token", "user_profile_id", "betas"])
+    def test_refuses_unreviewed_top_level_parameters(self, key: str) -> None:
+        ok, reason, _ = gateway.check_request("POST", "/v1/messages", _msg(**{key: []}), MODELS)
+        assert not ok and key in reason
+
+    def test_deeply_nested_content_is_refused_not_crashing(self) -> None:
+        block: dict[str, Any] = {"type": "text", "text": "x"}
+        for _ in range(3000):
+            block = {"type": "tool_result", "tool_use_id": "t", "content": [block]}
+        body = json.dumps({"model": "claude-sonnet-5", "max_tokens": 1,
+                           "messages": [{"role": "user", "content": [block]}]}).encode()
+        ok, _, _ = gateway.check_request("POST", "/v1/messages", body, MODELS)
+        assert not ok
+
+    def test_repeated_beta_header_reaches_the_policy(self, tmp_path: Path, monkeypatch) -> None:
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        monkeypatch.setenv("GATEWAY_CAPTURE_ONLY", "1")
+        monkeypatch.setenv("GATEWAY_ALLOWED_MODELS", "claude-sonnet-5")
+        monkeypatch.setattr(gateway, "LOG_PATH", tmp_path / "requests.jsonl")
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+            body = _msg()
+            conn.putrequest("POST", "/v1/messages")
+            conn.putheader("content-type", "application/json")
+            conn.putheader("content-length", str(len(body)))
+            conn.putheader("anthropic-beta", "claude-code-20250219")
+            conn.putheader("anthropic-beta", "files-api-2025-04-14")
+            conn.endheaders(body)
+            status = conn.getresponse().status
+        finally:
+            httpd.shutdown()
+        assert status == 403
+        [record] = [json.loads(t) for t in (tmp_path / "requests.jsonl").read_text().splitlines()]
+        assert record["reason"] == "anthropic-beta not allowed: files-api-2025-04-14"
+
+
 # ---------------------------------------------------------------------------
 # Leak checks on what the agent can read
 # ---------------------------------------------------------------------------
@@ -775,8 +1145,10 @@ FORBIDDEN = [
 PLACEHOLDERS = {
     "@LEDGER_DIR@": "/tmp/ledger",
     "@EVAL_CPUS@": "14",
-    "@MAX_EVALUATIONS@": "150",
-    "@MAX_EXECUTIONS@": "152",
+    "@MAX_EVALUATIONS@": "200",
+    "@MAX_EXECUTIONS@": "200",
+    "@MAX_GENERATIONS@": "1000",
+    "@AGENT_CPUS@": "2",
     "@MODEL@": "claude-sonnet-5",
     "@EFFORT@": "xhigh",
     "@MAX_TURNS@": "40",
@@ -806,7 +1178,7 @@ def test_template_loads_with_helix_and_matches_the_protocol(tmp_path: Path) -> N
     config = load_config(path)
     assert config.dataset.train_size == 1 and config.dataset.val_size == 1
     assert config.evolution.minibatch_size == 1
-    assert config.evolution.max_evaluations == 150
+    assert config.evolution.max_evaluations == 0
     assert config.evolution.num_parallel_proposals == 1
     assert config.evolution.mutations_per_parent == 1
     assert config.evolution.merge_enabled is False
@@ -817,10 +1189,10 @@ def test_template_loads_with_helix_and_matches_the_protocol(tmp_path: Path) -> N
     assert config.sandbox.auth_volume == "helix-circle-clean-claude-home"
     assert config.evaluator.sidecar is not None
     assert config.evaluator.sidecar.internal_network is True
-    assert "CP_MAX_EXECUTIONS=152" in config.evaluator.sidecar.command
+    assert "CP_MAX_EXECUTIONS=200" in config.evaluator.sidecar.command
     # Nothing agent-visible carries the budget or credentials.
     assert all("CP_MAX" not in value for value in config.env.values())
-    assert config.env["ANTHROPIC_API_KEY"].startswith("placeholder")
+    assert config.env["CLAUDE_CODE_OAUTH_TOKEN"].startswith("placeholder")
     assert "rules" not in config.agent.background.lower() or "1e-6" in config.agent.background
 
 
@@ -916,7 +1288,7 @@ def test_best_record_prefers_higher_valid_score_then_earlier_execution() -> None
     assert summarize.best_record([records[1]]) is None
 
 
-def test_usage_cost_prices_cache_writes_and_reads() -> None:
+def test_subscription_usage_counts_cache_writes_and_reads() -> None:
     requests = [
         {"event": "start"},
         {"decision": "deny", "reason": "server tool not allowed"},
@@ -928,17 +1300,16 @@ def test_usage_cost_prices_cache_writes_and_reads() -> None:
                    "cache_read_input_tokens": 2_000_000}},
     ]
     out = summarize.usage_cost(requests)
-    # 1M in * $2 + 0.3M 5m-writes * $2.5 + 0.1M 1h-writes * $4 + 2M reads * $0.2
-    # + 0.1M out * $10
-    assert out["cost_usd_list_price_total"] == pytest.approx(2.0 + 0.75 + 0.4 + 0.4 + 1.0)
+    assert out["tokens_by_model"]["claude-sonnet-5"]["input_tokens"] == 1_000_000
+    assert out["tokens_by_model"]["claude-sonnet-5"]["cache_creation_input_tokens"] == 400_000
+    assert out["subscription_usage"]["dollars_charged"] is None
     assert out["denied_requests_by_reason"] == {"server tool not allowed": 1}
     assert out["requests_by_model_and_effort"] == {"claude-sonnet-5:xhigh": 1}
 
 
 def test_gateway_capture_mode_records_and_refuses_without_upstream(tmp_path: Path, monkeypatch) -> None:
+    import http.client
     import threading
-    import urllib.error
-    import urllib.request
     from http.server import ThreadingHTTPServer
 
     monkeypatch.setenv("GATEWAY_CAPTURE_ONLY", "1")
@@ -953,18 +1324,15 @@ def test_gateway_capture_mode_records_and_refuses_without_upstream(tmp_path: Pat
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     body = _msg(output_config={"effort": "xhigh"}, tools=[{"name": "Bash", "input_schema": {}}])
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{httpd.server_address[1]}/v1/messages?beta=true",
-        data=body, method="POST",
-        headers={"content-type": "application/json", "anthropic-beta": "x-2026-01-01",
-                 "x-api-key": "placeholder"},
-    )
     try:
-        with pytest.raises(urllib.error.HTTPError) as excinfo:
-            urllib.request.urlopen(request, timeout=10)
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+        conn.request("POST", "/v1/messages?beta=true", body=body, headers={
+            "content-type": "application/json", "anthropic-beta": "x-2026-01-01",
+            "x-api-key": "placeholder"})
+        status = conn.getresponse().status
     finally:
         httpd.shutdown()
-    assert excinfo.value.code == 403
+    assert status == 403
     [record] = [json.loads(text) for text in (tmp_path / "requests.jsonl").read_text().splitlines()]
     assert record["decision"] == "deny" and record["reason"].startswith("capture only")
     assert record["model"] == "claude-sonnet-5" and record["effort"] == "xhigh"
@@ -1003,3 +1371,181 @@ def test_gateway_records_upstream_error_type() -> None:
     parser.finish()
     assert parser.error_type == "invalid_request_error"
     assert parser.error_message == "Your credit balance is too low"
+
+
+def test_subscription_refresh_stays_in_auth_volume_and_never_logs_tokens(tmp_path, monkeypatch):
+    from io import BytesIO
+    path = tmp_path / '.credentials.json'
+    path.write_text(json.dumps({'claudeAiOauth': {
+        'accessToken': 'test-expired', 'refreshToken': 'test-refresh',
+        'expiresAt': 0, 'scopes': ['user:inference'], 'subscriptionType': 'max'}}))
+    monkeypatch.setattr(gateway, 'CREDENTIAL_PATH', path)
+    monkeypatch.setattr(gateway, 'LOG_PATH', tmp_path / 'events.jsonl')
+    calls = []
+    def renew(request, **kwargs):
+        calls.append(request)
+        assert request.full_url == 'https://platform.claude.com/v1/oauth/token'
+        assert json.loads(request.data)['refresh_token'] == 'test-refresh'
+        return BytesIO(json.dumps({'access_token': 'test-new-access',
+            'refresh_token': 'test-new-refresh', 'expires_in': 3600}).encode())
+    monkeypatch.setattr(gateway.urllib.request, 'urlopen', renew)
+    assert gateway.subscription_token() == 'test-new-access'
+    assert gateway.subscription_token() == 'test-new-access'
+    assert len(calls) == 1
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text())['claudeAiOauth']['subscriptionType'] == 'max'
+    assert 'test-' not in (tmp_path / 'events.jsonl').read_text()
+
+
+def test_subscription_refresh_error_never_exposes_response_or_token(tmp_path, monkeypatch):
+    path = tmp_path / '.credentials.json'
+    path.write_text(json.dumps({'claudeAiOauth': {
+        'accessToken': 'test-expired', 'refreshToken': 'test-refresh',
+        'expiresAt': 0, 'scopes': ['user:inference']}}))
+    monkeypatch.setattr(gateway, 'CREDENTIAL_PATH', path)
+    def fail(*args, **kwargs):
+        raise ValueError('test-refresh secret echoed by upstream')
+    monkeypatch.setattr(gateway.urllib.request, 'urlopen', fail)
+    with pytest.raises(gateway.CredentialError) as caught:
+        gateway.subscription_token()
+    assert 'test-refresh' not in str(caught.value)
+    assert caught.value.__suppress_context__
+
+
+def test_gateway_forwards_subscription_auth_without_logging_it(tmp_path, monkeypatch):
+    import http.client
+    import threading
+    from http.server import ThreadingHTTPServer
+    monkeypatch.delenv('GATEWAY_CAPTURE_ONLY', raising=False)
+    monkeypatch.setenv('GATEWAY_ALLOWED_MODELS', 'claude-sonnet-5')
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'unused-test-api-key')
+    monkeypatch.setattr(gateway, 'LOG_PATH', tmp_path / 'requests.jsonl')
+    monkeypatch.setattr(gateway, 'subscription_token', lambda: 'test-private-subscription-token')
+    sent = {}
+    class Response:
+        status = 200
+        def getheader(self, name, default=None):
+            return 'application/json' if name == 'Content-Type' else default
+        def getheaders(self):
+            return [('Content-Type', 'application/json'), ('anthropic-ratelimit-unified-status', 'allowed')]
+        def read1(self, size):
+            return b''
+    class Upstream:
+        def __init__(self, host, *args, **kwargs):
+            assert host == 'api.anthropic.com'
+        def request(self, method, path, body, headers):
+            sent.update(headers)
+        def getresponse(self):
+            return Response()
+        def close(self):
+            pass
+    monkeypatch.setattr(gateway.http.client, 'HTTPSConnection', Upstream)
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection('127.0.0.1', httpd.server_address[1], timeout=10)
+        conn.request('POST', '/v1/messages', body=_msg(), headers={
+            'Authorization': 'Bearer placeholder', 'X-Api-Key': 'client-must-not-forward'})
+        response = conn.getresponse()
+        assert response.status == 200
+        response.read()
+    finally:
+        httpd.shutdown()
+    assert sent['authorization'] == 'Bearer test-private-subscription-token'
+    assert not any(k.lower() == 'x-api-key' for k in sent)
+    assert 'oauth-2025-04-20' in sent['anthropic-beta']
+    text = (tmp_path / 'requests.jsonl').read_text()
+    assert 'test-private-subscription-token' not in text
+    assert 'unused-test-api-key' not in text
+    assert json.loads(text)['auth_mode'] == 'claude_subscription'
+
+
+def test_summary_reports_unreached_checkpoints_and_every_evaluation():
+    records = [{'seq': i, 'score': i / 100, 'valid': i != 3,
+                'files_sha256': str(i)} for i in range(1, 134)]
+    points = summarize.checkpoints(records, (63, 133, 200))
+    assert points['63']['best_score'] == 0.63
+    assert points['133']['best_score'] == 1.33
+    assert points['200']['best_score'] is None and not points['200']['reached']
+    curve = summarize.execution_curve(records)
+    assert len(curve) == 133 and curve[2]['best_score'] == 0.02
+    assert summarize.distinct_tree_curve(records)['best_score_by_distinct_trees']['200'] is None
+
+
+def test_summary_detects_unfinished_missing_and_duplicate_executions():
+    budget = summarize.budget_accounting(
+        [{'seq': 1}, {'seq': 1}, {'seq': 4}], [{'seq': 1}, {'seq': 2}, {'seq': 4}],
+        [], [], 200, 0, False)
+    assert budget['unfinished_executions'] == [2]
+    assert budget['missing_execution_numbers'] == [3]
+    assert budget['duplicate_execution_records'] == [1]
+    assert not budget['ledger_consistent'] and budget['run_incomplete']
+
+
+def test_summary_attributes_removed_candidate_from_ledger():
+    roles = summarize.execution_roles([
+        {'seq': 1, 'kind': 'execution', 'split': 'val', 'candidate_id': 'g0-s0'},
+        {'seq': 1, 'kind': 'cache_hit', 'split': 'train', 'candidate_id': 'g0-s0'},
+        {'seq': 2, 'kind': 'execution', 'split': 'train', 'candidate_id': 'g12-s13', 'phase': 'gate'}])
+    assert roles[2] == {'candidate_id': 'g12-s13', 'generation': 12,
+                        'role': 'gate evaluation of a new child', 'phase': 'gate'}
+
+
+def test_watchdog_detects_budget_refusal_lost_calls_and_abort():
+    assert watchdog.evaluator_stop_reason([{'status': 429}], [])[0] == 'budget_spent'
+    assert watchdog.evaluator_stop_reason([{'status': 409}], [])[0] == 'evaluator_refusal'
+    assert watchdog.evaluator_stop_reason([], [{'event': 'evaluation_aborted'}])[0] == 'evaluator_aborted'
+    assert watchdog.diverged(watchdog.counter_gap(10, 14), 0)
+    assert not watchdog.diverged(watchdog.counter_gap(10, 12), 0)
+
+
+def test_compute_summary_measures_bash_python_and_coordinate_literals(tmp_path):
+    path = tmp_path / 'session.jsonl'
+    path.write_text('\n'.join(json.dumps(e) for e in [
+        {'timestamp': '2026-09-17T00:00:00Z', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'x', 'name': 'Bash', 'input': {'command': 'python3 solve.py'}}]}},
+        {'timestamp': '2026-09-17T00:00:03Z', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 'x', 'content': 'ok'}]}}
+    ]))
+    bash = summarize.transcript_tool_use([path])['bash']
+    assert bash['invocations'] == bash['running_python'] == 1
+    assert bash['python_seconds_total'] == 3
+    assert summarize.hardcoded_evidence({'solve.py': 'x=0.123456789'}, [[0.123456789]*3]*26)['appears_hard_coded']
+
+
+def test_service_enforces_exact_200_execution_cap_with_cache_hits(tmp_path, monkeypatch):
+    case = TestEvaluatorService()
+    monkeypatch.setattr(server, 'MAX_EXECUTIONS', 200)
+    body = case._body({'solve.py': b'# 0'})
+    _, ledger = case._evaluate(tmp_path, monkeypatch, body, case._ok())
+    for index in range(1, 200):
+        # Parent/validation cache hits must not reduce the new-tree budget.
+        assert server.evaluate_request(body, ledger, 'runner')['cached_from_seq'] == index
+        body = case._body({'solve.py': f'# {index}'.encode()})
+        assert server.evaluate_request(body, ledger, 'runner')['results'][0][0] == 26 / 16
+    with pytest.raises(server.BudgetExhausted):
+        server.evaluate_request(case._body({'solve.py': b'# 200'}), ledger, 'runner')
+    assert server.evaluate_request({**body, 'split': 'val'}, ledger, 'runner')['cached_from_seq'] == 200
+    assert ledger.seq == ledger.executions == 200
+    assert len(ledger.starts.read_text().splitlines()) == 200
+    assert len(ledger.requests.read_text().splitlines()) == 400
+
+
+def test_invalid_summary_returns_nonzero_and_labels_headline(tmp_path, monkeypatch):
+    private = tmp_path / '.helix-run'
+    (private / 'ledger').mkdir(parents=True)
+    (private / 'protocol.env').write_text(f"RUN_DIR='{tmp_path}'\nMAX_EVALUATIONS='200'\n")
+    (private / 'ledger/evaluations.jsonl').write_text(json.dumps({
+        'seq': 1, 'valid': True, 'score': 3.0, 'candidate_id': 'g7-s8',
+        'circles': grid_packing()}) + '\n')
+    monkeypatch.setattr(summarize, 'PRIVATE', private)
+    monkeypatch.setattr(sys, 'argv', ['summarize.py', '--no-rerun'])
+    assert summarize.main() == 2
+    result = json.loads((private / 'summary/summary.json').read_text())
+    assert any(label.startswith('INVALID') for label in result['headline'])
+    assert result['best_valid_within_budget']['generation'] == 7
+
+
+def test_watchdog_stops_on_subscription_refresh_failure():
+    assert watchdog.should_stop([{'decision': 'deny', 'status': 503,
+                                  'reason': 'subscription login unavailable'}])

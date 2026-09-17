@@ -4,7 +4,7 @@
 #   setup_run_dir.sh [RUN_DIR]
 #
 # Settings (environment, defaults in brackets):
-#   MAX_EVALUATIONS [150]  scoring-function executions (optimize_anything's
+#   MAX_EVALUATIONS [200]  scoring-function executions (optimize_anything's
 #                          max_metric_calls for circle packing)
 #   MODEL [claude-sonnet-5]  EFFORT [xhigh]  MAX_TURNS [40]
 #
@@ -29,15 +29,15 @@ CLEAN_RUN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$(cd "${CLEAN_RUN}/.." && pwd)"
 HELIX_SRC="$(git -C "${CLEAN_RUN}" rev-parse --show-toplevel)"
 RUN_DIR="${1:-${HOME}/helix-circle-packing-clean-run}"
-MAX_EVALUATIONS="${MAX_EVALUATIONS:-150}"
+MAX_EVALUATIONS="${MAX_EVALUATIONS:-200}"
 MODEL="${MODEL:-claude-sonnet-5}"
 EFFORT="${EFFORT:-xhigh}"
 MAX_TURNS="${MAX_TURNS:-40}"
 TAG="${HELIX_CIRCLE_CLEAN_TAG:-1}"
-# HELIX may finish the proposal it admitted below its cap (at most one more
-# execution with one proposal per generation); the evaluator refuses anything
-# beyond one more than that.
-MAX_EXECUTIONS=$((MAX_EVALUATIONS + 2))
+MAX_EXECUTIONS="${MAX_EVALUATIONS}"
+MAX_GENERATIONS="${MAX_GENERATIONS:-1000}"
+AGENT_CPUS="${AGENT_CPUS:-2}"
+SUBSCRIPTION_AUTH_VOLUME="${SUBSCRIPTION_AUTH_VOLUME:-helix-auth-claude}"
 
 case "${RUN_DIR}" in
   "${HELIX_SRC}"|"${HELIX_SRC}"/*)
@@ -74,7 +74,7 @@ mkdir -p "${PRIVATE}/bin" "${PRIVATE}/ledger" "${PRIVATE}/logs/gateway" \
   "${PRIVATE}/transcripts" "${PRIVATE}/isolation" "${PRIVATE}/summary"
 chmod 700 "${PRIVATE}" "${PRIVATE}/ledger"
 for f in launch.sh run_wrapper.sh stop.sh summarize.sh summarize.py \
-         independent_check.py isolation_probe.py watchdog.py; do
+         independent_check.py isolation_probe.py watchdog.py agent_monitor.py; do
   cp "${CLEAN_RUN}/scripts/${f}" "${PRIVATE}/bin/${f}"
 done
 cp "${CLEAN_RUN}/evaluator/evaluator_client.py" "${PRIVATE}/bin/evaluator_client.py"
@@ -86,6 +86,8 @@ sed -e "s#@LEDGER_DIR@#${PRIVATE}/ledger#g" \
     -e "s#@EVAL_CPUS@#${EVAL_CPUS}#g" \
     -e "s#@MAX_EVALUATIONS@#${MAX_EVALUATIONS}#g" \
     -e "s#@MAX_EXECUTIONS@#${MAX_EXECUTIONS}#g" \
+    -e "s#@MAX_GENERATIONS@#${MAX_GENERATIONS}#g" \
+    -e "s#@AGENT_CPUS@#${AGENT_CPUS}#g" \
     -e "s#@MODEL@#${MODEL}#g" \
     -e "s#@EFFORT@#${EFFORT}#g" \
     -e "s#@MAX_TURNS@#${MAX_TURNS}#g" \
@@ -100,6 +102,9 @@ HELIX_SRC='${HELIX_SRC}'
 HELIX_COMMIT_AT_SETUP='$(git -C "${HELIX_SRC}" rev-parse HEAD)'
 MAX_EVALUATIONS='${MAX_EVALUATIONS}'
 MAX_EXECUTIONS='${MAX_EXECUTIONS}'
+MAX_GENERATIONS='${MAX_GENERATIONS}'
+AGENT_CPUS='${AGENT_CPUS}'
+SUBSCRIPTION_AUTH_VOLUME='${SUBSCRIPTION_AUTH_VOLUME}'
 MODEL='${MODEL}'
 EFFORT='${EFFORT}'
 MAX_TURNS='${MAX_TURNS}'

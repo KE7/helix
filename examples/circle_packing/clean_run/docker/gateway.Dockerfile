@@ -9,5 +9,5 @@ RUN chmod 0755 /opt/gateway && chmod 0644 /opt/gateway/anthropic_gateway.py \
 LABEL helix-circle-clean="1" \
       helix-circle-clean.role="gateway"
 
-USER nobody
+USER 1000:1000
 CMD ["python3", "/opt/gateway/anthropic_gateway.py"]

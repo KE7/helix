@@ -34,7 +34,7 @@ D. (no API spend) Claude Code, run by HELIX's argv builder in an agent
    container pointed at a capture-only gateway, sends requests for the
    configured model with ``output_config.effort`` equal to the configured
    effort, offers no WebSearch/WebFetch tool, no server tool and no MCP server;
-E. (``--api-auth-check`` only; one Messages request with max_tokens 16) the
+E. (``--api-auth-check`` only; one Messages request with at most 64 output tokens) the
    model API answers through the real gateway from inside an agent container
    with the configured model and effort.
 
@@ -82,6 +82,7 @@ BLOCKED_URLS = [
     "https://example.com/",
     "http://example.com/",
     "https://www.packomania.com/",
+    "https://packomania.com/",
     "http://hydra.nat.uni-magdeburg.de/packing/csq/csq.html",
     "https://erich-friedman.github.io/packing/cirRsqu/",
     "https://gepa-ai.github.io/gepa/",
@@ -128,7 +129,7 @@ env = dict(os.environ)
 out["env_keys"] = sorted(env)
 out["env_has_real_key"] = any("sk-ant" in v for v in env.values())
 out["anthropic_base_url"] = env.get("ANTHROPIC_BASE_URL")
-out["api_key_is_placeholder"] = env.get("ANTHROPIC_API_KEY", "").startswith("placeholder")
+out["api_key_is_placeholder"] = env.get("CLAUDE_CODE_OAUTH_TOKEN", "").startswith("placeholder")
 out["docker_socket"] = os.path.exists("/var/run/docker.sock")
 out["curl"] = {u: run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15", u])
                for u in json.loads(sys.argv[1])}
@@ -139,21 +140,30 @@ def py_fetch(url):
     except Exception as e:
         return type(e).__name__
 out["python_fetch"] = {u: py_fetch(u) for u in ["https://example.com/", "https://www.packomania.com/"]}
-out["dns"] = {h: run(["getent", "hosts", h]) for h in ["example.com", "www.packomania.com", "api.anthropic.com", "anthropic-gateway", "helix-evaluator"]}
+out["dns"] = {h: run(["getent", "hosts", h]) for h in ["example.com", "www.packomania.com", "packomania.com", "github.com", "pypi.org", "api.anthropic.com", "anthropic-gateway", "helix-evaluator"]}
 gw = "http://anthropic-gateway:8080"
 out["gateway_as_proxy"] = {
     u: run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15", "-x", gw, u])
     for u in ["https://example.com/", "http://example.com/", "https://api.anthropic.com/v1/models"]
 }
 out["gateway_get_models"] = run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15", gw + "/v1/models"])
-def post(body):
+def post(body, route="/v1/messages"):
     return run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-m", "15", "-X", "POST",
-                "-H", "content-type: application/json", "-d", json.dumps(body), gw + "/v1/messages"])
+                "-H", "content-type: application/json", "-d", json.dumps(body), gw + route])
 base = {"model": sys.argv[2], "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}
 out["gateway_web_search_tool"] = post({**base, "tools": [{"type": "web_search_20260209", "name": "web_search"}]})
 out["gateway_web_fetch_tool"] = post({**base, "tools": [{"type": "web_fetch_20260209", "name": "web_fetch"}]})
 out["gateway_code_execution_tool"] = post({**base, "tools": [{"type": "code_execution_20260521", "name": "code_execution"}]})
 out["gateway_websearch_named_tool"] = post({**base, "tools": [{"name": "WebSearch", "input_schema": {"type": "object"}}]})
+out["gateway_webfetch_named_tool"] = post({**base, "tools": [{"name": "WebFetch", "input_schema": {"type": "object"}}]})
+url_image = {"type": "image", "source": {"type": "url", "url": "https://example.com/x.png"}}
+url_doc = {"type": "document", "source": {"type": "url", "url": "https://example.com/x.pdf"}}
+file_doc = {"type": "document", "source": {"type": "file", "file_id": "file_test"}}
+blocks = [url_image, url_doc, file_doc,
+          {"type": "tool_result", "tool_use_id": "x", "content": [url_doc]},
+          {"type": "document", "source": {"type": "content", "content": [url_image]}}]
+out["gateway_remote_sources"] = [post({**base, "messages": [{"role": "user", "content": [block]}]}, route)
+                                 for route in ["/v1/messages", "/v1/messages/count_tokens"] for block in blocks]
 out["gateway_mcp_servers"] = post({**base, "mcp_servers": [{"type": "url", "url": "https://example.com/mcp", "name": "x"}]})
 out["gateway_other_model"] = post({**base, "model": "claude-opus-5"})
 out["evaluator_by_name"] = run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-m", "8", "http://helix-evaluator:8080/evaluate"])
@@ -253,6 +263,17 @@ EVAL_CASES: dict[str, tuple[str, float, dict[str, Any]]] = {
     ),
     "snoop": (SNOOP_SOLVE, 26 / 16, {"valid": True}),
 }
+
+EVAL_CASES["fifo"] = ("import os, sys\ndef pack_circles(n):\n    os.mkfifo(sys.argv[1]); os._exit(0)\n", 0.0, {"valid": False})
+for index in range(3):
+    EVAL_CASES[f"persistent_state_{index}"] = (
+        GRID + f"# unique tree {index}\n" +
+        "def pack_circles(n):\n    from pathlib import Path\n"
+        "    for directory in ['/tmp', '/var/tmp', '/dev/shm']:\n"
+        "        p = Path(directory) / 'cp-persistence-canary'\n"
+        "        if p.exists(): return []\n"
+        "        p.write_text('marker')\n"
+        "    return rows\n", 26 / 16, {"valid": True})
 
 
 class Report:
@@ -431,7 +452,7 @@ def assess_agent_probe(probe: dict[str, Any], report: Report, *, with_sidecar: b
                      all(v != "reachable" for v in probe["python_fetch"].values()), probe["python_fetch"])
         dns = probe["dns"]
         report.check("B7 external names do not resolve; the gateway does",
-                     all(dns[h].get("rc") != 0 for h in ("example.com", "www.packomania.com", "api.anthropic.com"))
+                     all(dns[h].get("rc") != 0 for h in ("example.com", "www.packomania.com", "packomania.com", "github.com", "pypi.org", "api.anthropic.com"))
                      and dns["anthropic-gateway"].get("rc") == 0, dns)
         proxy = probe["gateway_as_proxy"]
         report.check("B8 the gateway refuses to act as a web proxy",
@@ -440,9 +461,12 @@ def assess_agent_probe(probe: dict[str, Any], report: Report, *, with_sidecar: b
                      probe["gateway_get_models"])
         denied = {k: probe[k] for k in ("gateway_web_search_tool", "gateway_web_fetch_tool",
                                         "gateway_code_execution_tool", "gateway_websearch_named_tool",
-                                        "gateway_mcp_servers", "gateway_other_model")}
+                                        "gateway_mcp_servers", "gateway_other_model", "gateway_webfetch_named_tool")}
         report.check("B10 the gateway refuses web and server tools, MCP servers and other models",
                      all(v.get("out") == "403" for v in denied.values()), denied)
+        report.check("B14 URL/file/nested sources denied on Messages and count_tokens",
+                     all(v.get("out") == "403" for v in probe["gateway_remote_sources"]),
+                     probe["gateway_remote_sources"])
         report.check("B11 check_packing.py reports VALID for the seed without printing a score",
                      probe["check_packing"].get("rc") == 0
                      and probe["check_packing"].get("out", "").startswith("VALID")
@@ -498,13 +522,13 @@ def check_evaluator(config: HelixConfig, run_dir: Path, report: Report, out_dir:
             ip = _docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
                          runtime.container_name).stdout.strip()
 
-            def evaluate(name: str, prepare: Callable[[Path], None]) -> Any:
+            def evaluate(name: str, prepare: Callable[[Path], None], split: str = "val") -> Any:
                 tree = work / name
                 prepare(tree)
                 (tree / "helix_batch.json").write_text('["0"]')
                 candidate = Candidate(id=f"probe-{name}", worktree_path=str(tree), branch_name="probe",
                                       generation=0, parent_id=None, parent_ids=[], operation="probe")
-                return run_evaluator(candidate, test_config, split="val")
+                return run_evaluator(candidate, test_config, split=split)
 
             seed = evaluate("seed", lambda t: _seed_copy(run_dir, t))
             seed_score = seed.instance_scores.get("0")
@@ -534,7 +558,7 @@ def check_evaluator(config: HelixConfig, run_dir: Path, report: Report, out_dir:
                     ok = ok and results[name]["timed_out"] is True
                 report.check(f"C2 {name}: valid={extra['valid']} score={expected!r}", ok, results[name])
             try:
-                over = evaluate("over_cap", lambda t: _seed_copy(run_dir, t))
+                over = evaluate("over_cap", lambda t: _seed_copy(run_dir, t), split="train")
                 over_result: Any = {"unexpected_score": over.instance_scores.get("0")}
             except Exception as exc:  # noqa: BLE001 - the refusal surfaces as an evaluator error
                 over_result = {"refused": type(exc).__name__}
@@ -575,6 +599,53 @@ def check_evaluator(config: HelixConfig, run_dir: Path, report: Report, out_dir:
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return seed
+
+
+def production_prompt(config: HelixConfig, run_dir: Path, report: Report, out_dir: Path) -> None:
+    """Score the seed with the production settings for the exact rendered prompt."""
+    assert config.evaluator.sidecar is not None
+    ledger = out_dir / ("prompt-ledger-" + uuid.uuid4().hex[:8])
+    ledger.mkdir()
+    sidecar = config.evaluator.sidecar.model_copy(update={
+        "volumes": [f"{ledger}:/srv/cpeval/ledger:rw"]})
+    probe_config = config.model_copy(update={
+        "evaluator": config.evaluator.model_copy(update={"sidecar": sidecar})})
+    with tempfile.TemporaryDirectory(prefix="cp-prompt-") as tmp:
+        tree = Path(tmp) / "tree"
+        _seed_copy(run_dir, tree)
+        candidate = Candidate(id="g0-s0", worktree_path=str(tree), branch_name="probe",
+                              generation=0, parent_id=None, parent_ids=[], operation="seed")
+        with start_evaluator_sidecar(sidecar, passthrough_env=config.passthrough_env,
+                                     fixed_env=config.env, extra_hosts=config.sandbox.extra_hosts):
+            result = run_evaluator(candidate, probe_config, split="val")
+        check_prompt(config, result, report, out_dir)
+        report.check("A9 prompt seed uses production 600-second timeout",
+                     result.per_example_side_info[0]["candidate_run"]["time_limit_seconds"] == 600)
+
+
+def symlink_probe(config: HelixConfig, run_dir: Path, report: Report) -> None:
+    from helix.mutator import _ignore_helix_artifacts
+    with tempfile.TemporaryDirectory(prefix="cp-links-") as tmp:
+        root = Path(tmp)
+        victim = root / "host-only.txt"
+        victim.write_text("private host canary\n")
+        tree = root / "tree"
+        _seed_copy(run_dir, tree)
+        code = ("import os,pathlib; p=pathlib.Path('.helix_artifacts/backend_transcripts'); "
+                "p.mkdir(parents=True); "
+                f"os.symlink({str(victim)!r},p/'host.jsonl'); "
+                "pathlib.Path('.gitignore').unlink(); "
+                f"os.symlink({str(victim)!r},'.gitignore'); "
+                f"os.symlink({str(victim)!r},'escape')")
+        result = run_sandboxed_command(["python3", "-c", code], cwd=tree, env=_agent_env(config),
+            sandbox=config.sandbox, scope="agent", sync_back=True,
+            image=resolve_sandbox_image(config.sandbox, config.agent.backend), agent_backend="claude")
+        _ignore_helix_artifacts(tree)
+        files = [p for p in tree.rglob('*') if p.is_file() and not p.is_symlink()]
+        report.check("B15 agent-planted symlinks neither copy nor modify host files",
+                     result.returncode == 0 and victim.read_text() == "private host canary\n"
+                     and not (tree / "escape").is_symlink()
+                     and all(b"private host canary" not in p.read_bytes() for p in files))
 
 
 def capture_agent_requests(config: HelixConfig, run_dir: Path, report: Report, out_dir: Path) -> None:
@@ -633,7 +704,7 @@ def capture_agent_requests(config: HelixConfig, run_dir: Path, report: Report, o
         }
         (out_dir / f"capture-{suffix}.json").write_text(json.dumps(summary, indent=2))
         tools = sorted({t for rec in messages for t in (rec.get("tool_names") or [])})
-        report.check("D1 Claude Code (HELIX argv, agent container) sent Messages requests for the configured model",
+        report.check("D1 first Claude Code request uses the configured model (later turns rely on gateway policy)",
                      bool(main), {"models": sorted({str(rec.get('model')) for rec in messages}), "requests": len(requests)})
         report.check(f"D2 every main-model request carries output_config.effort = {config.agent.effort!r}",
                      bool(main) and all(rec.get("effort") == config.agent.effort for rec in main),
@@ -656,41 +727,35 @@ def capture_agent_requests(config: HelixConfig, run_dir: Path, report: Report, o
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-AUTH_CHECK = r"""
-import json, sys, urllib.request, urllib.error
-body = {"model": sys.argv[1], "max_tokens": 16, "output_config": {"effort": sys.argv[2]},
-        "messages": [{"role": "user", "content": "Reply with the word OK."}]}
-req = urllib.request.Request("http://anthropic-gateway:8080/v1/messages", data=json.dumps(body).encode(),
-    headers={"content-type": "application/json", "anthropic-version": "2023-06-01",
-             "x-api-key": "placeholder"}, method="POST")
-try:
-    with urllib.request.urlopen(req, timeout=120) as r:
-        data = json.loads(r.read()); status = r.status
-except urllib.error.HTTPError as e:
-    data = json.loads(e.read() or b"{}"); status = e.code
-print("AUTH_JSON=" + json.dumps({"status": status, "model": data.get("model"), "stop_reason": data.get("stop_reason"),
-      "usage": data.get("usage"), "error": data.get("error"),
-      "text": "".join(b.get("text", "") for b in data.get("content", []) if isinstance(b, dict))[:50]}))
-"""
-
-
 def api_auth_check(config: HelixConfig, run_dir: Path, report: Report) -> None:
-    workdir = Path(tempfile.mkdtemp(prefix="cp-probe-auth-"))
-    try:
-        source = workdir / "tree"
+    """A tiny real Claude Code subscription request, with production model/effort."""
+    with tempfile.TemporaryDirectory(prefix="cp-probe-auth-") as tmp:
+        source = Path(tmp) / "tree"
         _seed_copy(run_dir, source)
-        result = run_sandboxed_command(
-            ["python3", "-c", AUTH_CHECK, str(config.agent.model), str(config.agent.effort)],
-            cwd=source, env=_agent_env(config), sandbox=config.sandbox, scope="agent", sync_back=False,
-            image=resolve_sandbox_image(config.sandbox, config.agent.backend), agent_backend=config.agent.backend,
-        )
-        line = next((rec for rec in result.stdout.splitlines() if rec.startswith("AUTH_JSON=")), None)
-        data = json.loads(line[len("AUTH_JSON="):]) if line else {"stdout": result.stdout[-500:], "stderr": result.stderr[-500:]}
-        report.check(f"E1 the model API answers {config.agent.model} at effort {config.agent.effort!r} "
-                     "through the gateway from inside an agent container",
-                     data.get("status") == 200 and str(data.get("model", "")).startswith(str(config.agent.model)), data)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        argv = _build_backend_args("/workspace", config.agent, ".agent_task_prompt.md")
+        argv[-1] = "Reply with the word OK. Do not use tools."
+        env = _agent_env(config)
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64"
+        try:
+            result = run_sandboxed_command(
+                argv, cwd=source, env=env,
+                sandbox=config.sandbox.model_copy(update={"timeout_seconds": 180}),
+                scope="agent", sync_back=False,
+                image=resolve_sandbox_image(config.sandbox, config.agent.backend),
+                agent_backend=config.agent.backend,
+            )
+            data = json.loads(result.stdout)
+            evidence = {"exit_code": result.returncode, "is_error": data.get("is_error"),
+                        "subtype": data.get("subtype"), "usage": data.get("usage"),
+                        "model_usage": data.get("modelUsage"),
+                        "result": str(data.get("result", ""))[:300]}
+            passed = result.returncode == 0 and data.get("is_error") is False and any(
+                model.startswith(str(config.agent.model)) for model in (data.get("modelUsage") or {}))
+        except (ValueError, subprocess.TimeoutExpired) as exc:
+            evidence = {"error": type(exc).__name__}
+            passed = False
+        report.check(f"E1 Claude Code subscription answers {config.agent.model} at effort {config.agent.effort!r} "
+                     "through the gateway from inside an agent container", passed, evidence)
 
 
 def main() -> int:
@@ -701,15 +766,15 @@ def main() -> int:
     parser.add_argument("--skip-evaluator", action="store_true")
     parser.add_argument("--skip-capture", action="store_true")
     args = parser.parse_args()
-    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
         if os.environ.get(key):
             print(f"refusing to run with {key} set: HELIX would forward it into agent containers", file=sys.stderr)
             return 2
     run_dir = args.run_dir.resolve()
     config = load_config(run_dir / ".helix-run" / "helix.toml")
-    out_dir = run_dir / ".helix-run" / "isolation"
-    out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = run_dir / ".helix-run" / "isolation" / ("preflight-" + stamp)
+    out_dir.mkdir(parents=True, exist_ok=False)
     out = args.out or out_dir / f"isolation-{stamp}.json"
     report = Report()
     check_run_dir(run_dir, config, report)
@@ -719,7 +784,8 @@ def main() -> int:
     if not args.skip_evaluator:
         seed = check_evaluator(config, run_dir, report, out_dir)
         if seed is not None:
-            check_prompt(config, seed, report, out_dir)
+            production_prompt(config, run_dir, report, out_dir)
+    symlink_probe(config, run_dir, report)
     if not args.skip_capture:
         capture_agent_requests(config, run_dir, report, out_dir)
     if args.api_auth_check:

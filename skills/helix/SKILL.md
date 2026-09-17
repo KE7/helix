@@ -172,6 +172,7 @@ HELIX also sets:
 
 - `HELIX_SPLIT=train|val`
 - `HELIX_INSTANCE_IDS` as a comma-separated copy of requested ids
+- `HELIX_CANDIDATE_ID` with the id of the candidate being evaluated
 - `HELIX_EVALUATOR_ENDPOINT` for sidecar evaluator clients
 
 Prefer `helix_batch.json` because the built-in result parser uses that same
