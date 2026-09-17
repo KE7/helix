@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protected evaluator files; refresh helpers for mutation and merge candidates.
   (PR #30 refactor)
 
+### Fixed
+- When a parent's minibatch evaluation exhausted `max_evaluations`, HELIX
+  stopped without charging the child's gate evaluation and the mutation's
+  token usage, which the proposal worker had already spent; the budget
+  counter could end one evaluation below the number of evaluator runs. Both
+  are now charged before stopping.
+
 ### Changed
 - **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
   configuration field. Every backend's native transcript is now always

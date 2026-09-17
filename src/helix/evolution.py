@@ -2949,6 +2949,28 @@ def _run_evolution_impl(
                     )
 
                 if budget_api.budget_exhausted(state, config):
+                    # The worker has already run this slot's mutation and, on
+                    # the minibatch path, the child's gate evaluation.  Charge
+                    # both before stopping so that no spent tokens and no
+                    # evaluator execution go unrecorded.
+                    if wr.child_usage:
+                        budget_api.charge_llm_usage(
+                            state, wr.child_usage, candidate_id=child.id,
+                            source="mutation",
+                        )
+                    if (
+                        use_minibatch_gate
+                        and _subsample_ids is not None
+                        and wr.parent_eval_result is not None
+                        and wr.child_eval_result is not None
+                    ):
+                        budget_api.charge_evaluation(
+                            state,
+                            num_actual_examples=wr.child_n_uncached,
+                            candidate_id=child.id,
+                            split="train",
+                            source="mutation_minibatch_gate",
+                        )
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True

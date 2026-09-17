@@ -937,3 +937,105 @@ def test_usage_is_none_when_no_backend_output_is_recoverable(
 
     assert excinfo.value.usage == UsageStats()
     assert MutationError("no backend ran").usage is None
+
+
+# ---------------------------------------------------------------------------
+# Budget exhaustion by a parent evaluation still charges the slot's spent work
+# ---------------------------------------------------------------------------
+
+
+def _run_counted_evolution(
+    tmp_path: Path, monkeypatch, *, max_evaluations: int
+) -> tuple[dict, list[dict], int]:
+    """Run HELIX end to end with a stub mutator whose children always score lower.
+
+    Returns the persisted state, one record per real evaluator execution, and
+    the number of mutations the stub performed.
+    """
+    import subprocess as _subprocess
+    import sys as _sys
+
+    from helix import mutator as mutator_module
+    from helix.config import load_config
+    from helix.evolution import run_evolution
+
+    project = tmp_path / "project"
+    project.mkdir()
+    log = tmp_path / "executions.jsonl"
+    (project / "solve.py").write_text("VALUE = 100.0\n")
+    (project / "evaluate.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "ns = {}\n"
+        "exec(Path('solve.py').read_text(), ns)\n"
+        "ids = json.loads(Path('helix_batch.json').read_text())\n"
+        f"with open({str(log)!r}, 'a') as handle:\n"
+        "    handle.write(json.dumps({'split': os.environ.get('HELIX_SPLIT'), 'ids': ids}) + '\\n')\n"
+        "print('HELIX_RESULT=' + json.dumps([[ns['VALUE'], {}] for _ in ids]))\n"
+    )
+    (project / "helix.toml").write_text(
+        'objective = "maximize VALUE"\n'
+        "[evaluator]\n"
+        f'command = "{_sys.executable} evaluate.py"\n'
+        "[dataset]\n"
+        "train_size = 1\n"
+        "val_size = 1\n"
+        "[evolution]\n"
+        f"max_evaluations = {max_evaluations}\n"
+        "max_generations = 50\n"
+        "minibatch_size = 1\n"
+        "merge_enabled = false\n"
+        "[agent]\n"
+        'backend = "claude"\n'
+    )
+    for args in (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
+    ):
+        _subprocess.run(args, cwd=project, check=True)
+
+    mutations = {"count": 0}
+
+    def worse_child(worktree_path: str, prompt: str, config: object):
+        mutations["count"] += 1
+        path = Path(worktree_path) / "solve.py"
+        namespace: dict = {}
+        exec(path.read_text(), namespace)
+        path.write_text(f"VALUE = {namespace['VALUE'] - 1.0}\n")
+        return {}, UsageStats(input_tokens=10, output_tokens=2, cost_usd=0.5)
+
+    monkeypatch.setattr(mutator_module, "_MUTATOR_OVERRIDE", worse_child)
+    monkeypatch.chdir(project)
+    run_evolution(load_config(project / "helix.toml"), project, project / ".helix")
+    state = json.loads((project / ".helix" / "state.json").read_text())
+    executions = [json.loads(line) for line in log.read_text().splitlines()]
+    return state, executions, mutations["count"]
+
+
+def test_parent_eval_exhausting_budget_still_charges_child_gate_and_usage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Seed val (1) + gen 1 parent/child (2) = 3; gen 2's parent evaluation
+    # brings the counter to the cap of 4 after the worker has already run the
+    # mutation and the child's gate evaluation.  Both must still be charged.
+    state, executions, mutations = _run_counted_evolution(
+        tmp_path, monkeypatch, max_evaluations=4
+    )
+    assert len(executions) == 5
+    assert state["budget"]["evaluations"] == len(executions)
+    assert mutations == 2
+    assert state["budget"]["input_tokens"] == 10 * mutations
+    assert state["budget"]["cost_usd"] == pytest.approx(0.5 * mutations)
+
+
+def test_budget_counter_matches_evaluator_executions_below_the_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A cap reached by a child's gate evaluation (odd total) is unaffected.
+    state, executions, mutations = _run_counted_evolution(
+        tmp_path, monkeypatch, max_evaluations=5
+    )
+    assert len(executions) == 5
+    assert state["budget"]["evaluations"] == len(executions)
+    assert state["budget"]["input_tokens"] == 10 * mutations
