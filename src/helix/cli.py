@@ -64,7 +64,8 @@ objective = "Describe the optimisation objective"
 command = "uv run python evaluate.py"
 # protected_files = ["evaluate.py"]  # optional extra evaluator-immutable files
 #
-# With [sandbox].enabled = true, configure [evaluator.sidecar] and make
+# To run evaluation in Docker, set [sandbox].enabled = true and
+# [sandbox].evaluator = true, configure [evaluator.sidecar], and make
 # command an evaluator-runner command such as:
 #   command = "python /runner/evaluate_client.py"
 #
@@ -95,6 +96,7 @@ max_turns = 20
 # after `helix sandbox login <backend>`. HELIX keeps this opt-in so machines
 # without Docker can still use local workflows.
 enabled = false
+# evaluator = true  # with enabled = true: run evaluation in Docker through [evaluator.sidecar]
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 # network = "bridge"
 # skip_special_files = true  # skip FIFOs/sockets/devices during workspace sync
@@ -349,8 +351,8 @@ def init() -> None:
         "     evaluator dependencies (for example [cyan]uv run python evaluate.py[/cyan]\n"
         "     or [cyan]bash run_eval.sh[/cyan], not whichever [cyan]python3[/cyan] happens\n"
         "     to be on PATH).\n"
-        "     If you enable Docker sandboxing, add [cyan]\\[evaluator.sidecar][/cyan]\n"
-        "     and use an evaluator-runner command instead.\n"
+        "     If you enable sandboxed evaluation ([cyan]\\[sandbox].evaluator = true[/cyan]),\n"
+        "     add [cyan]\\[evaluator.sidecar][/cyan] and use an evaluator-runner command instead.\n"
         "  2. Run [cyan]helix evolve[/cyan] to start evolution.\n"
     )
 

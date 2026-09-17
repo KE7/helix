@@ -110,6 +110,10 @@ endpoint = "http://helix-evaluator:8080/evaluate"
 [dataset]
 train_size = 100
 val_size = 100
+
+[sandbox]
+enabled = true
+evaluator = true  # the sidecar is used only with both flags set
 ```
 
 ## Single-Task GEPA Mode
@@ -132,6 +136,10 @@ image = "my-private-evaluator:latest"
 runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
+
+[sandbox]
+enabled = true
+evaluator = true  # the sidecar is used only with both flags set
 ```
 
 Use `helix_result` anyway when you want side info in reflection prompts or
@@ -250,7 +258,8 @@ and should normally use Docker sandboxing:
 
 ```toml
 [sandbox]
-enabled = true
+enabled = true     # run mutation agents in Docker
+evaluator = true   # run evaluation through [evaluator.sidecar]
 network = "bridge"
 skip_special_files = true
 ```
@@ -273,11 +282,12 @@ If the old GEPA evaluator depends on local packages, either:
 2. Build a private evaluator sidecar image with evaluator code and data.
 3. Write an evaluator-runner command that reads `helix_batch.json`, calls
    `HELIX_EVALUATOR_ENDPOINT`, and prints `HELIX_RESULT=...`.
-3. Emit `HELIX_RESULT=` with one entry per requested id.
-4. Add `[evaluator.sidecar]` with image, command, and endpoint.
-5. Add `[dataset]` cardinalities.
-6. Map GEPA engine/reflection/merge config into `[evolution]`.
-7. Configure `[agent]` with backend, model, max turns, and background.
-8. Enable `[sandbox]` and log in the backend.
-9. Run evaluator manually, then `helix evolve`.
-10. Inspect `helix frontier`, `helix best`, and `helix log`.
+4. Emit `HELIX_RESULT=` with one entry per requested id.
+5. Add `[evaluator.sidecar]` with image, command, and endpoint.
+6. Add `[dataset]` cardinalities.
+7. Map GEPA engine/reflection/merge config into `[evolution]`.
+8. Configure `[agent]` with backend, model, max turns, and background.
+9. Set `[sandbox].enabled = true` and `[sandbox].evaluator = true`, and log in
+   the backend.
+10. Run evaluator manually, then `helix evolve`.
+11. Inspect `helix frontier`, `helix best`, and `helix log`.

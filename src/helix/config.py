@@ -683,10 +683,12 @@ class AgentConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """Configuration for OS-level subprocess isolation.
 
-    When enabled, HELIX runs untrusted agent/evaluator commands in a Docker
-    container whose only project mount is a temporary copy of the candidate
-    worktree.  Agent-side filesystem changes are synced back explicitly after
-    the backend exits; evaluator-side changes are discarded.
+    When enabled, HELIX runs untrusted agent commands in a Docker container
+    whose only project mount is a temporary copy of the candidate worktree.
+    With ``evaluator`` also set, evaluator commands run the same way through
+    ``[evaluator.sidecar]``; otherwise they run on the host.  Agent-side
+    filesystem changes are synced back explicitly after the backend exits;
+    evaluator-side changes are discarded.
     """
 
     model_config = ConfigDict(extra="forbid")

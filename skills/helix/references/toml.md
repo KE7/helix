@@ -29,10 +29,13 @@ over raw API keys in evaluator code.
 
 ## Evaluator
 
-Without Docker sandboxing, `[evaluator].command` runs directly in the candidate
-workspace. With `[sandbox].enabled = true`, `[evaluator.sidecar]` is required:
-HELIX starts that evaluator service once per `helix evolve`, then runs
-short-lived evaluator-runner containers that can reach it.
+By default, `[evaluator].command` runs directly in the candidate workspace on
+the host. This includes runs with `[sandbox].enabled = true`, which sandboxes
+mutation agents only. With `[sandbox].enabled = true` and
+`[sandbox].evaluator = true`, `[evaluator.sidecar]` is required (config
+validation fails without it): HELIX starts that evaluator service once per
+`helix evolve`, then runs short-lived evaluator-runner containers that can
+reach it.
 
 ```toml
 [evaluator]
@@ -54,7 +57,7 @@ startup_timeout_seconds = 60
 Rules:
 
 - `command` is split with `shlex.split()` and run with `shell=false`.
-- In sandbox mode, `command` is the evaluator-runner command. The runner sees a
+- With sandboxed evaluation, `command` is the evaluator-runner command. The runner sees a
   copied `/workspace`, receives `HELIX_EVALUATOR_ENDPOINT`, calls the sidecar,
   prints `HELIX_RESULT`, and exits.
 - `runner_image` is the short-lived evaluator-runner image. It should contain
@@ -71,8 +74,8 @@ Rules:
 - `extra_commands` run after the main command in the same evaluator-runner
   workspace.
 - `protected_files` are hashed at run start and checked after mutations/merges.
-  They are only for non-sandboxed local prototypes; do not use repo-local
-  evaluator files as the Docker sandbox security boundary.
+  They are for local prototypes without sandboxed evaluation; do not use
+  repo-local evaluator files as the Docker sandbox security boundary.
 
 Score parser:
 
@@ -164,8 +167,8 @@ background = "Only modify src/solver.py and supporting implementation files."
 ```
 
 Use `background` as the agent's project-specific guardrail. It is not a
-security boundary. In sandboxed runs, evaluator secrecy comes from the sidecar
-network boundary, not from telling the agent not to edit evaluator files.
+security boundary. With sandboxed evaluation, evaluator secrecy comes from the
+sidecar network boundary, not from telling the agent not to edit evaluator files.
 
 Backend notes:
 
@@ -178,7 +181,8 @@ Backend notes:
 
 ```toml
 [sandbox]
-enabled = true
+enabled = true     # run mutation and merge agents in Docker
+evaluator = true   # also run evaluation in Docker through [evaluator.sidecar]
 image = "ghcr.io/ke7/helix-evo-runner-claude:latest" # optional
 network = "bridge"
 cpus = 4.0
@@ -201,13 +205,15 @@ If `image` is unset, HELIX chooses the image from `agent.backend`.
 Sandbox behavior:
 
 - Agent runs in a copied `/workspace`; agent changes sync back.
-- Evaluator sidecar starts once per `helix evolve` on a private internal Docker
-  network.
-- Evaluator-runner containers run in fresh copied `/workspace` directories,
-  use `[evaluator.sidecar].runner_image`, join the private evaluator network,
-  call the sidecar, and exit.
+- With `evaluator = false` (the default), the evaluator command runs on the
+  host in the candidate worktree, and `[evaluator.sidecar]` is not used.
+- With `evaluator = true`, the evaluator sidecar starts once per
+  `helix evolve` on a private internal Docker network.
+- With `evaluator = true`, evaluator-runner containers run in fresh copied
+  `/workspace` directories, use `[evaluator.sidecar].runner_image`, join the
+  private evaluator network, call the sidecar, and exit. Their changes are
+  discarded.
 - The sidecar sees only what the runner sends over the endpoint.
-- Evaluator-runner changes are discarded.
 - Agent auth volume mounts at `/home/node`.
 - Evaluator containers do not get agent auth volumes.
 - `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX artifacts are excluded

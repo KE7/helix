@@ -98,12 +98,12 @@ flowchart TD
     FRONT --> SEL
 
     %% ── Phase 3: Docker Sandbox — isolated execution ─────────────────────────────
-    subgraph DOCKER["🐳  Docker Sandbox  —  isolated execution environment"]
+    subgraph DOCKER["🐳  Docker Sandbox (opt-in)  —  isolated execution environment"]
         direction LR
         subgraph ANET["  Agent Network  (normal egress)  "]
             AGENT["Mutation / Merge Container\n──────────────────────────\nagy · claude · codex\ncursor · opencode\nAuth: helix-auth-BACKEND"]:::agent
         end
-        subgraph ENET["  Private Evaluator Network  (helix-eval-*)  "]
+        subgraph ENET["  Private Evaluator Network  (helix-eval-*, opt-in)  "]
             ERUN["Eval Runners\n(short-lived,\ncopied workspace)"]:::eval
             ESVC["Evaluator Sidecar\n(benchmark data\nno host ports)"]:::eval
             ERUN -->|"HTTP/RPC"| ESVC
@@ -150,9 +150,9 @@ flowchart TD
 **The loop in detail:**
 
 1. **Seed** — Your starting code is copied into a git worktree and evaluated
-2. **Evaluate** — Start the private evaluator sidecar once, then run short-lived evaluator-runner containers that call it and print `HELIX_RESULT`
+2. **Evaluate** — Run the evaluator command in the candidate worktree and parse its `HELIX_RESULT` line. With sandboxed evaluation (`[sandbox].enabled = true`, `[sandbox].evaluator = true`, and `[evaluator.sidecar]`), HELIX starts the private evaluator sidecar once per run and runs short-lived evaluator-runner containers that call it
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
-4. **Mutate** — Spawn the configured agent backend in an isolated Docker workspace. It can edit candidate files and use its backend auth, but it does not join the evaluator network
+4. **Mutate** — Spawn the configured agent backend in the candidate's worktree. With `[sandbox].enabled = true`, the backend runs in an isolated Docker workspace, where it can edit candidate files and use its backend auth but does not join the evaluator network
 5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
 7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend
@@ -185,9 +185,13 @@ This creates a `helix.toml` config file and a `.helix/` directory. Edit `helix.t
 
 ### Recommended: Enable Docker Sandboxing
 
-For a first HELIX run, use Docker sandboxing. It keeps mutation agents in
-copied workspaces and requires a private evaluator sidecar, so agents never see
-the evaluator source, benchmark data, or evaluator endpoint.
+For a first HELIX run, use Docker sandboxing. `[sandbox].enabled = true` runs
+mutation agents in copied Docker workspaces. `[sandbox].evaluator = true` also
+runs evaluation in Docker through a private evaluator sidecar, configured in
+`[evaluator.sidecar]`, that agent containers cannot reach. When the evaluator
+code and benchmark data live in the sidecar image, they stay out of the agents'
+workspaces. Without `[sandbox].evaluator = true`, the evaluator command runs on
+the host in the candidate worktree.
 
 Install and start Docker, then log in to your selected backend inside its
 persistent sandbox auth volume:
@@ -197,7 +201,8 @@ helix sandbox login claude      # or agy, codex, cursor, opencode
 helix sandbox status claude
 ```
 
-Then enable the sandbox and configure the evaluator sidecar in `helix.toml`:
+Then enable the sandbox and sandboxed evaluation, and configure the evaluator
+sidecar in `helix.toml`:
 
 ```toml
 [evaluator]
@@ -212,11 +217,14 @@ startup_timeout_seconds = 120
 
 [sandbox]
 enabled = true
+evaluator = true
 network = "bridge"
 skip_special_files = true
 ```
 
-HELIX keeps this setting opt-in so existing local workflows and machines without
+`[evaluator.sidecar]` is required when both `enabled` and `evaluator` are true.
+
+HELIX keeps these settings opt-in so existing local workflows and machines without
 Docker continue to work, but sandboxing is the recommended mode for new projects.
 
 ### Connect The HELIX Agent Skill
@@ -406,7 +414,9 @@ max_turns = 20                   # hard cap for claude; an in-prompt hint for ot
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 
 [sandbox]
-enabled = false                  # true = run agent/evaluator subprocesses in Docker
+enabled = false                  # true = run mutation and merge agents in Docker
+evaluator = false                # true (with enabled = true) = run evaluation in Docker
+                                 # through [evaluator.sidecar], which is then required
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
 network = "bridge"               # "bridge" | "none" | "host"
 skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
@@ -548,9 +558,14 @@ and `W` is the worker count:
 
 ### Docker Sandboxing
 
-When `[sandbox].enabled = true`, HELIX starts `[evaluator.sidecar]` once per
-`helix evolve` on a private internal Docker network. Agent containers run in
-copied workspaces on the normal agent network and cannot reach that sidecar.
+When `[sandbox].enabled = true`, HELIX runs mutation and merge agents in
+Docker containers with copied workspaces on the normal agent network. The
+evaluator command still runs on the host in the candidate worktree unless
+sandboxed evaluation is also enabled.
+
+When `[sandbox].evaluator = true` is set as well, HELIX requires
+`[evaluator.sidecar]` and starts it once per `helix evolve` on a private
+internal Docker network that agent containers cannot reach.
 Evaluator-runner containers run only during evaluation, join the private
 network, call the sidecar, print evaluator output, and exit.
 The long-lived sidecar does not mount the candidate workspace; the runner must
@@ -650,10 +665,10 @@ When `evolution.val_stage_size` is positive and `dataset.val_size` is set, accep
 
 ### Evaluator Integrity
 
-For non-sandboxed local prototypes, HELIX can lock evaluator-critical files so
+For local prototypes, HELIX can lock evaluator-critical files so
 mutations and merges cannot game the score by editing the benchmark itself.
-Sandboxed runs should use `[evaluator.sidecar]` instead of repo-local evaluator
-files.
+Runs with sandboxed evaluation (`[sandbox].evaluator = true`) should use
+`[evaluator.sidecar]` instead of repo-local evaluator files.
 
 ```toml
 [evaluator]
