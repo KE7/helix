@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tomllib
 import warnings
@@ -57,6 +58,20 @@ def _load_dotenv_file(path: Path) -> None:
         os.environ[key] = value
 
 
+# Docker object names (networks, volumes): an alphanumeric first character,
+# then alphanumerics, ``_``, ``.`` or ``-``.  Anything else would reach the
+# ``docker run`` argv as a malformed or option-like token.
+_DOCKER_OBJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _require_docker_object_name(field: str, value: str) -> None:
+    if not _DOCKER_OBJECT_NAME_RE.fullmatch(value):
+        raise ValueError(
+            f"{field} must be a Docker object name (letters, digits, '_', '.', "
+            f"'-', starting with a letter or digit); got {value!r}"
+        )
+
+
 class EvaluatorSidecarConfig(BaseModel):
     """Warm private evaluator service for Docker-sandboxed runs."""
 
@@ -69,6 +84,29 @@ class EvaluatorSidecarConfig(BaseModel):
     healthcheck_command: str | None = None
     startup_timeout_seconds: int = 60
     internal_network: bool = True
+    volumes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra ``docker run -v`` mounts for the long-lived sidecar service "
+            "only (e.g. ``/host/ledger:/ledger:rw`` for a private evaluation "
+            "log). Never applied to agent or evaluator-runner containers."
+        ),
+    )
+
+    def model_post_init(self, __context: object) -> None:
+        for spec in self.volumes:
+            parts = spec.split(":")
+            if (
+                len(parts) not in (2, 3)
+                or not parts[0]
+                or not parts[1].startswith("/")
+                or (len(parts) == 3 and parts[2] not in ("ro", "rw"))
+            ):
+                raise ValueError(
+                    "evaluator.sidecar.volumes entries must be "
+                    "'<host path or volume>:<absolute container path>[:ro|rw]'; "
+                    f"got {spec!r}"
+                )
 
     @property
     def resolved_runner_image(self) -> str:
@@ -678,6 +716,30 @@ class AgentConfig(BaseModel):
     effort: str | None = None
     max_turns: int | None = None
     background: str | None = None
+    disallowed_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Backend tools the mutation agent may not use, e.g. "
+            '``["WebSearch", "WebFetch"]``. Forwarded to Claude Code as '
+            "``--disallowedTools``; only the ``claude`` backend supports it, "
+            "and setting it for another backend is a configuration error "
+            "rather than a silently ignored control."
+        ),
+    )
+
+    def model_post_init(self, __context: object) -> None:
+        for tool in self.disallowed_tools:
+            if not tool.strip() or "," in tool:
+                raise ValueError(
+                    "agent.disallowed_tools entries must be non-empty and must "
+                    f"not contain ',' (got {tool!r})"
+                )
+        if self.disallowed_tools and self.backend != "claude":
+            raise ValueError(
+                "agent.disallowed_tools is only supported for backend='claude' "
+                f"(got backend={self.backend!r}); HELIX has no way to enforce it "
+                "for that backend"
+            )
 
 
 class SandboxConfig(BaseModel):
@@ -697,7 +759,11 @@ class SandboxConfig(BaseModel):
     evaluator: bool = False
     backend: Literal["docker"] = "docker"
     image: str | None = None
-    network: Literal["bridge", "none", "host"] = "bridge"
+    # ``bridge``, ``none``, ``host`` or the name of an existing Docker network
+    # (for example an ``--internal`` network whose only route out is an
+    # egress proxy).  Applies to agent containers and to evaluator containers
+    # when no sidecar runtime supplies its private network.
+    network: str = "bridge"
     cpus: float | None = None
     memory: str | None = None
     timeout_seconds: int | None = None
@@ -706,6 +772,11 @@ class SandboxConfig(BaseModel):
     extra_hosts: dict[str, str] = Field(default_factory=dict)
     skip_special_files: bool = True
     omit_from_agent: list[str] = Field(default_factory=list)
+    # Docker volume mounted at ``/home/node`` in agent containers.  ``None``
+    # uses the shared ``helix-auth-<backend>`` login volume.  A dedicated
+    # volume keeps one run from seeing credentials, caches or leftovers that
+    # other runs wrote to the shared volume.
+    auth_volume: str | None = None
     # Every agent invocation's native CLI transcript is copied into the
     # candidate worktree under ``transcript_artifact_dir/<backend>/
     # <session_id>.jsonl`` and used for tool-call accounting: claude
@@ -719,6 +790,11 @@ class SandboxConfig(BaseModel):
     # these copies are the only durable record of what the agent did.
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
     claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
+
+    def model_post_init(self, __context: object) -> None:
+        _require_docker_object_name("sandbox.network", self.network)
+        if self.auth_volume is not None:
+            _require_docker_object_name("sandbox.auth_volume", self.auth_volume)
 
 
 class WorktreeConfig(BaseModel):

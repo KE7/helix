@@ -757,6 +757,14 @@ def _build_backend_args(
     prompt_artifact_name: str,
 ) -> list[str]:
     backend = config.backend
+    if config.disallowed_tools and backend != "claude":
+        # ``AgentConfig`` rejects this at load time; a CLI ``--backend``
+        # override goes through ``model_copy`` and skips that validation, so
+        # refuse here rather than run the agent without the requested denial.
+        raise ValueError(
+            "agent.disallowed_tools is only supported for backend='claude' "
+            f"(got backend={backend!r})"
+        )
     if backend == "agy":
         args = [
             "agy",
@@ -799,6 +807,11 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
+        if config.disallowed_tools:
+            # ``--disallowedTools`` is variadic in Claude Code; the ``=`` form
+            # binds exactly one value, so the trailing prompt argument can
+            # never be swallowed as another tool name.
+            args.append("--disallowedTools=" + ",".join(config.disallowed_tools))
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 

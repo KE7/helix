@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `[agent].disallowed_tools` (claude backend only): tool names passed to
+  Claude Code as `--disallowedTools`, for example `["WebSearch", "WebFetch"]`.
+  Setting it for another backend is a configuration error.
+- `[sandbox].network` accepts the name of an existing Docker network (for
+  example an `--internal` network whose only route out is an egress proxy),
+  besides `bridge`, `none` and `host`.
+- `[sandbox].auth_volume`: a dedicated Docker volume mounted at `/home/node` in
+  agent containers (and used by the transcript copy and the per-generation
+  state reset) instead of the shared `helix-auth-<backend>` volume.
+- `[evaluator.sidecar].volumes`: extra mounts for the long-lived evaluator
+  sidecar service only, for example a private evaluation ledger.
+- `xhigh` and `max` are recognized `effort` values for the `claude` backend
+  (Claude Code 2.1.274 `--effort`); HELIX previously warned on them.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by

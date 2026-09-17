@@ -80,6 +80,7 @@ from helix.population import (
 )
 from helix.sandbox import (
     reset_sandbox_agent_state,
+    sandbox_auth_volume_name,
     resolve_sandbox_image,
     start_evaluator_sidecar,
 )
@@ -1720,6 +1721,7 @@ def _reset_sandbox_agent_state_for_generation(config: HelixConfig, gen: int) -> 
         config.agent.backend,
         image=resolve_sandbox_image(config.sandbox, config.agent.backend),
         generation=gen,
+        volume=sandbox_auth_volume_name(config.agent.backend, config.sandbox),
     )
 
 

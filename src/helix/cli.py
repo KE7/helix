@@ -600,7 +600,8 @@ def sandbox_logout(
     default=None,
     help=(
         "Override backend reasoning-effort level. Forwarded as --effort to "
-        "the 'agy' and 'claude' backends (low|medium|high), as "
+        "the 'agy' (low|medium|high) and 'claude' (low|medium|high|xhigh|max) "
+        "backends, as "
         "model_reasoning_effort to the 'codex' backend, and as --variant to "
         "the 'opencode' backend; ignored by cursor (a warning is emitted "
         "when set on a backend that does not support it)."

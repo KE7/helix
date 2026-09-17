@@ -317,7 +317,7 @@ def _copy_backend_transcript_from_auth_volume(
         "-v",
         f"{workspace}:/workspace:rw",
         "-v",
-        f"{sandbox_auth_volume_name(agent_backend)}:/home/node:ro",
+        f"{sandbox_auth_volume_name(agent_backend, sandbox)}:/home/node:ro",
         "-e",
         "HOME=/home/node",
         image,
@@ -363,6 +363,7 @@ def reset_sandbox_agent_state(
     *,
     image: str | None = None,
     generation: int | None = None,
+    volume: str | None = None,
 ) -> int:
     """Delete the backend CLI's session state from its sandbox auth volume.
 
@@ -378,7 +379,7 @@ def reset_sandbox_agent_state(
     if script is None:
         logger.debug("no sandbox state paths known for backend %s", agent_backend)
         return 0
-    volume = sandbox_auth_volume_name(agent_backend)
+    volume = volume or sandbox_auth_volume_name(agent_backend)
     docker_image = image or resolve_sandbox_image(
         SandboxConfig(enabled=True), agent_backend
     )
@@ -1082,6 +1083,8 @@ def start_evaluator_sidecar(
         args.extend(
             _build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts)
         )
+        for volume_spec in sidecar.volumes:
+            args.extend(["-v", volume_spec])
         for key in passthrough_env or []:
             if key in os.environ:
                 args.extend(["-e", f"{key}={os.environ[key]}"])
@@ -1109,7 +1112,16 @@ def start_evaluator_sidecar(
         _run_docker(["docker", "network", "rm", network], check=False)
 
 
-def sandbox_auth_volume_name(agent_backend: str) -> str:
+def sandbox_auth_volume_name(
+    agent_backend: str, sandbox: SandboxConfig | None = None
+) -> str:
+    """Name of the Docker volume mounted at ``/home/node`` for *agent_backend*.
+
+    ``sandbox.auth_volume`` wins when set; otherwise the shared
+    ``helix-auth-<backend>`` login volume is used.
+    """
+    if sandbox is not None and sandbox.auth_volume:
+        return sandbox.auth_volume
     if agent_backend not in DEFAULT_BACKEND_IMAGES:
         raise ValueError(f"No default sandbox auth volume for backend: {agent_backend}")
     return f"helix-auth-{agent_backend}"
@@ -1146,7 +1158,9 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        args.extend(["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"])
+        args.extend(
+            ["-v", f"{sandbox_auth_volume_name(agent_backend, sandbox)}:/home/node:rw"]
+        )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])

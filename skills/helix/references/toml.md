@@ -50,6 +50,8 @@ runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
 startup_timeout_seconds = 60
+# Optional extra mounts for the sidecar service only (never agents or runners):
+# volumes = ["/host/private/ledger:/srv/ledger:rw"]
 # Optional when the default HTTP reachability probe is not enough:
 # healthcheck_command = "python /runner/healthcheck.py"
 ```
@@ -162,7 +164,7 @@ backend = "claude"  # agy | claude | codex | cursor | opencode
 model = "sonnet"
 effort = "medium"
 max_turns = 20
-allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
+disallowed_tools = ["WebSearch", "WebFetch"]  # claude only; passed as --disallowedTools
 background = "Only modify src/solver.py and supporting implementation files."
 ```
 
@@ -184,7 +186,8 @@ Backend notes:
 enabled = true     # run mutation and merge agents in Docker
 evaluator = true   # also run evaluation in Docker through [evaluator.sidecar]
 image = "ghcr.io/ke7/helix-evo-runner-claude:latest" # optional
-network = "bridge"
+network = "bridge"  # or the name of an existing Docker network
+# auth_volume = "my-run-home"  # dedicated /home/node volume instead of helix-auth-<backend>
 cpus = 4.0
 memory = "16g"
 timeout_seconds = 3600

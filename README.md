@@ -214,6 +214,7 @@ runner_image = "my-evaluator-runner:latest"
 command = "python -m benchmark_server"
 endpoint = "http://helix-evaluator:8080/evaluate"
 startup_timeout_seconds = 120
+# volumes = ["/host/private/ledger:/srv/ledger:rw"]  # mounts for the sidecar service only
 
 [sandbox]
 enabled = true
@@ -412,16 +413,19 @@ backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "open
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20                   # hard cap for claude; an in-prompt hint for other backends
 # background = "Only modify files under src/. Do not touch tests/ or config/."
+# disallowed_tools = ["WebSearch", "WebFetch"]  # claude only; passed as --disallowedTools
 
 [sandbox]
 enabled = false                  # true = run mutation and merge agents in Docker
 evaluator = false                # true (with enabled = true) = run evaluation in Docker
                                  # through [evaluator.sidecar], which is then required
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
-network = "bridge"               # "bridge" | "none" | "host"
+network = "bridge"               # "bridge" | "none" | "host" | an existing Docker network
+                                 # (for example an --internal network with an egress proxy)
 skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
 # Agent containers mount a persistent Docker auth volume named
 # helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
+# auth_volume = "my-run-home"    # optional: mount this volume at /home/node instead
 
 [worktree]
 base_dir = ".helix/worktrees"
