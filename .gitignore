@@ -1,7 +1,6 @@
-examples/circle_packing/.git/
-examples/circle_packing/.helix/
-examples/web_researcher/.git/
-examples/web_researcher/.helix/
+# Run state and repositories that `helix evolve` creates inside examples
+examples/*/.git/
+examples/*/.helix/
 tests/integration/circle_packing_playground/
 
 # Virtual environments

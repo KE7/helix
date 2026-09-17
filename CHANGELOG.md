@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tool-call counts for `agy` are now read from its native
   `transcript.jsonl` (`tool_calls[*].name` on planner steps); its JSON
   stdout envelope carries no per-tool events.
+- New CLI subcommand `helix attempts` — surfaces rejected attempt records and
+  perfect-skip events; supports filtering by `--generation`, `--stage`,
+  `--reason`, `--cid`; `--skips` flag to show only perfect-skip entries;
+  `--json` for machine-readable output. (PR #30)
+- New artifact directories `.helix/attempts/` and `.helix/skips/` — per-rejected-candidate
+  JSON files and per-generation perfect-skip event lists persisted alongside
+  `.helix/evaluations/` and `.helix/worktrees/`. (PR #30)
+- `tool_event_count` / `tool_names` tracking in `UsageStats` — normalised
+  tool-use metrics for each mutation backend, extracted from transcript
+  artifacts. (PR #32)
+- `session_id`, `to_dict`, `from_dict` helpers on `UsageStats`. (PR #32)
+- New module `src/helix/evaluator_manifest.py` — SHA-256 manifest for
+  protected evaluator files; refresh helpers for mutation and merge candidates.
+  (PR #30 refactor)
 
 ### Changed
 - **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
@@ -87,6 +101,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sum_scores` mapping in the result schema are unchanged and still
   reported; sums also still drive the acceptance gate, which does match
   upstream's `StrictImprovementAcceptance`.
+- **GEPA structural alignment**: generation counter advances unconditionally per
+  GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
+  bypassed when re-evaluating the parent's minibatch, ensuring consistent
+  parent-comparison semantics across resume scenarios. (PR #32)
+- Scalar evaluator results now populate every requested instance ID in multi-example runs. (PR #32)
+- `examples/web_researcher`: the seed agent asks Claude Haiku directly, and a
+  web-fetching reference agent is in
+  `docs/experiments/web-researcher/reference_agent.py`. The example sets
+  `[dataset]` sizes; `evaluate.py` accepts HELIX's positional ids, resolves
+  `FETCH:pypi:<package>` and `FETCH:cpython` expected values itself, and
+  matches version answers on dot-separated components (at least
+  major.minor). The evaluator command pins Python 3.12 with the anthropic SDK,
+  `ANTHROPIC_API_KEY` is in `passthrough_env`, `evaluate.py`, `train/`, and
+  `val/` are protected files, and mutation agents run in the Docker sandbox
+  with those paths omitted from their workspace.
+- `examples/circle_packing`: `solve_optimized.py` moved to
+  `docs/experiments/circle-packing/reference_known_best.py`, and `evaluate.py`
+  is a protected file.
+- README: design section and concurrent work.
 
 ### Fixed
 - Backend transcript preservation now covers every backend. It was only ever
@@ -132,39 +165,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different `PYTHONHASHSEED` values. Upstream GEPA indexes programs by
   integer, so it was never exposed to this; HELIX's port changed the
   identifier type.
-
-## [0.2.2] - 2026-05-13
-
-### Added
-- New CLI subcommand `helix attempts` — surfaces rejected attempt records and
-  perfect-skip events; supports filtering by `--generation`, `--stage`,
-  `--reason`, `--cid`; `--skips` flag to show only perfect-skip entries;
-  `--json` for machine-readable output. (PR #30)
-- New artifact directories `.helix/attempts/` and `.helix/skips/` — per-rejected-candidate
-  JSON files and per-generation perfect-skip event lists persisted alongside
-  `.helix/evaluations/` and `.helix/worktrees/`. (PR #30)
-- 5-backend `tool_event_count` / `tool_names` tracking in `UsageStats` —
-  normalised tool-use metrics for claude, codex, cursor, gemini, and opencode
-  backends extracted from transcript artifacts. (PR #32)
-- `session_id`, `to_dict`, `from_dict` helpers on `UsageStats`. (PR #32)
-- New module `src/helix/evaluator_manifest.py` — SHA-256 manifest for
-  protected evaluator files; refresh helpers for mutation and merge candidates.
-  (PR #30 refactor)
-
-### Changed
-- **GEPA structural alignment**: generation counter advances unconditionally per
-  GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
-  bypassed when re-evaluating the parent's minibatch, ensuring consistent
-  parent-comparison semantics across resume scenarios. (PR #32)
-- Scalar evaluator results now populate every requested instance ID in multi-example runs. (PR #32)
-
-### Fixed
 - Mandatory stop-condition enforcement: `run_evolution` now raises `ValueError`
   at startup if both `max_generations ≤ 0` and `max_evaluations ≤ 0`. Previously
   a config with both set to negative values would loop indefinitely. (PR #32)
 - Resume reconciliation: incomplete attempts and orphaned worktrees from a
   crashed run are cleaned up at resume time before the first new generation
   starts. (PR #30)
+- `helix init`: the next-steps message escapes bracketed table names such as
+  `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
 
 ## [0.2.1] - 2026-05-10
 
@@ -288,7 +296,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[evaluator]` (the key lives on `[evolution]`) silently left users on
   the default sampler with no warning.
 
-## [0.1.0] - 2026-04-10
+## [0.1.0] - 2026-04-13
 
 ### Added
 - GEPA (Genetic-Pareto) parity support for evolution strategies

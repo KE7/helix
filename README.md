@@ -840,7 +840,7 @@ Run an example to produce results. [`docs/experiments/circle-packing.md`](docs/e
 ```bibtex
 @software{helix2026,
   title={HELIX: Hierarchical Evolution via LLM-Informed eXploration},
-  author={Elmaaroufi, Karim and OMAR},
+  author={Elmaaroufi, Karim},
   year={2026},
   url={https://github.com/KE7/helix}
 }
@@ -856,9 +856,9 @@ BSD 3-Clause License. See [LICENSE](LICENSE) for details.
 
 ## 🙏 Acknowledgments
 
-HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Agrawal, Lee, Ma, Elmaaroufi, Tan, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis, and Zaharia. Their work on applying reflective Pareto evolution to any text made HELIX possible — we extended their algorithm to full codebases and agentic mutation but the foundation is theirs.
+HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis, and Zaharia, described in *optimize_anything: Unified Text Optimization can Outperform Specialized Systems* (ACM CAIS 2026). Their work on applying reflective Pareto evolution to any text made HELIX possible — we extended their algorithm to full codebases and agentic mutation but the foundation is theirs.
 
-- **[GEPA optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)** — The algorithmic foundation: minibatch-gated Pareto evolution with reflective LLM mutation
+- **[GEPA optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)** — The algorithmic foundation: minibatch-gated Pareto evolution with reflective LLM mutation ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633))
 - **[Antigravity CLI](https://antigravity.google/cli)** — Supported HELIX mutation backend
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Supported HELIX mutation backend
 - **[Codex CLI](https://developers.openai.com/codex/cli)** — Supported HELIX mutation backend
@@ -867,11 +867,34 @@ HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Ag
 - **[OMAR](http://omar.tech/)** — The multi-agent orchestration system used to build HELIX
 
 ```bibtex
-@article{gepa_optimize_anything2026,
-  title={Introducing optimize\_anything},
-  author={Agrawal, Lakshya A and Lee, Donghyun and Ma, Wenjie and Elmaaroufi, Karim and Tan, Shangyin and Seshia, Sanjit A. and Sen, Koushik and Klein, Dan and Stoica, Ion and Gonzalez, Joseph E. and Khattab, Omar and Dimakis, Alexandros G. and Zaharia, Matei},
-  year={2026},
-  url={https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/}
+@inproceedings{agrawal2026optimizeanything,
+  title         = {optimize\_anything: Unified Text Optimization can Outperform Specialized Systems},
+  author        = {Agrawal, Lakshya A and Lee, Donghyun and Tan, Shangyin and Ma, Wenjie and Elmaaroufi, Karim and Sandadi, Rohit and Seshia, Sanjit A. and Sen, Koushik and Klein, Dan and Stoica, Ion and Gonzalez, Joseph E. and Khattab, Omar and Dimakis, Alexandros G. and Zaharia, Matei},
+  booktitle     = {Proceedings of the ACM Conference on AI and Agentic Systems (CAIS '26)},
+  address       = {San Jose, CA, USA},
+  publisher     = {ACM},
+  month         = may,
+  year          = {2026},
+  pages         = {1--16},
+  doi           = {10.1145/3786335.3813167},
+  eprint        = {2605.19633},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.CL},
+  note          = {arXiv version titled ``optimize\_anything: A Universal API for Optimizing any Text Parameter''}
+}
+```
+
+Meta-Harness, cited in [Design](#design):
+
+```bibtex
+@article{lee2026metaharness,
+  title         = {Meta-Harness: End-to-End Optimization of Model Harnesses},
+  author        = {Lee, Yoonho and Nair, Roshen and Zhang, Qizheng and Lee, Kangwook and Khattab, Omar and Finn, Chelsea},
+  journal       = {arXiv preprint arXiv:2603.28052},
+  year          = {2026},
+  eprint        = {2603.28052},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.AI}
 }
 ```
 
