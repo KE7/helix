@@ -613,6 +613,7 @@ def production_prompt(config: HelixConfig, run_dir: Path, report: Report, out_di
     with tempfile.TemporaryDirectory(prefix="cp-prompt-") as tmp:
         tree = Path(tmp) / "tree"
         _seed_copy(run_dir, tree)
+        (tree / "helix_batch.json").write_text('["0"]')
         candidate = Candidate(id="g0-s0", worktree_path=str(tree), branch_name="probe",
                               generation=0, parent_id=None, parent_ids=[], operation="seed")
         with start_evaluator_sidecar(sidecar, passthrough_env=config.passthrough_env,
