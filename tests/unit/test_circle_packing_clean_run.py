@@ -1549,3 +1549,9 @@ def test_invalid_summary_returns_nonzero_and_labels_headline(tmp_path, monkeypat
 def test_watchdog_stops_on_subscription_refresh_failure():
     assert watchdog.should_stop([{'decision': 'deny', 'status': 503,
                                   'reason': 'subscription login unavailable'}])
+
+
+def test_summary_does_not_treat_a_smaller_budget_marker_as_full_completion():
+    result = summarize.budget_accounting([{'seq': 1}], [{'seq': 1}], [], [], 200, 0, True)
+    assert result['sidecar_budget_marker_present']
+    assert not result['budget_exhausted'] and result['run_incomplete']

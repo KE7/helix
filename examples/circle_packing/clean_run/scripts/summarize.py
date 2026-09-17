@@ -188,7 +188,7 @@ def budget_accounting(
     duplicates = sorted(seq for seq, count in Counter(recorded).items() if count > 1)
     answered = len(requests)
     cache_hits = sum(1 for r in requests if r.get("kind") == "cache_hit")
-    budget_spent = marker_present or highest >= budget
+    budget_spent = highest >= budget
     return {
         "unit": "executions of the scoring function",
         "max_executions": budget,
@@ -196,6 +196,7 @@ def budget_accounting(
         "executions_recorded": len(recorded),
         "budget_spent": budget_spent,
         "budget_exhausted": budget_spent,
+        "sidecar_budget_marker_present": marker_present,
         "run_incomplete": not budget_spent,
         "executions_short_of_budget": max(0, budget - highest),
         "unfinished_executions": unfinished,
