@@ -388,7 +388,7 @@ def run_agent_probe(config: HelixConfig, run_dir: Path, report: Report, sidecar_
             image=image,
             agent_backend=config.agent.backend,
         )
-        line = next((l for l in result.stdout.splitlines() if l.startswith("PROBE_JSON=")), None)
+        line = next((rec for rec in result.stdout.splitlines() if rec.startswith("PROBE_JSON=")), None)
         if line is None:
             report.check(f"{label} agent probe ran", False,
                          {"stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]})
@@ -461,7 +461,7 @@ def assess_agent_probe(probe: dict[str, Any], report: Report, *, with_sidecar: b
 def _ledger_lines(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    return [json.loads(rec) for rec in path.read_text().splitlines() if rec.strip()]
 
 
 def check_evaluator(config: HelixConfig, run_dir: Path, report: Report, out_dir: Path) -> Any:
@@ -549,7 +549,7 @@ def check_evaluator(config: HelixConfig, run_dir: Path, report: Report, out_dir:
             report.check("C3 candidate code cannot read the ledger or scoring code, reach the web, or request evaluations",
                          all(outcomes.get(k) == "FAIL" for k in must_fail), outcomes)
             listing = _docker("exec", runtime.container_name, "ps", "-eo", "uid=,stat=,comm=").stdout
-            leftovers = [l.split() for l in listing.splitlines() if l.split() and l.split()[0] == "2000"]
+            leftovers = [rec.split() for rec in listing.splitlines() if rec.split() and rec.split()[0] == "2000"]
             report.check("C4 no candidate processes (running or zombie) survive an evaluation",
                          not leftovers,
                          {"candidate_processes": leftovers, "daemon_spawned": outcomes.get("spawn_daemon")})
@@ -582,12 +582,18 @@ def capture_agent_requests(config: HelixConfig, run_dir: Path, report: Report, o
     suffix = uuid.uuid4().hex[:8]
     network = f"{LABEL}-probe-{suffix}"
     gateway = f"{LABEL}-probe-gateway-{suffix}"
+    # A throwaway home volume, so the capture session leaves no state or
+    # transcript in the run's own agent home volume.
+    home = f"{LABEL}-probe-home-{suffix}"
     capture = out_dir / f"capture-{suffix}"
     capture.mkdir(parents=True)
     gateway_image = config.sandbox.image.replace("agent-claude", "gateway") if config.sandbox.image else ""
     workdir = Path(tempfile.mkdtemp(prefix="cp-probe-capture-"))
     try:
         _docker("network", "create", "--internal", "--label", f"{LABEL}=1", network, check=True)
+        _docker("volume", "create", "--label", f"{LABEL}=1", home, check=True)
+        _docker("run", "--rm", "--label", f"{LABEL}=probe", "--network", "none", "-v", f"{home}:/home/node",
+                str(config.sandbox.image), "chown", "node:node", "/home/node", check=True)
         _docker("run", "-d", "--name", gateway, "--label", f"{LABEL}=1", "--network", network,
                 "--network-alias", "anthropic-gateway", "-e", "GATEWAY_CAPTURE_ONLY=1",
                 "-e", f"GATEWAY_ALLOWED_MODELS={config.agent.model}",
@@ -596,7 +602,9 @@ def capture_agent_requests(config: HelixConfig, run_dir: Path, report: Report, o
         source = workdir / "tree"
         _seed_copy(run_dir, source)
         (source / ".agent_task_prompt.md").write_text("Reply with the word OK.\n")
-        sandbox = config.sandbox.model_copy(update={"network": network, "timeout_seconds": 180})
+        sandbox = config.sandbox.model_copy(
+            update={"network": network, "auth_volume": home, "timeout_seconds": 180}
+        )
         argv = _build_backend_args("/workspace", config.agent, ".agent_task_prompt.md")
         started = time.monotonic()
         try:
@@ -612,38 +620,39 @@ def capture_agent_requests(config: HelixConfig, run_dir: Path, report: Report, o
         outcome["seconds"] = round(time.monotonic() - started, 1)
         time.sleep(1)
         lines = _ledger_lines(capture / "gateway_requests.jsonl")
-        requests = [l for l in lines if l.get("event") != "start"]
-        messages = [l for l in requests if l.get("path") == "/v1/messages"]
-        main = [l for l in messages if l.get("model") == config.agent.model]
+        requests = [rec for rec in lines if rec.get("event") != "start"]
+        messages = [rec for rec in requests if rec.get("path") == "/v1/messages"]
+        main = [rec for rec in messages if rec.get("model") == config.agent.model]
         summary = {
             "claude_outcome": outcome,
             "requests": [
-                {k: l.get(k) for k in ("method", "path", "decision", "reason", "model", "effort", "thinking",
+                {k: rec.get(k) for k in ("method", "path", "decision", "reason", "model", "effort", "thinking",
                                        "tool_names", "body_keys", "anthropic_beta", "max_tokens", "stream")}
-                for l in requests
+                for rec in requests
             ],
         }
         (out_dir / f"capture-{suffix}.json").write_text(json.dumps(summary, indent=2))
-        tools = sorted({t for l in messages for t in (l.get("tool_names") or [])})
+        tools = sorted({t for rec in messages for t in (rec.get("tool_names") or [])})
         report.check("D1 Claude Code (HELIX argv, agent container) sent Messages requests for the configured model",
-                     bool(main), {"models": sorted({str(l.get('model')) for l in messages}), "requests": len(requests)})
+                     bool(main), {"models": sorted({str(rec.get('model')) for rec in messages}), "requests": len(requests)})
         report.check(f"D2 every main-model request carries output_config.effort = {config.agent.effort!r}",
-                     bool(main) and all(l.get("effort") == config.agent.effort for l in main),
-                     [{k: l.get(k) for k in ("model", "effort", "thinking")} for l in main])
+                     bool(main) and all(rec.get("effort") == config.agent.effort for rec in main),
+                     [{k: rec.get(k) for k in ("model", "effort", "thinking")} for rec in main])
         report.check("D3 no request offered WebSearch/WebFetch, a server tool or an MCP server",
                      bool(messages)
                      and not ({"WebSearch", "WebFetch", "web_search", "web_fetch"} & set(tools))
-                     and all(l.get("reason") != "mcp_servers is not allowed" for l in requests)
-                     and not any(str(l.get("reason", "")).startswith(("server tool", "tool not allowed")) for l in requests)
-                     and all("mcp_servers" not in (l.get("body_keys") or []) for l in messages),
+                     and all(rec.get("reason") != "mcp_servers is not allowed" for rec in requests)
+                     and not any(str(rec.get("reason", "")).startswith(("server tool", "tool not allowed")) for rec in requests)
+                     and all("mcp_servers" not in (rec.get("body_keys") or []) for rec in messages),
                      {"tools_offered": tools})
-        other = [l for l in requests if l.get("path") not in ("/v1/messages", "/v1/messages/count_tokens")]
+        other = [rec for rec in requests if rec.get("path") not in ("/v1/messages", "/v1/messages/count_tokens")]
         report.check("D4 every request other than the Messages API was refused by policy",
-                     all(str(l.get("reason", "")).startswith("route not allowed") for l in other),
-                     sorted({f"{l.get('method')} {l.get('path')} -> {l.get('reason')}" for l in requests}))
+                     all(str(rec.get("reason", "")).startswith("route not allowed") for rec in other),
+                     sorted({f"{rec.get('method')} {rec.get('path')} -> {rec.get('reason')}" for rec in requests}))
     finally:
         _docker("rm", "-f", gateway)
         _docker("network", "rm", network)
+        _docker("volume", "rm", home)
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -675,7 +684,7 @@ def api_auth_check(config: HelixConfig, run_dir: Path, report: Report) -> None:
             cwd=source, env=_agent_env(config), sandbox=config.sandbox, scope="agent", sync_back=False,
             image=resolve_sandbox_image(config.sandbox, config.agent.backend), agent_backend=config.agent.backend,
         )
-        line = next((l for l in result.stdout.splitlines() if l.startswith("AUTH_JSON=")), None)
+        line = next((rec for rec in result.stdout.splitlines() if rec.startswith("AUTH_JSON=")), None)
         data = json.loads(line[len("AUTH_JSON="):]) if line else {"stdout": result.stdout[-500:], "stderr": result.stderr[-500:]}
         report.check(f"E1 the model API answers {config.agent.model} at effort {config.agent.effort!r} "
                      "through the gateway from inside an agent container",

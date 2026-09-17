@@ -894,7 +894,7 @@ def test_local_example_evaluator_scores_invalid_packings_zero(
         [sys.executable, "evaluate.py"], cwd=tmp_path, capture_output=True, text=True,
         check=True,
     ).stdout
-    line = next(l for l in out.splitlines() if l.startswith("HELIX_RESULT="))
+    line = next(text for text in out.splitlines() if text.startswith("HELIX_RESULT="))
     [[score, side_info]] = json.loads(line[len("HELIX_RESULT="):])
     assert score == expected
     assert side_info["scores"]["sum_radii"] == expected
@@ -965,7 +965,7 @@ def test_gateway_capture_mode_records_and_refuses_without_upstream(tmp_path: Pat
     finally:
         httpd.shutdown()
     assert excinfo.value.code == 403
-    [record] = [json.loads(l) for l in (tmp_path / "requests.jsonl").read_text().splitlines()]
+    [record] = [json.loads(text) for text in (tmp_path / "requests.jsonl").read_text().splitlines()]
     assert record["decision"] == "deny" and record["reason"].startswith("capture only")
     assert record["model"] == "claude-sonnet-5" and record["effort"] == "xhigh"
     assert record["tool_names"] == ["Bash"] and record["anthropic_beta"] == "x-2026-01-01"
