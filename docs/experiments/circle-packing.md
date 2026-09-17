@@ -6,9 +6,9 @@
 
 ## Overview
 
-Circle packing is a classic computational geometry problem and an ideal benchmark for evolutionary code optimization — the search space is continuous, evaluation is fast and deterministic, and the global optimum is well-studied.
+Circle packing is a classic computational geometry problem and a common benchmark for LLM-driven code evolution: the search space is continuous, and evaluation is fast and deterministic.
 
-This experiment mirrors the GEPA O.A. **Single-Task Search** shape (`dataset=None`, `valset=None`), with HELIX's one-train/one-val contract and a Pareto frontier that tracks score metrics directly.
+The example runs a single task: `helix.toml` sets `[dataset]` sizes of 1 and 1, so HELIX passes the evaluator one example id, `"0"`, on both the train and val splits.
 
 | | Value |
 |---|---|
@@ -16,57 +16,45 @@ This experiment mirrors the GEPA O.A. **Single-Task Search** shape (`dataset=Non
 | **Container** | Unit square [0, 1] × [0, 1] |
 | **Score** | Sum of all radii |
 | **Constraints** | No overlaps, all circles within bounds |
-| **Mode** | Single-task search |
+| **Mode** | Example-id handoff with one example (`train_size = 1`, `val_size = 1`) |
 
 ---
 
 ## Configuration
 
+The configuration is [`examples/circle_packing/helix.toml`](../../examples/circle_packing/helix.toml):
+
 ```toml
-# helix.toml — circle packing
-
-objective = "Maximize sum of radii of 26 non-overlapping circles packed in a unit square. Higher score = better."
-seed = "."
-
 [evaluator]
 command = "uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py"
+protected_files = ["evaluate.py"]
 
 [dataset]
 train_size = 1
 val_size = 1
 
 [evolution]
-max_generations = 20
-merge_enabled = false   # single-task: no crossover needed
+max_generations = 30
+merge_enabled = false
+perfect_score_threshold = 100.0
+max_evaluations = 500
 
 [agent]
 backend = "claude"
-model = "sonnet"
+model = "haiku"
+effort = "low"
 max_turns = 20
 ```
+
+`[agent].background` states the task, the constraints, the `pack_circles(n)` interface, and the evaluator's Python version and packages.
 
 ---
 
 ## Seed Solution
 
-The naive seed uses simple grid placement — divide the square into rows and columns, place circles at cell centers with uniform radius:
+[`examples/circle_packing/solve.py`](../../examples/circle_packing/solve.py) places one circle at the center, a ring of 8 around it, and the remaining 17 on an outer ring clipped to the square. It then shrinks radii greedily until no circles overlap and every circle fits inside the square.
 
-```python
-import math
-
-def pack_circles(n: int) -> list[tuple[float, float, float]]:
-    cols = math.ceil(math.sqrt(n))
-    rows = math.ceil(n / cols)
-    r = 0.5 / max(cols, rows)
-    circles = []
-    for i in range(n):
-        x = (i % cols + 0.5) / cols
-        y = (i // cols + 0.5) / rows
-        circles.append((x, y, r))
-    return circles[:n]
-```
-
-**Seed score: ~0.98** — extremely conservative, wastes most of the available space.
+**Seed score: 0.979764.** The command in the example README reproduces it. It uses the same placement and radius computation as the seed in appendix B of GEPA's blog post, which the post says it adopted from ShinkaEvolve. The post's trajectory figure shows that seed at a score of 0.98.
 
 ---
 
@@ -74,99 +62,63 @@ def pack_circles(n: int) -> list[tuple[float, float, float]]:
 
 The evaluator (`evaluate.py`) validates the solution and computes the score:
 
-1. **Boundary check** — Every circle `(x, y, r)` must satisfy: `r ≤ x ≤ 1-r` and `r ≤ y ≤ 1-r`
-2. **Overlap check** — For every pair `(i, j)`: `dist(center_i, center_j) ≥ r_i + r_j`
-3. **Score** — Sum of all radii; violations are reported in `side_info` and do not alter the score.
+1. **Boundary check:** every circle `(x, y, r)` must satisfy `r ≤ x ≤ 1-r` and `r ≤ y ≤ 1-r`.
+2. **Overlap check:** for every pair `(i, j)`, `dist(center_i, center_j) ≥ r_i + r_j`.
+3. **Score:** the sum of all radii. Violations are reported in `side_info` and do not change the score, the same rule as the evaluator in GEPA's [`examples/circle_packing`](https://github.com/gepa-ai/gepa/tree/main/examples/circle_packing). A valid packing has both violation counts at 0.
 
-Output format (one pair per id in `helix_batch.json`):
+Output format (one pair per id in `helix_batch.json`), shown for the seed:
+
 ```text
-HELIX_RESULT=[[2.635982, {"scores": {"sum_radii": 2.635982}, "violations": 0, "arrangement": "26 circles in 6x5 grid, avg_r=0.1014, violations=0"}]]
+HELIX_RESULT=[[0.979764, {"scores": {"sum_radii": 0.979764}, "feedback": "All 26 circles are valid: inside the square, no overlaps. ...", "bounds_violations": {"count": 0, "worst": []}, "overlap_violations": {"count": 0, "total_overlap_depth": 0.0, "worst": []}, "radius_stats": {"n_circles": 26, "min": 0.01, "max": 0.130332, "mean": 0.037683}}]]
 ```
 
 ---
 
-## Results
+## Reference Values
 
-### Generation-by-Generation Progression
-
-| Gen | Candidate | Score | Δ | Strategy |
-|:---:|---|:---:|:---:|---|
-| 0 | `g0-s0` | 0.98 | — | Naive grid placement |
-| 1 | `g1-m0` | 1.42 | +0.44 | Variable radii — larger circles in center |
-| 2 | `g2-m0` | 1.78 | +0.36 | Greedy sequential placement with gap-filling |
-| 3 | `g3-m0` | 2.01 | +0.23 | Added local search optimization pass |
-| 4 | `g4-m1` | 2.19 | +0.18 | Physics-based force simulation (repulsion + compression) |
-| 5 | `g5-m0` | 2.35 | +0.16 | Hybrid: greedy seed → force simulation → local refinement |
-| 6 | `g6-m0` | 2.48 | +0.13 | Annealing-based perturbation with adaptive step size |
-| 7 | `g7-m0` | 2.56 | +0.08 | Multi-start: run 5 random seeds, keep best |
-| 8 | `g8-m1` | **2.63** | +0.07 | Fine-tuned force parameters + boundary handling |
-
-### Score Trajectory
-
-```
-Score
-2.8 ┤
-    │
-2.6 ┤                                               ●━━ 2.63 (HELIX)
-    │                                          ●━━━━
-2.4 ┤                                     ●━━━
-    │                                ●━━━━
-2.2 ┤                           ●━━━
-    │
-2.0 ┤                      ●━━━
-    │
-1.8 ┤                 ●━━━
-    │
-1.6 ┤
-    │
-1.4 ┤            ●━━━
-    │
-1.2 ┤
-    │
-1.0 ┤       ●━━━━━━━━ 0.98 (seed)
-    │
-    └────┬────┬────┬────┬────┬────┬────┬────┬────┬──
-         0    1    2    3    4    5    6    7    8   Gen
-```
-
-### Comparison
-
-| Method | Score | Notes |
+| Source | Sum of radii (n=26) | Notes |
 |---|:---:|---|
-| Naive grid (seed) | 0.98 | Uniform radius, row/column layout |
-| **HELIX** (8 gens) | **2.63** | Full tool access, multi-strategy evolution |
-| GEPA benchmark | 2.635 | ICLR 2026 (single-file, blind mutation) |
-| Known optimum (n=26) | ~2.69 | Packomania reference |
+| Best known packing | 2.63598+ | [Erich Friedman's Packing Center](https://erich-friedman.github.io/packing/cirRsqu/) |
+| GEPA optimize_anything | 2.63598+ | [Introducing optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/) |
+| AlphaEvolve | 2.635 | [AlphaEvolve results notebook](https://github.com/google-deepmind/alphaevolve_results/blob/main/mathematical_results.ipynb), section B.12, which lists the previous state of the art as 2.634. The radii of its Construction 1 sum to 2.635863 |
 
-> **HELIX achieves 99.3% of the GEPA benchmark** in just 8 generations, with significantly richer mutation capabilities.
+These are best known values, not proven optima.
 
 ---
 
-## What Claude Code Did
+## Reference Packing
 
-Unlike GEPA's blind one-shot mutations, Claude Code explored the problem space with full tool access:
+[`circle-packing/reference_known_best.py`](circle-packing/reference_known_best.py) is a reference packing for checking the evaluator setup. It embeds a packing (`KNOWN_BEST_CONFIG`) whose radii sum to 2.635982, runs an SLSQP-based search for up to 50 seconds, and returns the embedded packing when that search does not find a packing scoring above 2.6.
 
-**Generation 1–2:** Read the evaluator to understand scoring, then replaced the fixed-radius grid with variable-radius greedy placement.
-
-**Generation 3–4:** Ran the solver multiple times, observed that greedy placement left gaps, added a local search post-processing step and then a physics-based force simulation.
-
-**Generation 5–6:** Combined strategies — greedy initialization seeds the force simulation, which is followed by simulated annealing for fine-tuning.
-
-**Generation 7–8:** Added multi-start (multiple random initializations), tuned hyperparameters by running the evaluator repeatedly during the mutation session, and fixed edge cases in boundary handling.
-
-Each mutation session lasted 5–15 Claude Code turns, with the agent verifying its changes by running `python evaluate.py` mid-mutation.
+```bash
+tmp_dir=$(mktemp -d) && cp "$(git rev-parse --show-toplevel)/examples/circle_packing/evaluate.py" "$tmp_dir/" \
+  && cp "$(git rev-parse --show-toplevel)/docs/experiments/circle-packing/reference_known_best.py" "$tmp_dir/solve.py" \
+  && printf '["0"]\n' > "$tmp_dir/helix_batch.json" \
+  && cd "$tmp_dir" \
+  && uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py
+# HELIX_RESULT=[[2.635982, {"scores": {"sum_radii": 2.635982}, "feedback": "All 26 circles are valid: inside the square, no overlaps. ...", ...}]]
+```
 
 ---
 
 ## Reproducing
 
+Copy the example to a standalone directory outside any git repository, then run HELIX there. The copy keeps the run's git repository, candidate worktrees, and `.helix/` state separate from the HELIX clone:
+
 ```bash
-cd examples/circle_packing/
-helix init
+work_dir="$(mktemp -d)/circle_packing"
+cp -R "$(git rev-parse --show-toplevel)/examples/circle_packing" "$work_dir"
+cd "$work_dir"
 helix evolve
 ```
 
-The full run completes in approximately 30 minutes with `claude-sonnet-4-5`.
+`helix evolve` initializes the copy as a git repository and commits it as the seed. After the run, `helix frontier`, `helix best`, and `helix log` show the frontier, the best candidate, and the mutation log.
+
+A reported result should include:
+
+- the `helix.toml` used, including the backend, model, effort, and `[sandbox]` settings;
+- the `.helix/` state and mutation logs from the run;
+- the best candidate's `solve.py` and its `HELIX_RESULT` line, with both violation counts at 0.
 
 ---
 

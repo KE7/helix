@@ -4,7 +4,8 @@ import numpy as np
 def pack_circles(n: int) -> list[tuple[float, float, float]]:
     """Pack n circles in unit square to maximize sum of radii.
 
-    Naive seed implementation matching the GEPA blog post:
+    Concentric-ring seed from the GEPA optimize_anything blog post
+    (appendix B):
     https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/
 
     Uses a concentric-ring heuristic: one center circle, a ring of 8,

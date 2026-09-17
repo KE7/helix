@@ -16,7 +16,7 @@ HELIX applies reflective Pareto evolution to whole software repositories. Each m
 
 <br>
 
-[Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Configuration](#-configuration) · [CLI Reference](#-cli-reference) · [Results](#-results)
+[Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Configuration](#-configuration) · [CLI Reference](#-cli-reference) · [Examples](#-examples)
 
 </div>
 
@@ -769,19 +769,13 @@ stderr as fallback debug context.
 
 ---
 
-## 🧪 Results
+## 🧪 Examples
 
-### 🔵 Circle Packing
+| Example | Task | Seed |
+|---|---|---|
+| [`examples/circle_packing/`](examples/circle_packing/) | Pack 26 non-overlapping circles in the unit square, maximizing the sum of radii | `solve.py`, a concentric-ring layout with a sum of radii of 0.979764 |
 
-Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
-
-| | Score | Config |
-|---|:---:|---|
-| Seed (naive concentric grid) | 0.9798 | — |
-| **HELIX best (gen 14 of 30)** | **2.6360** | `haiku` · `low` effort · `max_turns=20` |
-| GEPA optimize_anything ([blog](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)) | 2.63598+ | gemini-3-flash |
-
-> **Note:** HELIX **matched the best published result** (2.635982 vs 2.63598+) using Claude Haiku with low reasoning effort and a 20-turn per mutation budget, and exceeded AlphaEvolve's 2.6358. See [`examples/circle_packing/`](examples/circle_packing/) for the full fixture including `solve_optimized.py` (the best evolved solution).
+Run an example to produce results. [`docs/experiments/circle-packing.md`](docs/experiments/circle-packing.md) describes the circle-packing evaluation protocol and lists published reference values for the task.
 
 ---
 

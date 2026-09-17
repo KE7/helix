@@ -5,8 +5,8 @@ Imports solve.pack_circles(26), checks validity constraints, computes total
 radius sum as score, and prints one ``HELIX_RESULT=`` line. Exits with code 0
 on success.
 
-Score = sum of all radii (no penalty for violations — matching the
-GEPA blog: https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)
+Score = sum of all radii. Violations are reported in side_info and do not
+change the score, the same rule as GEPA's examples/circle_packing evaluator.
 
 ``side_info`` carries the feedback the *next* mutation actually reasons from
 (see the "Evaluator Contract" note in skills/helix/SKILL.md): which circles
@@ -272,7 +272,8 @@ def evaluate():
         )
         return
 
-    # Score = sum of all radii (no violation penalty, matching GEPA blog)
+    # Score = sum of all radii; violations are reported in side_info and do
+    # not change the score (same rule as GEPA's examples/circle_packing).
     score = round(sum(r for _, _, r in circles), 6)
     _emit(score, side_info_extra=_analyze(circles))
 

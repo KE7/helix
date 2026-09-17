@@ -1,7 +1,13 @@
 """
-Optimized circle packing for 26 circles in unit square.
-Uses scipy SLSQP + iterated local search (single-circle relocation).
-Achieves 2.635982, matching the best published result and above AlphaEvolve's 2.6358.
+Reference packing for the circle packing example (n=26, unit square).
+
+KNOWN_BEST_CONFIG is an embedded packing whose radii sum to 2.635982.
+pack_circles(n) runs an SLSQP + iterated-local-search pass for up to
+TIME_BUDGET seconds and returns KNOWN_BEST_CONFIG when that pass does not find
+a packing scoring above 2.6.
+
+Use it to check that the example's evaluator and interpreter are set up
+correctly; see docs/experiments/circle-packing.md.
 """
 import math
 import time
@@ -14,8 +20,10 @@ TIME_BUDGET = 50.0  # seconds
 # Priority seeds known to produce good base solutions
 PRIORITY_SEEDS = [230, 13, 10, 7, 5, 2, 42, 100, 150, 200]
 
-# Known high-quality configuration (score ≈ 2.635982, matches the 2.63598+ published result)
-# Derived from seed 230 base + ILS relocation of circle 11
+# Embedded packing, derived from the seed-230 base solution plus ILS relocation
+# of circle 11.  Its radii sum to 2.635982; the best known value for n=26 on
+# Erich Friedman's Packing Center is 2.63598+
+# (https://erich-friedman.github.io/packing/cirRsqu/).
 KNOWN_BEST_CONFIG = [
     (0.4955317611, 0.7246573608, 0.1176296263),
     (0.8965327270, 0.5174044160, 0.1034671730),
