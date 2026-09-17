@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecar service only, for example a private evaluation ledger.
 - `xhigh` and `max` are recognized `effort` values for the `claude` backend
   (Claude Code 2.1.274 `--effort`); HELIX previously warned on them.
+- `examples/circle_packing/clean_run/`: a sandboxed, leak-free protocol for
+  the circle-packing example with an evaluation budget in optimize_anything's
+  unit (evaluator service with a private ledger, egress gateway, isolation
+  checks, launch/stop/summary scripts). See
+  `docs/experiments/circle-packing.md`.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by
@@ -56,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now charged before stopping.
 
 ### Changed
+- The circle-packing example evaluator scores an invalid packing 0 (it used
+  to score its radius sum), validates with optimize_anything's absolute
+  tolerance of 1e-6, and scores a valid packing by its radius sum after
+  subtracting the largest residual violation from every radius.
 - **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
   configuration field. Every backend's native transcript is now always
   copied out of the auth volume (or `$HOME` when unsandboxed) at the end of

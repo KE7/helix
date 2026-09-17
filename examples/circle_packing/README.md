@@ -18,6 +18,12 @@ helix evolve
 `helix evolve` initializes the copy as a git repository and evolves `solve.py`
 against `evaluate.py` using the configuration in `helix.toml`.
 
+This quick setup has no isolation: the agent can read and run `evaluate.py`,
+evaluate outside the budget, and use the web. For a run whose result you
+intend to report, use the sandboxed protocol in [`clean_run/`](clean_run/),
+described in
+[`docs/experiments/circle-packing.md`](../../docs/experiments/circle-packing.md#clean-run-protocol).
+
 ## Results
 
 Run the example to produce results; see
@@ -56,6 +62,16 @@ the evaluator's Python version and packages.
 - `helix.toml` — project configuration. It lists `evaluate.py` in
   `[evaluator].protected_files`, so a candidate that modifies the evaluator is
   rejected.
+- `check_packing.py` — validity checker that computes no score; the
+  clean-run protocol gives it to the agent in place of an evaluator.
+- `clean_run/` — the sandboxed, leak-free protocol (evaluator service,
+  egress gateway, Dockerfiles, config template, scripts).
+
+A packing is valid when it has exactly 26 finite `(x, y, r)` rows with
+`r ≥ 0`, every circle lies inside the square and no two overlap, within an
+absolute tolerance of 1e-6. An invalid packing scores 0. A valid packing
+scores the sum of its radii after every radius is reduced by the largest
+residual violation, so tolerance slack never raises the score.
 
 ## Requirements
 
@@ -72,7 +88,7 @@ tmp_dir=$(mktemp -d) && cp "$(git rev-parse --show-toplevel)/examples/circle_pac
   && printf '["0"]\n' > "$tmp_dir/helix_batch.json" \
   && cd "$tmp_dir" \
   && uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py
-# HELIX_RESULT=[[0.979764, {"scores": {"sum_radii": 0.979764}, "feedback": "All 26 circles are valid: inside the square, no overlaps. Radii range 0.0100-0.1303 (mean 0.0377, spread ratio 13.03) across 26 circles. Circle 0 could grow 0.1113 before circle 8 (total headroom 0.3665). Largest empty gap: r0.1211 near (0.88, 0.88).", "bounds_violations": {"count": 0, "worst": []}, "overlap_violations": {"count": 0, "total_overlap_depth": 0.0, "worst": []}, "radius_stats": {"n_circles": 26, "min": 0.01, "max": 0.130332, "mean": 0.037683}}]]
+# HELIX_RESULT=[[0.979764..., {"scores": {"sum_radii": 0.979764...}, "valid": true, "certification_shrink": 1.4e-17, "feedback": "All 26 circles are valid: inside the square, no overlaps. Radii range 0.0100-0.1303 (mean 0.0377, spread ratio 13.03) across 26 circles. Circle 0 could grow 0.1113 before circle 8 (total headroom 0.3665). Largest empty gap: r0.1211 near (0.88, 0.88).", "bounds_violations": {"count": 0, "worst": []}, "overlap_violations": {"count": 0, "total_overlap_depth": 0.0, "worst": []}, "radius_stats": {"n_circles": 26, "min": 0.01, "max": 0.130332, "mean": 0.037683}}]]
 ```
 
 A score of `0.0` with `"ERROR: Could not import solve.py"` means the evaluator

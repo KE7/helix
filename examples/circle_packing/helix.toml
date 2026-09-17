@@ -31,7 +31,8 @@ background = """
 Circle packing: pack 26 non-overlapping circles in the unit square [0,1]x[0,1].
 Each circle is (x, y, r) and must lie inside the square: r <= x, r <= y, r <= 1-x, r <= 1-y.
 No two circles may overlap: dist(c_i, c_j) >= r_i + r_j.
-Score = sum of all radii. Higher is better.
+Both rules are checked with an absolute tolerance of 1e-6. An invalid packing scores 0.
+Score of a valid packing: let s = max(0, largest containment excess, largest pairwise overlap / 2); the score is the sum over circles of max(0, r - s). Higher is better.
 solve.py must define pack_circles(n) returning a list of n (x, y, r) tuples; evaluate.py calls pack_circles(26).
 The evaluator runs Python 3.12 with numpy and scipy installed.
 """

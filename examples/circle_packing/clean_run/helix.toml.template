@@ -1,0 +1,98 @@
+# HELIX configuration for the leak-free circle-packing run.
+#
+# scripts/setup_run_dir.sh renders this file into <run dir>/.helix-run/helix.toml
+# and replaces @LEDGER_DIR@, @EVAL_CPUS@, @MAX_EVALUATIONS@,
+# @MAX_EXECUTIONS@, @MODEL@, @EFFORT@ and @MAX_TURNS@.  The file lives outside
+# the candidate tree, and HELIX never copies a helix.toml into an agent
+# workspace.  See docs/experiments/circle-packing.md for the protocol.
+
+objective = "Maximize the sum of the radii of 26 non-overlapping circles packed inside the unit square."
+rng_seed = 0
+
+[env]
+# Agent containers reach the model API only through the egress gateway, which
+# injects the real credential.  The placeholder below is all an agent sees.
+ANTHROPIC_BASE_URL = "http://anthropic-gateway:8080"
+ANTHROPIC_API_KEY = "placeholder-the-gateway-injects-the-credential"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+DISABLE_AUTOUPDATER = "1"
+DISABLE_TELEMETRY = "1"
+DISABLE_ERROR_REPORTING = "1"
+DISABLE_BUG_COMMAND = "1"
+
+[evaluator]
+# Runs in an evaluator-runner container on the sidecar's private network.  It
+# never executes candidate code: it sends the candidate tree to the sidecar
+# and prints the sidecar's answer.
+command = "python3 /opt/cpeval/runner/evaluator_client.py"
+include_stdout = true
+include_stderr = true
+
+[evaluator.sidecar]
+image = "helix-circle-clean/evaluator:1"
+# CP_MAX_EXECUTIONS is a backstop above HELIX's own cap; it is set on the
+# sidecar's command line so it never reaches an agent or runner environment.
+command = "env CP_MAX_EXECUTIONS=@MAX_EXECUTIONS@ python3 /opt/cpeval/private/evaluator_server.py"
+endpoint = "http://helix-evaluator:8080/evaluate"
+startup_timeout_seconds = 120
+internal_network = true
+volumes = ["@LEDGER_DIR@:/srv/cpeval/ledger:rw"]
+
+[dataset]
+# Single-task search: one task, scored the same way on the train gate and on
+# validation.
+train_size = 1
+val_size = 1
+
+[evolution]
+# Budget: executions of the scoring function, optimize_anything's
+# max_metric_calls unit.  With minibatch_size = 1 every HELIX evaluation unit
+# is exactly one execution (optimize_anything also uses a minibatch of 1 in
+# single-task mode).
+max_evaluations = @MAX_EVALUATIONS@
+# Every generation executes the scoring function at least once (the parent is
+# re-scored), so this cap cannot bind before max_evaluations; it only guards
+# against a loop that spends tokens without evaluating.
+max_generations = 300
+minibatch_size = 1
+num_parallel_proposals = 1
+mutations_per_parent = 1
+merge_enabled = false
+cache_evaluation = true
+acceptance_criterion = "strict_improvement"
+frontier_type = "objective"
+candidate_selection_strategy = "pareto"
+
+[agent]
+backend = "claude"
+model = "@MODEL@"
+effort = "@EFFORT@"
+max_turns = @MAX_TURNS@
+disallowed_tools = ["WebSearch", "WebFetch"]
+background = """
+Task: place 26 circles inside the unit square [0, 1] x [0, 1] so that no two circles overlap, maximizing the sum of their radii.
+
+Interface: solve.py must define pack_circles(n) returning a list of n rows (x, y, r) of finite floats. The evaluator imports solve.py from the candidate tree and calls pack_circles(26). Other files in the tree may be used.
+
+Validity, with absolute tolerance 1e-6:
+- exactly 26 rows, each (x, y, r) of finite real numbers, r >= 0
+- containment: r - x <= 1e-6, r - y <= 1e-6, x + r - 1 <= 1e-6, y + r - 1 <= 1e-6
+- no overlap: r_i + r_j - hypot(x_i - x_j, y_i - y_j) <= 1e-6 for every pair i < j
+An invalid packing, an exception, or a call that exceeds the time limit scores 0.
+
+Score of a valid packing: let s = max(0, largest containment excess, largest pairwise overlap / 2). The score is the sum over circles of max(0, r - s). A packing with no residual violation scores the plain sum of its radii.
+
+Evaluation environment: a separate container without network access, running Python 3.11 with numpy 2.3.3, scipy 1.16.2 and the standard library; pack_circles(26) has a 600-second wall-clock limit; BLAS runs single-threaded; @EVAL_CPUS@ CPU cores are available.
+
+This workspace has the same Python, numpy and scipy, and no network access. check_packing.py reports whether a packing meets the validity rules and its residual violation s; it does not compute a score. The evaluator cannot be reached from this workspace.
+"""
+
+[sandbox]
+enabled = true
+evaluator = true
+image = "helix-circle-clean/agent-claude:1"
+network = "helix-circle-clean-agent"
+auth_volume = "helix-circle-clean-claude-home"
+skip_special_files = true
+# Hang guard for one agent session or one evaluator-runner call.
+timeout_seconds = 5400
