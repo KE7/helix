@@ -89,6 +89,21 @@ EVAL_ID="$(image_id "${EVALUATOR_IMAGE}")"
 GATEWAY_ID="$(image_id "${GATEWAY_IMAGE}")"
 [ -n "${AGENT_ID}" ] && [ -n "${EVAL_ID}" ] && [ -n "${GATEWAY_ID}" ] \
   || die "images missing; run examples/circle_packing/clean_run/scripts/build_images.sh"
+# The code baked into the images must be the code in this HELIX checkout.
+CLEAN_SRC="${HELIX_SRC}/examples/circle_packing/clean_run"
+check_image_file() {  # $1 image, $2 path in the image, $3 source file
+  local want got
+  want="$(shasum -a 256 "$3" | cut -d' ' -f1)"
+  got="$(docker run --rm --label "${LABEL}=launch" --network none --user root \
+    --entrypoint sha256sum "$1" "$2" 2>/dev/null | cut -d' ' -f1)"
+  [ -n "${got}" ] && [ "${want}" = "${got}" ] \
+    || die "$1 carries a different $2 than ${3}; rebuild with ${CLEAN_SRC}/scripts/build_images.sh"
+}
+check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/private/evaluator_server.py "${CLEAN_SRC}/evaluator/evaluator_server.py"
+check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/private/packing_rules.py "${CLEAN_SRC}/evaluator/packing_rules.py"
+check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/harness/candidate_harness.py "${CLEAN_SRC}/evaluator/candidate_harness.py"
+check_image_file "${EVALUATOR_IMAGE}" /opt/cpeval/runner/evaluator_client.py "${CLEAN_SRC}/evaluator/evaluator_client.py"
+check_image_file "${GATEWAY_IMAGE}" /opt/gateway/anthropic_gateway.py "${CLEAN_SRC}/gateway/anthropic_gateway.py"
 CLAUDE_VERSION="$(docker run --rm --label "${LABEL}=launch" --network none "${AGENT_IMAGE}" claude --version)"
 PY_VERSIONS="$(docker run --rm --label "${LABEL}=launch" --network none "${EVALUATOR_IMAGE}" \
   python3 -c 'import sys, numpy, scipy; print(sys.version.split()[0], numpy.__version__, scipy.__version__)')"
