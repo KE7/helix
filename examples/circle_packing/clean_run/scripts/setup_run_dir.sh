@@ -6,7 +6,7 @@
 # Settings (environment, defaults in brackets):
 #   MAX_EVALUATIONS [200]  scoring-function executions (optimize_anything's
 #                          max_metric_calls for circle packing)
-#   MODEL [claude-sonnet-5]  EFFORT [xhigh]  MAX_TURNS [40]
+#   MODEL [claude-haiku-4-5]  EFFORT [xhigh]  MAX_TURNS [40]
 #
 # The run directory is a fresh git repository outside any HELIX clone whose
 # only commit holds the seed candidate (solve.py, check_packing.py and a
@@ -30,7 +30,7 @@ EXAMPLE="$(cd "${CLEAN_RUN}/.." && pwd)"
 HELIX_SRC="$(git -C "${CLEAN_RUN}" rev-parse --show-toplevel)"
 RUN_DIR="${1:-${HOME}/helix-circle-packing-clean-run}"
 MAX_EVALUATIONS="${MAX_EVALUATIONS:-200}"
-MODEL="${MODEL:-claude-sonnet-5}"
+MODEL="${MODEL:-claude-haiku-4-5}"
 EFFORT="${EFFORT:-xhigh}"
 MAX_TURNS="${MAX_TURNS:-40}"
 TAG="${HELIX_CIRCLE_CLEAN_TAG:-1}"

@@ -1546,9 +1546,26 @@ def test_invalid_summary_returns_nonzero_and_labels_headline(tmp_path, monkeypat
     assert result['best_valid_within_budget']['generation'] == 7
 
 
-def test_watchdog_stops_on_subscription_refresh_failure():
-    assert watchdog.should_stop([{'decision': 'deny', 'status': 503,
-                                  'reason': 'subscription login unavailable'}])
+def test_watchdog_requires_consecutive_subscription_refresh_failures():
+    failure = {'decision': 'deny', 'status': 503,
+               'reason': 'subscription login unavailable'}
+    assert not watchdog.should_stop([failure])
+    assert watchdog.should_stop([failure] * 3)
+    assert not watchdog.should_stop([failure, _fwd(200), failure, failure])
+
+
+def test_watchdog_ignores_historical_subscription_failure_after_recovery():
+    # Full-run regression: stale preflight failures preceded successful inference.
+    records = [{'decision': 'deny', 'status': 503,
+                'reason': 'subscription login unavailable; run helix sandbox login claude'}] * 10
+    records += [_fwd(200)] * 3
+    assert not watchdog.should_stop(records)
+
+
+def test_watchdog_success_and_unrelated_denials_are_not_auth_failures():
+    assert not watchdog.should_stop([_fwd(200, 'authentication_error')] * 3)
+    assert not watchdog.should_stop([{'decision': 'deny', 'status': 503,
+                                      'reason': 'temporary gateway failure'}] * 3)
 
 
 def test_summary_does_not_treat_a_smaller_budget_marker_as_full_completion():

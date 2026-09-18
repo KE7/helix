@@ -27,8 +27,9 @@ when any of these happens, and writes the reason to the stop record:
   of requests the service answered drift apart by more than a proposal's worth
   (``DIVERGENCE_TOLERANCE``), relative to their difference when the watchdog
   started, on two consecutive polls;
-* ``credential``: ``CONSECUTIVE`` forwarded model API requests in a row failed
-  for a reason retrying cannot fix (authentication, permission or billing).
+* ``credential``: ``CONSECUTIVE`` model API attempts in a row failed
+  authentication, permission or billing, including subscription login failures
+  at the gateway. Successful forwarded requests reset this streak.
 
 If HELIX has not exited ``ESCALATE_SECONDS`` after SIGINT it gets SIGTERM, and
 SIGKILL 30 s later.
@@ -60,7 +61,14 @@ FATAL_MESSAGE_MARKERS = ("credit balance", "billing", "invalid x-api-key", "api 
 EVALUATOR_FAILURE_RE = re.compile(r"(?:Parent|Child) eval for proposal \S+.*?failed", re.S)
 
 
+def is_subscription_failure(record: dict[str, Any]) -> bool:
+    return (record.get("decision") == "deny" and record.get("status") == 503
+            and str(record.get("reason", "")).startswith("subscription login"))
+
+
 def is_fatal(record: dict[str, Any]) -> bool:
+    if is_subscription_failure(record):
+        return True
     status = record.get("status")
     if record.get("decision") != "allow" or not isinstance(status, int) or status < 400:
         return False
@@ -72,14 +80,18 @@ def is_fatal(record: dict[str, Any]) -> bool:
     )
 
 
+def credential_failures(
+    records: list[dict[str, Any]], consecutive: int = CONSECUTIVE
+) -> list[dict[str, Any]]:
+    """Return the fatal streak, ignoring policy denials but never successes."""
+    attempts = [r for r in records if r.get("decision") == "allow" or is_subscription_failure(r)]
+    tail = attempts[-consecutive:]
+    return tail if len(tail) == consecutive and all(is_fatal(r) for r in tail) else []
+
+
 def should_stop(records: list[dict[str, Any]], consecutive: int = CONSECUTIVE) -> bool:
-    """Credential rule: the last ``consecutive`` forwarded requests all failed fatally."""
-    if any(r.get("status") == 503 and str(r.get("reason", "")).startswith("subscription login")
-           for r in records):
-        return True
-    forwarded = [r for r in records if r.get("decision") == "allow"]
-    tail = forwarded[-consecutive:]
-    return len(tail) == consecutive and all(is_fatal(r) for r in tail)
+    """Credential rule: the last ``consecutive`` API attempts all failed fatally."""
+    return bool(credential_failures(records, consecutive))
 
 
 def evaluator_stop_reason(
@@ -206,6 +218,7 @@ def main() -> int:
     # on the refusal that ended its previous segment.
     start_rejections = len(_jsonl(ledger / "rejected_requests.jsonl"))
     start_events = len(_jsonl(ledger / "service_events.jsonl"))
+    start_gateway = len(_jsonl(args.gateway_log))
     start_failures = _evaluator_failures(args.helix_log)
     start_counter = _helix_counter(args.helix_state)
     baseline = (
@@ -221,11 +234,11 @@ def main() -> int:
         if not _alive(pid):
             return 0
 
-        requests = _jsonl(args.gateway_log)
-        if should_stop(requests):
+        failures = credential_failures(_jsonl(args.gateway_log)[start_gateway:])
+        if failures:
             stop(pid, args.stop_record, "credential", [
-                {k: r.get(k) for k in ("finished_utc", "status", "error_type", "error_message")}
-                for r in [r for r in requests if r.get("decision") == "allow"][-CONSECUTIVE:]
+                {k: r.get(k) for k in ("finished_utc", "decision", "status", "reason", "error_type", "error_message")}
+                for r in failures
             ])
             return 0
 
