@@ -6,7 +6,8 @@
 # Settings (environment, defaults in brackets):
 #   MAX_EVALUATIONS [200]  scoring-function executions (optimize_anything's
 #                          max_metric_calls for circle packing)
-#   MODEL [claude-haiku-4-5]  EFFORT [xhigh]  MAX_TURNS [40]
+#   MODEL [claude-haiku-4-5]  EFFORT [unset]  MAX_TURNS [40]
+# Haiku 4.5 does not send output_config.effort; omit the CLI effort override.
 #
 # The run directory is a fresh git repository outside any HELIX clone whose
 # only commit holds the seed candidate (solve.py, check_packing.py and a
@@ -31,7 +32,7 @@ HELIX_SRC="$(git -C "${CLEAN_RUN}" rev-parse --show-toplevel)"
 RUN_DIR="${1:-${HOME}/helix-circle-packing-clean-run}"
 MAX_EVALUATIONS="${MAX_EVALUATIONS:-200}"
 MODEL="${MODEL:-claude-haiku-4-5}"
-EFFORT="${EFFORT:-xhigh}"
+EFFORT="${EFFORT:-}"
 MAX_TURNS="${MAX_TURNS:-40}"
 TAG="${HELIX_CIRCLE_CLEAN_TAG:-1}"
 MAX_EXECUTIONS="${MAX_EVALUATIONS}"
@@ -91,6 +92,7 @@ sed -e "s#@LEDGER_DIR@#${PRIVATE}/ledger#g" \
     -e "s#@MODEL@#${MODEL}#g" \
     -e "s#@EFFORT@#${EFFORT}#g" \
     -e "s#@MAX_TURNS@#${MAX_TURNS}#g" \
+    -e '/^effort = ""$/d' \
     "${CLEAN_RUN}/helix.toml.template" > "${PRIVATE}/helix.toml"
 if grep -q '@[A-Z_]*@' "${PRIVATE}/helix.toml"; then
   echo "unrendered placeholder in ${PRIVATE}/helix.toml" >&2; exit 1

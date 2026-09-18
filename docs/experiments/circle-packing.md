@@ -235,7 +235,7 @@ compute, not a compute-matched comparison with optimize_anything.
 The smoke and stopped full run use Claude Code 2.1.274 with
 `--model claude-sonnet-5 --effort xhigh --max-turns 40
 --disallowedTools=WebSearch,WebFetch`. New run directories default to
-`claude-haiku-4-5` with `xhigh` effort; `MODEL` and `EFFORT` select overrides
+`claude-haiku-4-5` with no effort override; `MODEL` and `EFFORT` select overrides
 when running `setup_run_dir.sh`. The agent container has
 2 CPUs and a 5,400-second session limit. The monitor records sampled
 container CPU-seconds, memory, timing and CPU limits; transcripts supply

@@ -363,7 +363,8 @@ def check_run_dir(run_dir: Path, config: HelixConfig, report: Report) -> None:
     report.check(
         "A7 claude argv denies WebSearch and WebFetch and sets model, effort and max turns",
         "--disallowedTools=WebSearch,WebFetch" in argv
-        and argv[argv.index("--effort") + 1] == agent.effort
+        and (("--effort" in argv and argv[argv.index("--effort") + 1] == agent.effort)
+             if agent.effort is not None else "--effort" not in argv)
         and argv[argv.index("--model") + 1] == agent.model
         and argv[argv.index("--max-turns") + 1] == str(agent.max_turns),
         argv,
