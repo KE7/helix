@@ -26,6 +26,13 @@ described in
 
 ## Results
 
+A capped two-generation clean-run smoke produces a sum of radii of
+**2.63598308491755**, independently checked as exactly feasible and reproduced
+in a fresh container. This is a smoke observation, not a benchmark result.
+The full run capped at 200 scoring executions remains incomplete after a
+watchdog credential stop despite successful sampled requests. See the
+[run state and watchdog fix](../../docs/experiments/circle-packing.md#current-run-state).
+
 Run the example to produce results; see
 [`docs/experiments/circle-packing.md`](../../docs/experiments/circle-packing.md)
 for the evaluation protocol and reference values. The seed solver (`solve.py`)

@@ -23,7 +23,9 @@ Two setups exist:
 - [`examples/circle_packing/`](../../examples/circle_packing/) is the quick local example. It runs the evaluator in the candidate tree, without isolation, and is not suitable for reporting a result.
 - [`examples/circle_packing/clean_run/`](../../examples/circle_packing/clean_run/) is the [clean-run protocol](#clean-run-protocol): a sandboxed, leak-free run whose evaluation budget matches optimize_anything's. Results for this page come only from that protocol.
 
-No HELIX result is reported here yet.
+A two-generation smoke run produces a valid packing with radius sum
+**2.63598308491755** under the clean-run protocol. The full run capped at
+200 scoring executions remains incomplete. See [Current run state](#current-run-state).
 
 ---
 
@@ -119,7 +121,55 @@ The protocol uses a standalone seed repository, a private scoring service, an
 isolated Claude Code mutation container, and a gateway that permits model
 inference without remote-content tools. The implementation is in
 [`examples/circle_packing/clean_run/`](../../examples/circle_packing/clean_run/).
-No HELIX experiment results are reported here.
+The smoke run checks the protocol and candidate reproduction; it does not
+establish a benchmark result.
+
+### Current run state
+
+The 2026-09-17 smoke uses a two-generation cap and a three-execution cap,
+with `claude-sonnet-5`, `xhigh` effort and at most 40 turns per mutation.
+Its best candidate, `g1-s1`, produces a radius sum of
+**2.63598308491755** at scoring execution 2. The independent rational-arithmetic
+check finds exactly 26 circles, no boundary violations and no overlapping
+pairs at zero tolerance. A fresh networkless container reproduces the same
+packing and score. The saved state reaches generation 2; the ledger records
+two scoring executions and six answered requests, four served from cache.
+The three-execution budget is not exhausted.
+
+This is the output of a capped smoke run under the stated protocol, not a
+benchmark result. The smoke summary records 42 Bash calls, including 29
+running Python, and about 4,764 sampled agent CPU-seconds across two
+containers. The final candidate contains all 78 coordinate/radius values as
+literals. Network isolation does not rule out pretrained knowledge, and the
+scoring-execution cap does not bound local search inside a mutation session.
+
+The full budget-matched run has a cap of **200 scoring executions** and is
+**incomplete**. Its own watchdog stops it with reason `credential`; the run
+segment lasts **335 seconds**. The stop record's evidence contains three
+HTTP **200** responses with no error type or error message. The gateway log
+contains older subscription-login failures from an earlier preflight, followed
+by successful inference in this run. The watchdog's historical-error check
+causes the stop despite those successful sampled requests.
+
+The watchdog now considers gateway records added after it starts, clears
+historical login failures when later inference succeeds, and requires three
+consecutive fatal attempts before recording the actual failures that trigger
+a credential stop. Regression tests cover
+successful requests after a login failure, startup with stale failures, and
+consecutive new login failures after recovery. This code fix does not complete
+or rerun the full experiment. Its saved state remains at generation 1 with only the
+seed on the frontier; the ledger contains two scoring executions and four
+answered requests, while HELIX's saved request counter is three. The full
+run's summary directory is empty.
+
+The evidence lives in separate run directories: the smoke is
+`helix-circle-packing-stageC-smoke-20260917`, and the full run is
+`helix-circle-packing-clean-run`. In each directory, `.helix/state.json`
+records search state and `.helix-run/ledger/` records executions and requests.
+The smoke's `.helix-run/summary/summary.json` records the exact check and
+fresh-container reproduction; the full run's
+`.helix-run/logs/watchdog_stop.json`, `run_times.jsonl`, and
+`gateway/gateway_requests.jsonl` record the stop and request outcomes.
 
 ### Reference experiment and budget
 
@@ -157,7 +207,9 @@ The private sidecar is the authority for this run's execution count:
 - A deterministic archive digest caches identical trees across parent,
   child and validation requests. `requests.jsonl` records every answer,
   including cache hits and its originating execution. Cache hits consume
-  zero executions. Every new scoring execution consumes one.
+  zero executions. Every new scoring execution consumes one, including
+  evaluations triggered by agent-generated proposals; failures and interrupted
+  executions still count.
 - At the cap, the service refuses new executions and new proposal rounds.
   Cached validation of the last candidate remains possible. The watchdog
   stops HELIX on the budget refusal and checks evaluator failures,
@@ -180,8 +232,11 @@ compute, not a compute-matched comparison with optimize_anything.
 
 ### Mutation and subscription authentication
 
-Claude Code 2.1.274 runs with `--model claude-sonnet-5 --effort xhigh
---max-turns 40 --disallowedTools=WebSearch,WebFetch`. The agent container has
+The smoke and stopped full run use Claude Code 2.1.274 with
+`--model claude-sonnet-5 --effort xhigh --max-turns 40
+--disallowedTools=WebSearch,WebFetch`. New run directories default to
+`claude-haiku-4-5` with `xhigh` effort; `MODEL` and `EFFORT` select overrides
+when running `setup_run_dir.sh`. The agent container has
 2 CPUs and a 5,400-second session limit. The monitor records sampled
 container CPU-seconds, memory, timing and CPU limits; transcripts supply
 Bash/Python counts and tool-result latency. CPU totals are lower bounds:
@@ -300,7 +355,8 @@ it leaves the committed full-run configuration untouched.
 
 ### Comparison limits
 
-HELIX uses a tool-enabled Sonnet mutator and an entire repository;
+The recorded smoke and stopped full run use a tool-enabled Sonnet mutator
+and an entire repository;
 the reference uses GPT-5 reflection plus a GPT-5.1 refiner and code strings.
 HELIX supplies no warm-start argument to `pack_circles(26)` and removes
 candidate state between executions. Parent feedback still carries the

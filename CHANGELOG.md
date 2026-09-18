@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (PR #30 refactor)
 
 ### Fixed
+- The circle-packing watchdog ignores credential failures from earlier run
+  segments, resets the failure streak after successful inference, and records
+  the three consecutive fatal attempts that trigger a stop.
 - When a parent's minibatch evaluation exhausted `max_evaluations`, HELIX
   stopped without charging the child's gate evaluation and the mutation's
   token usage, which the proposal worker had already spent; the budget

@@ -1572,3 +1572,25 @@ def test_summary_does_not_treat_a_smaller_budget_marker_as_full_completion():
     result = summarize.budget_accounting([{'seq': 1}], [{'seq': 1}], [], [], 200, 0, True)
     assert result['sidecar_budget_marker_present']
     assert not result['budget_exhausted'] and result['run_incomplete']
+
+
+def test_watchdog_ignores_gateway_history_before_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway_log = tmp_path / "gateway.jsonl"
+    gateway_log.write_text(json.dumps({"decision": "deny", "status": 503,
+                                      "reason": "subscription login unavailable"}) + "\n")
+    gateway_log.write_text(gateway_log.read_text() * 3)
+    pid_file = tmp_path / "pid"
+    pid_file.write_text("123")
+    monkeypatch.setattr(sys, "argv", [
+        "watchdog.py", "--pid-file", str(pid_file),
+        "--stop-record", str(tmp_path / "stop.json"),
+        "--gateway-log", str(gateway_log), "--ledger-dir", str(tmp_path),
+        "--helix-state", str(tmp_path / "state.json"),
+        "--helix-log", str(tmp_path / "helix.log"),
+    ])
+    alive = iter([True, False])
+    monkeypatch.setattr(watchdog, "_alive", lambda pid: next(alive))
+    monkeypatch.setattr(watchdog.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(watchdog, "stop", lambda *args: pytest.fail("stale failure stopped run"))
+    assert watchdog.main() == 0
+    assert not (tmp_path / "stop.json").exists()
