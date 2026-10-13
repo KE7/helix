@@ -78,22 +78,27 @@ def summary_prompt(
     *,
     objective: str = "",
     diff: str = "",
+    new_files: str = "",
     max_words: int = MAX_SUMMARY_WORDS,
 ) -> str:
     """Build the whole prompt for the dedicated change-summary call.
 
     This is a standalone task, not an addendum to the mutation prompt: the
     call that runs it has no memory of the mutation and sees only what is
-    written here, so the diff has to carry the content.
+    written here, so the diff and the new files have to carry the content.
 
     Parameters
     ----------
     objective:
         What the run is optimizing, for context on *why* a change was made.
     diff:
-        The mutation's changes against its parent.  Empty when git produced
-        nothing usable -- the prompt then says so explicitly rather than
-        leaving the model to invent an approach it cannot see.
+        The mutation's changes to files git already tracks, against its
+        parent.
+    new_files:
+        Pre-rendered contents of files the mutation created but never added
+        to git, which ``diff`` cannot show.  When both this and ``diff`` are
+        empty the prompt says so explicitly rather than leaving the model to
+        invent an approach it cannot see.
     max_words:
         Word budget.  The same number bounds what :func:`capture_summary`
         keeps, so the request and the enforcement cannot drift apart.
@@ -108,9 +113,12 @@ def summary_prompt(
         sections.append(f"## Objective being optimized\n{objective}")
     if diff:
         sections.append(
-            f"## The change that was made, as a diff against the parent\n```diff\n{diff}\n```"
+            "## Changes to existing files, as a diff against the parent\n"
+            f"```diff\n{diff}\n```"
         )
-    else:
+    if new_files:
+        sections.append(f"## New files added by this attempt\n{new_files}")
+    if not diff and not new_files:
         sections.append(
             "## The change that was made\n"
             "No diff was available. Say that plainly in the file; do not guess at an "

@@ -73,6 +73,21 @@ class TestSummaryPrompt:
     def test_objective_section_omitted_when_absent(self) -> None:
         assert "## Objective being optimized" not in summary_prompt(diff="- a\n+ b")
 
+    def test_carries_new_files_in_their_own_section(self) -> None:
+        prompt = summary_prompt(diff="- a\n+ b", new_files="### features.py\n```\nX = 1\n```")
+        assert "## Changes to existing files" in prompt
+        assert "## New files added by this attempt" in prompt
+        assert "X = 1" in prompt
+        assert prompt.index("## Changes to existing files") < prompt.index("## New files")
+
+    def test_new_files_alone_are_a_change(self) -> None:
+        """A mutation that only added files has no diff, but it is not a
+        mutation with nothing to describe."""
+        prompt = summary_prompt(new_files="### features.py\n```\nX = 1\n```")
+        assert "## New files added by this attempt" in prompt
+        assert "## Changes to existing files" not in prompt
+        assert "No diff was available" not in prompt
+
     def test_absent_diff_is_declared_rather_than_invented(self) -> None:
         """The summary is fed into later prompts, so a call with nothing to
         look at must be told to say so instead of guessing an approach."""

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -2187,6 +2189,15 @@ _MAX_DIFF_CHARS = 20_000
 
 _DIFF_TRUNCATION_MARKER = "\n[... diff truncated ...]"
 
+#: Ceilings on new-file contents handed to the summary call: per file, so one
+#: generated data file cannot crowd out the code, and in total, matching the
+#: diff's own ceiling.
+_MAX_NEW_FILE_CHARS = 4_000
+_MAX_NEW_FILES_CHARS = 20_000
+
+#: Leading bytes searched for a NUL to call a file binary, as git does.
+_BINARY_SNIFF_BYTES = 8_000
+
 
 def _git_stdout(worktree_path: str, *args: str) -> str:
     """Run a git command in *worktree_path*, returning stdout or ``""``."""
@@ -2227,35 +2238,144 @@ def _child_diff(worktree_path: str, base_sha: str | None) -> str:
     changed a great deal.  Diffing from the captured base covers committed and
     uncommitted work alike, so it does not matter what the agent chose to do.
 
-    Untracked new files are listed by name: a mutation that adds a module is a
-    real change, and ``git diff`` alone would not mention it.
+    Files the agent created but never added to git are invisible to
+    ``git diff``; :func:`_new_files_section` covers those.
 
     Returns ``""`` on any git failure or when nothing changed; the caller then
     builds a diff-less prompt rather than failing the mutation.
     """
     ref = base_sha or "HEAD"
-    patch = _git_stdout(worktree_path, "diff", "--no-color", ref)
-    untracked = [
-        name
-        for name in _git_stdout(
-            worktree_path, "ls-files", "--others", "--exclude-standard"
-        ).splitlines()
-        if name.strip()
-    ]
-    if not patch.strip() and not untracked:
+    patch = _git_stdout(worktree_path, "diff", "--no-color", ref).strip()
+    if not patch:
         return ""
     if len(patch) > _MAX_DIFF_CHARS:
         patch = patch[:_MAX_DIFF_CHARS] + _DIFF_TRUNCATION_MARKER
 
-    parts: list[str] = []
-    stat = _git_stdout(worktree_path, "diff", "--stat", ref).strip()
-    if stat:
-        parts.append(stat)
-    if untracked:
-        parts.append("new files: " + ", ".join(sorted(untracked)))
-    if patch.strip():
-        parts.append(patch.strip())
-    return "\n\n".join(parts)
+    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref).strip()
+    return f"{diffstat}\n\n{patch}" if diffstat else patch
+
+
+def _untracked_files(worktree_path: str) -> list[str]:
+    """Return the worktree's untracked, non-ignored files, sorted.
+
+    ``-z`` keeps unusual filenames intact; without it git C-quotes them.
+    """
+    listing = _git_stdout(
+        worktree_path, "ls-files", "-z", "--others", "--exclude-standard"
+    )
+    return sorted(name for name in listing.split("\0") if name)
+
+
+def _read_new_file(root: Path, rel: str, max_chars: int) -> tuple[str, str | None]:
+    """Read the head of one new file for the summary prompt.
+
+    Returns ``(note, text)``.  ``text`` is ``None`` when the contents are
+    withheld, and ``note`` then says why; otherwise ``note`` is ``""`` or
+    discloses a truncation.
+
+    Never follows a symlink: the target could be any readable path, and what
+    is read here is copied into a prompt whose output is persisted.  A link
+    is reported by its target instead.
+    """
+    path = root / rel
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "unreadable", None
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "?"
+        return f"symlink to {target}; not followed", None
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file", None
+    if info.st_size == 0:
+        return "empty", None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return "unreadable", None
+    try:
+        # Four bytes per character covers any UTF-8 text up to max_chars.
+        head = os.read(fd, max(max_chars * 4, _BINARY_SNIFF_BYTES))
+    except OSError:
+        return "unreadable", None
+    finally:
+        os.close(fd)
+
+    # git's own heuristic: a NUL byte near the start means binary.
+    if b"\0" in head[:_BINARY_SNIFF_BYTES]:
+        return f"binary, {info.st_size:,} bytes; contents omitted", None
+    text = head.decode("utf-8", errors="replace")
+    if len(text) > max_chars or info.st_size > len(head):
+        text = text[:max_chars]
+        return (
+            f"{info.st_size:,} bytes; only the first {len(text):,} characters shown"
+        ), text
+    return "", text
+
+
+#: Code-fence language for a new file's extension.  Cosmetic: an unknown
+#: extension just gets a bare fence.
+_FENCE_LANGUAGES = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript", ".sh": "bash",
+    ".json": "json", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml",
+    ".md": "markdown", ".c": "c", ".h": "c", ".cpp": "cpp", ".rs": "rust",
+    ".go": "go", ".java": "java", ".sql": "sql",
+}
+
+
+def _fenced(text: str, language: str) -> str:
+    """Wrap *text* in a code fence that nothing inside it can close.
+
+    A fixed three-backtick fence would end at the first ``` the file itself
+    contains -- in a Markdown file, say -- and spill the rest into the prompt
+    as prose.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{language}\n{text.rstrip(chr(10))}\n{fence}"
+
+
+def _new_files_section(worktree_path: str) -> str:
+    """Render the contents of untracked new files for the summary prompt.
+
+    A mutation that puts its whole idea in a new module is invisible to
+    ``git diff``, and the summary call is told not to explore the repository,
+    so the contents have to be handed over here.
+
+    Bounded twice: each file shows at most its head, and once the total
+    budget is spent the remaining files are still named -- every new file is
+    at least listed -- but not shown.
+
+    Returns ``""`` when there are no new files or git cannot list them.
+    """
+    names = _untracked_files(worktree_path)
+    if not names:
+        return ""
+    root = Path(worktree_path)
+    budget = _MAX_NEW_FILES_CHARS
+    blocks: list[str] = []
+    unshown: list[str] = []
+    for rel in names:
+        if budget <= 0:
+            unshown.append(rel)
+            continue
+        note, text = _read_new_file(root, rel, min(_MAX_NEW_FILE_CHARS, budget))
+        heading = f"### {rel}" + (f" ({note})" if note else "")
+        if text is None:
+            blocks.append(heading)
+            continue
+        budget -= len(text)
+        language = _FENCE_LANGUAGES.get(Path(rel).suffix.lower(), "")
+        blocks.append(f"{heading}\n{_fenced(text, language)}")
+    if unshown:
+        blocks.append(
+            "Also added, contents not shown (size budget reached): "
+            + ", ".join(unshown)
+        )
+    return "\n\n".join(blocks)
 
 
 def _content_tree_hash(worktree_path: str) -> str | None:
@@ -2385,6 +2505,7 @@ def generate_change_summary(
     prompt = summary_prompt(
         objective=config.objective,
         diff=_child_diff(worktree_path, base_sha),
+        new_files=_new_files_section(worktree_path),
         max_words=max_words,
     )
     # A fresh turn budget: the mutation's own limit governs editing code and is

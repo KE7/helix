@@ -1518,16 +1518,16 @@ class TestChildDiff:
 
         assert "+    return 42" in _child_diff(str(wt), base)
 
-    def test_reports_new_untracked_files(self, tmp_path: Path):
-        """A mutation that adds a module changed something; ``git diff`` alone
-        would not mention it."""
+    def test_untracked_files_are_left_to_the_new_files_section(self, tmp_path: Path):
+        """``git diff`` cannot see a file never added to git; that is
+        ``_new_files_section``'s job, and the diff must not half-cover it."""
         from helix.mutator import _child_diff, capture_base_commit
 
         wt = self._repo(tmp_path)
         base = capture_base_commit(str(wt))
         (wt / "features.py").write_text("SPARSE = True\n")
 
-        assert "features.py" in _child_diff(str(wt), base)
+        assert _child_diff(str(wt), base) == ""
 
     def test_empty_when_nothing_changed(self, tmp_path: Path):
         from helix.mutator import _child_diff, capture_base_commit
@@ -1554,6 +1554,168 @@ class TestChildDiff:
         diff = _child_diff(str(wt), base)
         assert "truncated" in diff
         assert len(diff) < _MAX_DIFF_CHARS * 2
+
+
+class TestNewFilesSection:
+    """``_new_files_section``: what the summary call sees of files the agent
+    created but never added to git.
+
+    The reviewer's case: a mutation whose whole idea lives in a new, unstaged
+    module.  ``git diff`` shows nothing for it, and the summary call is told
+    not to explore, so its contents must be in the prompt.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        return TestChildDiff()._repo(tmp_path)
+
+    def test_shows_the_contents_of_a_new_module(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "features.py").write_text("def sparse_features(x):\n    return x[::2]\n")
+
+        section = _new_files_section(str(wt))
+        assert "### features.py" in section
+        assert "def sparse_features(x):" in section
+        assert "```python" in section
+
+    def test_empty_when_nothing_was_added(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "solve.py").write_text("changed, but tracked\n")
+        assert _new_files_section(str(wt)) == ""
+
+    def test_no_git_is_not_an_error(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        (plain / "x.py").write_text("x = 1\n")
+        assert _new_files_section(str(plain)) == ""
+
+    def test_ignored_files_are_not_shown(self, tmp_path: Path):
+        """HELIX's own artifacts live behind ``.gitignore`` and are not part
+        of the change."""
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / ".git" / "info" / "exclude").write_text("*.log\n")
+        (wt / "run.log").write_text("noise\n")
+        assert _new_files_section(str(wt)) == ""
+
+    def test_files_in_new_directories_are_listed_individually(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "pkg").mkdir()
+        (wt / "pkg" / "a.py").write_text("A = 1\n")
+        (wt / "pkg" / "b.py").write_text("B = 2\n")
+
+        section = _new_files_section(str(wt))
+        assert "### pkg/a.py" in section and "A = 1" in section
+        assert "### pkg/b.py" in section and "B = 2" in section
+
+    def test_binary_contents_are_withheld(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "weights.bin").write_bytes(b"\x00\x01\x02payload" * 100)
+
+        section = _new_files_section(str(wt))
+        assert "### weights.bin (binary, 1,000 bytes; contents omitted)" in section
+        assert "payload" not in section
+
+    def test_large_file_shows_only_its_head(self, tmp_path: Path):
+        from helix.mutator import _MAX_NEW_FILE_CHARS, _new_files_section
+
+        wt = self._repo(tmp_path)
+        lines = [f"row_{i:06d}" for i in range(50_000)]
+        (wt / "table.csv").write_text("\n".join(lines))
+
+        section = _new_files_section(str(wt))
+        assert "row_000000" in section
+        assert "row_049999" not in section
+        assert "only the first 4,000 characters shown" in section
+        assert len(section) < _MAX_NEW_FILE_CHARS + 500
+
+    def test_total_budget_still_names_every_file(self, tmp_path: Path):
+        """Past the total budget a file loses its contents, never its name:
+        the agent should know everything that was added."""
+        from helix.mutator import _MAX_NEW_FILES_CHARS, _new_files_section
+
+        wt = self._repo(tmp_path)
+        count = _MAX_NEW_FILES_CHARS // 4_000 + 3
+        for i in range(count):
+            (wt / f"m{i:02d}.py").write_text(f"# module {i}\n" + "x = 1\n" * 1_000)
+
+        section = _new_files_section(str(wt))
+        for i in range(count):
+            assert f"m{i:02d}.py" in section
+        assert "contents not shown (size budget reached)" in section
+        assert f"# module {count - 1}" not in section
+
+    def test_symlinks_are_not_followed(self, tmp_path: Path):
+        """The target could be any readable file; its contents must not be
+        copied into a prompt whose output is persisted."""
+        import os
+
+        from helix.mutator import _new_files_section
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOP-SECRET-VALUE\n")
+        wt = self._repo(tmp_path)
+        os.symlink(secret, wt / "innocent.py")
+
+        section = _new_files_section(str(wt))
+        assert "TOP-SECRET-VALUE" not in section
+        assert f"### innocent.py (symlink to {secret}; not followed)" in section
+
+    def test_empty_file_is_labelled(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "__init__.py").write_text("")
+        assert "### __init__.py (empty)" in _new_files_section(str(wt))
+
+    def test_backticks_in_a_file_cannot_close_its_fence(self, tmp_path: Path):
+        """A Markdown file containing ``` would otherwise end the block early
+        and spill the rest of itself into the prompt as prose."""
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "NOTES.md").write_text("intro\n```python\ncode\n```\noutro\n")
+
+        section = _new_files_section(str(wt))
+        assert "````markdown\nintro\n```python" in section
+        assert section.rstrip().endswith("outro\n````")
+
+    def test_summary_prompt_carries_both_sections(self, tmp_path: Path, mocker):
+        """End to end through ``generate_change_summary``: a tracked edit and
+        an unstaged new module both reach the prompt the backend is given."""
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        wt = self._repo(tmp_path)
+        base = capture_base_commit(str(wt))
+        (wt / "solve.py").write_text("from features import sparse\n\ndef solve(n):\n    return sparse(n)\n")
+        (wt / "features.py").write_text("def sparse(n):\n    return n // 2\n")
+
+        prompts: list[str] = []
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            prompts.append(prompt)
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        generate_change_summary(str(wt), make_config(), base_sha=base)
+
+        assert len(prompts) == 1
+        prompt = prompts[0]
+        assert "## Changes to existing files" in prompt
+        assert "+from features import sparse" in prompt
+        assert "## New files added by this attempt" in prompt
+        assert "def sparse(n):" in prompt
+        assert "No diff was available" not in prompt
 
 
 class TestSummaryCallCannotAlterTheCandidate:
