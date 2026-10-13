@@ -2798,7 +2798,9 @@ def _run_evolution_impl(
             if config.evolution.sibling_history:
                 for _context in presample_contexts:
                     _sibling_sections[_context[0].id] = render_history(
-                        state.sibling_history, _context[0].id
+                        state.sibling_history,
+                        _context[0].id,
+                        max_entries=config.evolution.sibling_history_max_entries,
                     )
 
             worker_results = _dispatch_proposals(

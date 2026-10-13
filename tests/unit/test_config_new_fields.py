@@ -730,3 +730,31 @@ class TestSiblingHistory:
         cfg = load_config(toml)
         assert cfg.evolution.sibling_history is True
         assert cfg.evolution.sibling_summary_max_words == 60
+
+    def test_max_entries_defaults_to_unbounded(self):
+        assert EvolutionConfig().sibling_history_max_entries is None
+
+    def test_max_entries_is_settable(self):
+        cfg = EvolutionConfig(sibling_history_max_entries=3)
+        assert cfg.sibling_history_max_entries == 3
+
+    def test_max_entries_rejects_non_positive(self):
+        for bad in (0, -1):
+            with pytest.raises(ValidationError, match="must be >= 1"):
+                EvolutionConfig(sibling_history_max_entries=bad)
+
+    def test_max_entries_toml_round_trip(self, tmp_path):
+        toml = tmp_path / "helix.toml"
+        toml.write_text(
+            textwrap.dedent("""
+            objective = "Test"
+
+            [evaluator]
+            command = "python evaluate.py"
+
+            [evolution]
+            sibling_history = true
+            sibling_history_max_entries = 4
+        """)
+        )
+        assert load_config(toml).evolution.sibling_history_max_entries == 4

@@ -1070,6 +1070,35 @@ class TestSiblingHistory:
         assert len(handed) == 3
         assert len(_final_state(all_mocks).sibling_history[seed.id]) == 3
 
+    def test_max_entries_windows_the_prompt_but_not_the_record(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """``sibling_history_max_entries`` reaches the rendered prompt: by
+        generation 3 the seed has two rejected children, and a window of one
+        shows only the newer.  State still holds both."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        handed, child_ids = _wire_siblings(all_mocks, seed.id, child_score=0.1)
+
+        config = _make_config(
+            train_path,
+            max_generations=3,
+            num_parallel_proposals=1,
+            mutations_per_parent=1,
+            sibling_history=True,
+            sibling_history_max_entries=1,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(handed) == 3
+        third = handed[2]
+        assert third is not None
+        assert f"approach taken by {child_ids[1]}" in third
+        assert f"approach taken by {child_ids[0]}" not in third
+        assert "1 most recent of the 2" in third
+        assert len(_final_state(all_mocks).sibling_history[seed.id]) == 3
+
 
 # ---------------------------------------------------------------------------
 # 7. Cost model and budget accounting under P×N

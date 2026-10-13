@@ -27,9 +27,11 @@ Two properties the rest of the engine relies on:
   ``mutate``, while the child worktree is guaranteed to exist.  A rejected
   child's worktree is deleted by default, so a later read would find nothing.
 * **Every child is kept.**  There is no cap on how many children a parent
-  remembers.  A parent sampled many times is precisely the case this exists
-  for, so truncating its record would discard the attempts most worth knowing
-  about.  ``evolution.sibling_history`` is a plain on/off switch.
+  remembers in state.  A parent sampled many times is precisely the case this
+  exists for, so truncating its record would discard the attempts most worth
+  knowing about.  What *is* optionally bounded is how many reach the prompt:
+  ``evolution.sibling_history_max_entries`` shows only the most recent N, a
+  window applied at render time so the stored record stays complete.
 
 The self-report is untrusted input: an agent chooses its content and could
 choose its path, so ``capture_summary`` refuses anything that is not a regular
@@ -264,8 +266,13 @@ def _indent(text: str) -> str:
     )
 
 
-def render_history(history: dict[str, list[dict[str, Any]]], parent_id: str) -> str:
-    """Render every child of *parent_id* as a mutation-prompt section.
+def render_history(
+    history: dict[str, list[dict[str, Any]]],
+    parent_id: str,
+    *,
+    max_entries: int | None = None,
+) -> str:
+    """Render the children of *parent_id* as a mutation-prompt section.
 
     Returns ``""`` only when the parent has no recorded children, so the caller
     can skip the section rather than emit an empty heading.  Whether the
@@ -278,17 +285,32 @@ def render_history(history: dict[str, list[dict[str, Any]]], parent_id: str) -> 
         The full per-parent record.
     parent_id:
         Parent about to be mutated.
+    max_entries:
+        Show only the most recent this-many children (FIFO); ``None`` shows
+        all of them.  Recency rather than score decides what stays, because
+        the recorded scores come from different evaluation stages (minibatch,
+        full train, val) and do not rank against each other.  The heading
+        discloses the window so the agent knows earlier attempts exist.
     """
     entries = history.get(parent_id) or []
     if not entries:
         return ""
 
+    total = len(entries)
+    if max_entries is not None and total > max_entries:
+        entries = entries[-max_entries:]
+        scope = (
+            f"The {len(entries)} most recent of the {total} children already proposed "
+            "from this same parent, oldest first."
+        )
+    else:
+        scope = "Children already proposed from this same parent, oldest first."
+
     lines = [
         "## Previous Attempts From This Parent",
         # Descriptive only: what to *do* with this is stated once, up in the
         # task instructions (see ``history_instruction``).
-        "Children already proposed from this same parent, oldest first. They were scored "
-        "by the same evaluator you are being judged by.",
+        f"{scope} They were scored by the same evaluator you are being judged by.",
         "",
     ]
     for entry in entries:

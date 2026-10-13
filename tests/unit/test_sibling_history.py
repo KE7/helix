@@ -8,10 +8,11 @@ The module has three jobs, tested separately here:
 * **accumulate** — append one entry per evaluated child, keeping all of them.
 * **render** — turn a parent's entries into a prompt section.
 
-Note what is deliberately absent: there is no cap and no display limit. The
-on/off decision lives in the caller (``evolution.sibling_history``), which
-passes ``None`` to ``mutate`` when the feature is off, so nothing here has an
-"off" mode to test.
+Note what is deliberately absent: there is no cap on what is stored; the only
+limit is the optional display window ``render_history`` applies. The on/off
+decision lives in the caller (``evolution.sibling_history``), which passes
+``None`` to ``mutate`` when the feature is off, so nothing here has an "off"
+mode to test.
 """
 
 from __future__ import annotations
@@ -386,6 +387,44 @@ class TestRenderHistory:
         before = [dict(e) for e in history["p"]]
         render_history(history, "p")
         assert history["p"] == before
+
+
+class TestRenderHistoryWindow:
+    """``max_entries``: a FIFO window over what reaches the prompt."""
+
+    def test_keeps_only_the_most_recent(self) -> None:
+        rendered = render_history(_history(10), "p", max_entries=3)
+        for i in range(7):
+            assert f"approach number {i}" not in rendered
+        for i in range(7, 10):
+            assert f"approach number {i}" in rendered
+
+    def test_window_stays_oldest_first(self) -> None:
+        rendered = render_history(_history(10), "p", max_entries=3)
+        assert rendered.index("approach number 7") < rendered.index("approach number 9")
+
+    def test_heading_discloses_the_window(self) -> None:
+        """The agent must know earlier attempts exist, or it will read the
+        window as the parent's whole history."""
+        rendered = render_history(_history(10), "p", max_entries=3)
+        assert "3 most recent of the 10" in rendered
+
+    def test_under_the_limit_renders_as_unbounded(self) -> None:
+        """A window that cuts nothing changes nothing, heading included."""
+        history = _history(3)
+        assert render_history(history, "p", max_entries=3) == render_history(history, "p")
+        assert render_history(history, "p", max_entries=50) == render_history(history, "p")
+
+    def test_none_shows_everything(self) -> None:
+        rendered = render_history(_history(25), "p", max_entries=None)
+        for i in range(25):
+            assert f"approach number {i}" in rendered
+
+    def test_window_does_not_trim_the_store(self) -> None:
+        """The cap is display-only: state keeps every child."""
+        history = _history(10)
+        render_history(history, "p", max_entries=2)
+        assert len(history["p"]) == 10
 
 
 # ---------------------------------------------------------------------------
