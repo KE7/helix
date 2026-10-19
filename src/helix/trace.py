@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import functools
 import inspect
-import itertools
 import json
 import logging
 import os
@@ -29,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Iterator, ParamSpec, TextIO, TypeVar
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,6 @@ AttrsFn = Callable[[tuple[Any, ...], dict[str, Any]], dict[str, Any]]
 _enabled = False
 _sink: TextIO | None = None
 _sink_lock = threading.Lock()
-_span_ids = itertools.count(1)
 _sink_failed = False
 
 # Cheap identity attrs per span, keyed by span name.  Each receives the
@@ -211,7 +210,9 @@ def traced(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             if not _enabled:
                 return fn(*args, **kwargs)
-            span_id = next(_span_ids)
+            # Processes append to the same trace on resume, and may also run
+            # concurrently. A process-local counter would reuse earlier IDs.
+            span_id = uuid4().hex
             extracted: dict[str, Any] = {}
             if extract is not None:
                 try:

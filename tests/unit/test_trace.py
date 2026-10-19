@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -146,7 +149,7 @@ class TestTracedDecorator:
             assert sorted(pool.map(work, range(200))) == list(range(200))
         records = _read(trace_file)
         assert len(records) == 400
-        by_id: dict[int, list[str]] = {}
+        by_id: dict[str, list[str]] = {}
         for r in records:
             by_id.setdefault(r["span_id"], []).append(r["event"])
         assert len(by_id) == 200
@@ -215,6 +218,55 @@ class TestTracedDecorator:
 
 
 class TestEnable:
+    @pytest.mark.parametrize("concurrent", [False, True], ids=["sequential", "concurrent"])
+    def test_appended_processes_keep_span_ids_unique(
+        self, tmp_path: Path, concurrent: bool
+    ) -> None:
+        path = tmp_path / "trace.jsonl"
+        program = (
+            "import sys\n"
+            "from helix import trace\n"
+            "trace.enable(sys.argv[1])\n"
+            "@trace.traced('run')\n"
+            "def run():\n"
+            "    trace.traced('evaluate')(lambda: None)()\n"
+            "run()\n"
+            "trace.disable()\n"
+        )
+        # Each child must load the checkout under test, even when pytest uses
+        # a different interpreter or an installed copy of HELIX.
+        env = os.environ.copy()
+        source_root = str(Path(trace.__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [source_root, env.get("PYTHONPATH", "")]
+        )
+
+        def append_run(_index: int) -> None:
+            subprocess.run(
+                [sys.executable, "-c", program, str(path)],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        if concurrent:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(append_run, range(2)))
+        else:
+            for index in range(2):
+                append_run(index)
+
+        records = _read(path)
+        assert len(records) == 8
+        starts = [r["span_id"] for r in records if r["event"] == "start"]
+        assert len(starts) == len(set(starts)) == 4
+        for span_id in starts:
+            pair = [r for r in records if r["span_id"] == span_id]
+            assert [r["event"] for r in pair] == ["start", "end"]
+            assert pair[0]["span"] == pair[1]["span"]
+
     def test_env_var_is_the_fallback_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
