@@ -963,6 +963,28 @@ class TestLostRefreshRaceIsRetried:
         assert h.wasted[0].output_tokens == 2
         assert h.removed == h.clones
 
+    @pytest.mark.parametrize("step", ["clone_candidate", "_stash_attempt_artifacts", "_restore_attempt_artifacts"])
+    def test_retry_preparation_failure_still_records_first_attempt_spend(
+        self, mocker: Any, tmp_path: Path, step: str
+    ) -> None:
+        h = _RetryHarness(tmp_path, mocker)
+        h.run_backend([
+            _completed(1, stdout=CODEX_LOST_STREAM, stderr=CODEX_ALREADY_USED),
+        ])
+        if step == "clone_candidate":
+            clone = mocker.patch("helix.mutator.clone_candidate")
+            first = _candidate("g1-s0", tmp_path / "first")
+            Path(first.worktree_path).mkdir()
+            clone.side_effect = [first, OSError("retry preparation failed")]
+        else:
+            mocker.patch(f"helix.mutator.{step}", side_effect=OSError("retry preparation failed"))
+        with pytest.raises(OSError, match="retry preparation failed"):
+            h.mutate()
+        assert h.spent == []
+        assert len(h.wasted) == 1
+        assert h.wasted[0].input_tokens == 5
+        assert h.wasted[0].output_tokens == 2
+
     def test_timeout_on_the_first_attempt_cleans_up(
         self, mocker: Any, tmp_path: Path
     ) -> None:

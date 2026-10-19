@@ -1264,10 +1264,31 @@ def test_backend_transcript_copy_script_per_backend():
 
     opencode = build(agent_backend="opencode", sandbox=cfg, session_id="ses_1")
     assert opencode is not None
-    assert '"$HOME"/.local/share/opencode/opencode.db-wal' in opencode
+    assert "/workspace/.helix_opencode_state/opencode/opencode.db-wal" in opencode
     assert "backend_transcripts/opencode/.ses_1.opencode.db-wal" in opencode
 
     assert build(agent_backend="unknown", sandbox=cfg, session_id="x") is None
+
+
+def test_opencode_transcript_script_copies_candidate_database_and_wal(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    state = workspace / ".helix_opencode_state/opencode"
+    state.mkdir(parents=True)
+    (state / "opencode.db").write_bytes(b"candidate database")
+    (state / "opencode.db-wal").write_bytes(b"candidate WAL")
+    home = tmp_path / "home"
+    shared = home / ".local/share/opencode"
+    shared.mkdir(parents=True)
+    (shared / "opencode.db").write_bytes(b"shared database")
+    script = sandbox_module._backend_transcript_copy_script(
+        agent_backend="opencode", sandbox=SandboxConfig(enabled=True), session_id="ses_1"
+    )
+    assert script is not None
+    subprocess.run(["sh", "-c", script.replace("/workspace/", f"{workspace}/")],
+                   env={"HOME": str(home)}, check=True)
+    out = workspace / ".helix_artifacts/backend_transcripts/opencode"
+    assert (out / ".ses_1.opencode.db").read_bytes() == b"candidate database"
+    assert (out / ".ses_1.opencode.db-wal").read_bytes() == b"candidate WAL"
 
 
 def test_agent_copies_codex_transcript_from_auth_volume(tmp_path: Path, mocker):

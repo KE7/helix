@@ -16,6 +16,7 @@ from helix.backends import (
     BACKEND_AUTH_ENV,
     BACKEND_FRESH_SESSION_ENV,
     BACKEND_TRANSCRIPT_SOURCES,
+    OPENCODE_STATE_DIR_NAME,
     TRANSCRIPT_SESSION_ID_RE,
     backend_display_name,
 )
@@ -33,7 +34,6 @@ from helix.exceptions import (
 from helix.executor import _scrub_environment
 from helix.lines import split_lf_lines
 from helix.sandbox import (
-    OPENCODE_STATE_DIR_NAME,
     resolve_sandbox_image,
     run_sandboxed_command,
 )
@@ -1963,9 +1963,10 @@ def _export_sqlite_session_rows(
     sqlite may replay the sibling ``-wal`` into it.  Returns the row count.
     """
     import sqlite3
+    from contextlib import closing
 
     written = 0
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         with dst.open("w", encoding="utf-8") as out:
             for table, column in tables:
@@ -1999,7 +2000,8 @@ def _copy_local_backend_transcripts(
     """Collect ``backend``'s native transcript for ``session_id`` into the worktree.
 
     Driven by ``BACKEND_TRANSCRIPT_SOURCES``.  With ``home`` set (unsandboxed)
-    the files are globbed under that directory and copied; with ``home`` of
+    the files are globbed under that directory (or the candidate worktree for
+    workspace-relative sources) and copied; with ``home`` of
     ``None`` (sandboxed) the sandbox helper has already staged them under the
     artifact dir and only their presence is recorded.  An sqlite-backed store
     is then reduced to this session's rows and the staged copy removed.  A
@@ -2022,6 +2024,9 @@ def _copy_local_backend_transcripts(
         return []
     rel_dir = Path(artifact_dir) / backend
     out_dir = Path(worktree_path) / rel_dir
+    source_root = (
+        Path(worktree_path) if source_spec.source_root == "workspace" else home
+    )
     artifacts: list[dict[str, Any]] = []
     staged: list[Path] = []
     try:
@@ -2035,10 +2040,10 @@ def _copy_local_backend_transcripts(
                 "source": "sandbox_auth_volume",
                 "available": dst.is_file(),
             }
-            if home is not None and not dst.is_file():
+            if home is not None and source_root is not None and not dst.is_file():
                 glob_pattern = pattern.format(session_id=session_id)
-                matches = sorted(p for p in home.glob(glob_pattern) if p.is_file())
-                entry["source"] = str(matches[0]) if matches else str(home / glob_pattern)
+                matches = sorted(p for p in source_root.glob(glob_pattern) if p.is_file())
+                entry["source"] = str(matches[0]) if matches else str(source_root / glob_pattern)
                 if matches:
                     try:
                         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -2057,6 +2062,9 @@ def _copy_local_backend_transcripts(
         if source_spec.sqlite_export is not None:
             raw_name, tables = source_spec.sqlite_export
             raw_db = out_dir / raw_name.format(session_id=session_id)
+            # Opening a WAL-backed copy can create this file even though it
+            # was not copied from the backend. Remove it on interrupts too.
+            staged.append(Path(str(raw_db) + "-shm"))
             rel_path = rel_dir / f"{session_id}.jsonl"
             entry = {
                 "backend": backend,
@@ -2064,7 +2072,9 @@ def _copy_local_backend_transcripts(
                 "path": str(rel_path),
                 "source": str(raw_db)
                 if home is None
-                else str(home / source_spec.files[0][0]),
+                else str(source_root / source_spec.files[0][0])
+                if source_root is not None
+                else "sandbox_workspace",
                 "available": False,
             }
             if raw_db.is_file():
@@ -2432,6 +2442,11 @@ def invoke_with_refresh_race_retry(
         first_error = exc
         first_usage = exc.usage
 
+    # Account before any retry preparation: stashing artifacts or creating a
+    # fresh worktree can fail too, after the first attempt has already spent tokens.
+    if first_usage is not None:
+        record_wasted_usage(first_usage)
+
     logger.warning(
         "%s lost a refresh race on the shared credential; retrying once from "
         "a fresh worktree against the refreshed credential (%s).",
@@ -2447,11 +2462,6 @@ def invoke_with_refresh_race_retry(
         child = fresh_child()
         on_child_replaced(child)
         _restore_attempt_artifacts(child.worktree_path, Path(stash), attempt=1)
-
-    # The lost attempt's spend gets its own record, so the retry's outcome
-    # from here on carries only the retry's own tokens.
-    if first_usage is not None:
-        record_wasted_usage(first_usage)
 
     _, usage = invoke(child, True)
 
@@ -2831,8 +2841,8 @@ def mutate(
     record_wasted_usage:
         Required sink called once with the spend of an attempt that lost a
         refresh race and was thrown away (see
-        :func:`invoke_with_refresh_race_retry`).  Never called when no retry
-        happened.  It exists so the caller can charge wasted tokens under
+        :func:`invoke_with_refresh_race_retry`), even if preparing the retry
+        fails.  It exists so the caller can charge wasted tokens under
         their own budget ``source`` instead of billing them as productive
         mutation work; the sum charged is the same either way.  It has no
         default: a caller with nowhere to put the record would drop those

@@ -191,6 +191,9 @@ def backend_display_name(backend: str) -> str:
 # ``SandboxConfig.claude_transcript_root`` (or ``HELIX_CLAUDE_TRANSCRIPT_ROOT``)
 # and is handled by the pre-existing claude-specific code path.
 
+# Per-candidate state, excluded from candidate snapshots and sandbox sync-back.
+OPENCODE_STATE_DIR_NAME = ".helix_opencode_state"
+
 # Session ids are interpolated into shell globs and file names, so only accept
 # the shapes the CLIs actually emit (UUIDs, ``ses_…``, ``thr_…``).
 TRANSCRIPT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -201,8 +204,8 @@ class BackendTranscriptSource:
     """Where a backend CLI persists one session's transcript.
 
     ``id_keys`` are the field names, in priority order, that carry the session
-    id in the backend's structured stdout.  ``files`` maps a ``$HOME``-relative
-    glob (``{session_id}`` is substituted; ``*`` is left for the shell/glob) to
+    id in the backend's structured stdout. ``files`` maps a glob relative to
+    ``source_root`` (``{session_id}`` is substituted; ``*`` stays a glob) to
     the file name written under ``<transcript_artifact_dir>/<backend>/``.
     ``sqlite_export`` names the staged raw sqlite copy in ``files`` and the
     ``(table, session_id_column)`` pairs whose rows for this session are
@@ -212,6 +215,7 @@ class BackendTranscriptSource:
     id_keys: tuple[str, ...]
     files: tuple[tuple[str, str], ...]
     sqlite_export: tuple[str, tuple[tuple[str, str], ...]] | None = None
+    source_root: Literal["home", "workspace"] = "home"
 
 
 BACKEND_TRANSCRIPT_SOURCES: dict[str, BackendTranscriptSource] = {
@@ -263,15 +267,16 @@ BACKEND_TRANSCRIPT_SOURCES: dict[str, BackendTranscriptSource] = {
         ),
     ),
     # OpenCode >= 1.x persists sessions only in one sqlite database shared by
-    # every session (the older ``storage/`` JSON tree is no longer written).
+    # sessions in a candidate (the older ``storage/`` JSON tree is unused).
     # The db and its WAL are staged next to the artifacts under a dot-prefixed
     # name, this session's ``session``/``message``/``part`` rows are exported
     # to ``{session_id}.jsonl``, and the staged copy is removed.
     "opencode": BackendTranscriptSource(
+        source_root="workspace",
         id_keys=("sessionID", "session_id", "sessionId"),
         files=(
-            (".local/share/opencode/opencode.db", ".{session_id}.opencode.db"),
-            (".local/share/opencode/opencode.db-wal", ".{session_id}.opencode.db-wal"),
+            (f"{OPENCODE_STATE_DIR_NAME}/opencode/opencode.db", ".{session_id}.opencode.db"),
+            (f"{OPENCODE_STATE_DIR_NAME}/opencode/opencode.db-wal", ".{session_id}.opencode.db-wal"),
         ),
         sqlite_export=(
             ".{session_id}.opencode.db",

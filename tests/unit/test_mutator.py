@@ -2422,7 +2422,7 @@ class TestBackendTranscriptCollection:
         export, not only the sqlite errors the export itself catches.
         """
         sid = "ses_000000000000TestSession01"
-        _make_opencode_db(home / ".local/share/opencode/opencode.db", [sid])
+        _make_opencode_db(worktree / ".helix_opencode_state/opencode/opencode.db", [sid])
         mocker.patch(
             "helix.mutator._export_sqlite_session_rows",
             side_effect=KeyboardInterrupt,
@@ -2436,7 +2436,7 @@ class TestBackendTranscriptCollection:
 
     def test_opencode_exports_only_this_sessions_rows(self, home: Path, worktree: Path):
         sid = "ses_000000000000TestSession01"
-        db = home / ".local/share/opencode/opencode.db"
+        db = worktree / ".helix_opencode_state/opencode/opencode.db"
         _make_opencode_db(db, [sid, "ses_other"])
 
         artifacts = _collect(worktree, "opencode", sid)
@@ -2455,8 +2455,31 @@ class TestBackendTranscriptCollection:
         # The staged raw database copy does not survive in the worktree.
         assert sorted(p.name for p in out.iterdir()) == [f"{sid}.jsonl"]
 
+    def test_opencode_collects_wal_rows_without_reading_shared_home(
+        self, home: Path, worktree: Path
+    ):
+        import sqlite3
+
+        sid = "ses_private"
+        db = worktree / ".helix_opencode_state/opencode/opencode.db"
+        _make_opencode_db(db, [sid])
+        # A stale shared database must never supply the candidate's transcript.
+        _make_opencode_db(home / ".local/share/opencode/opencode.db", ["ses_shared"])
+        with sqlite3.connect(db) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("UPDATE message SET data = ?", ('{"role":"assistant","text":"wal-only"}',))
+            conn.commit()
+            assert Path(str(db) + "-wal").stat().st_size > 0
+            artifacts = _collect(worktree, "opencode", sid)
+        assert artifacts[0]["available"] is True
+        out = worktree / artifacts[0]["path"]
+        assert "wal-only" in out.read_text()
+        assert "ses_shared" not in out.read_text()
+        assert sorted(p.name for p in out.parent.iterdir()) == [f"{sid}.jsonl"]
+        assert db.is_file()  # collection copies, rather than consumes, live state
+
     def test_opencode_session_missing_from_db(self, home: Path, worktree: Path):
-        _make_opencode_db(home / ".local/share/opencode/opencode.db", ["ses_other"])
+        _make_opencode_db(worktree / ".helix_opencode_state/opencode/opencode.db", ["ses_other"])
 
         artifacts = _collect(worktree, "opencode", "ses_missing")
 
@@ -2476,7 +2499,8 @@ class TestBackendTranscriptCollection:
         assert artifacts, backend
         assert all(a["available"] is False for a in artifacts)
         assert all(a["reason"] == "transcript_not_found" for a in artifacts)
-        assert all(a["source"].startswith(str(home)) for a in artifacts)
+        expected_root = worktree if backend == "opencode" else home
+        assert all(a["source"].startswith(str(expected_root)) for a in artifacts)
         assert any(
             f"{backend} transcript" in rec.message and "not preserved" in rec.message
             for rec in caplog.records

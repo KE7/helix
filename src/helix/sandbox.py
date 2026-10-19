@@ -24,6 +24,7 @@ from helix.backends import (
     BACKEND_STATE_PATHS,
     BACKEND_TRANSCRIPT_SOURCES,
     DEFAULT_BACKEND_IMAGES,
+    OPENCODE_STATE_DIR_NAME,
     OPENCODE_STATE_TABLES,
     TRANSCRIPT_SESSION_ID_RE,
     transcript_session_id_keys,
@@ -42,12 +43,6 @@ HELIX_ARTIFACT_NAMES = {
     "helix_batch.json",
 }
 
-#: Per-candidate OpenCode state directory (holds ``opencode/opencode.db``).
-#: Under the worktree when unsandboxed; created in the per-candidate workspace
-#: copy (mounted at ``/workspace``) when sandboxed.  Starts with ``.helix`` so
-#: it is excluded from the sandbox copy and sync-back like every other HELIX
-#: artifact, and ``helix.mutator._ignore_helix_artifacts`` gitignores it.
-OPENCODE_STATE_DIR_NAME = ".helix_opencode_state"
 
 
 @dataclass(frozen=True)
@@ -246,7 +241,8 @@ def _backend_transcript_copy_script(
         return None
     steps = []
     for pattern, dest_name in source_spec.files:
-        glob_word = '"$HOME"/' + _shell_glob_word(pattern.format(session_id=session_id))
+        root = "/workspace/" if source_spec.source_root == "workspace" else '"$HOME"/'
+        glob_word = root + _shell_glob_word(pattern.format(session_id=session_id))
         rel_file = rel_dir / dest_name.format(session_id=session_id)
         dst = shlex.quote("/workspace/" + str(rel_file).lstrip("/"))
         steps.append(
@@ -269,14 +265,16 @@ def _copy_backend_transcript_from_auth_volume(
     sandbox: SandboxConfig,
     stdout: str,
 ) -> None:
-    """Copy the backend's native transcript for this run out of its auth volume.
+    """Stage this run's native transcript from its auth volume or workspace.
 
     The backend CLI writes its session store under ``/home/node`` in the
     ``helix-auth-<backend>`` volume, which the agent container mounts.  A
     short-lived helper container mounts that volume read-only alongside the
     workspace and copies the per-session files named by
     ``BACKEND_TRANSCRIPT_SOURCES`` (or ``claude_transcript_root`` for claude)
-    into ``<transcript_artifact_dir>/<backend>/`` so the regular sync-back
+    into ``<transcript_artifact_dir>/<backend>/``. OpenCode instead reads the
+    isolated database and WAL under ``/workspace/.helix_opencode_state``
+    before the temporary workspace is removed, so the regular sync-back
     carries them to the candidate worktree.
 
     This always runs: the mutator needs the copy to count tool events, and
