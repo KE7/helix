@@ -1,0 +1,59 @@
+[project]
+objective = """Maximize task success on ManiSkill 3 tabletop manipulation with a \
+Franka Panda arm. Each instance id names one deterministic trial from a family: \
+pushcube__N (push the cube into the goal region), pickcube__N (grasp the cube and \
+hold it at a 3-D goal point), or stackcube__N (stack cube A on cube B and release). \
+A trial scores 1.0 if the environment's own success check passes, otherwise \
+the best shaped reward it reached, capped at 0.95. Improve solver/ so every \
+family succeeds."""
+
+# Claude Code on macOS looks up its Keychain login by $USER, which HELIX's
+# environment scrub drops; without it the claude backend reports "Not logged in".
+passthrough_env = ["USER"]
+
+[evaluator]
+# Pin the interpreter and bring ManiSkill and pin (Pinocchio, for the IK
+# controller) so evaluation does not depend on the host python3. ManiSkill also
+# needs a Vulkan driver; see README.md.
+command = "uv run --no-project --python 3.12 --with mani_skill==3.0.1 --with pin python3 evaluate.py"
+# A candidate that modifies a protected file is rejected.
+protected_files = ["evaluate.py", "sim", "splits", "API_REFERENCE.md", "helix.toml"]
+
+[seedless]
+# HELIX reads instance ids from the file stems in these directories
+# (e.g. "pickcube__0") even with seedless mode off.
+enabled = false
+train_path = "splits/train"
+val_path = "splits/val"
+
+[evolution]
+max_generations = 15
+max_evaluations = 400
+minibatch_size = 3
+# Skip mutation when the parent scores 1.0 on every trial of its minibatch.
+perfect_score_threshold = 1.0
+# One trial per family in every minibatch (ids are grouped on "__").
+batch_sampler = "stratified"
+cache_evaluation = true
+merge_enabled = false
+
+[agent]
+backend = "claude"
+model = "sonnet"
+effort = "medium"
+max_turns = 30
+background = """
+ManiSkill 3 tabletop manipulation benchmark (Franka Panda). The evolving
+artifact is the solver/ package; its entry point solver.run(ctx) receives
+one trial context.
+
+- Read API_REFERENCE.md first: it documents ctx.get_observation(),
+  ctx.move_to(x, y, z), ctx.open_gripper(), ctx.close_gripper(), the
+  observation schema per family, and the per-trial step budget.
+- Edit only the solver/ package. evaluate.py, sim/, splits/,
+  API_REFERENCE.md, and helix.toml are protected; a candidate that changes
+  them is rejected.
+- Verify changes from the project root before finishing:
+    printf '["pushcube__0", "pickcube__0", "stackcube__0"]' > helix_batch.json
+    uv run --no-project --python 3.12 --with mani_skill==3.0.1 --with pin python3 evaluate.py
+"""
