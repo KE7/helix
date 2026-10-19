@@ -729,9 +729,25 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         # the candidate git tree free of opencode's session/session files.
         ".helix_opencode_state/",
     ]
-    existing = gitignore.read_text() if gitignore.exists() else ""
+    if gitignore.is_symlink():
+        # The candidate tree comes from an agent.  Writing through a symlinked
+        # .gitignore would modify whatever it points to, possibly a host file
+        # outside the worktree, so the link is replaced by a regular file.  Its
+        # current content is kept only when it resolves to a regular file
+        # inside the worktree.
+        real_root = os.path.realpath(worktree_path)
+        resolved = os.path.realpath(gitignore)
+        inside = resolved.startswith(real_root + os.sep)
+        existing = ""
+        if inside and os.path.isfile(resolved):
+            existing = Path(resolved).read_text()
+        gitignore.unlink()
+    else:
+        existing = gitignore.read_text() if gitignore.exists() else ""
     to_append = [p for p in patterns if p not in existing]
     if not to_append:
+        if not gitignore.exists():
+            gitignore.write_text(existing)
         return
     sep = "" if existing.endswith("\n") or not existing else "\n"
     gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
@@ -836,6 +852,14 @@ def _build_backend_args(
     prompt_artifact_name: str,
 ) -> list[str]:
     backend = config.backend
+    if config.disallowed_tools and backend != "claude":
+        # ``AgentConfig`` rejects this at load time; a CLI ``--backend``
+        # override goes through ``model_copy`` and skips that validation, so
+        # refuse here rather than run the agent without the requested denial.
+        raise ValueError(
+            "agent.disallowed_tools is only supported for backend='claude' "
+            f"(got backend={backend!r})"
+        )
     if backend == "agy":
         args = [
             "agy",
@@ -878,6 +902,11 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
+        if config.disallowed_tools:
+            # ``--disallowedTools`` is variadic in Claude Code; the ``=`` form
+            # binds exactly one value, so the trailing prompt argument can
+            # never be swallowed as another tool name.
+            args.append("--disallowedTools=" + ",".join(config.disallowed_tools))
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 

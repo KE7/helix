@@ -317,7 +317,7 @@ def _copy_backend_transcript_from_auth_volume(
         "-v",
         f"{workspace}:/workspace:rw",
         "-v",
-        f"{sandbox_auth_volume_name(agent_backend)}:/home/node:ro",
+        f"{sandbox_auth_volume_name(agent_backend, sandbox)}:/home/node:ro",
         "-e",
         "HOME=/home/node",
         image,
@@ -363,6 +363,7 @@ def reset_sandbox_agent_state(
     *,
     image: str | None = None,
     generation: int | None = None,
+    volume: str | None = None,
 ) -> int:
     """Delete the backend CLI's session state from its sandbox auth volume.
 
@@ -378,7 +379,7 @@ def reset_sandbox_agent_state(
     if script is None:
         logger.debug("no sandbox state paths known for backend %s", agent_backend)
         return 0
-    volume = sandbox_auth_volume_name(agent_backend)
+    volume = volume or sandbox_auth_volume_name(agent_backend)
     docker_image = image or resolve_sandbox_image(
         SandboxConfig(enabled=True), agent_backend
     )
@@ -581,6 +582,84 @@ def _safe_rmtree(path: Path, *, docker_image: str | None = None) -> None:
         logger.warning("failed to clean sandbox temp dir %s: %s", path, first_exc)
 
 
+def _escaping_symlinks(
+    root: Path, *, omit_paths: set[Path] | None = None
+) -> dict[Path, tuple[str, str]]:
+    """Map every symlink under ``root`` that leaves it to ``(link text, resolved path)``.
+
+    A link leaves ``root`` when its text is an absolute path or when it
+    resolves (following every link on the way) outside ``root``.  Paths that
+    sync-back never touches (``.git``, ``.helix*``, HELIX artifacts and
+    ``omit_paths``) are not inspected.  No link is followed to read or write
+    anything.
+    """
+    omitted = omit_paths or set()
+    real_root = os.path.realpath(root)
+    found: dict[Path, tuple[str, str]] = {}
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(directory)
+        rel_dir = base.relative_to(root)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not _ignore_for_sync(rel_dir / name)
+            and not _matches_omitted_path(rel_dir / name, omitted)
+        ]
+        for name in [*dirnames, *filenames]:
+            rel = rel_dir / name
+            path = base / name
+            if _ignore_for_sync(rel) or _matches_omitted_path(rel, omitted):
+                continue
+            if not path.is_symlink():
+                continue
+            try:
+                text = os.readlink(path)
+            except OSError:
+                continue
+            resolved = os.path.realpath(path)
+            inside = resolved == real_root or resolved.startswith(real_root + os.sep)
+            if os.path.isabs(text) or not inside:
+                found[rel] = (text, resolved)
+    return found
+
+
+def _drop_new_escaping_symlinks(
+    root: Path,
+    before: dict[Path, tuple[str, str]],
+    *,
+    omit_paths: set[Path] | None = None,
+) -> list[Path]:
+    """Remove symlinks that sync-back left pointing outside ``root``.
+
+    A link that already pointed to the same place before the sync (same link
+    text, same resolved path) is kept, so links the project itself carries
+    survive.  Any other link that is absolute or resolves outside ``root`` is
+    removed.  Removing one link can change where another resolves, so this
+    repeats until nothing changes.  Returns the removed paths.
+    """
+    removed: list[Path] = []
+    while True:
+        changed = False
+        for rel, info in _escaping_symlinks(root, omit_paths=omit_paths).items():
+            if before.get(rel) == info:
+                continue
+            logger.warning(
+                "dropping symlink %s -> %s from the sandbox workspace: it points "
+                "outside the workspace",
+                rel,
+                info[0],
+            )
+            try:
+                (root / rel).unlink()
+            except OSError as exc:
+                logger.warning("could not remove symlink %s: %s", root / rel, exc)
+                continue
+            removed.append(rel)
+            changed = True
+        if not changed:
+            return removed
+
+
 def _sync_back_workspace(
     src: Path,
     dst: Path,
@@ -588,6 +667,11 @@ def _sync_back_workspace(
     skip_special_files: bool = True,
     omit_paths: set[Path] | None = None,
 ) -> None:
+    # The workspace is agent-writable.  Symlinks sync back as symlinks and are
+    # never followed here, but a link that leaves the candidate tree would let
+    # later host-side reads and writes in the worktree reach host files, so
+    # every new link that points outside ``dst`` is dropped after the copy.
+    before = _escaping_symlinks(dst, omit_paths=omit_paths)
     _remove_extraneous_files(
         src,
         dst,
@@ -601,21 +685,85 @@ def _sync_back_workspace(
         skip_special_files=skip_special_files,
         omit_paths=omit_paths,
     )
+    _drop_new_escaping_symlinks(dst, before, omit_paths=omit_paths)
+
+
+def _is_real_directory(path: Path) -> bool:
+    """Return whether ``path`` is a directory itself, not a link to one."""
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _copy_regular_tree(source: Path, target: Path) -> None:
+    """Copy regular files and real directories; links are skipped, never followed."""
+    for directory, dirnames, filenames in os.walk(source, followlinks=False):
+        base = Path(directory)
+        out_dir = target / base.relative_to(source)
+        if out_dir.is_symlink():
+            logger.warning("skipping transcript directory %s: it is a symlink", out_dir)
+            dirnames[:] = []
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        kept = []
+        for name in dirnames:
+            if _is_real_directory(base / name):
+                kept.append(name)
+            else:
+                logger.warning(
+                    "skipping transcript path %s: not a real directory", base / name
+                )
+        dirnames[:] = kept
+        for name in filenames:
+            path = base / name
+            try:
+                regular = stat.S_ISREG(path.lstat().st_mode)
+            except OSError:
+                continue
+            if not regular:
+                logger.warning("skipping transcript path %s: not a regular file", path)
+                continue
+            destination = out_dir / name
+            if destination.is_symlink() or (
+                destination.exists() and not destination.is_file()
+            ):
+                logger.warning(
+                    "skipping transcript file %s: target is not a regular file",
+                    destination,
+                )
+                continue
+            shutil.copy2(path, destination, follow_symlinks=False)
 
 
 def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
-    """Preserve HELIX-owned transcript artifacts while hiding .helix* from agents."""
-    source = src / ".helix_artifacts" / "backend_transcripts"
+    """Preserve HELIX-owned transcript artifacts while hiding .helix* from agents.
+
+    The workspace is agent-writable, so a symlink anywhere on the way
+    (``.helix_artifacts``, ``backend_transcripts`` or any entry below them)
+    is skipped, never followed: an agent must not be able to make HELIX copy
+    host files into the run directory.
+    """
+    artifacts = src / ".helix_artifacts"
+    source = artifacts / "backend_transcripts"
     try:
-        if not source.exists():
+        if not source.exists() and not source.is_symlink() and not artifacts.is_symlink():
             return
     except OSError as exc:
         logger.warning("skipping inaccessible backend transcript artifacts %s: %s", source, exc)
         return
+    if not (_is_real_directory(artifacts) and _is_real_directory(source)):
+        logger.warning(
+            "skipping backend transcript artifacts %s: not a real directory", source
+        )
+        return
     target = dst / ".helix_artifacts" / "backend_transcripts"
-    target.mkdir(parents=True, exist_ok=True)
+    if (dst / ".helix_artifacts").is_symlink() or target.is_symlink():
+        logger.warning("skipping backend transcript artifacts: %s is a symlink", target)
+        return
     try:
-        shutil.copytree(source, target, dirs_exist_ok=True)
+        target.mkdir(parents=True, exist_ok=True)
+        _copy_regular_tree(source, target)
     except OSError as exc:
         logger.warning("skipping backend transcript artifact copy from %s: %s", source, exc)
 
@@ -1082,6 +1230,8 @@ def start_evaluator_sidecar(
         args.extend(
             _build_add_host_args(add_host_gateway=False, extra_hosts=extra_hosts)
         )
+        for volume_spec in sidecar.volumes:
+            args.extend(["-v", volume_spec])
         for key in passthrough_env or []:
             if key in os.environ:
                 args.extend(["-e", f"{key}={os.environ[key]}"])
@@ -1109,7 +1259,16 @@ def start_evaluator_sidecar(
         _run_docker(["docker", "network", "rm", network], check=False)
 
 
-def sandbox_auth_volume_name(agent_backend: str) -> str:
+def sandbox_auth_volume_name(
+    agent_backend: str, sandbox: SandboxConfig | None = None
+) -> str:
+    """Name of the Docker volume mounted at ``/home/node`` for *agent_backend*.
+
+    ``sandbox.auth_volume`` wins when set; otherwise the shared
+    ``helix-auth-<backend>`` login volume is used.
+    """
+    if sandbox is not None and sandbox.auth_volume:
+        return sandbox.auth_volume
     if agent_backend not in DEFAULT_BACKEND_IMAGES:
         raise ValueError(f"No default sandbox auth volume for backend: {agent_backend}")
     return f"helix-auth-{agent_backend}"
@@ -1146,7 +1305,9 @@ def _docker_args(
     if scope == "agent":
         if agent_backend is None:
             raise ValueError("agent_backend is required for sandboxed agent commands")
-        args.extend(["-v", f"{sandbox_auth_volume_name(agent_backend)}:/home/node:rw"])
+        args.extend(
+            ["-v", f"{sandbox_auth_volume_name(agent_backend, sandbox)}:/home/node:rw"]
+        )
 
     if sandbox.pids_limit is not None:
         args.extend(["--pids-limit", str(sandbox.pids_limit)])

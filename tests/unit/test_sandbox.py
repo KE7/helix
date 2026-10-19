@@ -1391,3 +1391,139 @@ def test_reset_sandbox_agent_state_unknown_backend_is_noop(mocker):
     run = mocker.patch("helix.sandbox.subprocess.run")
     assert sandbox_module.reset_sandbox_agent_state("nope", image="img") == 0
     run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Symlinks planted in the agent workspace
+# ---------------------------------------------------------------------------
+
+
+def _run_agent_writing(source: Path, mocker, write) -> None:
+    """Run a sandboxed agent command whose container calls ``write(workspace)``."""
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            write(workspace)
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+
+def test_sync_back_drops_symlinks_that_leave_the_worktree(tmp_path: Path, mocker):
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "secret.txt").write_text("host secret\n")
+    source = tmp_path / "candidate"
+    (source / "pkg").mkdir(parents=True)
+    (source / "main.py").write_text("x = 1\n")
+
+    def write(workspace: Path) -> None:
+        os.symlink(str(host / "secret.txt"), workspace / "absolute_link")
+        os.symlink("../../host/secret.txt", workspace / "relative_escape")
+        os.symlink("../..", workspace / "pkg" / "up_two")
+        # Each link below stays inside on its own; together they escape.
+        os.symlink(".", workspace / "here")
+        os.symlink("here/..", workspace / "chained_escape")
+        os.symlink("main.py", workspace / "inside_link")
+        os.symlink("../main.py", workspace / "pkg" / "inside_parent_link")
+
+    _run_agent_writing(source, mocker, write)
+
+    links = sorted(
+        str(p.relative_to(source)) for p in source.rglob("*") if p.is_symlink()
+    )
+    assert links == ["here", "inside_link", "pkg/inside_parent_link"]
+    assert (source / "inside_link").read_text() == "x = 1\n"
+    assert (host / "secret.txt").read_text() == "host secret\n"
+
+
+def test_sync_back_keeps_an_unchanged_project_symlink(tmp_path: Path, mocker):
+    # A link the project already carried is copied into the workspace and
+    # synced back unchanged; it must survive even though it points outside.
+    source = tmp_path / "candidate"
+    source.mkdir()
+    os.symlink("/opt/shared/data", source / "data")
+    (source / "main.py").write_text("x = 1\n")
+
+    def write(workspace: Path) -> None:
+        (workspace / "main.py").write_text("x = 2\n")
+        os.symlink("/opt/other", workspace / "new_absolute")
+
+    _run_agent_writing(source, mocker, write)
+
+    assert os.readlink(source / "data") == "/opt/shared/data"
+    assert not (source / "new_absolute").is_symlink()
+    assert (source / "main.py").read_text() == "x = 2\n"
+
+
+def test_sync_back_drops_a_retargeted_project_symlink(tmp_path: Path, mocker):
+    source = tmp_path / "candidate"
+    source.mkdir()
+    os.symlink("/opt/shared/data", source / "data")
+
+    def write(workspace: Path) -> None:
+        (workspace / "data").unlink()
+        os.symlink("/Users/someone/private", workspace / "data")
+
+    _run_agent_writing(source, mocker, write)
+
+    assert not (source / "data").exists() and not (source / "data").is_symlink()
+
+
+def test_backend_transcript_sync_never_follows_symlinks(tmp_path: Path, mocker):
+    host = tmp_path / "host_docs"
+    (host / "sub").mkdir(parents=True)
+    (host / "reference.py").write_text("KNOWN = 1\n")
+    (host / "sub" / "deep.txt").write_text("deep\n")
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("x = 1\n")
+
+    def write(workspace: Path) -> None:
+        transcripts = workspace / ".helix_artifacts" / "backend_transcripts"
+        transcripts.mkdir(parents=True)
+        (transcripts / "session.jsonl").write_text("{}\n")
+        os.symlink(str(host), transcripts / "helixdocs")
+        os.symlink(str(host / "reference.py"), transcripts / "file_link.jsonl")
+
+    _run_agent_writing(source, mocker, write)
+
+    copied = source / ".helix_artifacts" / "backend_transcripts"
+    assert (copied / "session.jsonl").read_text() == "{}\n"
+    assert sorted(p.name for p in copied.rglob("*")) == ["session.jsonl"]
+
+
+@pytest.mark.parametrize("linked", [".helix_artifacts", "backend_transcripts"])
+def test_backend_transcript_sync_refuses_a_symlinked_directory(
+    tmp_path: Path, mocker, linked: str
+):
+    host = tmp_path / "host_docs"
+    (host / "backend_transcripts").mkdir(parents=True)
+    (host / "reference.py").write_text("KNOWN = 1\n")
+    (host / "backend_transcripts" / "reference.py").write_text("KNOWN = 1\n")
+    source = tmp_path / "candidate"
+    source.mkdir()
+
+    def write(workspace: Path) -> None:
+        if linked == ".helix_artifacts":
+            os.symlink(str(host), workspace / ".helix_artifacts")
+        else:
+            (workspace / ".helix_artifacts").mkdir()
+            os.symlink(str(host), workspace / ".helix_artifacts" / "backend_transcripts")
+
+    _run_agent_writing(source, mocker, write)
+
+    copied = source / ".helix_artifacts"
+    assert not copied.exists() or not any(copied.rglob("reference.py"))

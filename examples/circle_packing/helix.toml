@@ -6,12 +6,11 @@ objective = "Maximize the sum of radii of 26 non-overlapping circles packed in a
 # passthrough_env = ["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]
 
 [evaluator]
-# The solver needs numpy + scipy and PEP 604 (`X | None`) annotations, so the
-# evaluator must not inherit whatever bare `python3` happens to be on PATH --
-# on macOS that is a 3.9 interpreter with no scipy, which scores every
-# candidate 0.0 including the reference solution.  Pin the interpreter and
-# bring the dependencies with it so a fresh clone reproduces the benchmark.
+# Pin the interpreter and bring numpy/scipy so evaluation does not depend on
+# the host python3.
 command = "uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py"
+# A candidate that modifies a protected file is rejected.
+protected_files = ["evaluate.py"]
 
 [dataset]
 train_size = 1
@@ -20,7 +19,7 @@ val_size = 1
 [evolution]
 max_generations = 30
 merge_enabled = false
-perfect_score_threshold = 100.0
+# No perfect_score_threshold: higher valid radius sums remain worth exploring.
 max_evaluations = 500
 
 [agent]
@@ -29,26 +28,11 @@ model = "haiku"
 effort = "low"
 max_turns = 20
 background = """
-Circle packing benchmark: pack 26 non-overlapping circles in a unit square [0,1]x[0,1].
-Each circle is (x, y, r) with r <= x, r <= y, r <= 1-x, r <= 1-y (inside bounds).
-No two circles overlap: dist(c_i, c_j) >= r_i + r_j.
-Score = sum of all radii. Best published result: 2.63598+. AlphaEvolve: 2.6358.
-
-PROVEN WINNING STRATEGIES:
-1. Use scipy.optimize (minimize with SLSQP or L-BFGS-B) for gradient-based optimization
-2. Multiple random restarts to escape local minima (use 5-10 restarts — evaluation timeout is 300s)
-3. Hexagonal/triangular packing as initial layout (better than grid)
-4. Iterative coordinate descent: fix positions, maximize each radius independently
-5. Force-directed relaxation: push overlapping circles apart
-6. The pack_circles function must be deterministic or nearly so for reproducibility
-
-KNOWN GOOD APPROACH (scipy):
-- Variables: [x0, y0, r0, x1, y1, r1, ...] flattened
-- Minimize: -sum(r_i)
-- Constraints: r_i > 0, x_i - r_i >= 0, x_i + r_i <= 1, same for y
-  dist(i,j) >= r_i + r_j for all pairs
-- Use scipy.optimize.minimize with method='SLSQP' or 'trust-constr'
-- Multiple random starts, keep best valid solution
-
-Target score >= 2.63598 to match the best published result.
+Circle packing: pack 26 non-overlapping circles in the unit square [0,1]x[0,1].
+Each circle is (x, y, r) and must lie inside the square: r <= x, r <= y, r <= 1-x, r <= 1-y.
+No two circles may overlap: dist(c_i, c_j) >= r_i + r_j.
+Both rules are checked with an absolute tolerance of 1e-6. An invalid packing scores 0.
+Score of a valid packing: let s = max(0, largest containment excess, largest pairwise overlap / 2); the score is the sum over circles of max(0, r - s). Higher is better.
+solve.py must define pack_circles(n) returning a list of n (x, y, r) tuples; evaluate.py calls pack_circles(26).
+The evaluator runs Python 3.12 with numpy and scipy installed.
 """

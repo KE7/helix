@@ -2,38 +2,46 @@
 
 ## Problem
 
-Pack 26 non-overlapping circles inside the unit square `[0, 1] × [0, 1]` so as to **maximize the sum of their radii**. This is a classic geometric optimization problem and one of the benchmarks used by [GEPA](https://gepa-ai.github.io/gepa/). The objective is the sum `Σ rᵢ`; circles may touch but must not overlap, and every circle must lie fully inside the unit square.
+Pack 26 non-overlapping circles inside the unit square `[0, 1] × [0, 1]` so as to **maximize the sum of their radii**. This is a classic geometric optimization problem. The objective is the sum `Σ rᵢ`; circles may touch but must not overlap, and every circle must lie fully inside the unit square.
 
 ## How to run
 
+Copy the example to a standalone directory, then run HELIX there:
+
 ```bash
-cd examples/circle_packing
+work_dir="$(mktemp -d)/circle_packing"
+cp -R "$(git rev-parse --show-toplevel)/examples/circle_packing" "$work_dir"
+cd "$work_dir"
 helix evolve
 ```
 
-This will evolve `solve.py` against `evaluate.py` using the configuration in `helix.toml`.
+`helix evolve` initializes the copy as a git repository and evolves `solve.py`
+against `evaluate.py` using the configuration in `helix.toml`.
 
-## Expected result
+This quick setup has no isolation: the agent can read and run `evaluate.py`,
+evaluate outside the budget, and use the web. For a run whose result you
+intend to report, use the sandboxed protocol in [`clean_run/`](clean_run/),
+described in
+[`docs/experiments/circle-packing.md`](../../docs/experiments/circle-packing.md#clean-run-protocol).
 
-Starting from a trivial seed solver scoring **0.9798**, HELIX evolves a solution that reaches **2.635982** — matching the best published result of **2.63598+**, and above AlphaEvolve's **2.6358**.
+## Results
 
-Score progression along the winning lineage:
+A capped two-generation clean-run smoke produces a sum of radii of
+**2.63598308491755**, independently checked as exactly feasible and reproduced
+in a fresh container. This is a smoke observation, not a benchmark result.
+The full run capped at 200 scoring executions remains incomplete after a
+watchdog credential stop despite successful sampled requests. See the
+[run state and watchdog fix](../../docs/experiments/circle-packing.md#current-run-state).
 
-| Stage      | Score   |
-|------------|---------|
-| Seed       | 0.9798  |
-| Gen ~3     | 2.5413  |
-| Gen ~6     | 2.5561  |
-| Gen ~10    | 2.6088  |
-| **Gen 14** | **2.6360** |
+Run the example to produce results; see
+[`docs/experiments/circle-packing.md`](../../docs/experiments/circle-packing.md)
+for the evaluation protocol and reference values. The seed solver (`solve.py`)
+scores **0.979764**; the command under [Requirements](#requirements)
+reproduces that number.
 
-The final score of **2.6360** was reached at **generation 14 of a 30-generation budget** — less than half the budget consumed.
+## Configuration
 
-> ### 💡 The kicker: this was the *cheapest* Claude setup available
->
-> *Achieved with **haiku + low reasoning effort + max_turns=20**, arguably the cheapest Claude setup available. Demonstrates HELIX can extract strong results from tiny budgets.*
-
-The exact `[agent]` block from `helix.toml` that produced the result:
+The agent settings in `helix.toml` are:
 
 ```toml
 [agent]
@@ -43,7 +51,8 @@ effort = "low"
 max_turns = 20
 ```
 
-No Sonnet, no Opus, no extended thinking — just Haiku with low effort and a hard 20-turn cap per mutation, and HELIX still matches GEPA.
+`[agent].background` describes the task, the `pack_circles(n)` interface, and
+the evaluator's Python version and packages.
 
 ## Files
 
@@ -57,25 +66,39 @@ No Sonnet, no Opus, no extended thinking — just Haiku with low effort and a ha
   evaluator never sees or reports a target to match — every measure is
   computed from the candidate's own geometry, so it keeps producing signal
   no matter how good the packing gets.
-- `helix.toml` — project configuration.
-- `solve_optimized.py` — a hand-tuned reference implementation that scores **2.635982**. It is not used during evolution; it is provided as a sanity check / target for comparison.
+- `helix.toml` — project configuration. It lists `evaluate.py` in
+  `[evaluator].protected_files`, so a candidate that modifies the evaluator is
+  rejected.
+- `check_packing.py` — validity checker that computes no score; the
+  clean-run protocol gives it to the agent in place of an evaluator.
+- `clean_run/` — the sandboxed, leak-free protocol (evaluator service,
+  egress gateway, Dockerfiles, config template, scripts).
+
+A packing is valid when it has exactly 26 finite `(x, y, r)` rows with
+`r ≥ 0`, every circle lies inside the square and no two overlap, within an
+absolute tolerance of 1e-6. An invalid packing scores 0. A valid packing
+scores the sum of its radii after every radius is reduced by the largest
+residual violation, so tolerance slack never raises the score. Scores are not
+clipped to any published value, and no score threshold stops the search.
+The reference packing in the docs is supplied test data, never the experiment
+seed or evidence that HELIX discovered those coordinates.
 
 ## Requirements
 
-The solver uses `numpy` and `scipy` and requires Python 3.10+ for PEP 604
-(`X | None`) annotations. The evaluator command in `helix.toml` pins an
-interpreter and installs those two packages itself via `uv`, so no manual
-setup is needed and a fresh clone reproduces the reference score.
+The seed solver uses `numpy`. The evaluator command in `helix.toml` pins
+Python 3.12 and installs `numpy` and `scipy` itself via `uv`, so evaluation
+does not depend on the host `python3` and a fresh clone reproduces the seed
+score.
 
 Verify the baseline before trusting a run:
 
 ```bash
 tmp_dir=$(mktemp -d) && cp "$(git rev-parse --show-toplevel)/examples/circle_packing/evaluate.py" "$tmp_dir/" \
-  && cp "$(git rev-parse --show-toplevel)/examples/circle_packing/solve_optimized.py" "$tmp_dir/solve.py" \
-  && printf '["reference"]\n' > "$tmp_dir/helix_batch.json" \
+  && cp "$(git rev-parse --show-toplevel)/examples/circle_packing/solve.py" "$tmp_dir/" \
+  && printf '["0"]\n' > "$tmp_dir/helix_batch.json" \
   && cd "$tmp_dir" \
   && uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py
-# HELIX_RESULT=[[2.635982, {"scores": {"sum_radii": 2.635982}, "feedback": "All 26 circles are valid: inside the square, no overlaps. Radii range 0.0692-0.1370 (mean 0.1014, spread ratio 1.98) across 26 circles. Circle 5 could grow 0.0000 before the left wall (total headroom 0.0000). Largest empty gap: r0.0238 near (0.97, 0.62).", "bounds_violations": {"count": 0, "worst": []}, "overlap_violations": {"count": 0, "total_overlap_depth": 0.0, "worst": []}, "radius_stats": {"n_circles": 26, "min": 0.069181, "max": 0.13701, "mean": 0.101384}}]]
+# HELIX_RESULT=[[0.979764..., {"scores": {"sum_radii": 0.979764...}, "valid": true, "certification_shrink": 1.4e-17, "feedback": "All 26 circles are valid: inside the square, no overlaps. Radii range 0.0100-0.1303 (mean 0.0377, spread ratio 13.03) across 26 circles. Circle 0 could grow 0.1113 before circle 8 (total headroom 0.3665). Largest empty gap: r0.1211 near (0.88, 0.88).", "bounds_violations": {"count": 0, "worst": []}, "overlap_violations": {"count": 0, "total_overlap_depth": 0.0, "worst": []}, "radius_stats": {"n_circles": 26, "min": 0.01, "max": 0.130332, "mean": 0.037683}}]]
 ```
 
 A score of `0.0` with `"ERROR: Could not import solve.py"` means the evaluator

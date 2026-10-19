@@ -21,11 +21,14 @@ context to a mutation agent.
    `src/helix/parsers/helix_result.py`, `src/helix/mutator.py`, `README.md`,
    and `examples/*/helix.toml`.
 4. Prefer Docker sandboxing for new setups:
-   `helix sandbox login <backend>`, then `[sandbox].enabled = true`.
+   `helix sandbox login <backend>`, then `[sandbox].enabled = true` for
+   mutation agents and `[sandbox].evaluator = true` with `[evaluator.sidecar]`
+   for evaluation.
 5. Use `uv run helix ...` inside this repo, or `helix ...` for installed
    user projects.
-6. For Docker sandboxing, require an evaluator sidecar. The evaluator must not
-   live in the candidate workspace or be visible to mutation agents.
+6. For Docker-sandboxed evaluation, set `[sandbox].evaluator = true` and
+   configure `[evaluator.sidecar]`. The evaluator must not live in the
+   candidate workspace or be visible to mutation agents.
 
 ## Reference Routing
 
@@ -43,14 +46,17 @@ Pareto frontier. `helix best --export PATH` copies the best candidate out when
 the run is done.
 
 With Docker sandboxing enabled, HELIX copies each candidate into a temporary
-agent container workspace. Agent changes sync back to the candidate worktree;
-evaluator-side changes are discarded. HELIX also starts a warm evaluator
-sidecar once per `helix evolve` on a private Docker network. Mutation agents
-run on the normal agent network and cannot reach the sidecar. Evaluator-runner
-containers run only during evaluation, join the private network, call the
-sidecar, print `HELIX_RESULT`, and exit. Agent containers get a persistent
-backend auth volume such as `helix-auth-claude`; candidate workspaces do not
-persist between mutations except through HELIX's accepted worktree sync.
+agent container workspace. Agent changes sync back to the candidate worktree.
+With `[sandbox].enabled = true` alone, the evaluator command still runs on the
+host in the candidate worktree. With `[sandbox].evaluator = true` as well,
+HELIX requires `[evaluator.sidecar]` and starts a warm evaluator sidecar once
+per `helix evolve` on a private Docker network. Mutation agents run on the
+normal agent network and cannot reach the sidecar. Evaluator-runner containers
+run only during evaluation, join the private network, call the sidecar, print
+`HELIX_RESULT`, and exit; their file changes are discarded. Agent containers
+get a persistent backend auth volume such as `helix-auth-claude`; candidate
+workspaces do not persist between mutations except through HELIX's accepted
+worktree sync.
 
 ## Security Boundary
 
@@ -61,10 +67,11 @@ For new projects, set up two directories:
 - A private evaluator/benchmark directory or image with tests, goldens, data,
   secrets, services, and scoring logic.
 
-When `[sandbox].enabled = true`, evaluator execution should use a sidecar. The
-agent container should never receive evaluator source, evaluator secrets,
-`helix.toml`, `.env*`, `.git`, or HELIX state. It should receive feedback only
-through parsed `HELIX_RESULT` scores and side information.
+When `[sandbox].enabled = true`, also set `[sandbox].evaluator = true` so
+evaluation runs through the sidecar instead of on the host. The agent container
+should never receive evaluator source, evaluator secrets, `helix.toml`, `.env*`,
+`.git`, or HELIX state. It should receive feedback only through parsed
+`HELIX_RESULT` scores and side information.
 
 Do not put evaluator endpoints, credentials, goldens, answer keys, or private
 benchmark details in `agent.background`, candidate files, or mutation prompts.
@@ -78,8 +85,9 @@ interface, and returns sanitized scores, stdout, stderr, and feedback.
 
 ## Docker Sidecar TOML
 
-Use this shape for new sandboxed projects. The evaluator command is a client
-that runs in `runner_image` and talks to the long-lived private sidecar service.
+Use this shape for new sandboxed projects. `[sandbox].evaluator = true` routes
+evaluation through the sidecar. The evaluator command is a client that runs in
+`runner_image` and talks to the long-lived private sidecar service.
 
 ```toml
 objective = "Describe exactly what the candidate should improve."
@@ -128,6 +136,7 @@ Preserve public function names and output artifact formats.
 
 [sandbox]
 enabled = true
+evaluator = true
 network = "bridge"
 skip_special_files = true
 
@@ -163,6 +172,7 @@ HELIX also sets:
 
 - `HELIX_SPLIT=train|val`
 - `HELIX_INSTANCE_IDS` as a comma-separated copy of requested ids
+- `HELIX_CANDIDATE_ID` with the id of the candidate being evaluated
 - `HELIX_EVALUATOR_ENDPOINT` for sidecar evaluator clients
 
 Prefer `helix_batch.json` because the built-in result parser uses that same

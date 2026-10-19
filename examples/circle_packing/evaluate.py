@@ -5,8 +5,24 @@ Imports solve.pack_circles(26), checks validity constraints, computes total
 radius sum as score, and prints one ``HELIX_RESULT=`` line. Exits with code 0
 on success.
 
-Score = sum of all radii (no penalty for violations — matching the
-GEPA blog: https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)
+A packing is valid when it has exactly 26 rows of finite real (x, y, r)
+numbers with r >= 0, every circle lies inside the unit square and no two
+circles overlap, all within an absolute tolerance of 1e-6 (optimize_anything's
+``validate_packing`` tolerance; check_packing.py and the sandboxed evaluator in
+clean_run/evaluator/packing_rules.py apply the same rule).  Any invalid
+packing scores 0; its violations are reported in side_info.
+
+The score of a valid packing is certified: every radius is first reduced by
+the largest residual violation, max(0, worst containment excess, worst
+pairwise overlap / 2), clipped at 0, and the reduced radii are summed
+unrounded.  The score therefore never exceeds the radius sum of a packing
+that satisfies every constraint exactly; a packing with no residual violation
+scores its plain radius sum.
+
+This file runs candidate code in-process and lives in the candidate tree, so
+a mutation agent can read, run and edit it.  Use it for local prototyping
+only; clean_run/ holds the sandboxed protocol for runs whose results are
+reported.
 
 ``side_info`` carries the feedback the *next* mutation actually reasons from
 (see the "Evaluator Contract" note in skills/helix/SKILL.md): which circles
@@ -23,9 +39,11 @@ MAX_OFFENDERS_LISTED) rather than enumerating every circle or every pair.
 """
 import json
 import math
+import numbers
 from pathlib import Path
 
 N_CIRCLES = 26
+TOLERANCE = 1e-6
 
 # Cap how many individual offenders (overlapping pairs, out-of-bounds
 # circles) side_info enumerates. Counts and aggregate totals are always
@@ -144,7 +162,7 @@ def _analyze(circles: list[tuple[float, float, float]]) -> dict:
     bounds_offenders = []
     for i, (x, y, r) in enumerate(circles):
         escape = _bounds_escape(x, y, r)
-        if escape > 1e-9:
+        if escape > TOLERANCE:
             bounds_offenders.append({"circle": i, "escapes_by": round(escape, 6)})
     bounds_offenders.sort(key=lambda o: -o["escapes_by"])
 
@@ -156,7 +174,7 @@ def _analyze(circles: list[tuple[float, float, float]]) -> dict:
             x_j, y_j, r_j = circles[j]
             dist = math.hypot(x_i - x_j, y_i - y_j)
             overlap = r_i + r_j - dist
-            if overlap > 1e-9:  # same tolerance as the validity check below
+            if overlap > TOLERANCE:  # same tolerance as the validity check below
                 total_overlap += overlap
                 overlap_offenders.append(
                     {"circles": [i, j], "overlap_by": round(overlap, 6)}
@@ -240,6 +258,36 @@ def _analyze(circles: list[tuple[float, float, float]]) -> dict:
     }
 
 
+def _structural_problems(circles: object) -> list[str]:
+    """Count, row shape, numeric type, finiteness and sign checks."""
+    if not isinstance(circles, (list, tuple)):
+        return [f"pack_circles must return a list, got {type(circles).__name__}"]
+    if len(circles) != N_CIRCLES:
+        return [f"expected exactly {N_CIRCLES} circles, got {len(circles)}"]
+    problems = []
+    for i, row in enumerate(circles):
+        try:
+            items = list(row)
+        except TypeError:
+            problems.append(f"row {i} is not an (x, y, r) triple of numbers")
+            continue
+        if len(items) != 3 or not all(
+            isinstance(v, numbers.Real) and not isinstance(v, bool) for v in items
+        ):
+            problems.append(f"row {i} is not an (x, y, r) triple of numbers")
+            continue
+        try:
+            values = [float(v) for v in items]
+        except (TypeError, ValueError, OverflowError):
+            problems.append(f"row {i} contains NaN or an infinite value")
+            continue
+        if not all(math.isfinite(v) for v in values):
+            problems.append(f"row {i} contains NaN or an infinite value")
+        elif values[2] < 0:
+            problems.append(f"circle {i} has a negative radius")
+    return problems[:MAX_OFFENDERS_LISTED]
+
+
 def _emit(score: float, *, side_info_extra: dict) -> None:
     side_info = {"scores": {"sum_radii": score}, **side_info_extra}
     payload = [[score, side_info] for _ in _read_batch_ids()]
@@ -272,9 +320,39 @@ def evaluate():
         )
         return
 
-    # Score = sum of all radii (no violation penalty, matching GEPA blog)
-    score = round(sum(r for _, _, r in circles), 6)
-    _emit(score, side_info_extra=_analyze(circles))
+    problems = _structural_problems(circles)
+    if problems:
+        _emit(
+            0.0,
+            side_info_extra={
+                "valid": False,
+                "feedback": "Invalid packing, score 0: " + "; ".join(problems),
+            },
+        )
+        return
+    circles = [(float(x), float(y), float(r)) for x, y, r in circles]
+    analysis = _analyze(circles)
+    valid = (
+        analysis["bounds_violations"]["count"] == 0
+        and analysis["overlap_violations"]["count"] == 0
+    )
+    if not valid:
+        # 0 for an invalid packing, so violations can never raise the score.
+        _emit(0.0, side_info_extra={"valid": False, **analysis})
+        return
+    worst_boundary = max(_bounds_escape(x, y, r) for x, y, r in circles)
+    worst_overlap = max(
+        circles[i][2] + circles[j][2]
+        - math.hypot(circles[i][0] - circles[j][0], circles[i][1] - circles[j][1])
+        for i in range(len(circles))
+        for j in range(i + 1, len(circles))
+    )
+    shrink = max(0.0, worst_boundary, worst_overlap / 2.0)
+    score = math.fsum(max(0.0, r - shrink) for _, _, r in circles)
+    _emit(
+        score,
+        side_info_extra={"valid": True, "certification_shrink": shrink, **analysis},
+    )
 
 
 if __name__ == "__main__":

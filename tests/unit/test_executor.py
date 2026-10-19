@@ -136,3 +136,17 @@ class TestRunEvaluator:
         )
 
         assert result.instance_scores == {"a": 0.25, "b": 0.75}
+
+
+def test_evaluator_environment_names_the_candidate(mocker, tmp_path: Path) -> None:
+    _prepare_batch(tmp_path)
+    run = mocker.patch(
+        "helix.executor.subprocess.run",
+        return_value=MagicMock(stdout=_result_line([1.0]), stderr="", returncode=0),
+    )
+
+    run_evaluator(make_candidate(str(tmp_path)), make_config(), split="val")
+
+    env = run.call_args.kwargs["env"]
+    assert env["HELIX_CANDIDATE_ID"] == "cand-001"
+    assert env["HELIX_SPLIT"] == "val"

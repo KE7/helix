@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import logging
@@ -81,6 +82,7 @@ from helix.population import (
 from helix.sibling_history import append_child, render_history
 from helix.sandbox import (
     reset_sandbox_agent_state,
+    sandbox_auth_volume_name,
     resolve_sandbox_image,
     start_evaluator_sidecar,
 )
@@ -307,7 +309,15 @@ def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> No
     if not state.resume_semantics:
         return
 
-    diffs = _semantic_diffs(state.resume_semantics, current)
+    saved = deepcopy(state.resume_semantics)
+    # Before sidecar mounts were configurable, an absent key meant no mounts.
+    # Normalize just that default; actual mount changes still invalidate scores.
+    saved_evaluator = saved.get("evaluator")
+    if isinstance(saved_evaluator, dict):
+        saved_sidecar = saved_evaluator.get("sidecar")
+        if isinstance(saved_sidecar, dict):
+            saved_sidecar.setdefault("volumes", [])
+    diffs = _semantic_diffs(saved, current)
     if diffs:
         preview = "; ".join(diffs[:5])
         if len(diffs) > 5:
@@ -1637,14 +1647,32 @@ def _run_proposal_worker(
     _child_eval: "EvalResult | None" = None
     _child_n_uncached: int = 0
     if _sub_ids is not None:
-        _ce, _cn = _cached_evaluate_batch(
-            _child,
-            list(_sub_ids),
-            minibatch_cache,  # use cache for child (unlike parent bypass)
-            config,
-            "train",
-            project_root,
-        )
+        try:
+            _ce, _cn = _cached_evaluate_batch(
+                _child,
+                list(_sub_ids),
+                minibatch_cache,  # use cache for child (unlike parent bypass)
+                config,
+                "train",
+                project_root,
+            )
+        except Exception as _ce_exc:
+            # The parent evaluation and the mutation's tokens are already
+            # spent; returning a failed proposal lets the apply phase charge
+            # both, where an escaping exception would lose them (and, on the
+            # single-slot path, end the run).
+            print_warning(
+                f"Child eval for proposal {_new_id} "
+                f"(parent: {_parent.id}, gen {gen}) failed: "
+                f"{type(_ce_exc).__name__}: {_ce_exc} — proposal slot skipped."
+            )
+            _safe_remove_worktree(_child, label="child whose gate evaluation failed")
+            return MutationFailedProposal(
+                presample_ctx=pre_ctx,
+                parent_eval_result=_parent_eval,
+                parent_n_uncached=_parent_n_uncached,
+                child_usage=_child.usage if _child.usage else None,
+            )
         _ce.candidate_id = _child.id
         _child_eval = _ce
         _child_n_uncached = _cn
@@ -1729,6 +1757,7 @@ def _reset_sandbox_agent_state_for_generation(config: HelixConfig, gen: int) -> 
         config.agent.backend,
         image=resolve_sandbox_image(config.sandbox, config.agent.backend),
         generation=gen,
+        volume=sandbox_auth_volume_name(config.agent.backend, config.sandbox),
     )
 
 
@@ -3005,6 +3034,28 @@ def _run_evolution_impl(
                     )
 
                 if budget_api.budget_exhausted(state, config):
+                    # The worker has already run this slot's mutation and, on
+                    # the minibatch path, the child's gate evaluation.  Charge
+                    # both before stopping so that no spent tokens and no
+                    # evaluator execution go unrecorded.
+                    if wr.child_usage:
+                        budget_api.charge_llm_usage(
+                            state, wr.child_usage, candidate_id=child.id,
+                            source="mutation",
+                        )
+                    if (
+                        use_minibatch_gate
+                        and _subsample_ids is not None
+                        and wr.parent_eval_result is not None
+                        and wr.child_eval_result is not None
+                    ):
+                        budget_api.charge_evaluation(
+                            state,
+                            num_actual_examples=wr.child_n_uncached,
+                            candidate_id=child.id,
+                            split="train",
+                            source="mutation_minibatch_gate",
+                        )
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True

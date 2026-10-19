@@ -1,11 +1,24 @@
 [project]
-objective = """Maximize accuracy answering software engineering questions requiring up-to-date knowledge. \
-The agent should use web browsing (requests, httpx, or urllib) to fetch live data from official docs, PyPI, \
-GitHub API, or package changelogs rather than relying on potentially stale LLM training data. \
-Questions cover current library versions, API behaviors, and language feature changes."""
+objective = """Maximize the accuracy of solve(question) in agent.py on software engineering \
+questions whose answers change over time, such as current library versions, API behaviors, \
+and language feature changes."""
+
+# The seed agent calls the Anthropic API. HELIX scrubs the environment of
+# evaluator and agent subprocesses; variables listed here are passed through
+# to both. The claude mutation backend also receives ANTHROPIC_API_KEY when it
+# is set, so mutation sessions authenticate with this API key.
+passthrough_env = ["ANTHROPIC_API_KEY"]
 
 [evaluator]
-command = "uv run python evaluate.py"
+# Pin the interpreter and bring the anthropic SDK so evaluation does not
+# depend on the host python3.
+command = "uv run --no-project --python 3.12 --with anthropic python evaluate.py"
+# A candidate that modifies a protected file is rejected.
+protected_files = ["evaluate.py", "train", "val"]
+
+[dataset]
+train_size = 5
+val_size = 5
 
 [evolution]
 max_generations = 2
@@ -17,27 +30,27 @@ backend = "claude"
 model = "haiku"
 effort = "low"
 max_turns = 20
-background = """The agent code is at: examples/web_researcher/agent.py
-The evaluator code is at: examples/web_researcher/evaluate.py
-The val questions are in: examples/web_researcher/val/*.json
+background = """
+Task: agent.py defines solve(question: str) -> str. It receives one software
+engineering question and returns only the answer string, for example a version
+number, an HTTP status code, or a module name.
 
-The agent's solve() function is what's being evaluated. It currently returns stale answers
-for version questions because it uses hardcoded training data instead of live web lookups.
+Evaluation: the evaluator imports agent.solve and calls it on each question in
+the requested batch. Each answer is compared with the expected value by
+normalized exact match. For version questions, an answer also matches when it
+gives at least major.minor and those components equal the leading components of
+the current version (for a current version of 3.13.4, "3.13" and "3.13.4" match;
+"3" does not). A match scores 1.0 and anything else 0.0. Expected values for
+version questions are resolved when the evaluator runs.
 
-HOW TO FIX: Modify examples/web_researcher/agent.py to fetch live package versions
-from PyPI using urllib.request (already in stdlib, no extra install needed):
+Environment: the evaluator runs Python 3.12 with the standard library and the
+anthropic SDK installed, network access, and ANTHROPIC_API_KEY set.
 
-  import urllib.request, json
-  def _fetch_pypi_version(package):
-      url = f"https://pypi.org/pypi/{package}/json"
-      with urllib.request.urlopen(url, timeout=10) as resp:
-          data = json.loads(resp.read().decode())
-      return data["info"]["version"]
-
-Replace the stale _TRAINING_KNOWLEDGE version entries with live PyPI calls.
-The packages to fetch are: anthropic, httpx, pydantic (and optionally requests, numpy).
-Keep the stable non-version answers (github rate limits, urllib2, asyncio) unchanged.
-
-VERIFY your changes work by running from the worktree root:
-  cd examples/web_researcher && uv run python agent.py
+Change agent.py and add new files as needed.
 """
+
+[sandbox]
+# Mutation agents run in Docker workspace copies that leave out the evaluator
+# and its question files. Evaluation runs on the host in the candidate worktree.
+enabled = true
+omit_from_agent = ["evaluate.py", "train", "val"]
