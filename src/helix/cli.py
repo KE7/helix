@@ -30,9 +30,27 @@ from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_heli
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
+from helix.trace import enable as enable_trace
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
+
+_trace_option = click.option(
+    "--trace",
+    "trace_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Append a JSONL timing trace of the run to this path (or set HELIX_TRACE).",
+)
+
+
+def _enable_trace(trace_path: Path | None) -> None:
+    """Start the span trace before evolution; an unopenable path fails loudly."""
+    try:
+        enable_trace(trace_path)
+    except OSError as exc:
+        print_error(f"Cannot open trace file: {exc}")
+        raise SystemExit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +622,7 @@ def sandbox_logout(
         "when set on a backend that does not support it)."
     ),
 )
+@_trace_option
 def evolve(
     config_path: str,
     project_dir: Path | None,
@@ -614,6 +633,7 @@ def evolve(
     backend: str | None,
     model: str | None,
     effort: str | None,
+    trace_path: Path | None,
 ) -> None:
     from helix.evolution import run_evolution
 
@@ -676,6 +696,7 @@ def evolve(
 
     base_dir = _helix_dir(project_root)
     setup_file_logging(base_dir)
+    _enable_trace(trace_path)
     try:
         run_evolution(config, project_root, base_dir)
     except ResumeIncompatibleError as exc:
@@ -1172,7 +1193,10 @@ def attempts_cmd(
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Project root directory (defaults to current working directory).",
 )
-def resume(config_path: str, project_dir: Path | None) -> None:
+@_trace_option
+def resume(
+    config_path: str, project_dir: Path | None, trace_path: Path | None
+) -> None:
     """Resume from the last completed generation of an evolution run.
 
     In-flight proposal batches are reconciled rather than resumed slot-by-slot.
@@ -1223,6 +1247,7 @@ def resume(config_path: str, project_dir: Path | None) -> None:
         raise SystemExit(1)
 
     print_info(f"Resuming from generation {state.generation if state else 0}…")
+    _enable_trace(trace_path)
     try:
         run_evolution(config, project_root, base_dir)
     except ResumeIncompatibleError as exc:

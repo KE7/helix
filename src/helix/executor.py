@@ -24,7 +24,7 @@ from helix.sandbox import (
     current_evaluator_sidecar_runtime,
     run_sandboxed_commands,
 )
-from helix.trace import TRACE, EventType
+from helix.trace import TRACE, EventType, traced
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +183,7 @@ def _collect_asi(
     return asi
 
 
+@traced("evaluate")
 def run_evaluator(
     candidate: Candidate,
     config: HelixConfig,
