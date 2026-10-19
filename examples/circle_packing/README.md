@@ -78,7 +78,10 @@ A packing is valid when it has exactly 26 finite `(x, y, r)` rows with
 `r ≥ 0`, every circle lies inside the square and no two overlap, within an
 absolute tolerance of 1e-6. An invalid packing scores 0. A valid packing
 scores the sum of its radii after every radius is reduced by the largest
-residual violation, so tolerance slack never raises the score.
+residual violation, so tolerance slack never raises the score. Scores are not
+clipped to any published value, and no score threshold stops the search.
+The reference packing in the docs is supplied test data, never the experiment
+seed or evidence that HELIX discovered those coordinates.
 
 ## Requirements
 

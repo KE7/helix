@@ -605,3 +605,29 @@ def test_evolve_success_prints_clean_hint(tmp_path: Path) -> None:
 
     # run_evolution should still have been called
     assert mock_evolve.called, "run_evolution should be called even after dropping worktrees"
+
+
+@pytest.mark.parametrize("mounts", [[], ["/tmp/ledger:/srv/ledger:rw"]])
+def test_resume_old_sidecar_state_defaults_missing_volumes(mounts: list[str]) -> None:
+    from copy import deepcopy
+    from helix.config import EvaluatorConfig, EvaluatorSidecarConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    config = HelixConfig(objective="test", evaluator=EvaluatorConfig(
+        command="python runner.py", sidecar=EvaluatorSidecarConfig(
+            image="evaluator:v1", command="python server.py", endpoint="http://eval:8080"
+        )
+    ))
+    state = make_state(frontier=[])
+    state.frontier_type = config.evolution.frontier_type
+    state.resume_semantics = _resume_semantics(config)
+    del state.resume_semantics["evaluator"]["sidecar"]["volumes"]
+    saved = deepcopy(state.resume_semantics)
+    assert config.evaluator.sidecar is not None
+    config.evaluator.sidecar.volumes = mounts
+    if mounts:
+        with pytest.raises(ResumeIncompatibleError, match="volumes"):
+            _validate_resume_semantics(state, config)
+    else:
+        _validate_resume_semantics(state, config)
+    assert state.resume_semantics == saved

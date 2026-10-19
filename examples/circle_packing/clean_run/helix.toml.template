@@ -2,7 +2,7 @@
 #
 # scripts/setup_run_dir.sh renders this file into <run dir>/.helix-run/helix.toml
 # and replaces @LEDGER_DIR@, @EVAL_CPUS@, @MAX_EVALUATIONS@,
-# @MAX_EXECUTIONS@, @MODEL@, @EFFORT@ and @MAX_TURNS@.  The file lives outside
+# @MAX_EXECUTIONS@, @IMAGE_TAG@, @MODEL@, @EFFORT@ and @MAX_TURNS@.  The file lives outside
 # the candidate tree, and HELIX never copies a helix.toml into an agent
 # workspace.  See docs/experiments/circle-packing.md for the protocol.
 
@@ -29,7 +29,7 @@ include_stdout = true
 include_stderr = true
 
 [evaluator.sidecar]
-image = "helix-circle-clean/evaluator:1"
+image = "helix-circle-clean/evaluator:@IMAGE_TAG@"
 # CP_MAX_EXECUTIONS is the exact execution cap; cached requests cost no executions.
 command = "env CP_MAX_EXECUTIONS=@MAX_EXECUTIONS@ python3 /opt/cpeval/private/evaluator_server.py"
 endpoint = "http://helix-evaluator:8080/evaluate"
@@ -49,6 +49,7 @@ val_size = 1
 # The watchdog stops on the sidecar's cap refusal. A generation guard can
 # stop a run early if mutations fail or produce no new trees; summary flags it.
 max_evaluations = 0
+# Leave perfect_score_threshold unset: there is no known optimal target.
 max_generations = @MAX_GENERATIONS@
 minibatch_size = 1
 num_parallel_proposals = 1
@@ -86,7 +87,7 @@ This workspace has the same Python, numpy and scipy, and no network access. chec
 [sandbox]
 enabled = true
 evaluator = true
-image = "helix-circle-clean/agent-claude:1"
+image = "helix-circle-clean/agent-claude:@IMAGE_TAG@"
 network = "helix-circle-clean-agent"
 auth_volume = "helix-circle-clean-claude-home"
 skip_special_files = true

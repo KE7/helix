@@ -45,7 +45,6 @@ val_size = 1
 [evolution]
 max_generations = 30
 merge_enabled = false
-perfect_score_threshold = 100.0
 max_evaluations = 500
 
 [agent]
@@ -78,7 +77,20 @@ Both evaluators (`examples/circle_packing/evaluate.py` locally, and `clean_run/e
 
 This is optimize_anything's `validate_packing` rule and tolerance (`atol=1e-6`). An invalid packing, an exception or a timeout scores **0**, as in optimize_anything.
 
-**Score.** Let `s = max(0, worst containment excess, worst pairwise overlap / 2)`. The score is `Σ max(0, r_i - s)`: every radius is reduced by the largest residual violation before summing. Shrinking every radius by `s` removes every violation, so the score never exceeds the radius sum of a packing that satisfies the constraints exactly. A packing with no residual violation scores its plain radius sum. optimize_anything scores a valid packing by its raw radius sum, so a packing that overlaps by up to 1e-6 can score up to about 1.3e-5 more there than any exactly valid packing; the certified score removes that gain. The score is never rounded.
+**Score.** Let `s = max(0, worst containment excess, worst pairwise overlap / 2)`. The score is `Σ max(0, r_i - s)`: every radius is reduced by the largest residual violation before summing. Shrinking every radius by `s` removes every violation, so the score never exceeds the radius sum of a packing that satisfies the constraints exactly. A packing with no residual violation scores its plain radius sum. optimize_anything scores a valid packing by its raw radius sum, so a packing that overlaps by up to 1e-6 can score up to about 1.3e-5 more there than any exactly valid packing; the certified score removes that gain. The score is never rounded. There is no normalization or clipping to a published result, and
+`perfect_score_threshold` is left unset. Any valid improvement receives its
+full certified radius sum, including one above a previously reported result.
+Only the execution budget, generation guard or an operational failure ends a
+run; matching a reference value does not.
+
+The previous local evaluator on `main` summed radii without rejecting invalid
+geometry, and its prompt supplied published targets and optimization recipes.
+Results from that setup cannot establish valid packings or independent search.
+The isolated protocol below replaces that setup for reported experiments; it
+starts from the geometric seed, keeps reference coordinates and scores out of
+the agent workspace, and validates the candidate's returned geometry in a
+separate process. The existing smoke remains a historical protocol check;
+a fresh completed run is still needed for a benchmark claim.
 
 Output format (one pair per id in `helix_batch.json`), shown for the seed from the local evaluator:
 
@@ -102,7 +114,7 @@ These are best known values, not proven optima.
 
 ## Reference Packing
 
-[`circle-packing/reference_known_best.py`](circle-packing/reference_known_best.py) is a reference packing for checking the evaluator setup. It embeds a packing (`KNOWN_BEST_CONFIG`) whose radii sum to 2.635982, runs an SLSQP-based search for up to 50 seconds, and returns the embedded packing when that search does not find a packing scoring above 2.6.
+[`circle-packing/reference_known_best.py`](circle-packing/reference_known_best.py) is a reference packing for checking the evaluator setup. It returns supplied coordinates (`KNOWN_BEST_CONFIG`) whose radii sum to 2.635982. It performs no optimization or search. Scoring this fixture checks the evaluator installation; it is not evidence of discovery and is never used as the experiment seed.
 
 ```bash
 tmp_dir=$(mktemp -d) && cp "$(git rev-parse --show-toplevel)/examples/circle_packing/evaluate.py" "$tmp_dir/" \

@@ -19,7 +19,7 @@ val_size = 1
 [evolution]
 max_generations = 30
 merge_enabled = false
-perfect_score_threshold = 100.0
+# No perfect_score_threshold: higher valid radius sums remain worth exploring.
 max_evaluations = 500
 
 [agent]

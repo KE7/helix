@@ -22,9 +22,13 @@ cd "${RUN_DIR}" || exit 1
 # signals as a whole (caffeinate, uv, HELIX and its docker clients).
 set -m
 # env -i: HELIX sees no Anthropic credential and no HELIX_* variables from this
-# shell (it forwards both into agent containers).  caffeinate keeps the Mac
-# awake for the run.
-caffeinate -i env -i \
+# shell (it forwards both into agent containers). On macOS, caffeinate keeps
+# the host awake; other hosts can run the same experiment without it.
+run_command=(env -i)
+if command -v caffeinate >/dev/null 2>&1; then
+  run_command=(caffeinate -i env -i)
+fi
+"${run_command[@]}" \
   PATH="${PATH}" HOME="${HOME}" LANG="en_US.UTF-8" TERM="dumb" COLUMNS="200" \
   uv run --project "${HELIX_SRC}" helix "${MODE}" \
     --config "${PRIVATE}/helix.toml" --dir "${RUN_DIR}" \

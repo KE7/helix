@@ -533,6 +533,24 @@ class TestEvaluatorService:
         starts = (tmp_path / "ledger" / "execution_starts.jsonl").read_text().splitlines()
         assert [json.loads(line)["seq"] for line in starts] == [1, 2]
 
+    @pytest.mark.parametrize("valid", [False, True])
+    def test_candidate_claimed_scores_cannot_replace_geometry(
+        self, tmp_path: Path, monkeypatch, valid: bool
+    ) -> None:
+        packing = grid_packing() if valid else [[0.5, 0.5, 0.5]] * 26
+        run = {
+            "payload": {"status": "ok", "circles": packing, "score": 999999},
+            "stdout_tail": 'HELIX_RESULT=[[999999, {}]]',
+            "exit_code": 0,
+        }
+        response, ledger = self._evaluate(
+            tmp_path, monkeypatch, self._body({"solve.py": b"# claimed result"}), run
+        )
+        [[score, side_info]] = response["results"]
+        assert score == (26 / 16 if valid else 0.0)
+        assert side_info["valid"] is valid
+        assert ledger.executions == 1
+
     def _ok(self, score_rows: list[list[float]] | None = None) -> dict[str, Any]:
         return {"payload": {"status": "ok", "circles": score_rows or grid_packing()},
                 "timed_out": False, "exit_code": 0, "wall_seconds": 0.5}
@@ -1144,6 +1162,7 @@ FORBIDDEN = [
 
 PLACEHOLDERS = {
     "@LEDGER_DIR@": "/tmp/ledger",
+    "@IMAGE_TAG@": "test-revision",
     "@EVAL_CPUS@": "14",
     "@MAX_EVALUATIONS@": "200",
     "@MAX_EXECUTIONS@": "200",
@@ -1179,6 +1198,7 @@ def test_template_loads_with_helix_and_matches_the_protocol(tmp_path: Path) -> N
     assert config.dataset.train_size == 1 and config.dataset.val_size == 1
     assert config.evolution.minibatch_size == 1
     assert config.evolution.max_evaluations == 0
+    assert config.evolution.perfect_score_threshold is None
     assert config.evolution.num_parallel_proposals == 1
     assert config.evolution.mutations_per_parent == 1
     assert config.evolution.merge_enabled is False
@@ -1594,3 +1614,86 @@ def test_watchdog_ignores_gateway_history_before_start(tmp_path: Path, monkeypat
     monkeypatch.setattr(watchdog, "stop", lambda *args: pytest.fail("stale failure stopped run"))
     assert watchdog.main() == 0
     assert not (tmp_path / "stop.json").exists()
+
+
+def test_scoring_has_no_fixed_reference_ceiling() -> None:
+    # Larger instances let us test scores above published n=26 values using
+    # elementary, exactly feasible packings, without claiming a new n=26 record.
+    for width in (8, 16):
+        radius = 1.0 / (2 * width)
+        packing = [[(2*x+1)*radius, (2*y+1)*radius, radius]
+                   for x in range(width) for y in range(width)]
+        verdict = rules.evaluate_packing(packing, n=width**2)
+        assert verdict["valid"]
+        assert verdict["score"] == math.fsum(row[2] for row in packing)
+        assert verdict["score"] > 2.64
+
+
+def test_reference_is_a_static_fixture_not_an_optimizer() -> None:
+    reference = _load("cp_reference_fixture", EXAMPLE.parents[1] / "docs/experiments/circle-packing/reference_known_best.py")
+    packing = reference.pack_circles(26)
+    verdict = rules.evaluate_packing(packing)
+    assert verdict["valid"]
+    assert verdict["score"] > 2.6
+    # The fixture is independent of search time, optimizer packages and seeds.
+    assert not hasattr(reference, "TIME_BUDGET")
+    assert not hasattr(reference, "minimize")
+    packing[0] = (0, 0, 0)
+    assert reference.pack_circles(26)[0] != packing[0]
+    with pytest.raises(ValueError, match="26"):
+        reference.pack_circles(25)
+
+
+def test_setup_uses_selected_image_tag(tmp_path: Path) -> None:
+    import subprocess
+    from helix.config import load_config
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text('#!/bin/sh\nif [ "$1" = run ]; then echo 2; fi\n')
+    docker.chmod(0o755)
+    run_dir = tmp_path / "experiment"
+    subprocess.run(["bash", str(CLEAN / "scripts/setup_run_dir.sh"), str(run_dir)],
+                   env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                        "HELIX_CIRCLE_CLEAN_TAG": "test-revision", "EFFORT": ""},
+                   check=True, capture_output=True, text=True)
+    config = load_config(run_dir / ".helix-run/helix.toml")
+    assert config.sandbox.image == "helix-circle-clean/agent-claude:test-revision"
+    assert config.evaluator.sidecar.image == "helix-circle-clean/evaluator:test-revision"
+    assert config.evolution.perfect_score_threshold is None
+
+
+@pytest.mark.parametrize("has_caffeinate", [False, True])
+def test_run_wrapper_starts_with_optional_caffeinate(tmp_path: Path, has_caffeinate: bool) -> None:
+    import shutil
+    import subprocess
+
+    private = tmp_path / ".helix-run"
+    (private / "bin").mkdir(parents=True)
+    (private / "logs/gateway").mkdir(parents=True)
+    wrapper = private / "bin/run_wrapper.sh"
+    shutil.copyfile(CLEAN / "scripts/run_wrapper.sh", wrapper)
+    for name in ("watchdog.py", "agent_monitor.py"):
+        (private / "bin" / name).write_text("")
+    (private / "protocol.env").write_text(
+        f"RUN_DIR='{tmp_path}'\nHELIX_SRC='{tmp_path}'\nAGENT_NETWORK='test'\n"
+        "GATEWAY_CONTAINER='test'\nARCHIVER_CONTAINER='test'\n"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("env", "date", "dirname", "rm"):
+        (bin_dir / name).symlink_to(shutil.which(name))
+    marker = tmp_path / "started"
+    commands = {"git": "echo revision", "docker": "exit 0", "sleep": "exit 0",
+                "uv": f"echo started > '{marker}'"}
+    if has_caffeinate:
+        commands["caffeinate"] = 'shift; exec "$@"'
+    for name, body in commands.items():
+        path = bin_dir / name
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+    subprocess.run(["/bin/bash", str(wrapper), "evolve"],
+                   env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+                   check=True, capture_output=True, text=True, timeout=10)
+    assert marker.read_text().strip() == "started"

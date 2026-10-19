@@ -84,6 +84,7 @@ chmod +x "${PRIVATE}/bin/"*.sh
 EVAL_CPUS="$(docker run --rm --label helix-circle-clean=setup --network none \
   "helix-circle-clean/evaluator:${TAG}" nproc)"
 sed -e "s#@LEDGER_DIR@#${PRIVATE}/ledger#g" \
+    -e "s#@IMAGE_TAG@#${TAG}#g" \
     -e "s#@EVAL_CPUS@#${EVAL_CPUS}#g" \
     -e "s#@MAX_EVALUATIONS@#${MAX_EVALUATIONS}#g" \
     -e "s#@MAX_EXECUTIONS@#${MAX_EXECUTIONS}#g" \

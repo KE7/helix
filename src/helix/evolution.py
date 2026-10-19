@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import logging
@@ -303,7 +304,15 @@ def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> No
     if not state.resume_semantics:
         return
 
-    diffs = _semantic_diffs(state.resume_semantics, current)
+    saved = deepcopy(state.resume_semantics)
+    # Before sidecar mounts were configurable, an absent key meant no mounts.
+    # Normalize just that default; actual mount changes still invalidate scores.
+    saved_evaluator = saved.get("evaluator")
+    if isinstance(saved_evaluator, dict):
+        saved_sidecar = saved_evaluator.get("sidecar")
+        if isinstance(saved_sidecar, dict):
+            saved_sidecar.setdefault("volumes", [])
+    diffs = _semantic_diffs(saved, current)
     if diffs:
         preview = "; ".join(diffs[:5])
         if len(diffs) > 5:
