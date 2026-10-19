@@ -19,6 +19,7 @@ from helix.backends import (
     backend_display_name,
 )
 from helix.lines import split_lf_lines
+from helix.sibling_history import MAX_SUMMARY_WORDS
 
 
 def _load_dotenv_file(path: Path) -> None:
@@ -544,6 +545,51 @@ class EvolutionConfig(BaseModel):
             "uses 5."
         ),
     )
+    sibling_history: bool = Field(
+        default=False,
+        description=(
+            "Show the mutating agent the children already proposed from the "
+            "parent it is mutating: each one's score, whether it was kept, and "
+            "a short description of what it changed, written by a separate "
+            "call that reads the mutation's diff.\n\n"
+            "``false`` (the default) disables the feature outright: no history "
+            "is rendered, no summary call is made, nothing is recorded, and "
+            "the mutation prompt is identical to one built without it.\n\n"
+            "Every child a parent produces is remembered in state, with no "
+            "cap — a parent sampled many times is the case the feature exists "
+            "for. How many reach the prompt is set separately by "
+            "``sibling_history_max_entries``. The record is advisory: it is shown to the agent and never used "
+            "to filter a proposal, because an approach that lost on one "
+            "minibatch can win on another. Safe to switch on mid-run; a "
+            "resume simply starts recording from the next child."
+        ),
+    )
+    sibling_summary_max_words: int = Field(
+        default=MAX_SUMMARY_WORDS,
+        description=(
+            "Word budget for each sibling summary. The same number is quoted "
+            "to the summarising call and enforced when its answer is read back, "
+            "so the request and the truncation cannot drift apart.\n\n"
+            "Only consulted when ``sibling_history`` is on. Raising it makes "
+            "each recorded attempt more informative and every later prompt that "
+            "renders the history correspondingly longer — a parent with ten "
+            "children carries ten of these, so the cost is per-parent, not "
+            "per-summary."
+        ),
+    )
+    sibling_history_max_entries: int | None = Field(
+        default=None,
+        description=(
+            "Show the mutating agent only the most recent N children of its "
+            "parent (a FIFO window). ``None`` (the default) shows every one.\n\n"
+            "Only consulted when ``sibling_history`` is on. The window is "
+            "applied when the prompt is built, so the full record stays in "
+            "state and the prompt says how many earlier attempts were left "
+            "out. Recency, not score, decides what is shown: recorded scores "
+            "come from different evaluation stages and do not rank against "
+            "each other."
+        ),
+    )
 
     def model_post_init(self, __context: object) -> None:
         if self.max_workers < 1:
@@ -584,6 +630,19 @@ class EvolutionConfig(BaseModel):
                 "evolution.proposal_top_k is only valid when "
                 "evolution.proposal_selection='top_k' (got "
                 f"proposal_selection={self.proposal_selection!r})"
+            )
+        if self.sibling_summary_max_words < 1:
+            raise ValueError(
+                "evolution.sibling_summary_max_words must be >= 1 "
+                f"(got {self.sibling_summary_max_words})"
+            )
+        if (
+            self.sibling_history_max_entries is not None
+            and self.sibling_history_max_entries < 1
+        ):
+            raise ValueError(
+                "evolution.sibling_history_max_entries must be >= 1 or unset "
+                f"(got {self.sibling_history_max_entries})"
             )
         if self.val_stage_size is not None and self.val_stage_size < 0:
             raise ValueError(

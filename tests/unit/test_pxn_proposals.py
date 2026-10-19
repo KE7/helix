@@ -873,6 +873,234 @@ class TestDroppedProposalsAreRecorded:
 
 
 # ---------------------------------------------------------------------------
+# 6b. Sibling history: what a parent remembers about its earlier children
+# ---------------------------------------------------------------------------
+
+
+def _wire_siblings(
+    all_mocks: dict[str, Any], seed_id: str, child_score: float = 0.9
+) -> tuple[list[str | None], list[str]]:
+    """Run children at a fixed score and log what ``mutate`` was handed.
+
+    Returns ``(sibling_history_args, child_ids)`` in call order.  Each mocked
+    child reports a summary naming itself, so a later generation's rendered
+    history can be traced back to the exact child that produced it.
+    """
+    handed: list[str | None] = []
+    child_ids: list[str] = []
+
+    def fake_mutate(**kwargs: Any) -> Candidate:
+        handed.append(kwargs.get("sibling_history"))
+        child_ids.append(kwargs["new_id"])
+        child = _make_candidate(kwargs["new_id"])
+        child.summary = f"approach taken by {kwargs['new_id']}"
+        return child
+
+    all_mocks["mutate"].side_effect = fake_mutate
+
+    def run_eval(
+        candidate: Candidate,
+        config: HelixConfig,
+        split: str = "val",
+        instance_ids: list[str] | None = None,
+        **kwargs: Any,
+    ) -> EvalResult:
+        if instance_ids is None:
+            return _make_result(candidate.id, {"v1": 0.5})
+        score = 0.3 if candidate.id == seed_id else child_score
+        return _make_result(candidate.id, {i: score for i in instance_ids})
+
+    all_mocks["run_evaluator"].side_effect = run_eval
+    return handed, child_ids
+
+
+def _final_state(all_mocks: dict[str, Any]) -> Any:
+    return all_mocks["save_state"].call_args_list[-1].args[0]
+
+
+class TestSiblingHistory:
+    """Children proposed from a parent are remembered against that parent.
+
+    The record exists so that re-sampling a parent does not restart from
+    blindness: the next mutation is shown what its siblings already tried and
+    how each one scored.
+    """
+
+    def test_off_by_default(self, tmp_path: Path, all_mocks: dict[str, Any]) -> None:
+        """Nothing rendered, nothing requested, nothing stored."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        handed, _ = _wire_siblings(all_mocks, seed.id)
+
+        config = _make_config(
+            train_path, num_parallel_proposals=1, mutations_per_parent=1
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert handed == [None]
+        assert _final_state(all_mocks).sibling_history == {}
+
+    def test_first_mutation_is_handed_an_empty_history(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """On, but nothing tried yet — distinct from off, because the agent is
+        still asked for the self-report that seeds the next attempt."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        handed, _ = _wire_siblings(all_mocks, seed.id)
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=1,
+            sibling_history=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert handed == [""]
+
+    def test_kept_and_rejected_children_are_both_recorded(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """One child clears the gate, one loses to it; the parent remembers
+        both, with the summary each agent wrote."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+
+        handed: list[str | None] = []
+
+        def fake_mutate(**kwargs: Any) -> Candidate:
+            handed.append(kwargs.get("sibling_history"))
+            child = _make_candidate(kwargs["new_id"])
+            child.summary = f"approach taken by {kwargs['new_id']}"
+            return child
+
+        all_mocks["mutate"].side_effect = fake_mutate
+
+        # g1-s1 scores below the parent's 0.3 and is rejected; g1-s2 clears.
+        scores = {"g1-s1": 0.1, "g1-s2": 0.9}
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is None:
+                return _make_result(candidate.id, {"v1": 0.5})
+            score = 0.3 if candidate.id == seed.id else scores[candidate.id]
+            return _make_result(candidate.id, {i: score for i in instance_ids})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=2,
+            sibling_history=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        entries = _final_state(all_mocks).sibling_history[seed.id]
+        assert {e["child_id"]: e["accepted"] for e in entries} == {
+            "g1-s1": False,
+            "g1-s2": True,
+        }
+        assert {e["summary"] for e in entries} == {
+            "approach taken by g1-s1",
+            "approach taken by g1-s2",
+        }
+
+    def test_a_resampled_parent_sees_its_earlier_child(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The end-to-end point of the feature.
+
+        Both children are rejected, so the seed stays the only frontier member
+        and is sampled again in generation 2 — where it must now be shown what
+        generation 1 already tried.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        handed, child_ids = _wire_siblings(all_mocks, seed.id, child_score=0.1)
+
+        config = _make_config(
+            train_path,
+            max_generations=2,
+            num_parallel_proposals=1,
+            mutations_per_parent=1,
+            sibling_history=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(handed) == 2, "expected one proposal in each of two generations"
+        assert handed[0] == ""
+        second = handed[1]
+        assert second is not None
+        assert "## Previous Attempts From This Parent" in second
+        assert "REJECTED" in second
+        assert f"approach taken by {child_ids[0]}" in second
+
+    def test_recorded_history_is_not_used_to_filter(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The record is advisory. A parent with rejected children must still
+        be sampled and still produce proposals — an approach that lost on one
+        minibatch can win on another.
+        """
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        handed, _ = _wire_siblings(all_mocks, seed.id, child_score=0.1)
+
+        config = _make_config(
+            train_path,
+            max_generations=3,
+            num_parallel_proposals=1,
+            mutations_per_parent=1,
+            sibling_history=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(handed) == 3
+        assert len(_final_state(all_mocks).sibling_history[seed.id]) == 3
+
+    def test_max_entries_windows_the_prompt_but_not_the_record(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """``sibling_history_max_entries`` reaches the rendered prompt: by
+        generation 3 the seed has two rejected children, and a window of one
+        shows only the newer.  State still holds both."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        handed, child_ids = _wire_siblings(all_mocks, seed.id, child_score=0.1)
+
+        config = _make_config(
+            train_path,
+            max_generations=3,
+            num_parallel_proposals=1,
+            mutations_per_parent=1,
+            sibling_history=True,
+            sibling_history_max_entries=1,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(handed) == 3
+        third = handed[2]
+        assert third is not None
+        assert f"approach taken by {child_ids[1]}" in third
+        assert f"approach taken by {child_ids[0]}" not in third
+        assert "1 most recent of the 2" in third
+        assert len(_final_state(all_mocks).sibling_history[seed.id]) == 3
+
+
+# ---------------------------------------------------------------------------
 # 7. Cost model and budget accounting under P×N
 # ---------------------------------------------------------------------------
 

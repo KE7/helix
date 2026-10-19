@@ -14,6 +14,7 @@ from helix.display import UsageStats
 from helix.exceptions import RateLimitError
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
+from helix.sibling_history import SUMMARY_ARTIFACT_NAME
 from helix.mutator import (
     _AGY_PRINT_TIMEOUT,
     MutationError,
@@ -130,6 +131,99 @@ class TestBuildMutationPrompt:
         prompt = build_mutation_prompt("goal", er, background=None)
         assert "## Background / Context" not in prompt
         assert "no additional background" not in prompt
+
+    def test_sibling_history_none_emits_nothing(self):
+        """``None`` is the feature's off switch: neither the history section
+        nor the request for a self-report may appear."""
+        er = make_eval_result()
+        prompt = build_mutation_prompt("goal", er, sibling_history=None)
+        assert "## Previous Attempts From This Parent" not in prompt
+        assert "## Change Summary" not in prompt
+        assert SUMMARY_ARTIFACT_NAME not in prompt
+
+    def test_sibling_history_defaults_to_off(self):
+        er = make_eval_result()
+        assert "## Change Summary" not in build_mutation_prompt("goal", er)
+
+    def test_empty_history_is_indistinguishable_from_off(self):
+        """On with nothing to show must equal off, byte for byte.
+
+        Otherwise an A/B between the two arms measures a standing prompt nudge
+        as well as the history, and the nudge lands on every mutation while the
+        history lands on almost none.
+        """
+        er = make_eval_result()
+        assert build_mutation_prompt("goal", er, sibling_history="") == (
+            build_mutation_prompt("goal", er, sibling_history=None)
+        )
+
+    def test_mutation_prompt_never_asks_for_a_summary(self):
+        """The summary is produced by a separate call afterwards.
+
+        Asking here would put the request last in the prompt, where an
+        exhausted turn budget silently drops it — the failure this design
+        exists to avoid.
+        """
+        er = make_eval_result()
+        for history in (None, "", "## Previous Attempts From This Parent\n- [KEPT]"):
+            prompt = build_mutation_prompt("goal", er, sibling_history=history)
+            assert SUMMARY_ARTIFACT_NAME not in prompt
+            assert "## Change Summary" not in prompt
+
+    def test_rendered_sibling_history_is_included(self):
+        er = make_eval_result()
+        section = "## Previous Attempts From This Parent\n- [REJECTED] score +0.1000"
+        prompt = build_mutation_prompt("goal", er, sibling_history=section)
+        assert section in prompt
+
+    def test_enabling_the_feature_only_adds(self):
+        """Everything an off run would have sent must still be sent.
+
+        The toggle guarantee in executable form: turning sibling tracking on
+        may add lines, but it cannot reword, reorder or drop a single line the
+        prompt already carried.
+        """
+        er = make_eval_result(asi={"stdout": "some output", "stderr": ""})
+        section = "## Previous Attempts From This Parent\n- [KEPT] score +0.5000"
+        off = build_mutation_prompt("goal", er, background="ctx")
+        on = build_mutation_prompt("goal", er, background="ctx", sibling_history=section)
+        for line in off.splitlines():
+            if line.strip():
+                assert line in on, f"off-prompt line lost when enabling: {line!r}"
+        assert len(on) > len(off)
+
+    def test_directive_to_consult_the_history_sits_with_the_instructions(self):
+        """The 'read your siblings' directive is an instruction about how to
+        work, so it belongs up with the task instructions rather than inside
+        the data section it refers to."""
+        er = make_eval_result()
+        section = "## Previous Attempts From This Parent\n- [KEPT] score +0.5000"
+        on = build_mutation_prompt("goal", er, sibling_history=section)
+        assert "already been tried" in on
+        assert "differs from" in on
+        # Stated before any of the run-specific content it governs.
+        assert on.index("already been tried") < on.index("## Objective")
+
+    def test_no_directive_without_a_history_section(self):
+        """Off, and on-with-nothing-to-show, must both stay silent: the
+        directive is meaningless when it points at an absent list."""
+        er = make_eval_result()
+        for history in (None, ""):
+            prompt = build_mutation_prompt("goal", er, sibling_history=history)
+            assert "already been tried" not in prompt
+            assert "differs from" not in prompt
+
+    def test_system_prompt_block_is_untouched_without_history(self):
+        """An off run's instruction block must be exactly the shared one."""
+        from helix.mutator import AUTONOMOUS_SYSTEM_PROMPT
+
+        er = make_eval_result()
+        for history in (None, ""):
+            prompt = build_mutation_prompt("goal", er, sibling_history=history)
+            assert prompt.startswith(AUTONOMOUS_SYSTEM_PROMPT.rstrip())
+            # ...and nothing appended to it.
+            first_section = prompt.split("\n\n")[0]
+            assert first_section == AUTONOMOUS_SYSTEM_PROMPT.rstrip()
 
     def test_contains_execution_instructions(self):
         er = make_eval_result()
@@ -1361,6 +1455,696 @@ class TestMutate:
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "special context" in prompt_arg
+
+
+class TestChildDiff:
+    """``_child_diff`` must report the mutation's work however the agent left it.
+
+    The agent is handed a real git worktree with permissions skipped, so
+    whether its changes are committed, staged or loose is its own business —
+    and not something the summary may depend on.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        import subprocess as sp
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        sp.run(["git", "init", "-q", "."], cwd=wt, check=True)
+        (wt / "solve.py").write_text("def solve(n):\n    return 0\n")
+        sp.run(["git", "add", "-A"], cwd=wt, check=True)
+        sp.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "parent"],
+            cwd=wt, check=True,
+        )
+        return wt
+
+    def test_sees_changes_the_agent_committed(self, tmp_path: Path):
+        """THE REGRESSION.
+
+        Observed live: claude-code ran ``git add``/``git commit`` unprompted, so
+        every change sat behind HEAD. ``git diff HEAD`` reported nothing and the
+        summary call dutifully wrote "no changes were made" about a mutation
+        that had rewritten the solver.
+        """
+        import subprocess as sp
+
+        from helix.mutator import _child_diff, capture_base_commit
+
+        wt = self._repo(tmp_path)
+        base = capture_base_commit(str(wt))
+        assert base is not None
+
+        (wt / "solve.py").write_text("import heapq\n\ndef solve(n):\n    return heapq.nsmallest(n, [])\n")
+        sp.run(["git", "add", "-A"], cwd=wt, check=True)
+        sp.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "agent's own commit"],
+            cwd=wt, check=True,
+        )
+
+        diff = _child_diff(str(wt), base)
+        assert "+import heapq" in diff, "committed work must still be reported"
+        # HEAD-relative diffing is exactly what failed in the live run.
+        assert _child_diff(str(wt), None) == ""
+
+    def test_sees_uncommitted_changes(self, tmp_path: Path):
+        from helix.mutator import _child_diff, capture_base_commit
+
+        wt = self._repo(tmp_path)
+        base = capture_base_commit(str(wt))
+        (wt / "solve.py").write_text("def solve(n):\n    return 42\n")
+
+        assert "+    return 42" in _child_diff(str(wt), base)
+
+    def test_untracked_files_are_left_to_the_new_files_section(self, tmp_path: Path):
+        """``git diff`` cannot see a file never added to git; that is
+        ``_new_files_section``'s job, and the diff must not half-cover it."""
+        from helix.mutator import _child_diff, capture_base_commit
+
+        wt = self._repo(tmp_path)
+        base = capture_base_commit(str(wt))
+        (wt / "features.py").write_text("SPARSE = True\n")
+
+        assert _child_diff(str(wt), base) == ""
+
+    def test_empty_when_nothing_changed(self, tmp_path: Path):
+        from helix.mutator import _child_diff, capture_base_commit
+
+        wt = self._repo(tmp_path)
+        assert _child_diff(str(wt), capture_base_commit(str(wt))) == ""
+
+    def test_no_git_is_not_an_error(self, tmp_path: Path):
+        """A non-git worktree yields no diff rather than failing the mutation."""
+        from helix.mutator import _child_diff, capture_base_commit
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert capture_base_commit(str(plain)) is None
+        assert _child_diff(str(plain), None) == ""
+
+    def test_enormous_diff_is_truncated(self, tmp_path: Path):
+        from helix.mutator import _MAX_DIFF_CHARS, _child_diff, capture_base_commit
+
+        wt = self._repo(tmp_path)
+        base = capture_base_commit(str(wt))
+        (wt / "solve.py").write_text("\n".join(f"x{i} = {i}" for i in range(60_000)))
+
+        diff = _child_diff(str(wt), base)
+        assert "truncated" in diff
+        assert len(diff) < _MAX_DIFF_CHARS * 2
+
+
+class TestNewFilesSection:
+    """``_new_files_section``: what the summary call sees of files the agent
+    created but never added to git.
+
+    The reviewer's case: a mutation whose whole idea lives in a new, unstaged
+    module.  ``git diff`` shows nothing for it, and the summary call is told
+    not to explore, so its contents must be in the prompt.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        return TestChildDiff()._repo(tmp_path)
+
+    def test_shows_the_contents_of_a_new_module(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "features.py").write_text("def sparse_features(x):\n    return x[::2]\n")
+
+        section = _new_files_section(str(wt))
+        assert "### features.py" in section
+        assert "def sparse_features(x):" in section
+        assert "```python" in section
+
+    def test_empty_when_nothing_was_added(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "solve.py").write_text("changed, but tracked\n")
+        assert _new_files_section(str(wt)) == ""
+
+    def test_no_git_is_not_an_error(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        (plain / "x.py").write_text("x = 1\n")
+        assert _new_files_section(str(plain)) == ""
+
+    def test_ignored_files_are_not_shown(self, tmp_path: Path):
+        """HELIX's own artifacts live behind ``.gitignore`` and are not part
+        of the change."""
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / ".git" / "info" / "exclude").write_text("*.log\n")
+        (wt / "run.log").write_text("noise\n")
+        assert _new_files_section(str(wt)) == ""
+
+    def test_files_in_new_directories_are_listed_individually(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "pkg").mkdir()
+        (wt / "pkg" / "a.py").write_text("A = 1\n")
+        (wt / "pkg" / "b.py").write_text("B = 2\n")
+
+        section = _new_files_section(str(wt))
+        assert "### pkg/a.py" in section and "A = 1" in section
+        assert "### pkg/b.py" in section and "B = 2" in section
+
+    def test_binary_contents_are_withheld(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "weights.bin").write_bytes(b"\x00\x01\x02payload" * 100)
+
+        section = _new_files_section(str(wt))
+        assert "### weights.bin (binary, 1,000 bytes; contents omitted)" in section
+        assert "payload" not in section
+
+    def test_large_file_shows_only_its_head(self, tmp_path: Path):
+        from helix.mutator import _MAX_NEW_FILE_CHARS, _new_files_section
+
+        wt = self._repo(tmp_path)
+        lines = [f"row_{i:06d}" for i in range(50_000)]
+        (wt / "table.csv").write_text("\n".join(lines))
+
+        section = _new_files_section(str(wt))
+        assert "row_000000" in section
+        assert "row_049999" not in section
+        assert "only the first 4,000 characters shown" in section
+        assert len(section) < _MAX_NEW_FILE_CHARS + 500
+
+    def test_total_budget_still_names_every_file(self, tmp_path: Path):
+        """Past the total budget a file loses its contents, never its name:
+        the agent should know everything that was added."""
+        from helix.mutator import _MAX_NEW_FILES_CHARS, _new_files_section
+
+        wt = self._repo(tmp_path)
+        count = _MAX_NEW_FILES_CHARS // 4_000 + 3
+        for i in range(count):
+            (wt / f"m{i:02d}.py").write_text(f"# module {i}\n" + "x = 1\n" * 1_000)
+
+        section = _new_files_section(str(wt))
+        for i in range(count):
+            assert f"m{i:02d}.py" in section
+        assert "contents not shown (size budget reached)" in section
+        assert f"# module {count - 1}" not in section
+
+    def test_symlinks_are_not_followed(self, tmp_path: Path):
+        """The target could be any readable file; its contents must not be
+        copied into a prompt whose output is persisted."""
+        import os
+
+        from helix.mutator import _new_files_section
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOP-SECRET-VALUE\n")
+        wt = self._repo(tmp_path)
+        os.symlink(secret, wt / "innocent.py")
+
+        section = _new_files_section(str(wt))
+        assert "TOP-SECRET-VALUE" not in section
+        assert f"### innocent.py (symlink to {secret}; not followed)" in section
+
+    def test_empty_file_is_labelled(self, tmp_path: Path):
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "__init__.py").write_text("")
+        assert "### __init__.py (empty)" in _new_files_section(str(wt))
+
+    def test_backticks_in_a_file_cannot_close_its_fence(self, tmp_path: Path):
+        """A Markdown file containing ``` would otherwise end the block early
+        and spill the rest of itself into the prompt as prose."""
+        from helix.mutator import _new_files_section
+
+        wt = self._repo(tmp_path)
+        (wt / "NOTES.md").write_text("intro\n```python\ncode\n```\noutro\n")
+
+        section = _new_files_section(str(wt))
+        assert "````markdown\nintro\n```python" in section
+        assert section.rstrip().endswith("outro\n````")
+
+    def test_summary_prompt_carries_both_sections(self, tmp_path: Path, mocker):
+        """End to end through ``generate_change_summary``: a tracked edit and
+        an unstaged new module both reach the prompt the backend is given."""
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        wt = self._repo(tmp_path)
+        base = capture_base_commit(str(wt))
+        (wt / "solve.py").write_text("from features import sparse\n\ndef solve(n):\n    return sparse(n)\n")
+        (wt / "features.py").write_text("def sparse(n):\n    return n // 2\n")
+
+        prompts: list[str] = []
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            prompts.append(prompt)
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        generate_change_summary(str(wt), make_config(), base_sha=base)
+
+        assert len(prompts) == 1
+        prompt = prompts[0]
+        assert "## Changes to existing files" in prompt
+        assert "+from features import sparse" in prompt
+        assert "## New files added by this attempt" in prompt
+        assert "def sparse(n):" in prompt
+        assert "No diff was available" not in prompt
+
+
+class TestSummaryCallCannotAlterTheCandidate:
+    """The summary call runs in the live worktree before the candidate is
+    snapshotted and scored, so anything it edits would be attributed to the
+    mutation and evaluated. Its prompt forbids that; this makes it an
+    invariant instead of a hope.
+
+    The hard requirement in every case below: the MUTATION's own work — which
+    may be uncommitted — must survive untouched.
+    """
+
+    def _repo(self, tmp_path: Path) -> Path:
+        import subprocess as sp
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        sp.run(["git", "init", "-q", "."], cwd=wt, check=True)
+        (wt / "solver.py").write_text("def score(ctx):\n    return 0.0\n")
+        (wt / ".gitignore").write_text(".agent_change_summary.md\n")
+        sp.run(["git", "add", "-A"], cwd=wt, check=True)
+        sp.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "parent"],
+            cwd=wt, check=True,
+        )
+        return wt
+
+    def test_modified_source_is_reverted(self, tmp_path: Path):
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        before = _content_tree_hash(str(wt))
+        (wt / "solver.py").write_text("def score(ctx):\n    return 999.0  # meddled\n")
+
+        reverted = _revert_summary_side_effects(str(wt), before)
+
+        assert reverted == ["solver.py"]
+        assert "999.0" not in (wt / "solver.py").read_text()
+
+    def test_file_created_by_the_summary_call_is_removed(self, tmp_path: Path):
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        before = _content_tree_hash(str(wt))
+        (wt / "sneaky.py").write_text("x = 1\n")
+
+        assert _revert_summary_side_effects(str(wt), before) == ["sneaky.py"]
+        assert not (wt / "sneaky.py").exists()
+
+    def test_file_deleted_by_the_summary_call_is_restored(self, tmp_path: Path):
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        before = _content_tree_hash(str(wt))
+        (wt / "solver.py").unlink()
+
+        assert _revert_summary_side_effects(str(wt), before) == ["solver.py"]
+        assert (wt / "solver.py").read_text() == "def score(ctx):\n    return 0.0\n"
+
+    def test_the_summary_note_itself_survives(self, tmp_path: Path):
+        """The note is the call's ONE legitimate output. It is gitignored, so
+        the guard must not see it — reverting it would defeat the feature."""
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        before = _content_tree_hash(str(wt))
+        (wt / SUMMARY_ARTIFACT_NAME).write_text("Switched to a heap.")
+
+        assert _revert_summary_side_effects(str(wt), before) == []
+        assert (wt / SUMMARY_ARTIFACT_NAME).read_text() == "Switched to a heap."
+
+    def test_uncommitted_mutation_work_is_never_destroyed(self, tmp_path: Path):
+        """THE DANGEROUS CASE.
+
+        Agents sometimes commit and sometimes don't. When the mutation's work
+        is still uncommitted, a naive ``git checkout -- .`` would erase the
+        whole mutation. The guard must restore only what the summary call
+        touched, and leave everything else exactly as the agent left it.
+        """
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        # The mutation's own work, left uncommitted:
+        (wt / "solver.py").write_text("def score(ctx):\n    return real_model(ctx)\n")
+        (wt / "features.py").write_text("GC = True\n")
+        before = _content_tree_hash(str(wt))
+
+        # ...then a well-behaved summary call writes only its note.
+        (wt / SUMMARY_ARTIFACT_NAME).write_text("Fitted a real model.")
+        assert _revert_summary_side_effects(str(wt), before) == []
+
+        # Every byte of the mutation survives.
+        assert "real_model" in (wt / "solver.py").read_text()
+        assert (wt / "features.py").read_text() == "GC = True\n"
+
+    def test_meddling_reverts_to_the_mutation_not_to_the_parent(self, tmp_path: Path):
+        """When the summary call does meddle, the restore point is the
+        mutation's output — not the pre-mutation parent."""
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        (wt / "solver.py").write_text("def score(ctx):\n    return real_model(ctx)\n")
+        before = _content_tree_hash(str(wt))
+        (wt / "solver.py").write_text("def score(ctx):\n    return 0.0  # helpfully reverted\n")
+
+        _revert_summary_side_effects(str(wt), before)
+
+        assert "real_model" in (wt / "solver.py").read_text()
+
+    def test_clean_call_changes_nothing(self, tmp_path: Path):
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        wt = self._repo(tmp_path)
+        before = _content_tree_hash(str(wt))
+        assert _revert_summary_side_effects(str(wt), before) == []
+
+    def test_non_git_worktree_is_a_no_op(self, tmp_path: Path):
+        from helix.mutator import _content_tree_hash, _revert_summary_side_effects
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert _content_tree_hash(str(plain)) is None
+        assert _revert_summary_side_effects(str(plain), None) == []
+
+    def test_end_to_end_a_meddling_summary_call_is_neutralised(
+        self, tmp_path: Path, mocker
+    ):
+        """The guard wired into the real path, not just called directly.
+
+        A summary call that "helpfully" rewrites the solver must leave the
+        candidate exactly as the mutation left it, while its note still
+        reaches ``child.summary``.
+        """
+        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
+
+        wt = self._repo(tmp_path)
+        child = make_candidate("g1-s0", str(wt))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
+        mocker.patch("helix.mutator.remove_worktree")
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            p = Path(worktree_path)
+            if kwargs.get("prompt_artifact_name") == SUMMARY_PROMPT_ARTIFACT_NAME:
+                # Misbehaving: writes its note AND rewrites the candidate.
+                (p / SUMMARY_ARTIFACT_NAME).write_text("Fitted a gradient booster.")
+                (p / "solver.py").write_text("def score(ctx):\n    return 0.0  # meddled\n")
+                (p / "extra.py").write_text("junk = 1\n")
+            else:
+                # The mutation's real work, left uncommitted.
+                (p / "solver.py").write_text("def score(ctx):\n    return real_model(ctx)\n")
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+
+        result = mutate(
+            make_candidate("g0-s0"),
+            make_eval_result(),
+            "g1-s0",
+            make_config(),
+            Path("/tmp"),
+            sibling_history="",
+        )
+
+        # The mutation's work stands; the meddling is gone.
+        assert "real_model" in (wt / "solver.py").read_text()
+        assert "meddled" not in (wt / "solver.py").read_text()
+        assert not (wt / "extra.py").exists()
+        # ...and the summary still came through.
+        assert result.summary == "Fitted a gradient booster."
+
+    def test_the_real_index_is_left_alone(self, tmp_path: Path):
+        """The hash is computed in a temp index; the worktree's own index
+        belongs to the mutation and to ``snapshot_candidate`` after it."""
+        import subprocess as sp
+
+        from helix.mutator import _content_tree_hash
+
+        wt = self._repo(tmp_path)
+        (wt / "solver.py").write_text("def score(ctx):\n    return 1.0\n")
+        before_status = sp.run(
+            ["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True
+        ).stdout
+
+        _content_tree_hash(str(wt))
+
+        after_status = sp.run(
+            ["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True
+        ).stdout
+        assert before_status == after_status, "the real index was disturbed"
+
+
+class TestMutateGeneratesChangeSummary:
+    """``mutate`` produces the summary itself, with a second backend call.
+
+    A separate call rather than an instruction appended to the mutation
+    prompt: a closing instruction is the first casualty of an exhausted turn
+    budget, and it is lost silently.  Timing still matters -- the call runs
+    while the child worktree exists, because a gate-rejected child's worktree
+    is removed moments later and is unrecoverable by default.
+    """
+
+    def _child_in(self, tmp_path: Path, mocker) -> Candidate:
+        child_path = tmp_path / "g1-s0"
+        child_path.mkdir()
+        child = make_candidate("g1-s0", str(child_path))
+        mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
+        mocker.patch("helix.mutator.remove_worktree")
+        return child
+
+    def _invocations(self, mocker, *, summary_text: str | None = None) -> list:
+        """Patch the backend, recording the artifact each call was handed.
+
+        The summary call is the one given ``SUMMARY_PROMPT_ARTIFACT_NAME``, and
+        it is what writes the note -- exactly as a real backend would.
+        """
+        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
+
+        seen: list = []
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            artifact = kwargs.get("prompt_artifact_name")
+            seen.append(artifact)
+            if artifact == SUMMARY_PROMPT_ARTIFACT_NAME and summary_text is not None:
+                (Path(worktree_path) / SUMMARY_ARTIFACT_NAME).write_text(summary_text)
+            return ({}, UsageStats(output_tokens=10, cost_usd=0.5))
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        return seen
+
+    def _mutate(self, **kwargs):
+        return mutate(
+            make_candidate("g0-s0"),
+            make_eval_result(),
+            "g1-s0",
+            make_config(),
+            Path("/tmp"),
+            **kwargs,
+        )
+
+    def test_summary_call_runs_and_is_captured(self, tmp_path: Path, mocker):
+        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
+
+        self._child_in(tmp_path, mocker)
+        seen = self._invocations(mocker, summary_text="Swapped bubble sort for heapsort.")
+
+        result = self._mutate(sibling_history="")
+
+        assert result.summary == "Swapped bubble sort for heapsort."
+        assert SUMMARY_PROMPT_ARTIFACT_NAME in seen
+
+    def test_no_second_call_when_the_feature_is_off(self, tmp_path: Path, mocker):
+        """Off means exactly one backend call, as before the feature existed."""
+        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
+
+        self._child_in(tmp_path, mocker)
+        seen = self._invocations(mocker, summary_text="a summary nobody asked for")
+
+        result = self._mutate()
+
+        assert result.summary is None
+        assert SUMMARY_PROMPT_ARTIFACT_NAME not in seen
+        assert len(seen) == 1
+
+    def test_summary_call_writing_nothing_leaves_summary_none(
+        self, tmp_path: Path, mocker
+    ):
+        """A missing note degrades the record; it must not cost the mutation."""
+        self._child_in(tmp_path, mocker)
+        self._invocations(mocker, summary_text=None)
+
+        result = self._mutate(sibling_history="")
+
+        assert result is not None
+        assert result.summary is None
+
+    def test_summary_call_failure_does_not_lose_the_mutation(
+        self, tmp_path: Path, mocker
+    ):
+        """The child already exists and is worth evaluating; a failed
+        description of it is no reason to discard it."""
+        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
+
+        self._child_in(tmp_path, mocker)
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            if kwargs.get("prompt_artifact_name") == SUMMARY_PROMPT_ARTIFACT_NAME:
+                raise MutationError("summary backend exploded")
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+
+        result = self._mutate(sibling_history="")
+
+        assert result is not None
+        assert result.summary is None
+
+    def test_summary_tokens_are_charged_exactly_once(self, tmp_path: Path, mocker):
+        """``child.usage`` is the very object already handed to ``record_usage``,
+        so accumulating into it in place would bill the summary twice."""
+        self._child_in(tmp_path, mocker)
+        self._invocations(mocker, summary_text="did a thing")
+        charged: list = []
+
+        result = self._mutate(sibling_history="", record_usage=charged.append)
+
+        assert len(charged) == 2, "mutation and summary each reported once"
+        assert sum(u.cost_usd for u in charged) == 1.0
+        # The candidate's own total covers both, with nothing counted twice.
+        assert result.usage.cost_usd == 1.0
+
+    def test_configured_word_budget_reaches_both_halves(
+        self, tmp_path: Path, mocker
+    ):
+        """One number must drive the request and the truncation.
+
+        If the prompt asked for 150 words while the reader truncated at 120,
+        every long summary would be silently cut mid-sentence.
+        """
+        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
+
+        self._child_in(tmp_path, mocker)
+        seen_prompt: dict = {}
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            if kwargs.get("prompt_artifact_name") == SUMMARY_PROMPT_ARTIFACT_NAME:
+                seen_prompt["text"] = prompt
+                (Path(worktree_path) / SUMMARY_ARTIFACT_NAME).write_text(
+                    " ".join(f"w{i}" for i in range(50))
+                )
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        config = HelixConfig(
+            objective="goal",
+            evaluator=EvaluatorConfig(command="pytest -q"),
+            evolution={"sibling_history": True, "sibling_summary_max_words": 7},
+        )
+
+        result = mutate(
+            make_candidate("g0-s0"),
+            make_eval_result(),
+            "g1-s0",
+            config,
+            Path("/tmp"),
+            sibling_history="",
+        )
+
+        # Requested budget reached the prompt...
+        assert "7 words" in seen_prompt["text"]
+        # ...and the same budget was enforced on the way back in.
+        assert result.summary.startswith("w0 w1 w2 w3 w4 w5 w6")
+        assert "w7" not in result.summary
+        assert "truncated" in result.summary
+
+    def test_summary_call_does_not_clobber_the_mutation_record(
+        self, tmp_path: Path, mocker
+    ):
+        """Two backend calls land in one worktree; both records must survive.
+
+        Observed live: the summary call reused the mutation's artifact names,
+        so every ``.helix_backend_result.json`` in a sibling-tracking run
+        described a 3-turn summary instead of the mutation it was meant to
+        document — losing that invocation's usage, stop reason and transcript
+        pointers.
+        """
+        from helix.mutator import (
+            BACKEND_RESULT_ARTIFACT_NAME,
+            SUMMARY_BACKEND_ARTIFACT_INFIX,
+            SUMMARY_PROMPT_ARTIFACT_NAME,
+            _backend_artifact_names,
+        )
+
+        child = self._child_in(tmp_path, mocker)
+        wt = Path(child.worktree_path)
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            # Stand in for the real writer: tag the record with its caller.
+            is_summary = kwargs.get("prompt_artifact_name") == SUMMARY_PROMPT_ARTIFACT_NAME
+            name, _, _ = _backend_artifact_names(kwargs.get("artifact_infix", ""))
+            (Path(worktree_path) / name).write_text(
+                '{"which": "%s"}' % ("summary" if is_summary else "mutation")
+            )
+            if is_summary:
+                (Path(worktree_path) / SUMMARY_ARTIFACT_NAME).write_text("did a thing")
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+
+        self._mutate(sibling_history="")
+
+        mutation_record = wt / BACKEND_RESULT_ARTIFACT_NAME
+        summary_record = wt / _backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX)[0]
+        assert mutation_record.exists() and summary_record.exists()
+        assert "mutation" in mutation_record.read_text(), (
+            "the mutation's record was overwritten by the summary call"
+        )
+        assert "summary" in summary_record.read_text()
+
+    def test_default_artifact_names_are_unchanged(self):
+        """An infix-free call must reproduce the historical names exactly, so
+        a run without sibling tracking writes what it always did."""
+        from helix.mutator import (
+            BACKEND_RESULT_ARTIFACT_NAME,
+            BACKEND_STDERR_ARTIFACT_NAME,
+            BACKEND_STDOUT_ARTIFACT_NAME,
+            _backend_artifact_names,
+        )
+
+        assert _backend_artifact_names() == (
+            BACKEND_RESULT_ARTIFACT_NAME,
+            BACKEND_STDOUT_ARTIFACT_NAME,
+            BACKEND_STDERR_ARTIFACT_NAME,
+        )
+
+    def test_summary_artifacts_are_gitignored(self, tmp_path: Path):
+        """Neither the note nor its prompt may enter the candidate diff, or the
+        next generation inherits them as source."""
+        from helix.mutator import (
+            SUMMARY_PROMPT_ARTIFACT_NAME,
+            _ignore_helix_artifacts,
+        )
+
+        _ignore_helix_artifacts(tmp_path)
+
+        text = (tmp_path / ".gitignore").read_text()
+        assert SUMMARY_ARTIFACT_NAME in text
+        assert SUMMARY_PROMPT_ARTIFACT_NAME in text
 
 
 # ---------------------------------------------------------------------------

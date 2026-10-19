@@ -78,6 +78,7 @@ from helix.population import (
     HelixResult,
     ParetoFrontier,
 )
+from helix.sibling_history import append_child, render_history
 from helix.sandbox import (
     reset_sandbox_agent_state,
     resolve_sandbox_image,
@@ -163,6 +164,10 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
     Deliberately omitted (safe to toggle between runs):
       * ``evolution.cache_evaluation``: cache state is handled
         separately via ``eval_cache.pkl`` persistence.
+      * ``evolution.sibling_history``: changes what future mutation
+        prompts contain, not what any saved score means.  Omitted
+        deliberately so it can be switched on mid-run: resuming with it
+        newly enabled just starts recording from the next child.
       * ``evolution.max_generations`` / ``max_evaluations`` / parallelism:
         budgets and concurrency, not score interpretation.
       * ``agent.*``: changing the mutation backend / model / effort
@@ -1462,6 +1467,7 @@ def _run_proposal_worker(
     evaluator_manifest: dict[str, str],
     use_minibatch_gate: bool,
     gen: int,
+    sibling_history: str | None = None,
 ) -> ProposalResult:
     """Atomic proposal worker — mirrors the sample/evaluate/mutate/evaluate
     shape of GEPA's ``ReflectiveMutationProposer.propose``.
@@ -1476,6 +1482,8 @@ def _run_proposal_worker(
     - Reads config, project_root (immutable) ✓
     - Writes to per-candidate worktree only (no shared mutable state) ✓
     - Budget mutations DEFERRED to sequential acceptance loop ✓
+    - ``sibling_history`` arrives pre-rendered for the same reason: it comes
+      from ``state``, which this worker must not read ✓
     """
     _parent, _pfr, _sub_ids, _new_id = pre_ctx
 
@@ -1567,6 +1575,7 @@ def _run_proposal_worker(
                 )
             ),
             record_usage=_spent_usage.append,
+            sibling_history=sibling_history,
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
@@ -2778,6 +2787,22 @@ def _run_evolution_impl(
                 max_in_flight_evaluations=_batch_in_flight_units,
             )
 
+            # Rendered here, in the sequential phase, because it reads
+            # ``state`` and the workers below run in threads.  Leaving the
+            # dict empty when the feature is off is what carries the "off"
+            # signal all the way down: ``.get`` then yields None, and
+            # ``mutate`` emits a prompt identical to one built without the
+            # feature.  A parent with no children yet maps to "", which is on
+            # but has nothing to show.
+            _sibling_sections: dict[str, str] = {}
+            if config.evolution.sibling_history:
+                for _context in presample_contexts:
+                    _sibling_sections[_context[0].id] = render_history(
+                        state.sibling_history,
+                        _context[0].id,
+                        max_entries=config.evolution.sibling_history_max_entries,
+                    )
+
             worker_results = _dispatch_proposals(
                 presample_contexts,
                 lambda pre_ctx: _run_proposal_worker(
@@ -2790,6 +2815,7 @@ def _run_evolution_impl(
                     evaluator_manifest=evaluator_manifest,
                     use_minibatch_gate=use_minibatch_gate,
                     gen=gen,
+                    sibling_history=_sibling_sections.get(pre_ctx[0].id),
                 ),
                 max_workers=config.evolution.max_workers,
                 gen=gen,
@@ -2814,6 +2840,36 @@ def _run_evolution_impl(
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
             _acceptance_memo = AcceptanceMemo(acceptance)
+
+            def _record_sibling(
+                parent_id: str,
+                child: Candidate,
+                result: "EvalResult | None",
+                *,
+                accepted: bool,
+            ) -> None:
+                """Record one evaluated child under the parent it came from.
+
+                Called wherever a child's fate is decided and written down —
+                the same places that write ``evaluations/`` or ``attempts/``.
+                A rejected child matters as much as a kept one here: it is the
+                half of the record that stops the next attempt on this parent
+                re-proposing an approach already known to lose.
+
+                ``child.summary`` was read back in ``mutate`` while the
+                worktree still existed, so this works even for a child whose
+                worktree has since been removed.
+                """
+                if not config.evolution.sibling_history:
+                    return
+                append_child(
+                    state.sibling_history,
+                    parent_id,
+                    child_id=child.id,
+                    score=None if result is None else result.aggregate_score(),
+                    accepted=accepted,
+                    summary=child.summary,
+                )
 
             def _gate_proposal(
                 _p_idx: int, wr: "ProposalResult | None"
@@ -3047,6 +3103,9 @@ def _run_evolution_impl(
                             parent_id=_parent.id, generation=gen,
                             stage="train_minibatch", example_ids=list(_subsample_ids),
                         )
+                        _record_sibling(
+                            _parent.id, child, gating_result, accepted=False
+                        )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
                             decision="reject", example_ids=list(_subsample_ids),
@@ -3105,6 +3164,9 @@ def _run_evolution_impl(
                             status="rejected", reason="train_gate",
                             parent_id=_parent.id, generation=gen,
                             stage="train", example_ids=None,
+                        )
+                        _record_sibling(
+                            _parent.id, child, gating_result, accepted=False
                         )
                         print_warning(
                             f"Acceptance: {child.id} does not improve "
@@ -3180,6 +3242,9 @@ def _run_evolution_impl(
                             status="rejected", reason="val_stage",
                             parent_id=_parent.id, generation=gen,
                             stage="val_stage", example_ids=list(stage_val_example_ids),
+                        )
+                        _record_sibling(
+                            _parent.id, child, stage_result, accepted=False
                         )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -3261,6 +3326,7 @@ def _run_evolution_impl(
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
                 _save_evaluation(base_dir, val_result)
+                _record_sibling(_parent.id, child, val_result, accepted=True)
                 frontier.add(child, val_result)
                 _sync_frontier_state()
                 state.instance_scores[child.id] = val_result.instance_scores
@@ -3312,6 +3378,12 @@ def _run_evolution_impl(
                     generation=gen,
                     stage="train_minibatch" if _discard_ids is not None else "train",
                     example_ids=list(_discard_ids) if _discard_ids else None,
+                )
+                _record_sibling(
+                    _discard_parent.id,
+                    gated.child,
+                    gated.gating_result,
+                    accepted=False,
                 )
                 TRACE.emit(
                     EventType.ACCEPT_DECISION,
