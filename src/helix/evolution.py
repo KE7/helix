@@ -2845,9 +2845,7 @@ def _run_evolution_impl(
             # exhausted the evaluation budget.  Charge them all here, once,
             # before any of those outcomes can skip a slot.
             for wr in worker_results:
-                if wr is None or isinstance(wr, SkippedProposal):
-                    continue
-                if not wr.child_usage:
+                if wr is None or isinstance(wr, SkippedProposal) or not wr.child_usage:
                     continue
                 live.update(usage=wr.child_usage)
                 budget_api.charge_llm_usage(
@@ -3026,23 +3024,18 @@ def _run_evolution_impl(
                         source="parent_train_no_minibatch",
                     )
 
+                # The worker already ran the child's minibatch eval (if any),
+                # so charge it now, before the budget check can skip it.
+                if wr.child_eval_result is not None:
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=wr.child_n_uncached,
+                        candidate_id=child.id,
+                        split="train",
+                        source="mutation_minibatch_gate",
+                    )
+
                 if budget_api.budget_exhausted(state, config):
-                    # The worker has already run, on the minibatch path, the
-                    # child's gate evaluation.  Charge it before stopping so
-                    # that no evaluator execution goes unrecorded.
-                    if (
-                        use_minibatch_gate
-                        and _subsample_ids is not None
-                        and wr.parent_eval_result is not None
-                        and wr.child_eval_result is not None
-                    ):
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.child_n_uncached,
-                            candidate_id=child.id,
-                            split="train",
-                            source="mutation_minibatch_gate",
-                        )
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
@@ -3084,19 +3077,6 @@ def _run_evolution_impl(
                     # (a) Minibatch path: child eval result already in worker result
                     gating_result = wr.child_eval_result
                     _last_eval_result = gating_result
-                    budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=wr.child_n_uncached,
-                        candidate_id=child.id,
-                        split="train",
-                        source="mutation_minibatch_gate",
-                    )
-
-                    if budget_api.budget_exhausted(state, config):
-                        print_warning("Budget exhausted mid-generation -- stopping.")
-                        _save_state(state)
-                        _budget_break = True
-                        return None
 
                     # Apply the configured acceptance criterion on the
                     # per-instance score vectors (GEPA §5.1).
