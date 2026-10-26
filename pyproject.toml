@@ -12,7 +12,6 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
     {name = "Karim Elmaaroufi"},
-    {name = "OMAR"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -35,7 +34,6 @@ Homepage = "https://github.com/KE7/helix"
 Repository = "https://github.com/KE7/helix"
 Issues = "https://github.com/KE7/helix/issues"
 Author = "https://github.com/KE7"
-OMAR = "http://omar.tech/"
 
 [project.optional-dependencies]
 dev = [
@@ -44,6 +42,8 @@ dev = [
     "pytest-cov>=5.0",
     "mypy>=1.10",
     "ruff>=0.4",
+    # examples/circle_packing tests run its numpy-based fitness function
+    "numpy>=1.26",
 ]
 
 [project.scripts]
