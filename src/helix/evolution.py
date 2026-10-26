@@ -1637,14 +1637,32 @@ def _run_proposal_worker(
     _child_eval: "EvalResult | None" = None
     _child_n_uncached: int = 0
     if _sub_ids is not None:
-        _ce, _cn = _cached_evaluate_batch(
-            _child,
-            list(_sub_ids),
-            minibatch_cache,  # use cache for child (unlike parent bypass)
-            config,
-            "train",
-            project_root,
-        )
+        try:
+            _ce, _cn = _cached_evaluate_batch(
+                _child,
+                list(_sub_ids),
+                minibatch_cache,  # use cache for child (unlike parent bypass)
+                config,
+                "train",
+                project_root,
+            )
+        except Exception as _ce_exc:
+            # The parent evaluation and the mutation's tokens are already
+            # spent; returning a failed proposal lets the apply phase charge
+            # both, where an escaping exception would lose them (and, on the
+            # single-slot path, end the run).
+            print_warning(
+                f"Child eval for proposal {_new_id} "
+                f"(parent: {_parent.id}, gen {gen}) failed: "
+                f"{type(_ce_exc).__name__}: {_ce_exc} — proposal slot skipped."
+            )
+            _safe_remove_worktree(_child, label="child whose gate evaluation failed")
+            return MutationFailedProposal(
+                presample_ctx=pre_ctx,
+                parent_eval_result=_parent_eval,
+                parent_n_uncached=_parent_n_uncached,
+                child_usage=_child.usage if _child.usage else None,
+            )
         _ce.candidate_id = _child.id
         _child_eval = _ce
         _child_n_uncached = _cn
@@ -2821,6 +2839,28 @@ def _run_evolution_impl(
                 gen=gen,
             )
 
+            # Every slot's backend call has already run, so its tokens are
+            # spent whatever the slot's fate: failed, tampered, rejected by a
+            # gate or by selection, or never gated because an earlier slot
+            # exhausted the evaluation budget.  Charge them all here, once,
+            # before any of those outcomes can skip a slot.
+            for wr in worker_results:
+                if wr is None or isinstance(wr, SkippedProposal):
+                    continue
+                if not wr.child_usage:
+                    continue
+                live.update(usage=wr.child_usage)
+                budget_api.charge_llm_usage(
+                    state,
+                    wr.child_usage,
+                    candidate_id=wr.presample_ctx[3],
+                    source=(
+                        "mutation_failed"
+                        if isinstance(wr, MutationFailedProposal)
+                        else "mutation"
+                    ),
+                )
+
             # ---- Step 3: Sequential acceptance (sampling order) ----
             # Read worker results in pre-sampling order.  Budget mutations, lineage
             # writes, and frontier updates are all sequential here — mirrors
@@ -2905,17 +2945,6 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
-                    # Charge LLM usage: the mutation failed, but its tokens
-                    # were still spent.  Skipping this is how a run's budget
-                    # silently under-reports by a whole generation.
-                    if wr.child_usage:
-                        live.update(usage=wr.child_usage)
-                        budget_api.charge_llm_usage(
-                            state,
-                            wr.child_usage,
-                            candidate_id=_new_id,
-                            source="mutation_failed",
-                        )
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
                     return None
 
@@ -2966,13 +2995,6 @@ def _run_evolution_impl(
                             split="train",
                             source="parent_minibatch",
                         )
-                    # Charge LLM usage (mutation happened, even if rejected)
-                    if wr.child_usage:
-                        live.update(usage=wr.child_usage)
-                        budget_api.charge_llm_usage(
-                            state, wr.child_usage,
-                            candidate_id=wr.child.id, source="mutation",
-                        )
                     print_warning(
                         f"Mutation {wr.child.id} touched protected evaluator files "
                         f"({', '.join(wr.tampered_paths)}) -- rejecting."
@@ -3005,17 +3027,26 @@ def _run_evolution_impl(
                     )
 
                 if budget_api.budget_exhausted(state, config):
+                    # The worker has already run, on the minibatch path, the
+                    # child's gate evaluation.  Charge it before stopping so
+                    # that no evaluator execution goes unrecorded.
+                    if (
+                        use_minibatch_gate
+                        and _subsample_ids is not None
+                        and wr.parent_eval_result is not None
+                        and wr.child_eval_result is not None
+                    ):
+                        budget_api.charge_evaluation(
+                            state,
+                            num_actual_examples=wr.child_n_uncached,
+                            candidate_id=child.id,
+                            split="train",
+                            source="mutation_minibatch_gate",
+                        )
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
                     return None
-
-                # Charge LLM usage
-                if wr.child_usage:
-                    live.update(usage=wr.child_usage)
-                    budget_api.charge_llm_usage(
-                        state, wr.child_usage, candidate_id=child.id, source="mutation",
-                    )
 
                 mutations_attempted += 1
                 live.update(mutations_attempted=mutations_attempted)
