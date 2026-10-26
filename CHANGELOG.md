@@ -89,20 +89,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
-- The token and cost ledger now includes every proposal slot's backend
-  usage, whatever happens to the candidate. All slots in a batch run before
-  the sequential apply phase, but usage was charged inside it, so a slot it
-  never reached lost its tokens and dollars. That happened to the slot whose
-  parent evaluation exhausted `max_evaluations` (checked before the charge)
-  and to every slot after it in the batch. Usage is now charged for all
-  slots as soon as the batch returns; rejected worktrees are still removed by
-  default, since usage never depended on them. The slot that exhausts the
-  budget also charges its child's already-run gate evaluation, so the
-  evaluation counter can no longer end below the number of evaluator runs.
-- A child whose minibatch gate evaluation raises no longer loses the
-  mutation's tokens and the parent evaluation with it: the worker returns a
-  failed proposal, which the apply phase charges, instead of letting the
-  exception escape (dropping the slot, or ending a single-slot run).
+- Every proposal slot's spend is now charged, whatever happens to the
+  candidate. All slots in a batch run in parallel before the sequential apply
+  phase, but their parent evaluations, child minibatch evaluations and
+  backend tokens were charged inside that phase, branch by branch, so a slot
+  the phase did not reach (every slot after a mid-batch budget stop, and the
+  slot that hit the cap) lost its tokens, dollars and evaluations. The apply
+  phase now charges each slot's spend once, as soon as the batch returns,
+  and afterwards charges only the evaluations it runs itself. The
+  `max_evaluations` cap still stops the batch before any new evaluator work
+  starts. Rejected worktrees are still removed by default; usage never
+  depended on them.
+- A child whose minibatch evaluation raises is rejected as its own outcome
+  (`ChildEvalFailedProposal`) instead of ending a single-slot run or dropping
+  a parallel slot with its tokens. Its tokens and the failed evaluator run
+  are charged, it is recorded in sibling history, and its worktree is
+  removed. A parent minibatch evaluation that raises is charged for the
+  evaluator run as well.
 - Backend transcript preservation now covers every backend. It was only ever
   implemented for `claude`; `codex`, `opencode`, `agy`, and `cursor` runs
   silently kept no native transcript. Each backend's own

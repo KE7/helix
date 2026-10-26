@@ -61,6 +61,7 @@ from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.proposals import (
     AcceptanceMemo,
+    ChildEvalFailedProposal,
     EvaluatedProposal,
     GatedProposal,
     MutationFailedProposal,
@@ -1481,7 +1482,8 @@ def _run_proposal_worker(
     - Reads frontier (read-only during worker phase) ✓
     - Reads config, project_root (immutable) ✓
     - Writes to per-candidate worktree only (no shared mutable state) ✓
-    - Budget mutations DEFERRED to sequential acceptance loop ✓
+    - Budget mutations DEFERRED to the sequential phase, which charges what
+      the returned result says this worker spent ✓
     - ``sibling_history`` arrives pre-rendered for the same reason: it comes
       from ``state``, which this worker must not read ✓
     """
@@ -1518,7 +1520,8 @@ def _run_proposal_worker(
             return MutationFailedProposal(
                 presample_ctx=pre_ctx,
                 parent_eval_result=None,
-                parent_n_uncached=0,
+                # The evaluator was still run on every id (cache bypassed).
+                parent_n_uncached=len(_sub_ids),
             )
     else:
         # No-minibatch path: run train eval inside worker.
@@ -1647,20 +1650,15 @@ def _run_proposal_worker(
                 project_root,
             )
         except Exception as _ce_exc:
-            # The parent evaluation and the mutation's tokens are already
-            # spent; returning a failed proposal lets the apply phase charge
-            # both, where an escaping exception would lose them (and, on the
-            # single-slot path, end the run).
-            print_warning(
-                f"Child eval for proposal {_new_id} "
-                f"(parent: {_parent.id}, gen {gen}) failed: "
-                f"{type(_ce_exc).__name__}: {_ce_exc} — proposal slot skipped."
-            )
-            _safe_remove_worktree(_child, label="child whose gate evaluation failed")
-            return MutationFailedProposal(
+            return ChildEvalFailedProposal(
                 presample_ctx=pre_ctx,
                 parent_eval_result=_parent_eval,
+                child=_child,
+                error=f"{type(_ce_exc).__name__}: {_ce_exc}",
                 parent_n_uncached=_parent_n_uncached,
+                # Every id the evaluator was sent; a fresh child's content is
+                # almost never already cached.
+                child_n_uncached=len(_sub_ids),
                 child_usage=_child.usage if _child.usage else None,
             )
         _ce.candidate_id = _child.id
@@ -2839,25 +2837,52 @@ def _run_evolution_impl(
                 gen=gen,
             )
 
-            # Every slot's backend call has already run, so its tokens are
-            # spent whatever the slot's fate: failed, tampered, rejected by a
-            # gate or by selection, or never gated because an earlier slot
-            # exhausted the evaluation budget.  Charge them all here, once,
-            # before any of those outcomes can skip a slot.
+            # Charge everything the workers spent, for every slot, here and
+            # only here: the evaluations they ran and the backend's tokens.
+            # The work is done whatever happens to the slot next — failed,
+            # tampered, rejected, unselected, or never gated because the
+            # budget ran out — so nothing below may skip or repeat it.  The
+            # apply phase charges only the evaluations it runs itself.
             for wr in worker_results:
-                if wr is None or isinstance(wr, SkippedProposal) or not wr.child_usage:
+                if wr is None:
                     continue
-                live.update(usage=wr.child_usage)
-                budget_api.charge_llm_usage(
+                _slot_parent, _, _slot_subsample, _slot_id = wr.presample_ctx
+                budget_api.charge_evaluation(
                     state,
-                    wr.child_usage,
-                    candidate_id=wr.presample_ctx[3],
+                    num_actual_examples=wr.parent_n_uncached,
+                    candidate_id=_slot_parent.id,
+                    split="train",
                     source=(
-                        "mutation_failed"
-                        if isinstance(wr, MutationFailedProposal)
-                        else "mutation"
+                        "parent_minibatch"
+                        if _slot_subsample is not None
+                        else "parent_train_no_minibatch"
                     ),
                 )
+                if isinstance(wr, SkippedProposal):
+                    continue
+                if isinstance(wr, (EvaluatedProposal, ChildEvalFailedProposal)):
+                    budget_api.charge_evaluation(
+                        state,
+                        num_actual_examples=wr.child_n_uncached,
+                        candidate_id=_slot_id,
+                        split="train",
+                        source="mutation_minibatch_gate",
+                    )
+                if not isinstance(wr, MutationFailedProposal):
+                    mutations_attempted += 1
+                if wr.child_usage:
+                    live.update(usage=wr.child_usage)
+                    budget_api.charge_llm_usage(
+                        state,
+                        wr.child_usage,
+                        candidate_id=_slot_id,
+                        source=(
+                            "mutation_failed"
+                            if isinstance(wr, MutationFailedProposal)
+                            else "mutation"
+                        ),
+                    )
+            live.update(mutations_attempted=mutations_attempted)
 
             # ---- Step 3: Sequential acceptance (sampling order) ----
             # Read worker results in pre-sampling order.  Budget mutations, lineage
@@ -2865,12 +2890,12 @@ def _run_evolution_impl(
             # GEPA's ``_run_reflective_batch`` (``core/engine.py``), which
             # applies its selected candidates to the pool in order.
             #
-            # The step is split in two halves.  ``_gate_proposal`` charges the
-            # proposal's budget, records lineage and runs the acceptance gate;
-            # ``_apply_proposal`` runs the val stages and inserts into the
-            # frontier.  ``best_improvement`` and ``top_k`` cannot decide
-            # anything until every proposal in the batch has been gated, so
-            # they need the halves to be separable.  ``all_improvements``
+            # The step is split in two halves.  ``_gate_proposal`` records
+            # lineage and runs the acceptance gate (the slot's spend was
+            # charged above); ``_apply_proposal`` runs the val stages and
+            # inserts into the frontier.  ``best_improvement`` and ``top_k``
+            # cannot decide anything until every proposal in the batch has
+            # been gated, so they need the halves to be separable.  ``all_improvements``
             # still runs them interleaved per proposal — see the driver below.
 
             _last_eval_result: "EvalResult | None" = None
@@ -2912,18 +2937,17 @@ def _run_evolution_impl(
             def _gate_proposal(
                 _p_idx: int, wr: "ProposalResult | None"
             ) -> GatedProposal | None:
-                """Charge, record and gate one proposal slot.
+                """Record and gate one proposal slot (its spend is already charged).
 
                 Returns the gated proposal when it cleared its acceptance
                 gate, or None when the slot produced nothing to promote
-                (empty slot, skip-perfect, mutation failure, tamper, or a
-                gate rejection).  Sets ``_budget_break`` in the enclosing
-                scope when the budget ran out mid-slot; callers must check
-                it before using the return value.
+                (empty slot, skip-perfect, mutation failure, tamper, a child
+                eval that raised, or a gate rejection).  Sets
+                ``_budget_break`` in the enclosing scope when the budget ran
+                out; callers must check it before using the return value.
                 """
                 nonlocal _last_eval_result, _budget_break
                 nonlocal semantic_skip_count, retryable_semantic_skip_count
-                nonlocal mutations_attempted
 
                 if wr is None:
                     return None
@@ -2933,38 +2957,10 @@ def _run_evolution_impl(
                 # --- Handle non-success kinds (isinstance narrows wr for mypy) ---
 
                 if isinstance(wr, MutationFailedProposal):
-                    # Charge parent eval budget if the parent eval ran successfully
-                    # before the LLM call failed.
-                    if _subsample_ids is not None and wr.parent_eval_result is not None:
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.parent_n_uncached,
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_minibatch",
-                        )
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
                     return None
 
                 if isinstance(wr, SkippedProposal):
-                    # Charge parent eval budget (both paths)
-                    if _subsample_ids is not None:
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.parent_n_uncached,
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_minibatch",
-                        )
-                    else:
-                        # No-minibatch path: worker ran _cached_eval; n_uncached encodes was_cached
-                        budget_api.charge_evaluation(
-                            state,
-                            was_cached=(wr.parent_n_uncached == 0),
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_train_no_minibatch",
-                        )
                     _gen_skip_records.append({
                         "generation": gen,
                         "parent_id": _parent.id,
@@ -2984,15 +2980,6 @@ def _run_evolution_impl(
                     return None
 
                 if isinstance(wr, TamperedProposal):
-                    # Charge parent eval budget
-                    if _subsample_ids is not None:
-                        budget_api.charge_evaluation(
-                            state,
-                            num_actual_examples=wr.parent_n_uncached,
-                            candidate_id=_parent.id,
-                            split="train",
-                            source="parent_minibatch",
-                        )
                     print_warning(
                         f"Mutation {wr.child.id} touched protected evaluator files "
                         f"({', '.join(wr.tampered_paths)}) -- rejecting."
@@ -3000,49 +2987,27 @@ def _run_evolution_impl(
                     _safe_remove_worktree(wr.child, label="tamper-rejected mutation candidate")
                     return None
 
+                if isinstance(wr, ChildEvalFailedProposal):
+                    _record_sibling(_parent.id, wr.child, None, accepted=False)
+                    print_warning(
+                        f"Child eval for {wr.child.id} raised ({wr.error}) "
+                        f"-- rejecting."
+                    )
+                    _safe_remove_worktree(
+                        wr.child, label="child whose minibatch eval raised"
+                    )
+                    return None
+
                 # wr is EvaluatedProposal at this point (mypy narrows via isinstance exhaustion)
                 child = wr.child
 
-                # Charge parent eval budget
-                if _subsample_ids is not None and wr.parent_eval_result is not None:
-                    # Minibatch path
-                    budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=wr.parent_n_uncached,
-                        candidate_id=_parent.id,
-                        split="train",
-                        source="parent_minibatch",
-                    )
-                else:
-                    # No-minibatch path: parent_n_uncached encodes was_cached
-                    # (0 = was cached, 1 = not cached)
-                    budget_api.charge_evaluation(
-                        state,
-                        was_cached=(wr.parent_n_uncached == 0),
-                        candidate_id=_parent.id,
-                        split="train",
-                        source="parent_train_no_minibatch",
-                    )
-
-                # The worker already ran the child's minibatch eval (if any),
-                # so charge it now, before the budget check can skip it.
-                if wr.child_eval_result is not None:
-                    budget_api.charge_evaluation(
-                        state,
-                        num_actual_examples=wr.child_n_uncached,
-                        candidate_id=child.id,
-                        split="train",
-                        source="mutation_minibatch_gate",
-                    )
-
+                # Stop before this slot starts any work of its own (lineage,
+                # val evaluations) once the batch's spend reached the cap.
                 if budget_api.budget_exhausted(state, config):
                     print_warning("Budget exhausted mid-generation -- stopping.")
                     _save_state(state)
                     _budget_break = True
                     return None
-
-                mutations_attempted += 1
-                live.update(mutations_attempted=mutations_attempted)
 
                 candidates[child.id] = child
                 record_entry(
@@ -3530,7 +3495,10 @@ def _run_evolution_impl(
             # resume the next iteration will be gen+1 — no rollback, no infinite loop.
             if (
                 not any(
-                    wr and isinstance(wr, (EvaluatedProposal, TamperedProposal))
+                    isinstance(
+                        wr,
+                        (EvaluatedProposal, TamperedProposal, ChildEvalFailedProposal),
+                    )
                     for wr in worker_results
                 )
                 and semantic_skip_count

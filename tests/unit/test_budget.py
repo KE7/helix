@@ -950,16 +950,16 @@ def _run_counted_evolution(
     *,
     max_evaluations: int,
     max_generations: int = 50,
-    fail_children: bool = False,
+    fail_when: str = "",
     extra_evolution: str = "",
 ) -> tuple[dict, list[dict], int]:
     """Run HELIX end to end with a stub mutator whose children always score lower.
 
     Returns the persisted state, one record per real evaluator execution, and
-    the number of mutations the stub performed.  With ``fail_children`` the
-    evaluator records the execution and then exits without a result for any
-    child (``VALUE`` below the seed's), as an evaluator service that stopped
-    answering would.
+    the number of mutations the stub performed.  ``fail_when`` is a Python
+    condition over ``ns['VALUE']`` and ``split``: when it holds, the evaluator
+    records the execution and then exits without a result, as an evaluator
+    service that stopped answering would.
     """
     import subprocess as _subprocess
     import sys as _sys
@@ -978,13 +978,10 @@ def _run_counted_evolution(
         "ns = {}\n"
         "exec(Path('solve.py').read_text(), ns)\n"
         "ids = json.loads(Path('helix_batch.json').read_text())\n"
+        "split = os.environ.get('HELIX_SPLIT')\n"
         f"with open({str(log)!r}, 'a') as handle:\n"
-        "    handle.write(json.dumps({'split': os.environ.get('HELIX_SPLIT'), 'ids': ids}) + '\\n')\n"
-        + (
-            "if ns['VALUE'] < 100.0:\n    raise SystemExit(3)\n"
-            if fail_children
-            else ""
-        )
+        "    handle.write(json.dumps({'split': split, 'ids': ids}) + '\\n')\n"
+        + (f"if {fail_when}:\n    raise SystemExit(3)\n" if fail_when else "")
         + "print('HELIX_RESULT=' + json.dumps([[ns['VALUE'], {}] for _ in ids]))\n"
     )
     (project / "helix.toml").write_text(
@@ -1066,17 +1063,17 @@ def test_child_gate_evaluation_failure_charges_parent_eval_and_tokens(
     tmp_path: Path, monkeypatch
 ) -> None:
     # Every child's gate evaluation fails.  The run must go on to its
-    # generation cap, and each generation must still charge the parent
-    # evaluation and the mutation's tokens it spent; the failed child
-    # evaluation returned no result and is not charged.
+    # generation cap, and each generation must charge everything it spent:
+    # the parent evaluation, the failed child evaluation and the tokens.
     state, executions, mutations = _run_counted_evolution(
         tmp_path, monkeypatch, max_evaluations=-1, max_generations=3,
-        fail_children=True,
+        fail_when="ns['VALUE'] < 100.0",
     )
     assert mutations == 3
-    # seed val (1) + per generation: parent (1) + failed child (1)
+    # seed val (1) + per generation: parent (1) + failed child (1); the failed
+    # child evaluation still ran the evaluator, so it is charged too.
     assert len(executions) == 1 + 2 * mutations
-    assert state["budget"]["evaluations"] == 1 + mutations
+    assert state["budget"]["evaluations"] == len(executions)
     assert state["budget"]["input_tokens"] == 10 * mutations
     assert state["budget"]["cost_usd"] == pytest.approx(0.5 * mutations)
     worktrees = tmp_path / "project" / ".helix" / "worktrees"
@@ -1090,13 +1087,27 @@ def test_budget_break_still_charges_tokens_of_slots_never_gated(
     # evaluation (1) reach the cap of 2, so the apply phase stops at slot 0
     # and never gates slots 1 and 2.  All three mutations already ran, and
     # every one of their tokens and dollars must be in the ledger.
-    state, _executions, mutations = _run_counted_evolution(
+    state, executions, mutations = _run_counted_evolution(
         tmp_path, monkeypatch, max_evaluations=2,
         extra_evolution="mutations_per_parent = 3\n",
     )
     assert mutations == 3
+    # The workers ran slot 1's and slot 2's evaluations too.
+    assert state["budget"]["evaluations"] == len(executions)
     assert state["budget"]["input_tokens"] == 10 * mutations
     assert state["budget"]["output_tokens"] == 2 * mutations
     assert state["budget"]["cache_creation_input_tokens"] == 3 * mutations
     assert state["budget"]["cache_read_input_tokens"] == 7 * mutations
     assert state["budget"]["cost_usd"] == pytest.approx(0.5 * mutations)
+
+
+def test_parent_eval_failure_is_charged(tmp_path: Path, monkeypatch) -> None:
+    # Every parent minibatch evaluation fails, so no mutation ever runs; the
+    # evaluator still ran each time and each run is charged.
+    state, executions, mutations = _run_counted_evolution(
+        tmp_path, monkeypatch, max_evaluations=-1, max_generations=3,
+        fail_when="split == 'train'",
+    )
+    assert mutations == 0
+    assert len(executions) == 1 + 3
+    assert state["budget"]["evaluations"] == len(executions)
