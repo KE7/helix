@@ -2734,16 +2734,16 @@ def _run_evolution_impl(
             # adapter-side evaluation rather than an engine-level thread pool.
             #
             # BUDGET OVERSHOOT.  ``max_evaluations`` is a stop condition, not
-            # a reservation: it is checked between slots, and a slot that
-            # starts under the cap runs to completion. Here P is
+            # a reservation: it is checked between batches, and a batch that
+            # starts under the cap drains completely. Here P is
             # ``num_parallel_proposals`` and N is ``mutations_per_parent``.
-            # One iteration can therefore overspend the cap by up to P*N
-            # parent-minibatch evals
-            # plus P*N child-minibatch evals — the batch's work is already
-            # dispatched and paid for by the time the apply phase charges it.
-            # The conservative per-batch unit bound below is checked after
-            # the already-admitted work drains. It intentionally does not
-            # reserve speculative cache hits or cancel live workers.
+            # One iteration can therefore overspend the cap by its P*N
+            # parent- and child-minibatch evals plus the validation of every
+            # child it selects: the mutations are already paid for, so their
+            # winners are always validated.  The conservative per-batch unit
+            # bound ``U`` below is checked after the batch drains. It
+            # intentionally does not reserve speculative cache hits or cancel
+            # live workers.
             # =============================================================
 
             _np_raw = config.evolution.num_parallel_proposals
@@ -2942,11 +2942,9 @@ def _run_evolution_impl(
                 Returns the gated proposal when it cleared its acceptance
                 gate, or None when the slot produced nothing to promote
                 (empty slot, skip-perfect, mutation failure, tamper, a child
-                eval that raised, or a gate rejection).  Sets
-                ``_budget_break`` in the enclosing scope when the budget ran
-                out; callers must check it before using the return value.
+                eval that raised, or a gate rejection).
                 """
-                nonlocal _last_eval_result, _budget_break
+                nonlocal _last_eval_result
                 nonlocal semantic_skip_count, retryable_semantic_skip_count
 
                 if wr is None:
@@ -3000,14 +2998,6 @@ def _run_evolution_impl(
 
                 # wr is EvaluatedProposal at this point (mypy narrows via isinstance exhaustion)
                 child = wr.child
-
-                # Stop before this slot starts any work of its own (lineage,
-                # val evaluations) once the batch's spend reached the cap.
-                if budget_api.budget_exhausted(state, config):
-                    print_warning("Budget exhausted mid-generation -- stopping.")
-                    _save_state(state)
-                    _budget_break = True
-                    return None
 
                 candidates[child.id] = child
                 record_entry(
@@ -3121,11 +3111,6 @@ def _run_evolution_impl(
                         state, was_cached=_gating_cached, candidate_id=child.id,
                         split="train", source="mutation_train_gate",
                     )
-                    if budget_api.budget_exhausted(state, config):
-                        print_warning("Budget exhausted mid-generation -- stopping.")
-                        _save_state(state)
-                        _budget_break = True
-                        return None
 
                     _legacy_before = list(parent_acceptance_result.instance_scores.values())
                     _legacy_after = list(gating_result.instance_scores.values())
@@ -3161,12 +3146,8 @@ def _run_evolution_impl(
                 )
 
             def _apply_proposal(gated: GatedProposal) -> None:
-                """Promote one gated proposal to full validation and the frontier.
-
-                Sets ``_budget_break`` in the enclosing scope when the budget
-                ran out mid-slot; callers must check it before continuing.
-                """
-                nonlocal _last_eval_result, _budget_break
+                """Promote one gated proposal to full validation and the frontier."""
+                nonlocal _last_eval_result
                 nonlocal merges_due, last_iter_found_new_program, mutations_accepted
 
                 wr = gated.proposal
@@ -3191,11 +3172,6 @@ def _run_evolution_impl(
                         state, num_actual_examples=_n, candidate_id=child.id,
                         split="val", source="mutation_val_stage",
                     )
-                    if budget_api.budget_exhausted(state, config):
-                        print_warning("Budget exhausted mid-generation -- stopping.")
-                        _save_state(state)
-                        _budget_break = True
-                        return
 
                     _stage_before = _scores_for_example_ids(
                         _parent_frontier_result
@@ -3292,12 +3268,6 @@ def _run_evolution_impl(
                         source_single="mutation_full_val",
                     )
                 _last_eval_result = val_result
-
-                if budget_api.budget_exhausted(state, config):
-                    print_warning("Budget exhausted mid-generation -- stopping.")
-                    _save_state(state)
-                    _budget_break = True
-                    return
 
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
@@ -3416,71 +3386,60 @@ def _run_evolution_impl(
             # ``all_improvements`` promotes every proposal that clears the
             # gate, so it never needs to see the batch as a whole and keeps
             # gating and applying each proposal before moving to the next —
-            # the exact interleaving, and therefore the exact budget-break
-            # points, this loop had before selection existed.
+            # the interleaving this loop had before selection existed.
             #
             # The other two strategies rank proposals against each other, so
             # they must gate the whole batch first and only then apply the
             # winners.  That reordering is the reason for the split, and it
             # is confined to the configurations that opted into it.
             #
-            # If the budget runs out mid-gate the batch is abandoned without
-            # applying anything: proposals already gated keep their worktree
-            # and lineage entry, and resume reconciles them through the same
-            # incomplete-attempt path that already handles a budget break in
-            # the middle of the interleaved loop.
+            # Neither checks the budget: a batch admitted below the cap
+            # drains — every gated winner is validated — and the run stops
+            # after it (GEPA checks its stop condition only between
+            # iterations, too).  ``_batch_budget_guard`` bounds the overshoot.
             _selection = config.evolution.proposal_selection
             if _selection == "all_improvements":
                 for _p_idx, wr in enumerate(worker_results):
                     _gated = _gate_proposal(_p_idx, wr)
-                    if _budget_break:
-                        break
                     if _gated is None:
                         continue
                     if _drop_duplicate_child(_gated):
                         continue
                     _apply_proposal(_gated)
-                    if _budget_break:
-                        break
             else:
                 _gated_batch: list[GatedProposal] = []
                 for _p_idx, wr in enumerate(worker_results):
                     _gated = _gate_proposal(_p_idx, wr)
-                    if _budget_break:
-                        break
                     if _gated is not None:
                         _gated_batch.append(_gated)
 
-                if not _budget_break:
-                    _selected = select_proposals(
-                        _gated_batch,
-                        strategy=_selection,
-                        top_k=config.evolution.proposal_top_k,
-                    )
-                    _selected_orders = {g.order for g in _selected}
-                    # Everything gated but not selected is discarded here, in
-                    # sampled order, before any of the winners are applied —
-                    # so the frontier never briefly contains a child that
-                    # selection already ruled out.
-                    for _g in _gated_batch:
-                        if _g.order not in _selected_orders:
-                            print_info(
-                                f"Selection ({_selection}): {_g.child.id} cleared "
-                                f"the gate (improvement {_g.improvement:+.4f}) but "
-                                f"was not selected -- removing."
-                            )
-                            _discard_gated_child(
-                                _g,
-                                label="unselected proposal candidate",
-                                reason="proposal_selection",
-                                decision="reject_selection",
-                            )
-                    for _g in _selected:
-                        if _drop_duplicate_child(_g):
-                            continue
-                        _apply_proposal(_g)
-                        if _budget_break:
-                            break
+                _selected = select_proposals(
+                    _gated_batch,
+                    strategy=_selection,
+                    top_k=config.evolution.proposal_top_k,
+                )
+                _selected_orders = {g.order for g in _selected}
+                # Everything gated but not selected is discarded here, in
+                # sampled order, before any of the winners are applied —
+                # so the frontier never briefly contains a child that
+                # selection already ruled out.
+                for _g in _gated_batch:
+                    if _g.order not in _selected_orders:
+                        print_info(
+                            f"Selection ({_selection}): {_g.child.id} cleared "
+                            f"the gate (improvement {_g.improvement:+.4f}) but "
+                            f"was not selected -- removing."
+                        )
+                        _discard_gated_child(
+                            _g,
+                            label="unselected proposal candidate",
+                            reason="proposal_selection",
+                            decision="reject_selection",
+                        )
+                for _g in _selected:
+                    if _drop_duplicate_child(_g):
+                        continue
+                    _apply_proposal(_g)
 
             # Write skip records for this generation (GEPA parity — single JSON list)
             if _gen_skip_records:
@@ -3515,8 +3474,10 @@ def _run_evolution_impl(
                 _save_state(state)
                 TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
                 continue
-            # If budget was exhausted during sequential acceptance, break outer loop.
-            if _budget_break:
+            # The batch has drained; stop if it reached the cap.
+            if budget_api.budget_exhausted(state, config):
+                print_warning("Budget exhausted -- stopping.")
+                _save_state(state)
                 budget_api.enforce_batch_budget_guard(
                     state,
                     _batch_budget_guard,

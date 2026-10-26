@@ -96,10 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the phase did not reach (every slot after a mid-batch budget stop, and the
   slot that hit the cap) lost its tokens, dollars and evaluations. The apply
   phase now charges each slot's spend once, as soon as the batch returns,
-  and afterwards charges only the evaluations it runs itself. The
-  `max_evaluations` cap still stops the batch before any new evaluator work
-  starts. Rejected worktrees are still removed by default; usage never
-  depended on them.
+  and afterwards charges only the evaluations it runs itself. Rejected
+  worktrees are still removed by default; usage never depended on them.
+- `max_evaluations` is checked between iterations only, as in GEPA: a batch
+  admitted below the cap drains, so every child it selects is validated and
+  can join the frontier, even when the batch's own evaluations reach the cap.
+  The mutations are already paid for; HELIX used to stop mid-batch and throw
+  away an accepted child's validation. The overshoot stays within the
+  documented `U - 1` bound, which already included that validation.
 - A child whose minibatch evaluation raises is rejected as its own outcome
   (`ChildEvalFailedProposal`) instead of ending a single-slot run or dropping
   a parallel slot with its tokens. Its tokens and the failed evaluator run

@@ -952,8 +952,9 @@ def _run_counted_evolution(
     max_generations: int = 50,
     fail_when: str = "",
     extra_evolution: str = "",
+    child_delta: float = -1.0,
 ) -> tuple[dict, list[dict], int]:
-    """Run HELIX end to end with a stub mutator whose children always score lower.
+    """Run HELIX end to end with a stub mutator whose children score ``child_delta`` off their parent.
 
     Returns the persisted state, one record per real evaluator execution, and
     the number of mutations the stub performed.  ``fail_when`` is a Python
@@ -1009,12 +1010,12 @@ def _run_counted_evolution(
 
     mutations = {"count": 0}
 
-    def worse_child(worktree_path: str, prompt: str, config: object):
+    def stub_child(worktree_path: str, prompt: str, config: object):
         mutations["count"] += 1
         path = Path(worktree_path) / "solve.py"
         namespace: dict = {}
         exec(path.read_text(), namespace)
-        path.write_text(f"VALUE = {namespace['VALUE'] - 1.0}\n")
+        path.write_text(f"VALUE = {namespace['VALUE'] + child_delta}\n")
         return {}, UsageStats(
             input_tokens=10,
             output_tokens=2,
@@ -1023,7 +1024,7 @@ def _run_counted_evolution(
             cost_usd=0.5,
         )
 
-    monkeypatch.setattr(mutator_module, "_MUTATOR_OVERRIDE", worse_child)
+    monkeypatch.setattr(mutator_module, "_MUTATOR_OVERRIDE", stub_child)
     monkeypatch.chdir(project)
     run_evolution(load_config(project / "helix.toml"), project, project / ".helix")
     state = json.loads((project / ".helix" / "state.json").read_text())
@@ -1111,3 +1112,18 @@ def test_parent_eval_failure_is_charged(tmp_path: Path, monkeypatch) -> None:
     assert mutations == 0
     assert len(executions) == 1 + 3
     assert state["budget"]["evaluations"] == len(executions)
+
+
+def test_child_that_reaches_the_cap_is_still_validated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Seed val (1) + gen 1 parent (1) + child (1) reach the cap of 3.  The
+    # child improves, and its mutation is already paid for, so the batch
+    # drains: the child is validated (one more run) and joins the frontier.
+    state, executions, mutations = _run_counted_evolution(
+        tmp_path, monkeypatch, max_evaluations=3, child_delta=1.0,
+    )
+    assert mutations == 1
+    assert [e["split"] for e in executions] == ["val", "train", "train", "val"]
+    assert state["budget"]["evaluations"] == len(executions)
+    assert "g1-s1" in state["frontier"]

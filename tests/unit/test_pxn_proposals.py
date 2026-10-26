@@ -1231,15 +1231,17 @@ class TestCostModel:
     ) -> None:
         """The documented overshoot bound, enforced.
 
-        ``max_evaluations`` is checked between slots, so a batch already
-        dispatched runs to completion.  The engine documents the resulting
-        overshoot as at most P*N parent-minibatch evals plus P*N child evals;
-        this pins that bound rather than leaving it as prose.
+        ``max_evaluations`` is checked between batches, so a batch admitted
+        below the cap drains: its P*N parent and child minibatch evals and the
+        validation of every selected child.  The README documents the
+        resulting overshoot as at most ``U - 1`` with
+        ``U = 2*sum(|m_i|) + s*(V_stage + V_full)``; this pins that bound
+        rather than leaving it as prose.
         """
         train_path = _write_train_jsonl(tmp_path, n=20)
         seed = _make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
-        _eval_log(all_mocks, seed.id, {f"g1-s{i}": 0.9 for i in range(1, 30)})
+        calls = _eval_log(all_mocks, seed.id, {f"g1-s{i}": 0.9 for i in range(1, 30)})
 
         p, n, mb = 2, 2, 2
         cap = 30
@@ -1254,10 +1256,12 @@ class TestCostModel:
         )
         result = run_evolution(config, tmp_path, tmp_path / ".helix")
 
-        bound = cap + 2 * p * n * mb
-        assert result.budget.evaluations <= bound, (
+        # all_improvements selects every slot (s = P*N); no val stage here.
+        v_full = max(k for _, split, k in calls if split == "val")
+        u = 2 * p * n * mb + p * n * v_full
+        assert result.budget.evaluations <= cap + u - 1, (
             f"overshoot {result.budget.evaluations - cap} exceeds the documented "
-            f"bound of 2*P*N*minibatch_size = {2 * p * n * mb}"
+            f"bound of U - 1 = {u - 1}"
         )
 
 

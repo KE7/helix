@@ -337,7 +337,7 @@ class EvolutionConfig(BaseModel):
             "children: P parents sampled with replacement, N mutations each. "
             "Each of the P*N tasks draws its own minibatch. Default 1 keeps "
             "the historical one-child-per-parent behaviour. Note that "
-            "max_evaluations is checked between slots, so raising P*N raises "
+            "max_evaluations is checked between iterations, so raising P*N raises "
             "how far a single iteration can overshoot the cap. See "
             "https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/ "
             "for GEPA's scaling analysis."
