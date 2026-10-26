@@ -4,27 +4,34 @@ Evaluator for the web_researcher agent.
 Loads question JSON files from the selected split directory (train/ or val/).
 HELIX passes `HELIX_SPLIT=train|val`; this evaluator also accepts the legacy
 `SPLIT` env var for standalone local runs. For each question:
-  1. Resolves ground truth — tries to fetch live answer from the source URL if
-     ground_truth starts with 'FETCH:', else uses the static value.
+  1. Resolves the expected answer. A ``ground_truth`` of ``FETCH:pypi:<package>``
+     is the package's current version on PyPI, and ``FETCH:cpython`` is the
+     latest CPython release listed by endoflife.date; both are fetched at
+     evaluation time, with ``ground_truth_static_fallback`` used when the fetch
+     fails. Any other ``ground_truth`` is used as is.
   2. Runs agent.solve(question) -> str
   3. Compares answer to ground truth using the question's match_mode:
        - 'exact':          normalized exact match
-       - 'version_prefix': ground truth starts with agent's answer (agent can give
-                           major.minor when ground truth is major.minor.patch)
+       - 'version_prefix': the answer equals the expected version, or its
+                           dot-separated components, at least major.minor,
+                           equal the leading components of the expected
+                           version ("3.13" and "3.13.4" match "3.13.4";
+                           "3" and "3.1" do not)
+
+Requested ids come from ``helix_batch.json``. An id is either a question id
+(the ``id`` field, e.g. ``q02_requests_version``) or a positional index
+(``"0"``, ``"1"``, ...) into the split's questions sorted by file name, which is
+what HELIX writes when ``[dataset]`` sizes are set. Without ``helix_batch.json``
+the evaluator scores every question in the split.
 
 Emits one ``HELIX_RESULT=`` line containing a ``[score, side_info]`` pair for
-each id in ``helix_batch.json``. The pair order is positional to that file.
-
-Note: This evaluator itself fetches live ground truth for version questions.
-An evolved agent that *also* fetches live data will stay perfectly aligned with the
-evaluator as library versions advance — a naive offline agent will drift.
+each requested id. The pair order is positional to ``helix_batch.json``.
 """
 
 import json
 import os
 import pathlib
 import urllib.request
-import urllib.error
 
 # Shows up in `helix timing`; a no-op outside a HELIX run.
 from helix import timed
@@ -45,56 +52,33 @@ def _read_batch_ids() -> list[str] | None:
 # Ground truth resolution
 # ---------------------------------------------------------------------------
 
-def _fetch_pypi_version(package: str) -> str | None:
-    """Fetch the latest stable version of a PyPI package via the JSON API."""
-    url = f"https://pypi.org/pypi/{package}/json"
+_PYPI_JSON_URL = "https://pypi.org/pypi/{package}/json"
+_CPYTHON_RELEASES_URL = "https://endoflife.date/api/python.json"
+
+
+def _fetch_json(url: str):
+    """Fetch a URL and parse its JSON body, or return None on failure."""
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-            return data["info"]["version"]
+            return json.loads(resp.read().decode())
     except Exception:
         return None
 
 
-def _fetch_url_json(url: str, jq_path: str) -> str | None:
-    """
-    Fetch a URL, parse JSON, and extract a value by a dotted path like '.info.version'
-    or '.[0].latest'.
-    """
+def _fetch_live_value(key: str) -> str | None:
+    """Resolve a ``FETCH:`` key to its current value, or None on failure."""
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
-        return None
-
-    # Walk the jq-like path manually (supports . prefix, array index .[N], .key)
-    parts = jq_path.lstrip(".").split(".")
-    node = data
-    for part in parts:
-        if not part:
-            continue
-        # Handle array index like '[0]'
-        if part.startswith("[") and part.endswith("]"):
-            try:
-                idx = int(part[1:-1])
-                node = node[idx]
-            except (IndexError, ValueError, TypeError):
-                return None
+        if key.startswith("pypi:"):
+            data = _fetch_json(_PYPI_JSON_URL.format(package=key[len("pypi:"):]))
+            value = data["info"]["version"] if data is not None else None
+        elif key == "cpython":
+            data = _fetch_json(_CPYTHON_RELEASES_URL)
+            value = data[0]["latest"] if data else None
         else:
-            # Strip trailing array index if any, e.g. 'foo[0]'
-            if "[" in part:
-                key, bracket = part.split("[", 1)
-                try:
-                    idx = int(bracket.rstrip("]"))
-                    node = node[key][idx]
-                except (KeyError, IndexError, ValueError, TypeError):
-                    return None
-            else:
-                try:
-                    node = node[part]
-                except (KeyError, TypeError):
-                    return None
-    return str(node) if node is not None else None
+            value = None
+    except (KeyError, IndexError, TypeError):
+        value = None
+    return str(value) if value else None
 
 
 def resolve_ground_truth(question_data: dict) -> tuple[str, str]:
@@ -105,18 +89,14 @@ def resolve_ground_truth(question_data: dict) -> tuple[str, str]:
     """
     gt = question_data.get("ground_truth", "")
     fallback = question_data.get("ground_truth_static_fallback", gt)
-    source_url = question_data.get("ground_truth_source")
-    source_jq = question_data.get("ground_truth_source_jq", ".info.version")
 
     # Static ground truth (no fetch needed)
     if not gt.startswith("FETCH:"):
         return gt, "static"
 
-    # Dynamic: try to fetch live value
-    if source_url:
-        live_value = _fetch_url_json(source_url, source_jq)
-        if live_value:
-            return live_value, "live"
+    live_value = _fetch_live_value(gt[len("FETCH:"):])
+    if live_value:
+        return live_value, "live"
 
     # Fallback to static value
     return fallback, "fallback"
@@ -137,9 +117,10 @@ def answers_match(got: str, expected: str, match_mode: str) -> bool:
 
     match_mode:
         'exact'          - normalized strings must be equal
-        'version_prefix' - expected starts with got (agent can give partial version)
-                           OR got starts with expected (agent gives more specific version
-                           that is still consistent)
+        'version_prefix' - normalized strings are equal, or the answer has at
+                           least two dot-separated components (major.minor)
+                           and they equal the leading components of the
+                           expected version
     """
     got_n = _normalize(got)
     exp_n = _normalize(expected)
@@ -147,26 +128,18 @@ def answers_match(got: str, expected: str, match_mode: str) -> bool:
     if not got_n:
         return False
 
-    if match_mode == "exact":
-        return got_n == exp_n
-
-    elif match_mode == "version_prefix":
-        # Accept if:
-        #   - exact match
-        #   - agent gave major.minor and ground truth is major.minor.patch
-        #     e.g. got="3.13", expected="3.13.2"  -> expected starts with got+"."
-        #   - agent gave exact same major.minor.patch
+    if match_mode == "version_prefix":
         if got_n == exp_n:
             return True
-        # got is a prefix of expected (e.g. got="3.13", exp="3.13.2")
-        if exp_n.startswith(got_n + ".") or exp_n.startswith(got_n):
-            return True
-        # expected is a prefix of got (agent gave same series, slightly different patch)
-        if got_n.startswith(exp_n + ".") or got_n.startswith(exp_n):
-            return True
-        return False
+        got_parts = got_n.split(".")
+        exp_parts = exp_n.split(".")
+        return (
+            len(got_parts) >= 2
+            and len(got_parts) < len(exp_parts)
+            and exp_parts[: len(got_parts)] == got_parts
+        )
 
-    # Default: exact
+    # 'exact' and any unknown mode
     return got_n == exp_n
 
 
@@ -199,9 +172,10 @@ def evaluate():
         except Exception:
             continue
         questions_by_id[str(qdata.get("id", qfile.stem))] = (qfile, qdata)
+    ordered_ids = list(questions_by_id)
     requested_ids = _read_batch_ids()
     if requested_ids is None:
-        requested_ids = list(questions_by_id)
+        requested_ids = ordered_ids
 
     # Import agent
     try:
@@ -216,6 +190,9 @@ def evaluate():
     payload = []
     for q_id in requested_ids:
         question_entry = questions_by_id.get(q_id)
+        if question_entry is None and q_id.isdigit() and int(q_id) < len(ordered_ids):
+            # Positional id from HELIX's [dataset] sampler.
+            question_entry = questions_by_id[ordered_ids[int(q_id)]]
         if question_entry is None:
             payload.append([0.0, {"error": f"Unknown question id: {q_id}"}])
             continue

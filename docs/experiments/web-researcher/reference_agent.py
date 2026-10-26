@@ -1,11 +1,13 @@
 """
-Evolved agent for software engineering Q&A.
+Reference agent for the web_researcher example.
 
-Uses live web fetches from PyPI and official sources to answer questions about
-current library versions and APIs. Falls back to Claude Haiku for general questions.
+solve(question) answers the example's question types from live sources: package
+versions from the PyPI JSON API and the latest CPython release from
+endoflife.date. It returns fixed answers for the stable questions and asks
+Claude Haiku for anything else.
 
-This version uses urllib.request to fetch live package metadata from PyPI,
-ensuring version answers are always up-to-date.
+To run it against the example's evaluator, copy it over agent.py in a copy of
+examples/web_researcher/.
 """
 
 import json
