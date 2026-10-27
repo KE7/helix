@@ -819,7 +819,7 @@ $ helix timing
 │ agent  │ tool:exec │    97 │     4.6s │     6.4s │ 10.9s │  0.6s │
 └────────┴───────────┴───────┴──────────┴──────────┴───────┴───────┘
 Candidates: 6 accepted, 5 rejected, 0 undecided
-Wall: 2h34m over 10 generations (mean 9m42s, slowest gen 9: 11m04s)
+Wall: 1h37m over 10 generations (mean 9m42s, slowest gen 9: 11m04s)
 Work adds up across parallel proposal slots, so it can exceed wall time.
 ```
 
@@ -833,14 +833,17 @@ In this run, evaluation dominates: each child's solver runs for up to its
 600-second limit before a refiner LLM rewrites it. The mutation agent's 10
 calls took about 7 minutes in total, almost all of it waiting on the model.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/helix-timing-dark.png">
+  <img alt="Bar chart of the same run: every generation but one spent about 10 minutes in the evaluator and under a minute in the mutation agent; across all 10 generations the evaluator took 90 minutes (92%) and the agent 7.4 minutes (8%), of which 6.9 minutes was waiting on the model" src="docs/images/helix-timing-light.png">
+</picture>
+
 To see a run as a timeline instead, `helix timing --perfetto trace.json`
 writes the trace in Chrome's trace format. Drag that file into
 [ui.perfetto.dev](https://ui.perfetto.dev) (or `chrome://tracing`) to get one
 track per thread: the parallel proposal slots, what each spent its time on, and
 where siblings waited on each other. It's an optional viewer, not a
 dependency; nothing is installed.
-
-![One proposal from the circle-packing run in Perfetto: the parent's quick cached re-evaluation, the mutation with its 40-second agent call, then the child's long evaluation](docs/images/helix-timing-perfetto.png)
 
 #### Inside agent and evaluator calls
 
