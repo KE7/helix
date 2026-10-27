@@ -2578,10 +2578,9 @@ def generate_change_summary(
 # ---------------------------------------------------------------------------
 
 
-@traced(
-    "mutate",
-    lambda a: {"candidate_id": a["new_id"], "parent": a["parent"].id},
-)
+# No attrs: a mutation always runs inside its ``proposal`` span, which
+# already names the candidate and its parent.
+@traced("mutate")
 def mutate(
     parent: Candidate,
     eval_result: EvalResult,

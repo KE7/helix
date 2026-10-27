@@ -505,9 +505,9 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     return candidate
 
 
-@traced(
-    "clone", lambda a: {"candidate_id": a["new_id"], "parent": a["parent"].id}
-)
+# No attrs: a clone always runs inside the ``mutate`` or ``merge`` span that
+# names the candidate.
+@traced("clone")
 def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate:
     """Create a new worktree branched from *parent*.
 

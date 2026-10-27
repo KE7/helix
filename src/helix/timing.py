@@ -233,15 +233,21 @@ def traced(
 
 def evaluation_attrs(ids: str | None) -> AttrsFn:
     """Attrs for an evaluation span, reading the example ids from parameter
-    *ids* (``None``: the function always evaluates the whole split)."""
+    *ids* (``None``: the function always evaluates the whole split).
+
+    ``examples`` and ``evaluation_phase`` are left out when there are none.
+    """
 
     def attrs(a: dict[str, Any]) -> dict[str, Any]:
         examples = None if ids is None else a[ids]
+        extra = {
+            "examples": None if examples is None else len(examples),
+            "evaluation_phase": a.get("evaluation_phase"),
+        }
         return {
             "candidate_id": a["candidate"].id,
             "split": a["split"],
-            "examples": None if examples is None else len(examples),
-            "evaluation_phase": a.get("evaluation_phase"),
+            **{key: value for key, value in extra.items() if value is not None},
         }
 
     return attrs

@@ -581,7 +581,7 @@ class TestEndToEnd:
         assert rejected, "the stub evaluator never improves, so children are rejected"
         for cid in rejected:
             assert {"proposal", "mutate", "cached_evaluate"} <= {
-                r["span"] for r in ends if r["attrs"].get("candidate_id") == cid
+                r["span"] for r in ends if r["candidate"] == cid
             }
 
         # Stamped fields make every question a flat group-by: everything
