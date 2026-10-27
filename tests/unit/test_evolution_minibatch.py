@@ -1126,33 +1126,45 @@ class TestCachedEvaluateBatch:
         assert result.candidate_id == cand_b.id
         assert result.instance_scores == {"0": 0.5, "1": 0.5}
 
-    def test_content_key_falls_back_when_worktree_is_dirty(
+    def test_content_key_of_uncommitted_child_equals_committed_key(
         self, tmp_path: Path
     ) -> None:
-        """Dirty / untracked worktree must NOT key by tree SHA (avoid stale hits)."""
+        """A freshly mutated, not-yet-snapshotted child keys by its would-be tree.
+
+        Children are gated before the apply phase commits them, so the key
+        must cover uncommitted edits and untracked files (no stale hits),
+        leave the real index alone, and match the key after the snapshot.
+        """
         from helix.evolution import _candidate_content_key
+        from helix.worktree import snapshot_candidate
 
         repo = tmp_path / "repo"
         _init_repo(repo)
+        (repo / ".gitignore").write_text("helix_batch.json\n")
         (repo / "prompt.md").write_text("v1\n")
-        _git(["add", "prompt.md"], repo)
+        _git(["add", "-A"], repo)
         _git(["commit", "-m", "initial content"], repo)
 
-        cand = self._make_cand("cand-dirty")
+        cand = self._make_cand("cand-child")
         cand.worktree_path = str(repo)
-        clean_key = _candidate_content_key(cand)
-        tree_sha = _git(["rev-parse", "HEAD^{tree}"], repo)
-        assert clean_key == tree_sha  # sanity: clean repo keys by tree SHA
+        parent_key = _candidate_content_key(cand)
+        assert parent_key == _git(["rev-parse", "HEAD^{tree}"], repo)
 
-        # Modify a tracked file without committing → key must fall back to id.
-        (repo / "prompt.md").write_text("v1-uncommitted\n")
-        assert _candidate_content_key(cand) == cand.id
+        # The agent's edit: a modified tracked file plus a new untracked one.
+        (repo / "prompt.md").write_text("v2\n")
+        (repo / "helper.py").write_text("x = 1\n")
+        (repo / "helix_batch.json").write_text("[]\n")  # ignored: not content
+        status_before = _git(["status", "--porcelain"], repo)
 
-        # Reset and try untracked file → still falls back to id.
-        _git(["checkout", "--", "prompt.md"], repo)
-        assert _candidate_content_key(cand) == tree_sha
-        (repo / "scratch.txt").write_text("untracked\n")
-        assert _candidate_content_key(cand) == cand.id
+        child_key = _candidate_content_key(cand)
+        assert child_key != parent_key
+        assert child_key != cand.id
+        # Computing the key must not stage or commit anything.
+        assert _git(["status", "--porcelain"], repo) == status_before
+
+        snapshot_candidate(cand, "helix: mutate cand-child")
+        assert child_key == _git(["rev-parse", "HEAD^{tree}"], repo)
+        assert _candidate_content_key(cand) == child_key
 
     def test_cache_miss_invokes_full_evaluator(self, mocker: Any) -> None:
         """Empty cache → evaluator is invoked with ALL requested ids."""
