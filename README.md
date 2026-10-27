@@ -796,8 +796,8 @@ stderr as fallback debug context.
 Every `helix evolve` and `helix resume` appends a timing trace to
 `.helix/timing.jsonl`, the same way it always records its budget; there is
 nothing to turn on. `helix timing` reads it. Here it is on a 10-generation
-run of the circle-packing example, with Codex `gpt-6-luna` as the mutation
-agent:
+run of the circle-packing example with one proposal per generation, so 11
+candidates counting the seed, and Codex `gpt-6-luna` as the mutation agent:
 
 ```console
 $ helix timing
