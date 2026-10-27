@@ -329,6 +329,14 @@ class TestWallClock:
         ]
         assert timing.summarize(records).run_seconds == 30.0
 
+    def test_a_finished_run_leaves_out_sleep(self) -> None:
+        # Started at 100 and ended at 200 on the wall clock, but slept 60 s.
+        records = [
+            self._record("start", "run", "run", 100.0),
+            self._record("end", "run", "run", 200.0, duration_seconds=40.0, outcome="ok"),
+        ]
+        assert timing.summarize(records).run_seconds == 40.0
+
     def test_perfetto_slices_span_their_wall_time_across_sleep(self) -> None:
         # The machine slept 60 s inside "evaluate": duration_seconds leaves it out.
         records = [
