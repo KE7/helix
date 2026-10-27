@@ -826,9 +826,8 @@ Work adds up across parallel proposal slots, so it can exceed wall time.
 *Work* is the time spent on each kind of operation, grouped by what became of
 the candidate it was for. Rejected candidates are timed exactly like accepted
 ones, the same way their tokens are charged to the budget. Parallel proposal
-slots each add their own work, so work can exceed wall time. Work and
-generation times leave out time the machine slept; the total wall time
-includes it (this run's machine slept for about an hour).
+slots each add their own work, so work can exceed wall time. Every duration
+leaves out time the machine slept, so a closed lid doesn't count.
 
 In this run, evaluation dominates: each child's solver runs for up to its
 600-second limit before a refiner LLM rewrites it. The mutation agent's 10

@@ -325,8 +325,9 @@ class Summary:
     work: dict[str, dict[str, float]] = field(default_factory=dict)
     #: fate -> number of candidates.
     candidates: dict[str, int] = field(default_factory=dict)
-    #: Wall-clock seconds of every run (``evolve`` plus each ``resume``), sleep
-    #: included; a run still going counts up to its latest record.
+    #: Seconds of every run (``evolve`` plus each ``resume``), leaving out time
+    #: the machine slept like every other duration; a run still going counts
+    #: the wall-clock time up to its latest record.
     run_seconds: float = 0.0
     #: generation -> wall seconds.  A generation redone after a resume adds up.
     generation_seconds: dict[int, float] = field(default_factory=dict)
@@ -344,6 +345,7 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
     seen: set[str] = set()
     run_started: dict[str, float] = {}
     run_latest: dict[str, float] = defaultdict(float)
+    run_finished: dict[str, float] = {}
 
     def fate_of(candidate: str | None) -> str:
         return "unattributed" if candidate is None else fates.get(candidate, "undecided")
@@ -365,7 +367,9 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
             continue
         if candidate is not None:
             seen.add(candidate)
-        if r["span"] == "generation":
+        if r["span"] == "run":
+            run_finished[r["run_id"]] = r["duration_seconds"]
+        elif r["span"] == "generation":
             generations[r["attrs"]["generation"]] += r["duration_seconds"]
         kind = WORK_KINDS.get(r["span"])
         if kind is not None:
@@ -376,7 +380,10 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
     return Summary(
         work={kind: dict(by_fate) for kind, by_fate in work.items()},
         candidates=dict(candidates),
-        run_seconds=sum(run_latest[run] - start for run, start in run_started.items()),
+        run_seconds=sum(
+            run_finished.get(run, run_latest[run] - start)
+            for run, start in run_started.items()
+        ),
         generation_seconds=dict(generations),
         details={key: {**total, "seconds": dict(total["seconds"])} for key, total in details.items()},
     )
