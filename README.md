@@ -907,7 +907,7 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
   class, never its message.
 - `detail` records hold the totals above, with `within` (`agent` or
   `evaluate`), `source` (`transcript` or `timed`), `name`, `example`, `count`,
-  `seconds`, `max_seconds` and `errors`.
+  `seconds` and `max_seconds`.
 - Each candidate gets one `decision` record. A candidate with none was still
   undecided when the run stopped, and a `start` with no `end` was in flight
   when the process died.

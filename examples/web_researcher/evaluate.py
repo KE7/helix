@@ -20,19 +20,14 @@ An evolved agent that *also* fetches live data will stay perfectly aligned with 
 evaluator as library versions advance — a naive offline agent will drift.
 """
 
-import contextlib
 import json
 import os
 import pathlib
 import urllib.request
 import urllib.error
 
-try:
-    # Shows up in `helix timing`; a no-op outside a HELIX run.
-    from helix import timed
-except ImportError:  # running without HELIX installed
-    def timed(name, example=None):
-        return contextlib.nullcontext()
+# Shows up in `helix timing`; a no-op outside a HELIX run.
+from helix import timed
 
 
 def _read_batch_ids() -> list[str] | None:

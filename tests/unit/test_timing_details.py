@@ -62,16 +62,15 @@ class TestTimed:
         assert line["name"] == "sam3"
         assert line["example"] == "7"
         assert line["seconds"] >= 0
-        assert "error" not in line
 
-    def test_a_raising_block_is_recorded_as_an_error_and_reraises(
+    def test_a_raising_block_is_still_timed_and_reraises(
         self, timing_log: Path
     ) -> None:
         with pytest.raises(ValueError):
             with timed("molmo"):
                 raise ValueError("boom")
 
-        assert _lines(timing_log)[0]["error"] is True
+        assert _lines(timing_log)[0]["name"] == "molmo"
 
     def test_decorator_times_sync_and_async_calls(self, timing_log: Path) -> None:
         @timed("sync")
@@ -135,7 +134,7 @@ class TestTimed:
     def test_totals_group_by_name_and_example_and_skip_bad_lines(self) -> None:
         raw = "\n".join([
             json.dumps({"name": "sam3", "seconds": 1.0, "example": "a"}),
-            json.dumps({"name": "sam3", "seconds": 3.0, "example": "a", "error": True}),
+            json.dumps({"name": "sam3", "seconds": 3.0, "example": "a"}),
             json.dumps({"name": "sam3", "seconds": 2.0, "example": "b"}),
             json.dumps({"name": "molmo", "seconds": 0.5}),
             "not json",
@@ -148,7 +147,7 @@ class TestTimed:
         assert set(totals) == {("sam3", "a"), ("sam3", "b"), ("molmo", None)}
         assert totals[("sam3", "a")] == {
             "name": "sam3", "example": "a", "count": 2, "seconds": 4.0,
-            "max_seconds": 3.0, "errors": 1,
+            "max_seconds": 3.0,
         }
 
     def test_read_is_empty_for_a_missing_file(self, tmp_path: Path) -> None:
@@ -383,11 +382,11 @@ def _trace_with_details(path: Path) -> Path:
             with span("proposal", candidate_id="g1-s1"), span("agent"):
                 timing.detail("agent", "transcript", {
                     "name": "tool:Bash", "example": None, "count": 3, "seconds": 9.0,
-                    "max_seconds": 5.0, "errors": 0})
+                    "max_seconds": 5.0})
             with span("validate", candidate_id="g1-s1"), span("evaluate"):
                 timing.detail("evaluate", "timed", {
                     "name": "sam3", "example": "e1", "count": 4, "seconds": 2.0,
-                    "max_seconds": 1.0, "errors": 0})
+                    "max_seconds": 1.0})
             timing.decision("g1-s1", accepted=False, reason="r")
     return path
 

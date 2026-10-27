@@ -236,8 +236,8 @@ def detail(within: str, source: str, total: dict[str, Any]) -> None:
 
     *source* is ``"transcript"`` (read from the agent's own transcript:
     ``model``, ``tool:<name>``, ``other``) or ``"timed"`` (``helix.timed``
-    calls).  *total* holds ``name``, ``example``, ``count``, ``seconds``,
-    ``max_seconds`` and ``errors``.
+    calls).  *total* holds ``name``, ``example``, ``count``, ``seconds``
+    and ``max_seconds``.
     """
     if _sink is None:
         return
@@ -253,7 +253,6 @@ def detail(within: str, source: str, total: dict[str, Any]) -> None:
             "generation": generation,
             "candidate": candidate,
             "wall_time": time.time(),
-            "thread_id": threading.get_ident(),
         }
     )
 

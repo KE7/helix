@@ -11,7 +11,7 @@ mutating agent runs -- can time its own operations::
 
     timed.record("owl-vit", 0.41)   # a duration measured elsewhere
 
-Each call appends one JSON line, ``{"name", "seconds", "example", "error"}``,
+Each call appends one JSON line, ``{"name", "seconds", "example"}``,
 to the per-invocation file named by ``HELIX_TIMING_LOG``; any language can
 write the same line.  HELIX totals the file per ``(name, example)`` after the
 call returns and records the totals in ``.helix/timing.jsonl``.  Outside a
@@ -47,7 +47,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def _record(
-    name: str, seconds: float, *, example: object = None, error: bool = False
+    name: str, seconds: float, *, example: object = None
 ) -> None:
     """Append one timing line; best-effort, never raises."""
     if not os.environ.get(HELIX_TIMING_LOG_ENV):
@@ -55,8 +55,6 @@ def _record(
     entry: dict[str, Any] = {"name": str(name), "seconds": float(seconds)}
     if example is not None:
         entry["example"] = str(example)
-    if error:
-        entry["error"] = True
     line = json.dumps(entry) + "\n"
     if len(line.encode()) <= _MAX_LINE_BYTES:
         append_line(HELIX_TIMING_LOG_ENV, line)
@@ -76,13 +74,8 @@ class timed:
         self._started = time.perf_counter()
         return self
 
-    def __exit__(self, exc_type: object, *_: object) -> None:
-        _record(
-            self.name,
-            time.perf_counter() - self._started,
-            example=self.example,
-            error=exc_type is not None,
-        )
+    def __exit__(self, *_: object) -> None:
+        _record(self.name, time.perf_counter() - self._started, example=self.example)
 
     def __call__(self, fn: F) -> F:
         # A fresh instance per call, so concurrent calls never share a start.
@@ -123,12 +116,11 @@ def totals(raw: str) -> list[dict[str, Any]]:
         total = by_key.setdefault(
             key,
             {"name": key[0], "example": key[1], "count": 0, "seconds": 0.0,
-             "max_seconds": 0.0, "errors": 0},
+             "max_seconds": 0.0},
         )
         total["count"] += 1
         total["seconds"] += seconds
         total["max_seconds"] = max(total["max_seconds"], seconds)
-        total["errors"] += bool(entry.get("error"))
     return list(by_key.values())
 
 

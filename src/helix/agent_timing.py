@@ -143,7 +143,6 @@ def _total(name: str, seconds: float, count: int = 1, longest: float | None = No
         "count": count,
         "seconds": seconds,
         "max_seconds": seconds if longest is None else longest,
-        "errors": 0,
         **extra,
     }
 
