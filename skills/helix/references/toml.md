@@ -162,8 +162,8 @@ backend = "claude"  # agy | claude | codex | cursor | opencode
 model = "sonnet"
 effort = "medium"
 max_turns = 20
-allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep"]
 background = "Only modify src/solver.py and supporting implementation files."
+# web_access = false  # turn off the backend's built-in web tools
 ```
 
 Use `background` as the agent's project-specific guardrail. It is not a
@@ -176,6 +176,28 @@ Backend notes:
 - Claude: usually `claude`, `max_turns`, optional model/effort.
 - Codex: usually `codex`, model optional.
 - Cursor/OpenCode: check CLI support and model naming before pinning.
+
+No web access:
+
+- `web_access = false` turns off the backend's built-in web tools only. Web
+  access is on by default. Your own settings still load, including MCP servers
+  and plugins you configured, and some of those can reach the web (for
+  example codex's browser plugin, a fetch MCP server, or claude.ai
+  connectors). The shell can still reach the network too.
+- A strict no-web guarantee is the Docker sandbox's job: a fresh home with no
+  user config, plus a `[sandbox].network` with no route to the internet.
+- Each backend's own flags apply it:
+  - claude: `--disallowedTools=WebSearch,WebFetch`.
+  - codex: `-c web_search="disabled" -c features.apps=false`. The account-side
+    `codex_apps` connector searches the web even with `web_search` disabled,
+    so this also turns off your ChatGPT app connectors for the run.
+  - opencode: `OPENCODE_PERMISSION` denying `webfetch`/`websearch`, which
+    overrides every config file.
+  - agy and cursor have no such switch, so `web_access = false` is a
+    configuration error for them, including through `helix evolve --backend`.
+- `web_access = false` is pinned for resume: resuming with it changed in
+  either direction is rejected, because a no-web comparison holds only if
+  every proposal ran without web tools.
 
 ## Sandbox
 

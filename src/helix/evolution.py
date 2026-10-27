@@ -174,7 +174,10 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
       * ``agent.*``: changing the mutation backend / model / effort
         affects only future proposals, not the meaning of saved scores.
         (GEPA likewise treats the LM client as out-of-band of the
-        persisted state.)
+        persisted state.)  The exception is ``agent.web_access = false``,
+        pinned under ``agent`` because a no-web comparison is only valid if
+        every proposal ran without web tools.  The key is present only when
+        it is false, so states saved before it existed still resume.
       * ``sandbox`` / ``worktree`` / top-level ``seed`` / ``passthrough_env``
         / ``env``: runtime / filesystem layout.  The separate
         ``evaluator_integrity_manifest`` covers evaluator-environment
@@ -188,7 +191,7 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
     # would compare scores produced by different binaries.  Both are
     # hard-rejected on resume to match the strict-equality stance GEPA
     # gets implicitly by pickling its full config alongside state.
-    return {
+    semantics: dict[str, Any] = {
         "objective": config.objective,
         "rng_seed": config.rng_seed,
         "evaluator": {
@@ -232,6 +235,9 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
             "merge_subsample_size": config.evolution.merge_subsample_size,
         },
     }
+    if not config.agent.web_access:
+        semantics["agent"] = {"web_access": False}
+    return semantics
 
 
 _DIFF_VALUE_PREVIEW_CHARS = 80
