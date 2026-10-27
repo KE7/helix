@@ -297,7 +297,9 @@ class TestRunEvaluator:
             return_value=MagicMock(),
         )
         mock_sandbox_run.return_value = [
-            MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]", stderr="", returncode=0)
+            MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]", stderr="", returncode=0),
+            MagicMock(stdout="", stderr="", returncode=0),  # helix.log capture
+            MagicMock(stdout="", stderr="", returncode=0),  # helix.timed capture
         ]
 
         candidate = make_candidate()
@@ -327,6 +329,7 @@ class TestRunEvaluator:
         mock_run.return_value = [
             MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]", stderr="", returncode=0),
             MagicMock(stdout="extra", stderr="", returncode=0),
+            MagicMock(stdout="", stderr="", returncode=0),
             MagicMock(stdout="", stderr="", returncode=0),
         ]
 
@@ -376,6 +379,7 @@ class TestRunEvaluator:
         mock_run.return_value = [
             MagicMock(stdout="HELIX_RESULT=[[1.0, {}]]\n", stderr="", returncode=0),
             MagicMock(stdout=capture_stdout, stderr="", returncode=0),
+            MagicMock(stdout="", stderr="", returncode=0),  # helix.timed capture
         ]
 
         candidate = make_candidate()

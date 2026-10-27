@@ -10,6 +10,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,7 +39,8 @@ from helix.sibling_history import (
     history_instruction,
     summary_prompt,
 )
-from helix.timing import traced
+from helix import agent_timing, custom_timing
+from helix.timing import detail, traced
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -720,6 +722,9 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         *_backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX),
         ".helix_artifacts/",
         "helix_batch.json",
+        # ``helix.timed`` logs from scripts the agent runs; read and removed
+        # after each call, ignored in case a crash leaves one behind.
+        ".helix_timing_*.jsonl",
         # The change summary and its prompt are notes about the diff, not part
         # of it.  Ignored unconditionally: HELIX reads them straight out of the
         # worktree and never wants them committed, whichever way the feature is
@@ -1910,6 +1915,7 @@ def _write_backend_artifacts(
     sandbox: SandboxConfig | None = None,
     fallback_usage: UsageStats | None = None,
     artifact_infix: str = "",
+    agent_seconds: float | None = None,
 ) -> None:
     result_name, stdout_name, stderr_name = _backend_artifact_names(artifact_infix)
     try:
@@ -1943,6 +1949,14 @@ def _write_backend_artifacts(
             usage=usage,
             sandbox=sandbox,
         )
+        if agent_seconds is not None:
+            primary = next((a for a in transcript_artifacts if a.get("available")), None)
+            for total in agent_timing.breakdown(
+                backend,
+                None if primary is None else wt / primary["path"],
+                agent_seconds,
+            ):
+                detail("agent", "transcript", total)
         payload = {
             "backend": backend,
             "backend_display_name": backend_display_name(backend),
@@ -2025,6 +2039,15 @@ def invoke_claude_code(
     )
     _add_backend_auth_env(backend_env, backend)
     backend_env.update(_no_web_env(config))
+    # Scripts the agent runs can report ``helix.timed`` calls; the sandbox
+    # copies its workspace back, so the file is read from the worktree either way.
+    sandboxed = sandbox is not None and sandbox.enabled
+    timing_log_name = custom_timing.log_name()
+    backend_env[custom_timing.HELIX_TIMING_LOG_ENV] = (
+        f"/workspace/{timing_log_name}"
+        if sandboxed
+        else str(Path(worktree_path) / timing_log_name)
+    )
     if backend == "opencode" and (sandbox is None or not sandbox.enabled):
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
@@ -2049,6 +2072,7 @@ def invoke_claude_code(
         opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
         opencode_state_dir.mkdir(parents=True, exist_ok=True)
         backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
+    started = time.monotonic()
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
         result = run_sandboxed_command(
@@ -2069,6 +2093,11 @@ def invoke_claude_code(
             text=True,
             env=backend_env,
         )
+    agent_seconds = time.monotonic() - started
+    timing_log = Path(worktree_path) / timing_log_name
+    for total in custom_timing.totals(custom_timing.read(timing_log)):
+        detail("agent", "timed", total)
+    timing_log.unlink(missing_ok=True)
 
     # Recover the usage record from the raw stream FIRST, with a parse that
     # cannot raise.  Everything below this line can fail — and when it does,
@@ -2187,6 +2216,7 @@ def invoke_claude_code(
             sandbox=sandbox,
             fallback_usage=spent_usage,
             artifact_infix=artifact_infix,
+            agent_seconds=agent_seconds,
         )
 
 

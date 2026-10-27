@@ -826,6 +826,66 @@ track per thread: the parallel proposal slots, what each spent its time on, and
 where siblings waited on each other. It's an optional viewer, not a
 dependency; nothing is installed.
 
+#### Inside agent and evaluator calls
+
+`helix timing` also splits each agent call, and anything you time yourself:
+
+```console
+                       Inside agent and evaluator calls                        
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┓
+┃ Within           ┃ Name      ┃ Calls ┃ Accepted ┃ Rejected ┃  Total ┃   Max ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━╇━━━━━━━┩
+│ agent            │ model     │   800 │    1h40m │    7h31m │  9h11m │ 4m02s │
+│ agent            │ tool:Bash │  9214 │   22m10s │    1h48m │  2h10m │ 9m55s │
+│ agent            │ other     │   800 │    4m01s │   17m33s │ 21m34s │ 41.0s │
+│ evaluate (timed) │ sam3      │ 61440 │   19m02s │   58m41s │  1h17m │  3.1s │
+│ evaluate (timed) │ molmo     │ 30720 │   11m20s │   34m09s │ 45m29s │  2.4s │
+└──────────────────┴───────────┴───────┴──────────┴──────────┴────────┴───────┘
+```
+
+**Agent calls** are split using the backend's own transcript:
+- `tool:<name>` is each tool call, from its start to its result.
+- `model` is the rest of the transcript's time, when the agent was waiting on
+  the model (thinking, writing, compacting, retrying).
+- `other` is the call's time outside the transcript: CLI and MCP startup, and
+  container start in sandboxed runs.
+
+This works for `claude`, `codex` and `opencode`. `cursor` (no timestamps) and
+`agy` (step timestamps only, to the second) get one `unavailable` row rather
+than a guess.
+
+**Your own operations** are timed with `helix.timed`, which works in the
+evaluator, its `extra_commands`, its child processes, the evaluator sidecar,
+and scripts the agent runs during a mutation:
+
+```python
+from helix import timed
+
+with timed("sam3", example=example_id):
+    masks = sam3(frame)
+
+@timed("molmo")                       # sync or async functions
+def point(image, query): ...
+
+timed.record("owl-vit", 0.41)         # a duration measured elsewhere
+```
+
+Outside HELIX it does nothing, so the same code runs locally. Each call appends
+one line, `{"name": "sam3", "seconds": 0.84, "example": "12"}`, to the file
+named by `HELIX_TIMING_LOG`. Code in another language, or in an image without
+`helix` installed, can write that line itself. HELIX totals the file per name
+and example after each call, so a tool called thousands of times adds one record
+per evaluation, not thousands.
+
+- **GPU work:** a GPU call returns before its kernels finish, so time up to the
+  point the result is used (`.cpu()`, `synchronize()`) or around the request to
+  an inference server.
+- **Other services:** a model served by a separate container or machine can't
+  see `HELIX_TIMING_LOG`. Time the request where your evaluator makes it, or
+  pass a latency the server reports to `timed.record`.
+- **Overlap:** names can nest (`rollout` around `sam3`) and examples can run in
+  parallel, so totals are per name and don't add up to the evaluator's time.
+
 #### Record format
 
 One JSON object per line, flushed as written so a killed run keeps everything
@@ -844,6 +904,9 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 - `run_id` separates `evolve` from each later `resume` in the same file.
 - `outcome` is `"ok"` or `"error"`; on error, `error_type` names the exception
   class, never its message.
+- `detail` records hold the totals above, with `within` (`agent` or
+  `evaluate`), `source` (`transcript` or `timed`), `name`, `example`, `count`,
+  `seconds`, `max_seconds` and `errors`.
 - Each candidate gets one `decision` record. A candidate with none was still
   undecided when the run stopped, and a `start` with no `end` was in flight
   when the process died.

@@ -24,7 +24,8 @@ from helix.sandbox import (
     current_evaluator_sidecar_runtime,
     run_sandboxed_commands,
 )
-from helix.timing import evaluation_attrs, traced
+from helix import custom_timing
+from helix.timing import detail, evaluation_attrs, traced
 from helix.trace import TRACE, EventType
 
 logger = logging.getLogger(__name__)
@@ -261,9 +262,15 @@ def run_evaluator(
     # use the absolute ``/workspace/...`` form to remove that
     # assumption.
     helix_log_sandbox_path = f"/workspace/{helix_log_name}"
+    # ``helix.timed`` calls land in their own per-invocation file, read the
+    # same two ways as the ASI log above.
+    timing_log_name = custom_timing.log_name()
+    timing_log_path = Path(candidate.worktree_path) / timing_log_name
+    timing_log_sandbox_path = f"/workspace/{timing_log_name}"
     cmd_tokens = _validate_and_split_command(evaluator.command)
     if config.sandbox.enabled and config.sandbox.evaluator:
         env[HELIX_ASI_LOG_ENV] = helix_log_sandbox_path
+        env[custom_timing.HELIX_TIMING_LOG_ENV] = timing_log_sandbox_path
         if current_evaluator_sidecar_runtime() is None:
             raise ValueError(
                 "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
@@ -286,6 +293,12 @@ def run_evaluator(
                     "-c",
                     f"cat {shlex.quote(helix_log_sandbox_path)} 2>/dev/null || true",
                 ],
+                [
+                    "sh",
+                    "-c",
+                    f"head -c {custom_timing.MAX_LOG_BYTES} "
+                    f"{shlex.quote(timing_log_sandbox_path)} 2>/dev/null || true",
+                ],
             ],
             cwd=candidate.worktree_path,
             env=env,
@@ -296,14 +309,16 @@ def run_evaluator(
             agent_backend=config.agent.backend,
         )
         result = command_results[0]
-        helix_log_text = read_asi_log_text(command_results[-1].stdout)
-        extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:-1]]
+        helix_log_text = read_asi_log_text(command_results[-2].stdout)
+        timing_log_text = command_results[-1].stdout
+        extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:-2]]
     else:
         # Host path: the same env var also propagates to ``extra_commands``
         # below — those subprocesses will append to the same JSONL file
         # if they call ``helix.log()``.  Notes from extras are merged in
         # invocation order with the main command's notes.
         env[HELIX_ASI_LOG_ENV] = str(helix_log_path)
+        env[custom_timing.HELIX_TIMING_LOG_ENV] = str(timing_log_path)
         try:
             result = subprocess.run(
                 cmd_tokens,
@@ -326,8 +341,12 @@ def run_evaluator(
                 )
                 extra_outputs.append((extra_result.stdout, extra_result.stderr))
             helix_log_text = read_asi_log(helix_log_path)
+            timing_log_text = custom_timing.read(timing_log_path)
         finally:
             clear_asi_log(helix_log_path)
+            timing_log_path.unlink(missing_ok=True)
+    for total in custom_timing.totals(timing_log_text):
+        detail("evaluate", "timed", total)
 
     stdout = result.stdout
     stderr = result.stderr

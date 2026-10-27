@@ -950,6 +950,27 @@ def timing_cmd(project_dir: Path | None, perfetto_path: Path | None) -> None:
             _fmt_seconds(sum(by_fate.values())),
         )
     console.print(table)
+    if summary.details:
+        inside = Table(title="Inside agent and evaluator calls")
+        inside.add_column("Within", style="cyan")
+        inside.add_column("Name")
+        for column in ("Calls", "Accepted", "Rejected", "Total", "Max"):
+            inside.add_column(column, justify="right")
+        for (within, source, name), total in sorted(
+            summary.details.items(),
+            key=lambda item: (item[0][0], item[0][1], -sum(item[1]["seconds"].values())),
+        ):
+            by_fate = total["seconds"]
+            inside.add_row(
+                within if source == "transcript" else f"{within} (timed)",
+                name,
+                str(total["count"]),
+                _fmt_seconds(by_fate.get("accepted", 0.0)),
+                _fmt_seconds(by_fate.get("rejected", 0.0)),
+                _fmt_seconds(sum(by_fate.values())),
+                _fmt_seconds(total["max_seconds"]),
+            )
+        console.print(inside)
     console.print(
         "Candidates: "
         + ", ".join(

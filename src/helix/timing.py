@@ -231,6 +231,33 @@ def traced(
     return decorate
 
 
+def detail(within: str, source: str, total: dict[str, Any]) -> None:
+    """Record time spent inside the open *within* span, totalled per name.
+
+    *source* is ``"transcript"`` (read from the agent's own transcript:
+    ``model``, ``tool:<name>``, ``other``) or ``"timed"`` (``helix.timed``
+    calls).  *total* holds ``name``, ``example``, ``count``, ``seconds``,
+    ``max_seconds`` and ``errors``.
+    """
+    if _sink is None:
+        return
+    parent, generation, candidate = _context.get()
+    _write(
+        {
+            "event": "detail",
+            "within": within,
+            "source": source,
+            **total,
+            "parent_span_id": parent,
+            "run_id": _run_id,
+            "generation": generation,
+            "candidate": candidate,
+            "wall_time": time.time(),
+            "thread_id": threading.get_ident(),
+        }
+    )
+
+
 def evaluation_attrs(ids: str | None) -> AttrsFn:
     """Attrs for an evaluation span, reading the example ids from parameter
     *ids* (``None``: the function always evaluates the whole split).
@@ -304,6 +331,9 @@ class Summary:
     run_seconds: float = 0.0
     #: generation -> wall seconds.  A generation redone after a resume adds up.
     generation_seconds: dict[int, float] = field(default_factory=dict)
+    #: ``(within, source, name)`` of :func:`detail` records -> ``count``,
+    #: ``max_seconds``, and ``seconds`` by fate.
+    details: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
 
 
 def summarize(records: list[dict[str, Any]]) -> Summary:
@@ -311,24 +341,36 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
     fates = _fates(records)
     work: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     generations: dict[int, float] = defaultdict(float)
+    details: dict[tuple[str, str, str], dict[str, Any]] = {}
     seen: set[str] = set()
     run_started: dict[str, float] = {}
     run_latest: dict[str, float] = defaultdict(float)
+
+    def fate_of(candidate: str | None) -> str:
+        return "unattributed" if candidate is None else fates.get(candidate, "undecided")
+
     for r in records:
+        candidate = r.get("candidate")
         run_latest[r["run_id"]] = max(run_latest[r["run_id"]], r["wall_time"])
         if r["event"] == "start" and r["span"] == "run":
             run_started[r["run_id"]] = r["wall_time"]
+        if r["event"] == "detail":
+            total = details.setdefault(
+                (r["within"], r["source"], r["name"]),
+                {"count": 0, "max_seconds": 0.0, "seconds": defaultdict(float)},
+            )
+            total["count"] += r["count"]
+            total["max_seconds"] = max(total["max_seconds"], r["max_seconds"])
+            total["seconds"][fate_of(candidate)] += r["seconds"]
         if r["event"] != "end":
             continue
-        candidate = r.get("candidate")
         if candidate is not None:
             seen.add(candidate)
         if r["span"] == "generation":
             generations[r["attrs"]["generation"]] += r["duration_seconds"]
         kind = WORK_KINDS.get(r["span"])
         if kind is not None:
-            fate = "unattributed" if candidate is None else fates.get(candidate, "undecided")
-            work[kind][fate] += r["duration_seconds"]
+            work[kind][fate_of(candidate)] += r["duration_seconds"]
     candidates: dict[str, int] = defaultdict(int)
     for candidate in seen | set(fates):
         candidates[fates.get(candidate, "undecided")] += 1
@@ -337,6 +379,7 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
         candidates=dict(candidates),
         run_seconds=sum(run_latest[run] - start for run, start in run_started.items()),
         generation_seconds=dict(generations),
+        details={key: {**total, "seconds": dict(total["seconds"])} for key, total in details.items()},
     )
 
 
@@ -351,6 +394,12 @@ def to_perfetto(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
     fates = _fates(records)
     started = {r["span_id"]: r["wall_time"] for r in records if r["event"] == "start"}
+    # Detail totals are shown on the slice they were recorded inside.
+    details: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for r in records:
+        if r["event"] == "detail":
+            label = r["name"] if r["example"] is None else f"{r['name']}[{r['example']}]"
+            details[r["parent_span_id"]][label] += r["seconds"]
     pids: dict[str, int] = {}
     events: list[dict[str, Any]] = []
     for r in records:
@@ -371,6 +420,7 @@ def to_perfetto(records: list[dict[str, Any]]) -> dict[str, Any]:
                     "candidate": candidate,
                     "fate": None if candidate is None else fates.get(candidate, "undecided"),
                     "outcome": r["outcome"],
+                    **({"details": dict(details[r["span_id"]])} if r["span_id"] in details else {}),
                 },
             })
         elif r["event"] == "decision":
