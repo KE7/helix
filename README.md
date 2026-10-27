@@ -791,6 +791,53 @@ but successful mutation prompts omit them when structured diagnostics or
 `helix.log()` notes are available; failed evaluations still include stdout and
 stderr as fallback debug context.
 
+### Timing Trace
+
+Every `helix evolve` and `helix resume` appends a timing trace to
+`.helix/timing.jsonl`, the same way it always records its budget; there is
+nothing to turn on. Each slow operation is a *span* with a `start` and an `end`
+record, one JSON object per line, flushed as written so a killed run keeps
+everything it finished:
+
+```json
+{"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "wall_time": 1757400000.1, "monotonic": 1234.5, "thread_id": 6199, "attrs": {"candidate_id": "g1-s2", "split": "train", "examples": 8, "evaluation_phase": null}}
+{"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
+```
+
+`parent_span_id` links each span to the one it ran inside, so a run's spans form
+a tree; `run_id` tells apart the runs appended to the same file (`evolve`, then
+each `resume`). `duration_seconds` comes from the monotonic clock; `wall_time`
+is Unix epoch seconds for lining up with other logs. `outcome` is `"ok"` or
+`"error"`, and on error `error_type` names the exception class (never its
+message).
+
+| span | measures | `attrs` |
+| --- | --- | --- |
+| `run` | the whole run, sidecar included | |
+| `generation` | one iteration of the generation loop, sequential acceptance included | `generation` |
+| `proposal` | one proposal slot: parent eval, mutation, child eval (slots run in parallel) | `candidate_id`, `parent`, `generation` |
+| `mutate` / `merge` / `seed` | producing one candidate, its agent call included | `candidate_id`, `parent(s)` |
+| `summarize` | the sibling-history change summary | |
+| `agent` | one backend CLI call | `backend`, `model` |
+| `cached_evaluate` | one cache-aware evaluation: worktree lock wait, cache lookup, evaluator run | `candidate_id`, `split`, `examples`, `evaluation_phase` |
+| `evaluate` | one evaluator subprocess, always inside a `cached_evaluate` | `candidate_id`, `split`, `examples`, `evaluation_phase` |
+| `validate` | one full-validation pass | `candidate_id` |
+| `clone` / `snapshot` | creating a candidate worktree / committing it | `candidate_id` |
+| `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend`, `generation` |
+
+Time in a span that none of its children account for is HELIX's own work, such
+as a `cached_evaluate` with no `evaluate` child (a full cache hit) or the gaps
+in a `generation` (frontier updates, state saves, worktree removal). Spans
+that run in parallel overlap, so adding up `proposal` durations overstates wall
+time; read wall time from `generation` and `run`:
+
+```console
+$ jq -c 'select(.event=="end" and .span=="generation") | {run_id, gen: .attrs.generation, seconds: .duration_seconds}' .helix/timing.jsonl
+```
+
+A run's spans are complete only if its last record is the `end` of its `run`
+span; a `start` with no `end` is what was in flight when the process died.
+
 ---
 
 ## 📖 CLI Reference
@@ -849,6 +896,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 ├── config.toml          # Snapshot of helix.toml at run start
 ├── evaluator_manifest.json # Protected evaluator file hashes
 ├── state.json           # Generation, frontier, budget
+├── timing.jsonl         # Timing spans, appended by every run
 ├── lineage.json         # Full ancestry graph
 ├── log/                 # Semantic mutation logs
 │   ├── g1-m0.json
@@ -879,6 +927,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 | `lineage.py` | Ancestry graph tracking |
 | `state.py` | Atomic state persistence and resume |
 | `display.py` | Rich terminal UI with phase tracking |
+| `timing.py` | Always-on JSONL timing spans (`.helix/timing.jsonl`) |
 
 ---
 
