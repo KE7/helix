@@ -2,7 +2,7 @@
 
 A *proposal* is one (parent, minibatch) slot: evaluate the parent, reflect,
 mutate, check the result for evaluator tampering, then evaluate the child.
-Each attempt terminates in exactly one of the four results below.
+Each attempt terminates in exactly one of the five results below.
 
 These are a sealed union expressed as a class hierarchy rather than one
 ``kind``-discriminated dataclass: it gives ``mypy --strict`` the ``isinstance``
@@ -11,7 +11,10 @@ or ``TypeGuard``s.
 
 Budget charging, lineage writes and frontier updates are deliberately absent —
 producing a proposal is pure with respect to run state, so the attempts can run
-concurrently while the apply phase stays sequential and deterministic.
+concurrently while the apply phase stays sequential and deterministic.  Each
+result carries what its attempt spent (``parent_n_uncached``,
+``child_n_uncached``, ``child_usage``); the apply phase charges all of it as
+soon as the batch returns, whatever the result's kind.
 """
 
 from __future__ import annotations
@@ -46,9 +49,7 @@ class MutationFailedProposal:
 
     ``child_usage`` is the token usage the backend spent before it failed,
     recovered from the raw output independently of the parse that failed.
-    It is charged in the apply phase exactly like a successful proposal's:
-    the tokens are gone either way, and leaving them uncharged silently
-    under-reports the run's cost by however much the failed attempt burned.
+    It is charged like every other result's: the tokens are gone either way.
     ``None`` means no backend invocation happened — a parent eval that
     raised, or a worker that died before the LLM call.
     """
@@ -72,6 +73,23 @@ class TamperedProposal:
 
 
 @dataclass
+class ChildEvalFailedProposal:
+    """The mutation produced a child, but the child's minibatch eval raised.
+
+    ``child_n_uncached`` counts the ids the evaluator was sent, so the failed
+    run is charged like any other evaluator run.
+    """
+
+    presample_ctx: ProposalContext
+    parent_eval_result: EvalResult
+    child: Candidate
+    error: str
+    parent_n_uncached: int = 0
+    child_n_uncached: int = 0
+    child_usage: UsageStats | None = None
+
+
+@dataclass
 class EvaluatedProposal:
     """Every step completed; ``child_eval_result`` is None on the no-minibatch path."""
 
@@ -85,7 +103,11 @@ class EvaluatedProposal:
 
 
 ProposalResult: TypeAlias = (
-    SkippedProposal | MutationFailedProposal | TamperedProposal | EvaluatedProposal
+    SkippedProposal
+    | MutationFailedProposal
+    | TamperedProposal
+    | ChildEvalFailedProposal
+    | EvaluatedProposal
 )
 
 

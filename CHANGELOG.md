@@ -89,6 +89,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
+- Every proposal slot's spend is now charged, whatever happens to the
+  candidate. All slots in a batch run in parallel before the sequential apply
+  phase, but their parent evaluations, child minibatch evaluations and
+  backend tokens were charged inside that phase, branch by branch, so a slot
+  the phase did not reach (every slot after a mid-batch budget stop, and the
+  slot that hit the cap) lost its tokens, dollars and evaluations. The apply
+  phase now charges each slot's spend once, as soon as the batch returns,
+  and afterwards charges only the evaluations it runs itself. Rejected
+  worktrees are still removed by default; usage never depended on them.
+- `max_evaluations` is checked between iterations only, as in GEPA: a batch
+  admitted below the cap drains, so every child it selects is validated and
+  can join the frontier, even when the batch's own evaluations reach the cap.
+  The mutations are already paid for; HELIX used to stop mid-batch and throw
+  away an accepted child's validation. The overshoot stays within the
+  documented `U - 1` bound, which already included that validation.
+- A child whose minibatch evaluation raises is rejected as its own outcome
+  (`ChildEvalFailedProposal`) instead of ending a single-slot run or dropping
+  a parallel slot with its tokens. Its tokens and the failed evaluator run
+  are charged, it is recorded in sibling history, and its worktree is
+  removed. A parent minibatch evaluation that raises is charged for the
+  evaluator run as well.
 - Backend transcript preservation now covers every backend. It was only ever
   implemented for `claude`; `codex`, `opencode`, `agy`, and `cursor` runs
   silently kept no native transcript. Each backend's own
