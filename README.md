@@ -795,21 +795,24 @@ stderr as fallback debug context.
 
 Every `helix evolve` and `helix resume` appends a timing trace to
 `.helix/timing.jsonl`, the same way it always records its budget; there is
-nothing to turn on. `helix timing` reads it:
+nothing to turn on. `helix timing` reads it. Here it is on a 10-generation
+run of the circle-packing example with one proposal per generation, so 11
+candidates counting the seed, and Codex `gpt-6-luna` as the mutation agent:
 
 ```console
 $ helix timing
-                    Work by kind and candidate fate                     
-┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┓
-┃ Kind       ┃ Accepted ┃ Rejected ┃ Undecided ┃ Unattributed ┃  Total ┃
-┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━┩
-│ agent      │    2h11m │    9h48m │      0.0s │         0.0s │ 12h00m │
-│ evaluator  │    1h02m │    3h20m │      0.0s │         0.0s │  4h22m │
-│ git        │    4m10s │   15m02s │      0.0s │         0.0s │ 19m12s │
-│ state save │     0.0s │     0.0s │      0.0s │        41.3s │  41.3s │
-└────────────┴──────────┴──────────┴───────────┴──────────────┴────────┘
-Candidates: 76 accepted, 724 rejected, 0 undecided
-Wall: 5h12m over 200 generations (mean 1m34s, slowest gen 37: 6m02s)
+                    Work by kind and candidate fate
+┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Kind       ┃ Accepted ┃ Rejected ┃ Undecided ┃ Unattributed ┃ Total ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━┩
+│ evaluator  │   49m44s │   40m00s │      0.0s │         0.0s │ 1h29m │
+│ agent      │    4m22s │    3m01s │      0.0s │         0.0s │ 7m24s │
+│ git        │     1.1s │     2.1s │      0.0s │         0.0s │  3.1s │
+│ state save │     0.0s │     0.0s │      0.0s │         0.0s │  0.0s │
+└────────────┴──────────┴──────────┴───────────┴──────────────┴───────┘
+Candidates: 6 accepted, 5 rejected, 0 undecided
+Wall: 1h37m over 10 generations (mean 9m42s, slowest gen 9: 11m04s)
+Work adds up across parallel proposal slots, so it can exceed wall time.
 ```
 
 *Work* is the time spent on each kind of operation, grouped by what became of
