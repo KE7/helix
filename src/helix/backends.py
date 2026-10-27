@@ -44,7 +44,10 @@ EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset(
 # until this map is updated; the value still passes through to the CLI.
 EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
     "agy": frozenset({"low", "medium", "high"}),
-    "claude": frozenset({"low", "medium", "high"}),
+    # Claude Code 2.1.274 ``claude --help``: ``--effort <level>  Effort level
+    # for the current session (low, medium, high, xhigh, max)``.  Whether a
+    # given model honors ``xhigh``/``max`` is decided by the API, not the CLI.
+    "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
     "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
     "opencode": None,  # variant strings are model-specific; opencode validates them.
 }

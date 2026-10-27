@@ -743,6 +743,14 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         # the candidate git tree free of opencode's session/session files.
         ".helix_opencode_state/",
     ]
+    if gitignore.is_symlink():
+        # The candidate tree comes from an agent.  Write through the link only
+        # when it resolves to a regular file inside the worktree; any other
+        # link (possibly to a host file) is replaced by a regular file.
+        resolved = os.path.realpath(gitignore)
+        inside = resolved.startswith(os.path.realpath(worktree_path) + os.sep)
+        if not (inside and os.path.isfile(resolved)):
+            gitignore.unlink()
     existing = gitignore.read_text() if gitignore.exists() else ""
     to_append = [p for p in patterns if p not in existing]
     if not to_append:

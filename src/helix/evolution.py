@@ -1785,6 +1785,7 @@ def _reset_sandbox_agent_state_for_generation(config: HelixConfig, gen: int) -> 
         config.agent.backend,
         image=resolve_sandbox_image(config.sandbox, config.agent.backend),
         generation=gen,
+        sandbox=config.sandbox,
     )
 
 

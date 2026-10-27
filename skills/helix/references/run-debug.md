@@ -22,7 +22,8 @@ debug failures.
    pwd
    test -f helix.toml
    ```
-2. Validate evaluator runner and sidecar wiring:
+2. If evaluation is sandboxed (`[sandbox].evaluator = true`), validate
+   evaluator runner and sidecar wiring:
    ```bash
    docker run --rm my-private-evaluator:latest python -m benchmark_server
    ```
@@ -34,8 +35,13 @@ debug failures.
    helix sandbox status
    helix sandbox login <backend>
    ```
-4. If sandboxed, check sidecar config:
+4. If evaluation is sandboxed, check the sandbox and sidecar config. With
+   `enabled = true` alone, the evaluator runs on the host:
    ```toml
+   [sandbox]
+   enabled = true
+   evaluator = true
+
    [evaluator]
    command = "python /runner/evaluate_client.py"
 
@@ -183,7 +189,7 @@ Symptoms and checks:
 - All zero minibatch scores: evaluator probably ignored `helix_batch.json` ids
   or keyed results by metric names instead of example ids.
 - Hangs: add evaluator-level timeouts or configure `[sandbox].timeout_seconds`.
-- Missing dependencies in sandbox: build private evaluator/simulator
+- Missing dependencies in sandboxed evaluation: build private evaluator/simulator
   dependencies into `[evaluator.sidecar].image` and evaluator-client
   dependencies into `[evaluator.sidecar].runner_image`.
 
@@ -261,11 +267,13 @@ venvs directly unless the user accepts portability and sandbox tradeoffs.
 ## Common Repair Actions
 
 - Add or fix `[sandbox]` and run `helix sandbox login <backend>`.
-- Add `[evaluator.sidecar]` when `[sandbox].enabled = true`.
+- Set `[sandbox].evaluator = true` and add `[evaluator.sidecar]` to run
+  evaluation in Docker; with `[sandbox].enabled = true` alone, the evaluator
+  runs on the host.
 - Add evaluator service dependencies to the sidecar image and runner
   dependencies to `runner_image`.
 - Add `passthrough_env` for non-secret runtime vars such as CUDA/HF caches.
-- Use `protected_files` only for non-sandboxed local prototypes.
+- Use `protected_files` only for local prototypes without sandboxed evaluation.
 - Emit one positional result pair per example for per-example datasets.
 - Lower `num_parallel_proposals` if backend rate limits or resource contention
   dominate.
