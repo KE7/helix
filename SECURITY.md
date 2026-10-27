@@ -31,20 +31,27 @@ For new projects, the recommended setup is Docker sandboxing:
 
 ```toml
 [sandbox]
-enabled = true
+enabled = true     # run mutation and merge agents in Docker
+evaluator = true   # run evaluation in Docker; requires [evaluator.sidecar]
 ```
 
 In sandboxed mode, HELIX copies each candidate worktree into a temporary Docker
-workspace. Agent-side changes are synced back after the backend exits;
-evaluator-side changes are discarded. HELIX does not mount the host project
+workspace. Agent-side changes are synced back after the backend exits. With
+`[sandbox].evaluator = true`, evaluation also runs in Docker and
+evaluator-side changes are discarded; without it, the evaluator command runs on
+the host in the candidate worktree. HELIX does not mount the host project
 root, parent directories, or home directory into agent/evaluator containers by
 default. Agent containers receive only their backend-specific persistent auth
 volume, created by `helix sandbox login <backend>`.
 
-**This means:** sandboxing reduces the blast radius of a compromised mutation
-backend from "anything the local CLI can access" to the copied candidate
-workspace plus the backend auth volume and configured network access. It is not
-a defense against a malicious `helix.toml` or evaluator script.
+**This means:** with `[sandbox].enabled = true` and `[sandbox].evaluator = true`,
+sandboxing reduces the blast radius of a compromised mutation backend from
+"anything the local CLI can access" to the copied candidate workspace plus the
+backend auth volume and configured network access. With `[sandbox].enabled = true`
+alone, the evaluator command runs on the host in the candidate worktree, so any
+candidate code it imports or runs, such as an agent-written module, executes on
+the host. Sandboxing is not a defense against a malicious `helix.toml` or
+evaluator script.
 
 ### 4. `web_access = false` turns off built-in web tools only
 
@@ -60,7 +67,7 @@ fresh home with no user config, on a network without an internet route.
 - HELIX is NOT designed to defend against a malicious `helix.toml` file.
 - HELIX is NOT designed to defend against a malicious evaluator script.
 - HELIX IS designed to isolate each candidate mutation in a detached git worktree so mutations cannot corrupt the users source tree.
-- With `[sandbox].enabled = true`, HELIX IS designed to avoid direct host project/home mounts for agent and evaluator subprocesses.
+- With `[sandbox].enabled = true`, HELIX IS designed to avoid direct host project/home mounts for agent subprocesses, and with `[sandbox].evaluator = true` also for evaluator subprocesses.
 - HELIX IS designed to never modify the users existing git `.git/config` or remote state.
 
 ## Dependencies

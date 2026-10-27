@@ -35,6 +35,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kind and candidate fate plus wall time per generation, and `--perfetto FILE`
   exports a Chrome-trace timeline for ui.perfetto.dev (no extra dependency). A trace that cannot be
   written is a logged warning, never a failed run.
+- `examples/circle_packing/` is optimize_anything's circle-packing experiment
+  (gepa-ai/gepa@133d185a): GEPA's two-component candidate (`solve.py`,
+  `refiner_prompt.txt`), its fitness function with the GPT-5.1 refiner,
+  warm start and StateTracker (`gepa_fitness.py`), its objective, background
+  and budget, and the Python environment of its published run.
+  Its mutation agent (Claude Haiku 4.5 in Claude Code) runs sandboxed without
+  web access: `[agent].web_access = false` turns off its built-in web tools,
+  and `examples/circle_packing_sandbox/` provides an `--internal`
+  Docker network whose only route out is a gateway for the Anthropic Messages
+  API. See `docs/experiments/circle-packing.md`.
+- `[sandbox].network` accepts the name of an existing Docker network (for
+  example an `--internal` network whose only route out is an egress proxy),
+  besides `bridge`, `none` and `host`.
+- `[sandbox].auth_volume`: a dedicated Docker volume mounted at `/home/node` in
+  agent containers (and used by the transcript copy and the per-generation
+  state reset) instead of the shared `helix-auth-<backend>` volume.
+  `helix sandbox login` does not write it: it is for runs whose credential
+  reaches the agent another way.
+- `xhigh` and `max` are recognized `effort` values for the `claude` backend
+  (Claude Code 2.1.274 `--effort`); HELIX previously warned on them.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by
@@ -49,6 +69,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdout envelope carries no per-tool events.
 
 ### Changed
+- **BREAKING** (`examples/circle_packing`): the example was a different
+  experiment from optimize_anything's, and one that leaked its answer: the
+  agent background stated the record score and a solution recipe, the record
+  coordinates sat in the candidate tree (`solve_optimized.py`), and invalid
+  packings scored their radius sum. It is now GEPA's experiment (see Added);
+  the candidate interface is `main(timeout, current_best_solution)` instead of
+  `pack_circles(n)`, an invalid packing scores 0, and the example's README
+  states no result. The reference packing moved to
+  `docs/experiments/circle-packing/reference_known_best.py`.
+- `examples/web_researcher`: the seed agent asks Claude Haiku directly, and a
+  web-fetching reference agent is in
+  `docs/experiments/web-researcher/reference_agent.py`. The example sets
+  `[dataset]` sizes; `evaluate.py` accepts HELIX's positional ids, resolves
+  `FETCH:pypi:<package>` and `FETCH:cpython` expected values itself, and
+  matches version answers on dot-separated components (at least
+  major.minor). The evaluator command pins Python 3.12 with the anthropic SDK,
+  `ANTHROPIC_API_KEY` is in `passthrough_env`, `evaluate.py`, `train/`, and
+  `val/` are protected files, and mutation agents run in the Docker sandbox
+  with those paths omitted from their workspace.
+- README: design section and concurrent work.
 - **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
   configuration field. Every backend's native transcript is now always
   copied out of the auth volume (or `$HOME` when unsandboxed) at the end of
@@ -137,6 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are charged, it is recorded in sibling history, and its worktree is
   removed. A parent minibatch evaluation that raises is charged for the
   evaluator run as well.
+- `helix init`: the next-steps message escapes bracketed table names such as
+  `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
 - Backend transcript preservation now covers every backend. It was only ever
   implemented for `claude`; `codex`, `opencode`, `agy`, and `cursor` runs
   silently kept no native transcript. Each backend's own

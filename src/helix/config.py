@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import tomllib
 import warnings
@@ -58,6 +59,20 @@ def _load_dotenv_file(path: Path) -> None:
                     value = value[:i].rstrip()
                     break
         os.environ[key] = value
+
+
+# Docker object names (networks, volumes): an alphanumeric first character,
+# then alphanumerics, ``_``, ``.`` or ``-``.  Anything else would reach the
+# ``docker run`` argv as a malformed or option-like token.
+_DOCKER_OBJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _require_docker_object_name(field: str, value: str) -> None:
+    if not _DOCKER_OBJECT_NAME_RE.fullmatch(value):
+        raise ValueError(
+            f"{field} must be a Docker object name (letters, digits, '_', '.', "
+            f"'-', starting with a letter or digit); got {value!r}"
+        )
 
 
 class EvaluatorSidecarConfig(BaseModel):
@@ -775,10 +790,12 @@ class AgentConfig(BaseModel):
 class SandboxConfig(BaseModel):
     """Configuration for OS-level subprocess isolation.
 
-    When enabled, HELIX runs untrusted agent/evaluator commands in a Docker
-    container whose only project mount is a temporary copy of the candidate
-    worktree.  Agent-side filesystem changes are synced back explicitly after
-    the backend exits; evaluator-side changes are discarded.
+    When enabled, HELIX runs untrusted agent commands in a Docker container
+    whose only project mount is a temporary copy of the candidate worktree.
+    With ``evaluator`` also set, evaluator commands run the same way through
+    ``[evaluator.sidecar]``; otherwise they run on the host.  Agent-side
+    filesystem changes are synced back explicitly after the backend exits;
+    evaluator-side changes are discarded.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -787,7 +804,11 @@ class SandboxConfig(BaseModel):
     evaluator: bool = False
     backend: Literal["docker"] = "docker"
     image: str | None = None
-    network: Literal["bridge", "none", "host"] = "bridge"
+    # ``bridge``, ``none``, ``host`` or the name of an existing Docker network
+    # (for example an ``--internal`` network whose only route out is an
+    # egress proxy).  Applies to agent containers and to evaluator containers
+    # when no sidecar runtime supplies its private network.
+    network: str = "bridge"
     cpus: float | None = None
     memory: str | None = None
     timeout_seconds: int | None = None
@@ -796,6 +817,11 @@ class SandboxConfig(BaseModel):
     extra_hosts: dict[str, str] = Field(default_factory=dict)
     skip_special_files: bool = True
     omit_from_agent: list[str] = Field(default_factory=list)
+    # Docker volume mounted at ``/home/node`` in agent containers.  ``None``
+    # uses the shared ``helix-auth-<backend>`` login volume.  A dedicated
+    # volume keeps one run from seeing credentials, caches or leftovers that
+    # other runs wrote to the shared volume.
+    auth_volume: str | None = None
     # Every agent invocation's native CLI transcript is copied into the
     # candidate worktree under ``transcript_artifact_dir/<backend>/
     # <session_id>.jsonl`` and used for tool-call accounting: claude
@@ -809,6 +835,11 @@ class SandboxConfig(BaseModel):
     # these copies are the only durable record of what the agent did.
     transcript_artifact_dir: str = ".helix_artifacts/backend_transcripts"
     claude_transcript_root: str = "/home/node/.claude/projects/-workspace"
+
+    def model_post_init(self, __context: object) -> None:
+        _require_docker_object_name("sandbox.network", self.network)
+        if self.auth_volume is not None:
+            _require_docker_object_name("sandbox.auth_volume", self.auth_volume)
 
 
 class WorktreeConfig(BaseModel):

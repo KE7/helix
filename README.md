@@ -12,11 +12,11 @@
 
 **Evolutionary optimization for full codebases using agentic coding tools as the mutation engine and git worktrees as the population pool.**
 
-HELIX brings reflective Pareto evolution out of the single-artifact setting and into real software projects: entire repositories, multi-turn agentic mutation, tool use, web research, and verification loops, all inside a single evolutionary stage. Supported mutation backends include Antigravity CLI, Claude Code, Codex CLI, Cursor Agent, and OpenCode.
+HELIX applies reflective Pareto evolution to whole software repositories. Each mutation is a multi-turn coding-agent session that can read and edit the repository, run tests and other tools, and, where the backend supports it, search the web before HELIX scores the result. Supported mutation backends include Antigravity CLI, Claude Code, Codex CLI, Cursor Agent, and OpenCode.
 
 <br>
 
-[Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Configuration](#-configuration) · [CLI Reference](#-cli-reference) · [Results](#-results)
+[Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Configuration](#-configuration) · [CLI Reference](#-cli-reference) · [Examples](#-examples)
 
 </div>
 
@@ -28,33 +28,25 @@ HELIX brings reflective Pareto evolution out of the single-artifact setting and 
 
 ## Why HELIX?
 
-HELIX is built for a setting that today's evolution systems still do not really handle, including systems like KISS and OpenEvolve: improving **real, multi-file codebases** where useful mutations require exploration, iteration, and tooling, not just a single blind rewrite.
+HELIX is built for improving **real, multi-file codebases**, where useful mutations require exploration, iteration, and tooling.
 
-Instead of treating one file or one patch as the candidate, HELIX treats the **entire repository** as the evolving organism. Each mutation is a full agentic coding session running inside an isolated git worktree, so a candidate can:
+HELIX treats the **entire repository** as the evolving organism, rather than one file or one patch. Each mutation is an agentic coding session running inside an isolated git worktree, so a mutation can:
 
 1. **Read across the codebase** to understand architecture and dependencies.
 2. **Edit multiple files coherently** in one mutation.
-3. **Use tools mid-mutation** like tests, linters, shell commands, and web search.
+3. **Use tools mid-mutation** like tests, linters, shell commands, and, where the backend provides it, web search.
 4. **Take multiple turns to diagnose and self-correct** before the mutation is scored.
-5. **Stay inside one evolutionary stage** rather than requiring an outer orchestration loop to get tool use or iteration.
 
-The result is a new kind of evolutionary optimizer: one that preserves the reflective Pareto-evolutionary core while making it practical for whole repositories and realistic software engineering tasks.
+### Design
 
-### Coding agent as the mutation engine
+HELIX's search loop (minibatch-gated acceptance, instance-level Pareto parent selection, and merge) is ported from GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335.3813167); see [Acknowledgments](#-acknowledgments)). In HELIX:
 
-The difference between HELIX and `/chat/completions`-style evolvers (GEPA, DSPy-Refine, ShinkaEvolve) is that HELIX's mutation is driven by a **coding agent**, not a single LLM call. A GEPA-style mutation is one prompt → one completion → apply the diff. HELIX's mutation is a full agentic session bounded only by `max_turns`:
+- The candidate is the whole working tree. There is no `target_file`, and a mutation may create, edit, or delete files.
+- Each mutation is a multi-turn session of a coding-agent CLI (`agy`, `claude`, `codex`, `cursor`, or `opencode`) that can read, edit, and run code in the candidate's worktree before HELIX scores it.
+- Each candidate lives in its own git worktree.
+- An optional Docker sandbox (`[sandbox].enabled = true`) runs mutation and merge agents in copied workspaces. An optional evaluator sidecar (`[sandbox].enabled = true` and `[sandbox].evaluator = true`, plus `[evaluator.sidecar]`) runs evaluation on a private Docker network that agent containers cannot reach.
 
-| | GEPA / chat-completion evolvers | HELIX |
-|---|---|---|
-| Mutation shape | Single request/response | Multi-step agentic session |
-| Working surface | A single prompt / predictor string | The entire repository in a git worktree |
-| Mid-mutation introspection | None | Read any file, grep, glob, `find`, follow imports |
-| Mid-mutation verification | None | Run the test suite, type-checker, linter; read failures and react |
-| External information | None | Fetch the web, hit GitHub API, query package indexes live |
-| Self-correction | None per proposal (retries are separate generations) | Inside one mutation: diagnose a test failure, edit another file, re-run, commit only if green |
-| Cost accounting | 1 LLM call = 1 proposal | 1 proposal = N turns, gated by `max_turns` + whatever the agent decides is enough |
-
-This is why a full solver module or a shrinkwrap of an ML kernel behave qualitatively differently than a GEPA run on the same task: HELIX's candidate is the program a team of N humans could edit over an afternoon, not a single text blob produced in one shot.
+Meta-Harness ([Lee et al., 2026](https://arxiv.org/abs/2603.28052)) is concurrent work that uses a coding-agent proposer to optimize single-file harness programs.
 
 ---
 
@@ -65,8 +57,8 @@ This is why a full solver module or a shrinkwrap of an ML kernel behave qualitat
 | 🧬 | **Whole-codebase evolution** | The candidate is your repository, not a single file, prompt, or patch |
 | 📂 | **Multi-file editing** | Mutate entire directory trees — edit `auth.py:42` and `routes.py:18` in one coherent session |
 | 🔁 | **Multi-turn mutations** | A single mutation can inspect, edit, test, revise, and continue before being evaluated |
-| 🔧 | **Tool access during mutation** | The configured backend can read, grep, run tests, inspect the codebase, and use the web mid-mutation |
-| ✅ | **Self-verification** | Mutations verify themselves by running commands before committing |
+| 🔧 | **Tool access during mutation** | The configured backend can read, grep, run tests, inspect the codebase, and, where the backend provides it, use the web mid-mutation |
+| ✅ | **Self-verification** | A mutation can run tests and other commands to check its changes before HELIX scores it |
 | 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
 | ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (proposal concurrency bounded by `evolution.max_workers`) |
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
@@ -106,12 +98,12 @@ flowchart TD
     FRONT --> SEL
 
     %% ── Phase 3: Docker Sandbox — isolated execution ─────────────────────────────
-    subgraph DOCKER["🐳  Docker Sandbox  —  isolated execution environment"]
+    subgraph DOCKER["🐳  Docker Sandbox (opt-in)  —  isolated execution environment"]
         direction LR
         subgraph ANET["  Agent Network  (normal egress)  "]
             AGENT["Mutation / Merge Container\n──────────────────────────\nagy · claude · codex\ncursor · opencode\nAuth: helix-auth-BACKEND"]:::agent
         end
-        subgraph ENET["  Private Evaluator Network  (helix-eval-*)  "]
+        subgraph ENET["  Private Evaluator Network  (helix-eval-*, opt-in)  "]
             ERUN["Eval Runners\n(short-lived,\ncopied workspace)"]:::eval
             ESVC["Evaluator Sidecar\n(benchmark data\nno host ports)"]:::eval
             ERUN -->|"HTTP/RPC"| ESVC
@@ -158,9 +150,9 @@ flowchart TD
 **The loop in detail:**
 
 1. **Seed** — Your starting code is copied into a git worktree and evaluated
-2. **Evaluate** — Start the private evaluator sidecar once, then run short-lived evaluator-runner containers that call it and print `HELIX_RESULT`
+2. **Evaluate** — Run the evaluator command in the candidate worktree and parse its `HELIX_RESULT` line. With sandboxed evaluation (`[sandbox].enabled = true`, `[sandbox].evaluator = true`, and `[evaluator.sidecar]`), HELIX starts the private evaluator sidecar once per run and runs short-lived evaluator-runner containers that call it
 3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
-4. **Mutate** — Spawn the configured agent backend in an isolated Docker workspace. It can edit candidate files and use its backend auth, but it does not join the evaluator network
+4. **Mutate** — Spawn the configured agent backend in the candidate's worktree. With `[sandbox].enabled = true`, the backend runs in an isolated Docker workspace, where it can edit candidate files and use its backend auth but does not join the evaluator network
 5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
 7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend
@@ -193,9 +185,13 @@ This creates a `helix.toml` config file and a `.helix/` directory. Edit `helix.t
 
 ### Recommended: Enable Docker Sandboxing
 
-For a first HELIX run, use Docker sandboxing. It keeps mutation agents in
-copied workspaces and requires a private evaluator sidecar, so agents never see
-the evaluator source, benchmark data, or evaluator endpoint.
+For a first HELIX run, use Docker sandboxing. `[sandbox].enabled = true` runs
+mutation agents in copied Docker workspaces. `[sandbox].evaluator = true` also
+runs evaluation in Docker through a private evaluator sidecar, configured in
+`[evaluator.sidecar]`, that agent containers cannot reach. When the evaluator
+code and benchmark data live in the sidecar image, they stay out of the agents'
+workspaces. Without `[sandbox].evaluator = true`, the evaluator command runs on
+the host in the candidate worktree.
 
 Install and start Docker, then log in to your selected backend inside its
 persistent sandbox auth volume:
@@ -205,7 +201,8 @@ helix sandbox login claude      # or agy, codex, cursor, opencode
 helix sandbox status claude
 ```
 
-Then enable the sandbox and configure the evaluator sidecar in `helix.toml`:
+Then enable the sandbox and sandboxed evaluation, and configure the evaluator
+sidecar in `helix.toml`:
 
 ```toml
 [evaluator]
@@ -220,11 +217,14 @@ startup_timeout_seconds = 120
 
 [sandbox]
 enabled = true
+evaluator = true
 network = "bridge"
 skip_special_files = true
 ```
 
-HELIX keeps this setting opt-in so existing local workflows and machines without
+`[evaluator.sidecar]` is required when both `enabled` and `evaluator` are true.
+
+HELIX keeps these settings opt-in so existing local workflows and machines without
 Docker continue to work, but sandboxing is the recommended mode for new projects.
 
 ### Connect The HELIX Agent Skill
@@ -420,17 +420,24 @@ frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType pari
 backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "opencode"
 # model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
-max_turns = 20
+max_turns = 20                   # hard cap for claude; an in-prompt hint for other backends
 # background = "Only modify files under src/. Do not touch tests/ or config/."
 # web_access = true              # false = no built-in web tools (claude/codex/opencode)
 
 [sandbox]
-enabled = false                  # true = run agent/evaluator subprocesses in Docker
+enabled = false                  # true = run mutation and merge agents in Docker
+evaluator = false                # true (with enabled = true) = run evaluation in Docker
+                                 # through [evaluator.sidecar], which is then required
 # image = "ghcr.io/ke7/helix-evo-runner-claude:latest"  # optional; defaults from agent.backend
-network = "bridge"               # "bridge" | "none" | "host"
+network = "bridge"               # "bridge" | "none" | "host" | an existing Docker network
+                                 # (for example an --internal network with an egress proxy)
 skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
 # Agent containers mount a persistent Docker auth volume named
 # helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
+# auth_volume = "my-run-home"    # optional: mount this volume at /home/node instead;
+                                 # `helix sandbox login` never writes it, so use it
+                                 # only when the credential reaches the agent another
+                                 # way (e.g. examples/circle_packing_sandbox's gateway)
 
 [worktree]
 base_dir = ".helix/worktrees"
@@ -446,12 +453,9 @@ It does not resume a partially completed proposal batch slot-by-slot. The random
 number generator is seeded again for each invocation, so a resumed search need
 not take the same path as an uninterrupted run.
 
-This behaviour was exercised in a multi-hour interrupted run: budget remained
-`336`, cost remained `$0.77971`, the five-member frontier and its lineage were
-unchanged, three full-validation results remained available, and the resumed
-generation completed an accepted gate → validate → promote cycle. This is one
-interruption point only; it does not cover the apply phase or a partially
-written state file.
+`tests/unit/test_resume.py` covers saving state when a run is interrupted,
+resuming when candidate worktrees are missing, and the configuration checks a
+resume performs.
 
 Evaluation caps are dispatch boundaries rather than cancellation points. For
 an admitted evaluation phase, `U` is the bound on uncached evaluation units
@@ -462,15 +466,10 @@ and checks the in-flight bound, and the maximum permitted overshoot is
 For this bound, `P` = `evolution.num_parallel_proposals` is the number of parents
 sampled per iteration from HELIX's frequency-weighted Pareto list; HELIX samples
 them with replacement, so the same parent can occupy multiple `P` slots in one
-iteration. Upstream GEPA implements this same parent-major, with-replacement
-design directly as `PxNSampling(p, n)`: it samples `p` parents with replacement,
-then loops `n` times per parent to build that parent's mutation tasks, drawing a
-fresh minibatch for each task (upstream also ships `SameParentSampling`,
-`IndependentSampling`, and a single-parent/single-mutation default strategy).
-HELIX's `P*N` layout is parity with upstream's `PxNSampling`, not an extension
-of it: each selected parent is reused across its `N` consecutive slots, where
-`N` = `evolution.mutations_per_parent` is the number of reflective mutations
-proposed per selected parent. Each slot draws its own minibatch, so siblings are gated on
+iteration. This parent-major, with-replacement `P*N` layout follows GEPA's
+`PxNSampling(p, n)`: each selected parent is reused across its `N` consecutive
+slots, where `N` = `evolution.mutations_per_parent` is the number of reflective
+mutations proposed per selected parent. Each slot draws its own minibatch, so siblings are gated on
 different examples rather than selecting whichever sibling got an easy batch.
 Thus `P*N` is the number of proposal slots (logical proposals) per
 iteration. For an admitted proposal batch, let `C` be the number
@@ -531,29 +530,10 @@ example in a minibatch, and `1` for a no-example evaluation. This is why
 sizes rather than only on `P` and `N`. Cache hits and failed mutations reduce
 observed use below the bound.
 
-HELIX and upstream GEPA get their proposal-stage and validation-stage
-concurrency from different places. HELIX threads its `P*N` proposal slots
-through a single pool bounded by `evolution.max_workers`, because each HELIX
-proposal worker synchronously runs the evaluator subprocess — that pool is
-HELIX's only proposal-stage concurrency mechanism. Upstream GEPA has no
-equivalent engine-managed proposal-worker pool: its reflective-mutation
-throughput comes from one batched call at the reflection edge (`reflect_many`,
-backed by `LM.batch_complete(..., max_workers=10)`) rather than from engine
-threads. For the candidates that clear acceptance, upstream batches all of them
-into a single `_evaluate_programs_on_valset` call and, for adapters that
-implement `batch_evaluate` (the standard `OptimizeAnythingAdapter` does), fans
-every `(candidate, example)` pair across one `ThreadPoolExecutor` — so
-upstream's standard full-validation path is itself parallel. (An adapter
-without `batch_evaluate` falls back to sequential evaluation, and
-`write_agent_state=True` forces serial evaluation.) Only the acceptance
-decision and pool mutation that follow (`_add_evaluated_program`) run
-sequentially in upstream, by design. HELIX, by contrast, validates each
-accepted candidate sequentially, one at a time in sampled order — there is no
-batched or parallel full-validation call in HELIX today. The `max_workers`
-knob therefore names different layers in the two systems: HELIX's
-`evolution.max_workers` bounds the proposal pool described above, while
-upstream's `EngineConfig.max_workers` bounds the adapter's evaluation pool
-that backs full validation. When `P*N > evolution.max_workers`, HELIX queues
+HELIX threads its `P*N` proposal slots through a single pool bounded by
+`evolution.max_workers`, because each HELIX proposal worker synchronously runs
+the evaluator subprocess. HELIX validates each accepted candidate sequentially,
+one at a time in sampled order. When `P*N > evolution.max_workers`, HELIX queues
 excess proposal work. The logical width `P*N` therefore does not guarantee that
 every evaluation runs at once; worker-pool capacity and the sequential apply
 phase still bound HELIX's wall-clock parallelism.
@@ -565,8 +545,8 @@ provides the underlying scaling model. In HELIX, the practical knobs are
 `evolution.num_parallel_proposals` (`P`), `evolution.mutations_per_parent`
 (`N`), `evolution.max_workers` (the proposal-pool cap), and
 `evolution.max_evaluations` (the evaluation-budget cap). Use their code-defined
-interactions to reason about a workload. In the GEPA comparison below, `V` is
-the validation-set size and `W` is the worker count:
+interactions to reason about a workload. Below, `V` is the validation-set size
+and `W` is the worker count:
 
 - `P*N` proposal slots are submitted to one bounded pool. The pool uses
   `max_workers = min(len(contexts), evolution.max_workers)`, so when `P*N` is
@@ -579,10 +559,7 @@ the validation-set size and `W` is the worker count:
   sequential acceptance/full-validation passes, where `j` is the number of
   candidates that clear acceptance. HELIX validates each accepted candidate
   one at a time, so raising `evolution.max_workers` speeds proposal
-  generation but not the `j`-candidate validation cost. Upstream's standard
-  path differs here: it batches its `j` accepted candidates into one
-  `adapter.batch_evaluate` call, so its validation cost is bounded by
-  `EngineConfig.max_workers` rather than by `j` sequential passes.
+  generation but not the `j`-candidate validation cost.
 - The batch bound charges `2 * sum(|m_i|)` for the parent and child training
   minibatches. With `C` admitted contexts sharing minibatch size `m`, that is
   approximately `2*C*m`; increasing `P*N` therefore increases `U` and the
@@ -590,23 +567,21 @@ the validation-set size and `W` is the worker count:
   `evolution.max_evaluations` cap.
 - The blog's analytical `k*V <= W` model assumes a parallel full-validation
   stage: up to `k` accepted candidates are each evaluated on all `V` validation
-  examples in parallel across `W` workers. That describes upstream's standard
-  path: the engine batches accepted candidates into one `adapter.batch_evaluate`
-  call, and the standard `OptimizeAnythingAdapter` fans every
-  `(candidate, example)` pair across a `ThreadPoolExecutor` bounded by
-  `max_workers`. It does not describe HELIX: HELIX validates accepted
-  candidates sequentially, one at a time in sampled order, with no batched or
-  parallel full-validation call. The blog's speedup figures are therefore a
-  genuine upper bound for HELIX specifically, not a property shared by both
-  systems. For HELIX, actual proposal-stage concurrency is capped by
-  `evolution.max_workers`; upstream instead bounds its adapter-side
-  full-validation concurrency with its `EngineConfig.max_workers` setting.
+  examples in parallel across `W` workers. HELIX validates accepted candidates
+  sequentially, one at a time in sampled order, so for HELIX the model's
+  speedup figures are an upper bound. HELIX's proposal-stage concurrency is
+  capped by `evolution.max_workers`.
 
 ### Docker Sandboxing
 
-When `[sandbox].enabled = true`, HELIX starts `[evaluator.sidecar]` once per
-`helix evolve` on a private internal Docker network. Agent containers run in
-copied workspaces on the normal agent network and cannot reach that sidecar.
+When `[sandbox].enabled = true`, HELIX runs mutation and merge agents in
+Docker containers with copied workspaces on the normal agent network. The
+evaluator command still runs on the host in the candidate worktree unless
+sandboxed evaluation is also enabled.
+
+When `[sandbox].evaluator = true` is set as well, HELIX requires
+`[evaluator.sidecar]` and starts it once per `helix evolve` on a private
+internal Docker network that agent containers cannot reach.
 Evaluator-runner containers run only during evaluation, join the private
 network, call the sidecar, print evaluator output, and exit.
 The long-lived sidecar does not mount the candidate workspace; the runner must
@@ -706,10 +681,10 @@ When `evolution.val_stage_size` is positive and `dataset.val_size` is set, accep
 
 ### Evaluator Integrity
 
-For non-sandboxed local prototypes, HELIX can lock evaluator-critical files so
+For local prototypes, HELIX can lock evaluator-critical files so
 mutations and merges cannot game the score by editing the benchmark itself.
-Sandboxed runs should use `[evaluator.sidecar]` instead of repo-local evaluator
-files.
+Runs with sandboxed evaluation (`[sandbox].evaluator = true`) should use
+`[evaluator.sidecar]` instead of repo-local evaluator files.
 
 ```toml
 [evaluator]
@@ -734,9 +709,8 @@ instance ids as a single subprocess. Per-example parallelism — evaluating
 multiple ids of one candidate concurrently — lives **inside the evaluator**,
 not inside HELIX's engine.
 
-This is a deliberate architectural split: GEPA's reference adapter fans out
-per-example in-process, which is essentially free; HELIX's subprocess model
-would pay full subprocess-startup cost for each example. If you want N-way
+HELIX runs one evaluator subprocess per batch, so fanning out per example in
+HELIX would pay subprocess-startup cost for each example. If you want N-way
 parallelism per batch, your `evaluate.py` should do it directly:
 
 ```python
@@ -979,19 +953,14 @@ $ jq -s 'map(select(.event == "end" and .span == "agent")) | group_by(.generatio
 
 ---
 
-## 🧪 Results
+## 🧪 Examples
 
-### 🔵 Circle Packing
+| Example | Task | Seed |
+|---|---|---|
+| [`examples/circle_packing/`](examples/circle_packing/) | optimize_anything's circle-packing experiment: pack 26 non-overlapping circles in the unit square, maximizing the sum of radii, with GEPA's fitness function and GPT-5.1 refiner | GEPA's seed: `solve.py`, a concentric-ring layout with a sum of radii of 0.979764, and `refiner_prompt.txt` |
+| [`examples/web_researcher/`](examples/web_researcher/) | Answer software-engineering questions whose answers change over time, such as current package versions | `agent.py`, which asks Claude Haiku directly with no web access |
 
-Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
-
-| | Score | Config |
-|---|:---:|---|
-| Seed (naive concentric grid) | 0.9798 | — |
-| **HELIX best (gen 14 of 30)** | **2.6360** | `haiku` · `low` effort · `max_turns=20` |
-| GEPA optimize_anything ([blog](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)) | 2.63598+ | gemini-3-flash |
-
-> **Note:** HELIX **matched the best published result** (2.635982 vs 2.63598+) using Claude Haiku with low reasoning effort and a 20-turn per mutation budget, and exceeded AlphaEvolve's 2.6358. See [`examples/circle_packing/`](examples/circle_packing/) for the full fixture including `solve_optimized.py` (the best evolved solution).
+Run an example to produce results. [`docs/experiments/circle-packing.md`](docs/experiments/circle-packing.md) describes the circle-packing evaluation protocol and lists published reference values for the task.
 
 ---
 
@@ -1042,7 +1011,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 ```bibtex
 @software{helix2026,
   title={HELIX: Hierarchical Evolution via LLM-Informed eXploration},
-  author={Elmaaroufi, Karim and OMAR},
+  author={Elmaaroufi, Karim},
   year={2026},
   url={https://github.com/KE7/helix}
 }
@@ -1058,9 +1027,9 @@ BSD 3-Clause License. See [LICENSE](LICENSE) for details.
 
 ## 🙏 Acknowledgments
 
-HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Agrawal, Lee, Ma, Elmaaroufi, Tan, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis, and Zaharia. Their work on applying reflective Pareto evolution to any text made HELIX possible — we extended their algorithm to full codebases and agentic mutation but the foundation is theirs.
+HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis, and Zaharia, described in *optimize_anything: Unified Text Optimization can Outperform Specialized Systems* (ACM CAIS 2026). Their work on applying reflective Pareto evolution to any text made HELIX possible — we extended their algorithm to full codebases and agentic mutation but the foundation is theirs.
 
-- **[GEPA optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)** — The algorithmic foundation: minibatch-gated Pareto evolution with reflective LLM mutation
+- **[GEPA optimize_anything](https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/)** — The algorithmic foundation: minibatch-gated Pareto evolution with reflective LLM mutation ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633))
 - **[Antigravity CLI](https://antigravity.google/cli)** — Supported HELIX mutation backend
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Supported HELIX mutation backend
 - **[Codex CLI](https://developers.openai.com/codex/cli)** — Supported HELIX mutation backend
@@ -1069,11 +1038,34 @@ HELIX's core evolutionary algorithm is based on **GEPA optimize_anything** by Ag
 - **[OMAR](http://omar.tech/)** — The multi-agent orchestration system used to build HELIX
 
 ```bibtex
-@article{gepa_optimize_anything2026,
-  title={Introducing optimize\_anything},
-  author={Agrawal, Lakshya A and Lee, Donghyun and Ma, Wenjie and Elmaaroufi, Karim and Tan, Shangyin and Seshia, Sanjit A. and Sen, Koushik and Klein, Dan and Stoica, Ion and Gonzalez, Joseph E. and Khattab, Omar and Dimakis, Alexandros G. and Zaharia, Matei},
-  year={2026},
-  url={https://gepa-ai.github.io/gepa/blog/2026/02/18/introducing-optimize-anything/}
+@inproceedings{agrawal2026optimizeanything,
+  title         = {optimize\_anything: Unified Text Optimization can Outperform Specialized Systems},
+  author        = {Agrawal, Lakshya A and Lee, Donghyun and Tan, Shangyin and Ma, Wenjie and Elmaaroufi, Karim and Sandadi, Rohit and Seshia, Sanjit A. and Sen, Koushik and Klein, Dan and Stoica, Ion and Gonzalez, Joseph E. and Khattab, Omar and Dimakis, Alexandros G. and Zaharia, Matei},
+  booktitle     = {Proceedings of the ACM Conference on AI and Agentic Systems (CAIS '26)},
+  address       = {San Jose, CA, USA},
+  publisher     = {ACM},
+  month         = may,
+  year          = {2026},
+  pages         = {1--16},
+  doi           = {10.1145/3786335.3813167},
+  eprint        = {2605.19633},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.CL},
+  note          = {arXiv version titled ``optimize\_anything: A Universal API for Optimizing any Text Parameter''}
+}
+```
+
+Meta-Harness, cited in [Design](#design):
+
+```bibtex
+@article{lee2026metaharness,
+  title         = {Meta-Harness: End-to-End Optimization of Model Harnesses},
+  author        = {Lee, Yoonho and Nair, Roshen and Zhang, Qizheng and Lee, Kangwook and Khattab, Omar and Finn, Chelsea},
+  journal       = {arXiv preprint arXiv:2603.28052},
+  year          = {2026},
+  eprint        = {2603.28052},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.AI}
 }
 ```
 

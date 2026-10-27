@@ -1,54 +1,103 @@
-[project]
-objective = "Maximize the sum of radii of 26 non-overlapping circles packed in a unit square. Higher total radius sum = better packing."
+# optimize_anything's circle-packing experiment (gepa-ai/gepa@133d185a,
+# examples/circle_packing), run by HELIX.  The objective and the background
+# are GEPA's text; the appended last paragraph of the background says which
+# file holds which of the candidate's two components.  The [evolution] values
+# are that run's GEPAConfig: max_metric_calls=200, cache_evaluation=True,
+# frontier_type="objective", reflection_minibatch_size=1, seed 0, Pareto
+# candidate selection and no merge.
 
-# Uncomment to pass specific env vars through the scrub into evaluator
-# and Claude Code subprocesses (e.g. GPU selection, cache dirs):
-# passthrough_env = ["CUDA_VISIBLE_DEVICES", "MUJOCO_GL", "HF_HOME"]
+[project]
+objective = "Optimize circle packing code and refiner prompt to maximize sum of circle radii within a unit square for N=26 circles."
+# The refiner in evaluate.py calls openai/gpt-5.1.
+passthrough_env = ["OPENAI_API_KEY"]
 
 [evaluator]
-# The solver needs numpy + scipy and PEP 604 (`X | None`) annotations, so the
-# evaluator must not inherit whatever bare `python3` happens to be on PATH --
-# on macOS that is a 3.9 interpreter with no scipy, which scores every
-# candidate 0.0 including the reference solution.  Pin the interpreter and
-# bring the dependencies with it so a fresh clone reproduces the benchmark.
-command = "uv run --no-project --python 3.12 --with numpy --with scipy python3 evaluate.py"
+# The experiment's Python environment (requirements.in says where it is from).
+command = "uv run --no-project --python 3.11 --with-requirements requirements.txt python3 evaluate.py"
+# A candidate that modifies a protected file is rejected.
+protected_files = ["evaluate.py", "gepa_fitness.py", "run_main.py", "requirements.in", "requirements.txt"]
 
 [dataset]
 train_size = 1
 val_size = 1
 
 [evolution]
-max_generations = 30
+max_evaluations = 200
+# A guard only: every generation spends at least one evaluation, so the
+# 200-evaluation budget always ends the run first.
+max_generations = 1000
+minibatch_size = 1
+cache_evaluation = true
+frontier_type = "objective"
+candidate_selection_strategy = "pareto"
 merge_enabled = false
-perfect_score_threshold = 100.0
-max_evaluations = 500
 
+# The proposer is a small model in its own coding harness.  GEPA's proposer
+# had no tools, so this one gets none that reach the web: its built-in web
+# tools are off (web_access = false), and [sandbox] below confines the agent
+# to a network whose only route out is the Messages API.
 [agent]
 backend = "claude"
-model = "haiku"
-effort = "low"
-max_turns = 20
-background = """
-Circle packing benchmark: pack 26 non-overlapping circles in a unit square [0,1]x[0,1].
-Each circle is (x, y, r) with r <= x, r <= y, r <= 1-x, r <= 1-y (inside bounds).
-No two circles overlap: dist(c_i, c_j) >= r_i + r_j.
-Score = sum of all radii. Best published result: 2.63598+. AlphaEvolve: 2.6358.
+model = "claude-haiku-4-5"
+max_turns = 40
+web_access = false
+background = '''
+Make BREAKTHROUGH improvements by trying fundamentally different approaches.
 
-PROVEN WINNING STRATEGIES:
-1. Use scipy.optimize (minimize with SLSQP or L-BFGS-B) for gradient-based optimization
-2. Multiple random restarts to escape local minima (use 5-10 restarts — evaluation timeout is 300s)
-3. Hexagonal/triangular packing as initial layout (better than grid)
-4. Iterative coordinate descent: fix positions, maximize each radius independently
-5. Force-directed relaxation: push overlapping circles apart
-6. The pack_circles function must be deterministic or nearly so for reproducibility
+Pack 26 non-overlapping circles inside a UNIT SQUARE [0,1] x [0,1].
+Goal: MAXIMIZE the sum of all circle radii.
 
-KNOWN GOOD APPROACH (scipy):
-- Variables: [x0, y0, r0, x1, y1, r1, ...] flattened
-- Minimize: -sum(r_i)
-- Constraints: r_i > 0, x_i - r_i >= 0, x_i + r_i <= 1, same for y
-  dist(i,j) >= r_i + r_j for all pairs
-- Use scipy.optimize.minimize with method='SLSQP' or 'trust-constr'
-- Multiple random starts, keep best valid solution
+SCORING: Sum of all circle radii (higher is better!)
 
-Target score >= 2.63598 to match the best published result.
-"""
+CRITICAL CODE FORMAT:
+- Function name MUST be: `def main(timeout, current_best_solution):`
+- `current_best_solution` is a numpy array of shape (N, 3) or None.
+- Return a dictionary with:
+    - 'circles': numpy array shape (N, 3) where each row is (x, y, radius)
+    - 'all_scores': list of floats (even if just one score)
+
+CRITICAL CONSTRAINTS:
+1. All circles fully inside [0,1]×[0,1]: 0 ≤ x-r, x+r ≤ 1 and 0 ≤ y-r, y+r ≤ 1
+2. No overlaps: distance between centers ≥ sum of radii
+3. All radii positive
+4. N is 26 for this problem.
+
+INNOVATION STRATEGIES:
+1. **Algorithmic diversity**: Physics-based, optimization-based, geometric, hybrid, meta-heuristics
+2. **Geometric insights**: Hexagonal patterns, corner utilization, variable radii
+3. **Optimization techniques**: Multiple restarts, hierarchical approaches, gradient-free methods
+4. **Hyperparameter auto-tuning**: Use optuna/hyperopt to find best parameters automatically
+5. Imagine you have all the packages available in the environment already and freely explore any of the packages you need.
+
+ANALYSIS STRATEGY:
+1. If scores plateau → try fundamentally different algorithm
+2. If errors persist → address root cause, don't just patch
+3. Synthesize insights from refinement successes into NEW innovations
+4. The refiner LLM will handle the refinement process using the `refiner_prompt`, so you focus on making a big leap in the global strategy.
+
+OUTPUT REQUIREMENTS:
+- Return ONLY executable Python code (no markdown, no explanations)
+- Focus on BREAKTHROUGH ideas, not incremental tweaks
+- Be bold and innovative!
+
+In this repository the two components are files: `code` is solve.py and `refiner_prompt` is refiner_prompt.txt. Only these two files are evaluated.
+'''
+
+# Agent containers run on the network that ../circle_packing_sandbox/up.sh
+# starts: --internal, with a gateway that forwards Anthropic Messages API
+# requests and nothing else.  The evaluator runs on the host, as GEPA's did.
+[sandbox]
+enabled = true
+image = "helix-circle/agent:1"
+network = "helix-circle-agent"
+# A fresh home with no login: the gateway holds the credential.
+auth_volume = "helix-circle-agent-home"
+
+[env]
+ANTHROPIC_BASE_URL = "http://anthropic-gateway:8080"
+CLAUDE_CODE_OAUTH_TOKEN = "placeholder-the-gateway-injects-the-subscription-token"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+DISABLE_AUTOUPDATER = "1"
+DISABLE_TELEMETRY = "1"
+DISABLE_ERROR_REPORTING = "1"
+DISABLE_BUG_COMMAND = "1"

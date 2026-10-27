@@ -8,17 +8,68 @@ authors:
   - given-names: Karim
     family-names: Elmaaroufi
     website: 'https://github.com/KE7'
-  - name: OMAR
-    website: 'http://omar.tech/'
-version: "0.1.0"
-date-released: "2026-04-10"
+version: "0.2.1"
+date-released: "2026-05-10"
 repository-code: 'https://github.com/KE7/helix'
-license: MIT
+license: BSD-3-Clause
 abstract: >-
-  HELIX is an evolutionary code optimization framework that
-  applies LLM-driven mutation operators at GEPA parity to
-  automatically improve algorithm implementations.
+  HELIX is an evolutionary optimization framework for whole
+  code repositories. It uses coding-agent CLIs as the mutation
+  operator and git worktrees as the population, with a
+  reflective Pareto search loop ported from GEPA
+  optimize_anything.
 references:
+  - type: conference-paper
+    title: >-
+      optimize_anything: Unified Text Optimization can
+      Outperform Specialized Systems
+    authors:
+      - given-names: Lakshya A
+        family-names: Agrawal
+      - given-names: Donghyun
+        family-names: Lee
+      - given-names: Shangyin
+        family-names: Tan
+      - given-names: Wenjie
+        family-names: Ma
+      - given-names: Karim
+        family-names: Elmaaroufi
+      - given-names: Rohit
+        family-names: Sandadi
+      - given-names: Sanjit A.
+        family-names: Seshia
+      - given-names: Koushik
+        family-names: Sen
+      - given-names: Dan
+        family-names: Klein
+      - given-names: Ion
+        family-names: Stoica
+      - given-names: Joseph E.
+        family-names: Gonzalez
+      - given-names: Omar
+        family-names: Khattab
+      - given-names: Alexandros G.
+        family-names: Dimakis
+      - given-names: Matei
+        family-names: Zaharia
+    collection-title: >-
+      Proceedings of the ACM Conference on AI and Agentic
+      Systems (CAIS '26)
+    conference:
+      name: "CAIS '26: ACM Conference on AI and Agentic Systems"
+      city: San Jose
+      region: CA
+      country: US
+    publisher:
+      name: ACM
+    year: 2026
+    month: 5
+    start: 1
+    end: 16
+    doi: 10.1145/3786335.3813167
+    identifiers:
+      - type: url
+        value: 'https://arxiv.org/abs/2605.19633'
   - type: software
     title: >-
       GEPA: Reflective Prompt Evolution Can Outperform
