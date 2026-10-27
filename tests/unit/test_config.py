@@ -435,10 +435,10 @@ class TestStopAtScore:
             command = "python evaluate.py"
 
             [evolution]
-            stop_at_score = 2.635983362593453
+            stop_at_score = 0.75
         """)
 
-        assert load_config(toml).evolution.stop_at_score == 2.635983362593453
+        assert load_config(toml).evolution.stop_at_score == 0.75
 
     @pytest.mark.parametrize("value", [-3.5, 0.0, 1, 1e9])
     def test_accepts_any_finite_number(self, value: float) -> None:
@@ -512,3 +512,33 @@ class TestLoadConfigOverrides:
 
         assert result.exit_code == 0, result.output
         assert run.call_args[0][0].agent.backend == "cursor"
+
+    @pytest.mark.parametrize(
+        ("flags", "message"),
+        [
+            (["--objective", ""], "must be non-empty when seedless.enabled=True"),
+            (["--evaluator", ""], "evaluator.command must be non-empty"),
+        ],
+    )
+    def test_cli_empty_string_override_reaches_validation(
+        self, tmp_path: Path, mocker, flags: list[str], message: str
+    ) -> None:
+        # An empty flag is an override, not "no flag": it must be validated
+        # rather than silently dropped.
+        from click.testing import CliRunner
+
+        from helix.cli import cli
+
+        write_toml(tmp_path, self.BASE + "\n[seedless]\nenabled = true\n")
+        run = mocker.patch("helix.evolution.run_evolution")
+
+        result = CliRunner().invoke(cli, ["evolve", "--dir", str(tmp_path), *flags])
+
+        assert result.exit_code == 2, result.output
+        assert message in " ".join(result.output.split())
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("command", ["", "   "])
+    def test_empty_evaluator_command_rejected(self, command: str) -> None:
+        with pytest.raises(ValueError, match="evaluator.command must be non-empty"):
+            EvaluatorConfig(command=command)

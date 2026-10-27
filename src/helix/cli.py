@@ -638,9 +638,9 @@ def evolve(
     # CLI overrides are merged into the TOML before its one validation, so a
     # flag gets every check a helix.toml value does, cross-field ones included.
     overrides: dict[str, Any] = {}
-    if objective:
+    if objective is not None:
         overrides["objective"] = objective
-    if evaluator:
+    if evaluator is not None:
         overrides["evaluator"] = {"command": evaluator}
     evolution_overrides: dict[str, Any] = {}
     if generations is not None:

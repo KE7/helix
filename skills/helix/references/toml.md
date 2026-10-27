@@ -118,7 +118,7 @@ objective instead of starting from the current working tree. `train_path` and
 max_generations = 20
 perfect_score_threshold = 1.0
 max_evaluations = -1
-# stop_at_score = 2.635983  # end the run once the best val score reaches it; unset = off
+# stop_at_score = 0.95  # end the run once the best val score reaches it; unset = off
 
 minibatch_size = 3
 num_parallel_proposals = 4

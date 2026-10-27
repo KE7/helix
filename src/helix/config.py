@@ -120,6 +120,12 @@ class EvaluatorConfig(BaseModel):
         ),
     )
 
+    def model_post_init(self, __context: object) -> None:
+        # Rejected here, not only at run_evolution's preflight, so an empty
+        # helix.toml value or `--evaluator ""` fails before .helix/ is created.
+        if not self.command.strip():
+            raise ValueError("evaluator.command must be non-empty")
+
 
 class DatasetConfig(BaseModel):
     """Dataset cardinality for HELIX's minibatch sampler.
