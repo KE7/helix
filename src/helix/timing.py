@@ -159,12 +159,7 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
         outcome, error_type = "error", type(exc).__name__
         raise
     finally:
-        try:
-            _context.reset(token)
-        except ValueError:
-            # Exited in a different context than it was entered in; the
-            # parent pointer there was never this span's to restore.
-            pass
+        _context.reset(token)
         record.update(
             event="end",
             wall_time=time.time(),

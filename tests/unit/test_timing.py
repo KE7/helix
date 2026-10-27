@@ -227,7 +227,11 @@ class TestStamping:
         path = tmp_path / "t.jsonl"
         with recording(path), span("generation", generation=5):
             with ThreadPoolExecutor(max_workers=2) as pool:
-                pool.submit(contextvars.copy_context().run, span("agent").__enter__).result()
+                def agent() -> None:
+                    with span("agent"):
+                        pass
+
+                pool.submit(contextvars.copy_context().run, agent).result()
 
         agent = next(r for r in _read(path) if r["span"] == "agent")
         assert agent["generation"] == 5
@@ -358,7 +362,11 @@ class TestThreads:
     def test_a_thread_without_the_context_still_records(self, tmp_path: Path) -> None:
         path = tmp_path / "t.jsonl"
         with recording(path), span("dispatch"):
-            worker = threading.Thread(target=lambda: span("orphan").__enter__())
+            def orphan() -> None:
+                with span("orphan"):
+                    pass
+
+            worker = threading.Thread(target=orphan)
             worker.start()
             worker.join()
 
@@ -611,7 +619,7 @@ class TestEndToEnd:
             if r["span"] == "proposal":
                 assert parent(r) == "generation"
                 assert r["attrs"]["candidate_id"].startswith(
-                    f"g{r['attrs']['generation']}-"
+                    f"g{r['generation']}-"
                 )
             elif r["span"] == "mutate":
                 assert parent(r) == "proposal"

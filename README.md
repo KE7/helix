@@ -850,7 +850,7 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 | --- | --- | --- |
 | `run` | the whole run, sidecar included | |
 | `generation` | one iteration of the generation loop, sequential acceptance included | `generation` |
-| `proposal` | one proposal slot: parent eval, mutation, child eval (slots run in parallel) | `candidate_id`, `parent`, `generation` |
+| `proposal` | one proposal slot: parent eval, mutation, child eval (slots run in parallel) | `candidate_id`, `parent` |
 | `mutate` / `merge` / `seed` | producing one candidate, its agent call included | `candidate_id`, `parent(s)` |
 | `summarize` | the sibling-history change summary | |
 | `agent` | one backend CLI call | `backend`, `model` |
@@ -859,7 +859,7 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 | `validate` | one full-validation pass | `candidate_id` |
 | `clone` / `snapshot` / `remove` | creating, committing, or removing a candidate worktree | `candidate_id` |
 | `save_state` | one write of `state.json` and the eval-cache pickle (grows with the run) | |
-| `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend`, `generation` |
+| `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend` |
 
 Because every record carries `generation` and `candidate`, your own questions
 are flat queries. For example, agent seconds per generation:

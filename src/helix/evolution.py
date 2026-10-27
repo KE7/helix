@@ -1493,7 +1493,6 @@ def _plan_proposals(
     lambda a: {
         "candidate_id": a["pre_ctx"][3],
         "parent": a["pre_ctx"][0].id,
-        "generation": a["gen"],
     },
 )
 def _run_proposal_worker(
