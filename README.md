@@ -420,6 +420,7 @@ backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "open
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20
 # background = "Only modify files under src/. Do not touch tests/ or config/."
+# web_access = true              # false = no built-in web tools (claude/codex/opencode)
 
 [sandbox]
 enabled = false                  # true = run agent/evaluator subprocesses in Docker

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `[agent].web_access = false` turns off the mutation agent's built-in web
+  tools through each CLI's own flags (claude, codex, opencode; agy and cursor
+  reject it, as do `helix evolve --backend` overrides onto them). The default
+  (`true`) is unchanged. User MCP servers and plugins still load, and the
+  shell can still reach the network; a strict no-web run needs the Docker
+  sandbox. Resuming with `web_access` changed is rejected.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by

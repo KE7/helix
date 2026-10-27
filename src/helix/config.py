@@ -16,6 +16,7 @@ from helix.backends import (
     BackendName,
     EFFORT_AWARE_BACKENDS,
     EFFORT_VALID_VALUES,
+    NO_WEB_BACKENDS,
     backend_display_name,
 )
 from helix.lines import split_lf_lines
@@ -737,6 +738,19 @@ class AgentConfig(BaseModel):
     effort: str | None = None
     max_turns: int | None = None
     background: str | None = None
+    # ``False`` turns off the backend's built-in web tools only.  User MCP
+    # servers and plugins still load, and the shell can still reach the
+    # network; a strict no-web guarantee is the sandbox's job.
+    web_access: bool = True
+
+    def model_post_init(self, __context: object) -> None:
+        if not self.web_access and self.backend not in NO_WEB_BACKENDS:
+            supported = ", ".join(sorted(NO_WEB_BACKENDS))
+            raise ValueError(
+                "agent.web_access = false is not supported for "
+                f"backend={self.backend!r}: its CLI has no per-run switch for "
+                f"it, and HELIX does not half-apply it (supported: {supported})"
+            )
 
 
 class SandboxConfig(BaseModel):

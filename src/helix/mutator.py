@@ -878,6 +878,9 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
+        if not config.web_access:
+            # The ``=`` form stops the variadic flag swallowing the prompt.
+            args.append("--disallowedTools=WebSearch,WebFetch")
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
@@ -900,6 +903,9 @@ def _build_backend_args(
             args.extend(
                 ["-c", f"model_reasoning_effort={json.dumps(config.effort)}"]
             )
+        if not config.web_access:
+            # ``codex_apps`` searches the web even with ``web_search`` off.
+            args.extend(["-c", 'web_search="disabled"', "-c", "features.apps=false"])
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
@@ -940,6 +946,14 @@ def _build_backend_args(
         return args
 
     raise ValueError(f"Unsupported backend: {backend}")
+
+
+def _no_web_env(config: AgentConfig) -> dict[str, str]:
+    """opencode's no-web setting, which is env-only."""
+    if config.web_access or config.backend != "opencode":
+        return {}
+    # OPENCODE_PERMISSION wins over every config file.
+    return {"OPENCODE_PERMISSION": '{"webfetch": "deny", "websearch": "deny"}'}
 
 
 def _parse_json_object_output(
@@ -2004,6 +2018,7 @@ def invoke_claude_code(
         passthrough_env=passthrough_env, fixed_env=fixed_env
     )
     _add_backend_auth_env(backend_env, backend)
+    backend_env.update(_no_web_env(config))
     if backend == "opencode" and (sandbox is None or not sandbox.enabled):
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #

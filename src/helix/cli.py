@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import click
+from rich.markup import escape
 from rich.table import Table
 from rich.tree import Tree
 
 from helix import __version__
 from helix.backends import BACKENDS
-from helix.config import load_config
+from helix.config import AgentConfig, load_config
 from helix.logging_config import setup_file_logging
 from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
 from helix.display import (
@@ -670,9 +671,17 @@ def evolve(
             agent_updates["model"] = model
         if effort is not None:
             agent_updates["effort"] = effort
-        config = config.model_copy(
-            update={"agent": config.agent.model_copy(update=agent_updates)}
-        )
+        # model_validate, not model_copy: the overridden agent is validated
+        # (e.g. web_access = false with a backend that cannot honor it)
+        # before the run starts.
+        try:
+            agent = AgentConfig.model_validate(
+                {**config.agent.model_dump(), **agent_updates}
+            )
+        except ValueError as exc:
+            print_error(f"Invalid agent override: {escape(str(exc))}")
+            raise SystemExit(2)
+        config = config.model_copy(update={"agent": agent})
 
     base_dir = _helix_dir(project_root)
     setup_file_logging(base_dir)

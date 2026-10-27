@@ -46,6 +46,15 @@ backend from "anything the local CLI can access" to the copied candidate
 workspace plus the backend auth volume and configured network access. It is not
 a defense against a malicious `helix.toml` or evaluator script.
 
+### 4. `web_access = false` turns off built-in web tools only
+
+`[agent].web_access = false` turns off the backend's built-in web tools (search,
+fetch). It still loads your own settings, so MCP servers and plugins you
+configured still load, and some can reach the web (a browser plugin, a fetch
+MCP server, claude.ai connectors). The agent's shell can still reach the
+network. For a strict no-web guarantee, run the agent in the Docker sandbox: a
+fresh home with no user config, on a network without an internet route.
+
 ## Threat Model
 
 - HELIX is NOT designed to defend against a malicious `helix.toml` file.

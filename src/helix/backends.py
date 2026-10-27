@@ -49,6 +49,10 @@ EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
     "opencode": None,  # variant strings are model-specific; opencode validates them.
 }
 
+# Backends that can honor ``agent.web_access = false`` (agy 1.4 and
+# cursor-agent 2026.09 have no per-run switch for it).
+NO_WEB_BACKENDS: frozenset[BackendName] = frozenset({"claude", "codex", "opencode"})
+
 BACKEND_DISPLAY_NAMES: dict[str, str] = {
     "agy": "Antigravity CLI",
     "claude": "Claude Code",
