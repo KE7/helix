@@ -81,39 +81,22 @@ helix timing --perfetto trace.json
 
 ### Where the time went
 
-Every run appends timing to `.helix/timing.jsonl`; there is nothing to turn
-on. `helix timing` prints:
+Every run appends timing to `.helix/timing.jsonl`, and `helix timing` reads it.
+The README's "Timing Trace" section explains each table and the record format.
+Use it to find what to fix:
 
-- **Work by kind and candidate fate:** agent, evaluator, git, state save and
-  sandbox reset time, split by whether the candidate it was for was accepted
-  or rejected. Parallel proposal slots each add their own work, so work can
-  exceed wall time.
-- **Inside agent and evaluator calls:**
-  - each agent call split into `model`, `tool:<name>` and `other`
-    (startup, plus container start and HELIX's worktree copy in sandboxed
-    runs), read from the backend's transcript;
-  - anything the evaluator timed with `helix.timed`, per name.
+- Most work went to **rejected** candidates: the search has stalled.
+- **`model`** dominates agent time: the model is slow or overloaded.
+- One **`tool:<name>`** or **`helix.timed`** name dominates: start with that
+  tool, or that part of the evaluator.
+- **`other`** is large: slow CLI startup, slow container start, or a large
+  worktree being copied into the sandbox and back.
+- An **`unavailable`** row: the backend's transcript can't be split (`cursor`,
+  `agy`); its total is still counted.
 
-  An `unavailable` row means the backend's transcript can't be split:
-  `cursor` has no timestamps and `agy` only per-second step times. The agent
-  call's total is still counted.
-- **Candidates and wall time:** counts by fate, total wall time, and the mean
-  and slowest generation.
-
-When a total looks wrong, check whether the time went to rejected
-candidates (a stalled search), to `model` (slow or overloaded model), to one
-tool, or to `other` (slow startup, container start, or copying a large
-worktree into the sandbox).
-
-For a timeline, `helix timing --perfetto trace.json` writes Chrome trace JSON.
-Drag it into <https://ui.perfetto.dev> or `chrome://tracing` to see one track
-per thread: parallel proposal slots, siblings waiting on a shared parent's
-worktree lock inside `cached_evaluate`, and the `helix.timed` totals in each
-`evaluate` slice's args.
-
-Every record carries `generation` and `candidate`, so other questions are flat
-`jq` queries over `.helix/timing.jsonl`; the README's "Timing Trace" section
-has the record format.
+For a timeline, `helix timing --perfetto trace.json` writes Chrome trace JSON
+to open in <https://ui.perfetto.dev>. It shows parallel proposal slots and
+siblings waiting on a shared parent's worktree lock inside `cached_evaluate`.
 
 Useful files:
 

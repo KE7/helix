@@ -2048,7 +2048,7 @@ def invoke_claude_code(
         if sandboxed
         else str(Path(worktree_path) / timing_log_name)
     )
-    if backend == "opencode" and (sandbox is None or not sandbox.enabled):
+    if backend == "opencode" and not sandboxed:
         # Per-candidate SQLite isolation for concurrent opencode subprocesses.
         #
         # OpenCode stores its session database at:
