@@ -2252,15 +2252,16 @@ def _run_evolution_impl(
             # GEPA parity: ScoreThresholdStopper (utils/stop_condition.py),
             # which GEPAEngine.run checks before each iteration, stops once
             # max(program_full_scores_val_set) >= threshold.  The frontier is
-            # append-only, so its results are every accepted candidate's val
-            # score.  Checked before ``gen`` advances so a stopped run (and a
-            # resume of it under the same target) uses no generation number.
+            # append-only, so ``frontier.best()`` (the candidate the run
+            # reports) is the max over every accepted candidate's val score.
+            # Checked before ``gen`` advances so a stopped run (and a resume
+            # of it under the same target) uses no generation number.
             _target = config.evolution.stop_at_score
-            if _target is not None and frontier.results:
-                _best_val = max(r.aggregate_score() for r in frontier.results.values())
-                if _best_val >= _target:
+            if _target is not None and len(frontier):
+                _best = frontier.get_result(frontier.best().id)
+                if _best is not None and _best.aggregate_score() >= _target:
                     print_success(
-                        f"Score target reached ({_best_val:.6g} >= "
+                        f"Score target reached ({_best.aggregate_score():.6g} >= "
                         f"stop_at_score {_target:.6g}) -- stopping."
                     )
                     break

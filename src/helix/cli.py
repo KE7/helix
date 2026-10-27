@@ -16,7 +16,7 @@ from rich.tree import Tree
 
 from helix import __version__
 from helix.backends import BACKENDS
-from helix.config import AgentConfig, load_config
+from helix.config import AgentConfig, EvolutionConfig, load_config
 from helix.logging_config import setup_file_logging
 from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
 from helix.display import (
@@ -664,13 +664,16 @@ def evolve(
             }
         )
     if stop_at_score is not None:
-        config = config.model_copy(
-            update={
-                "evolution": config.evolution.model_copy(
-                    update={"stop_at_score": stop_at_score}
-                )
-            }
-        )
+        # Re-validate rather than model_copy: click's FLOAT accepts nan/inf,
+        # which helix.toml rejects and which would never trigger the stop.
+        try:
+            evolution = EvolutionConfig.model_validate(
+                {**config.evolution.model_dump(), "stop_at_score": stop_at_score}
+            )
+        except ValueError as exc:
+            print_error(escape(str(exc)))
+            raise SystemExit(2)
+        config = config.model_copy(update={"evolution": evolution})
     if no_merge:
         config = config.model_copy(
             update={

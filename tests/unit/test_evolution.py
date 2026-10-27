@@ -2826,7 +2826,7 @@ class TestStopAtScore:
 
         assert all_mocks["mutate"].call_count == 10
 
-    def test_evolve_cli_override(self, tmp_path, mocker):
+    def _invoke_evolve(self, tmp_path, mocker, value: str):
         from click.testing import CliRunner
 
         from helix.cli import cli
@@ -2836,10 +2836,22 @@ class TestStopAtScore:
             "[evolution]\nstop_at_score = 0.5\n"
         )
         run = mocker.patch("helix.evolution.run_evolution")
-
         result = CliRunner().invoke(
-            cli, ["evolve", "--dir", str(tmp_path), "--stop-at-score", "2.5"]
+            cli, ["evolve", "--dir", str(tmp_path), "--stop-at-score", value]
         )
+        return result, run
+
+    def test_evolve_cli_override(self, tmp_path, mocker):
+        result, run = self._invoke_evolve(tmp_path, mocker, "2.5")
 
         assert result.exit_code == 0, result.output
         assert run.call_args[0][0].evolution.stop_at_score == 2.5
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_evolve_cli_rejects_non_finite(self, tmp_path, mocker, value):
+        # click's FLOAT parses these; a nan target would never fire.
+        result, run = self._invoke_evolve(tmp_path, mocker, value)
+
+        assert result.exit_code == 2, result.output
+        assert "stop_at_score must be a finite number" in result.output
+        run.assert_not_called()
