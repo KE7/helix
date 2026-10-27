@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -185,16 +186,19 @@ class TestEvaluatorChannel:
         self, tmp_path: Path, mocker: Any
     ) -> None:
         """Inside the evaluator sidecar the log lives at ``/workspace/...``
-        and comes back on the stdout of one trailing capture command."""
-        captured = json.dumps({"name": "molmo", "seconds": 0.25, "example": "3"}) + "\n"
-        run = mocker.patch(
-            "helix.executor.run_sandboxed_commands",
-            return_value=[
+        and comes back after a marker line on the one capture command that
+        also returns the ``helix.log`` notes, so it costs no extra container."""
+        timed_line = json.dumps({"name": "molmo", "seconds": 0.25, "example": "3"})
+
+        def sidecar(commands: list[list[str]], **kwargs: Any) -> list[MagicMock]:
+            marker = re.search(r"echo (HELIX_TIMING_LOG_\w+)", commands[-1][2]).group(1)
+            capture = '{"message": "note"}\n' + f"\n{marker}\n{timed_line}\n"
+            return [
                 MagicMock(stdout=_result_line([1.0]), stderr="", returncode=0),
-                MagicMock(stdout="", stderr="", returncode=0),
-                MagicMock(stdout=captured, stderr="", returncode=0),
-            ],
-        )
+                MagicMock(stdout=capture, stderr="", returncode=0),
+            ]
+
+        run = mocker.patch("helix.executor.run_sandboxed_commands", side_effect=sidecar)
         mocker.patch("helix.executor.current_evaluator_sidecar_runtime", return_value=MagicMock())
         config = make_config(command="python /runner/evaluate.py")
         config.evaluator.sidecar = EvaluatorSidecarConfig(
@@ -209,11 +213,15 @@ class TestEvaluatorChannel:
 
         trace = tmp_path / "t.jsonl"
         with recording(trace):
-            run_evaluator(make_candidate(str(worktree)), config)
+            result = run_evaluator(make_candidate(str(worktree)), config)
 
+        commands = run.call_args.args[0]
+        assert len(commands) == 2  # the evaluator and one capture command
         log_path = run.call_args.kwargs["env"][custom_timing.HELIX_TIMING_LOG_ENV]
         assert log_path.startswith("/workspace/.helix_timing_")
-        assert log_path in run.call_args.args[0][-1][2]
+        assert log_path in commands[-1][2]
+        assert "note" in result.asi["log"]
+        assert "HELIX_TIMING_LOG_" not in result.asi["log"]
         (detail,) = _details(trace)
         assert (detail["name"], detail["example"], detail["seconds"]) == ("molmo", "3", 0.25)
 

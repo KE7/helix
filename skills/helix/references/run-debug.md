@@ -90,7 +90,8 @@ on. `helix timing` prints:
   exceed wall time.
 - **Inside agent and evaluator calls:**
   - each agent call split into `model`, `tool:<name>` and `other`
-    (startup and container start), read from the backend's transcript;
+    (startup, plus container start and HELIX's worktree copy in sandboxed
+    runs), read from the backend's transcript;
   - anything the evaluator timed with `helix.timed`, per name.
 
   An `unavailable` row means the backend's transcript can't be split:
@@ -101,7 +102,8 @@ on. `helix timing` prints:
 
 When a total looks wrong, check whether the time went to rejected
 candidates (a stalled search), to `model` (slow or overloaded model), to one
-tool, or to `other` (slow startup or container start).
+tool, or to `other` (slow startup, container start, or copying a large
+worktree into the sandbox).
 
 For a timeline, `helix timing --perfetto trace.json` writes Chrome trace JSON.
 Drag it into <https://ui.perfetto.dev> or `chrome://tracing` to see one track

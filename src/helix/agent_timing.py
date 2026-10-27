@@ -7,8 +7,9 @@ for every backend:
 * ``tool:<name>`` -- the paired tool intervals;
 * ``model`` -- the transcript window not covered by any tool: the backend was
   waiting on the model (thinking, generating, compacting, retrying);
-* ``other`` -- the call's wall time outside the window: CLI and MCP startup,
-  shutdown, and container start in sandboxed runs.
+* ``other`` -- the call's wall time outside the window: CLI and MCP startup
+  and shutdown, and in sandboxed runs container start plus HELIX copying the
+  worktree into the sandbox and back.
 
 Backends whose transcripts cannot support this get one ``unavailable`` total:
 cursor records no timestamps, and agy records only when each step starts, to

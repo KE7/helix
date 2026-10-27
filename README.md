@@ -847,8 +847,9 @@ dependency; nothing is installed.
 - `tool:<name>` is each tool call, from its start to its result.
 - `model` is the rest of the transcript's time, when the agent was waiting on
   the model (thinking, writing, compacting, retrying).
-- `other` is the call's time outside the transcript: CLI and MCP startup, and
-  container start in sandboxed runs.
+- `other` is the call's time outside the transcript: CLI and MCP startup and,
+  in sandboxed runs, container start plus HELIX copying the worktree into the
+  sandbox and back (large repositories make this grow).
 
 This works for `claude`, `codex` and `opencode`. `cursor` (no timestamps) and
 `agy` (step timestamps only, to the second) get one `unavailable` row rather

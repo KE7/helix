@@ -33,6 +33,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from helix.asi import append_line
+
 HELIX_TIMING_LOG_ENV = "HELIX_TIMING_LOG"
 
 #: A longer line is dropped, so one ``write`` stays atomic (POSIX ``PIPE_BUF``)
@@ -48,8 +50,7 @@ def _record(
     name: str, seconds: float, *, example: object = None, error: bool = False
 ) -> None:
     """Append one timing line; best-effort, never raises."""
-    path = os.environ.get(HELIX_TIMING_LOG_ENV)
-    if not path:
+    if not os.environ.get(HELIX_TIMING_LOG_ENV):
         return
     entry: dict[str, Any] = {"name": str(name), "seconds": float(seconds)}
     if example is not None:
@@ -57,13 +58,8 @@ def _record(
     if error:
         entry["error"] = True
     line = json.dumps(entry) + "\n"
-    if len(line.encode()) > _MAX_LINE_BYTES:
-        return
-    try:
-        with Path(path).open("a", encoding="utf-8") as fh:
-            fh.write(line)
-    except OSError:
-        return
+    if len(line.encode()) <= _MAX_LINE_BYTES:
+        append_line(HELIX_TIMING_LOG_ENV, line)
 
 
 class timed:
