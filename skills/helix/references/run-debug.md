@@ -75,7 +75,28 @@ helix history
 helix log
 helix attempts
 helix attempts --skips
+helix timing
+helix timing --perfetto trace.json
 ```
+
+### Where the time went
+
+Every run appends timing to `.helix/timing.jsonl`, and `helix timing` reads it.
+The README's "Timing Trace" section explains each table and the record format.
+Use it to find what to fix:
+
+- Most work went to **rejected** candidates: the search has stalled.
+- **`model`** dominates agent time: the model is slow or overloaded.
+- One **`tool:<name>`** or **`helix.timed`** name dominates: start with that
+  tool, or that part of the evaluator.
+- **`other`** is large: slow CLI startup, slow container start, or a large
+  worktree being copied into the sandbox and back.
+- An **`unavailable`** row: the backend's transcript can't be split (`cursor`,
+  `agy`); its total is still counted.
+
+For a timeline, `helix timing --perfetto trace.json` writes Chrome trace JSON
+to open in <https://ui.perfetto.dev>. It shows parallel proposal slots and
+siblings waiting on a shared parent's worktree lock inside `cached_evaluate`.
 
 Useful files:
 
@@ -89,6 +110,7 @@ Useful files:
   worktrees/gN-sN/
   attempts/           (per-rejected-candidate JSON records)
   skips/              (per-generation perfect-skip event lists)
+  timing.jsonl        (timing spans; read with `helix timing`)
 ```
 
 For backend diagnostics in a candidate worktree, inspect:

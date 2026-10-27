@@ -225,6 +225,39 @@ side_info = {
 side_info = {"scores": {"accuracy": 0.0}}
 ```
 
+### Timing the evaluator (optional)
+
+`helix timing` already reports how long each evaluator run took. To see what
+the time went *to* inside the evaluator (each perception model, the
+simulator, the candidate's own code), wrap those calls with `helix.timed`:
+
+```python
+from helix import timed
+
+with timed("sam3", example=example_id):    # a block
+    masks = sam3(frame)
+
+@timed("molmo")                            # every call; sync or async
+def point(image, query): ...
+
+timed.record("owl-vit", server_latency)    # a duration measured elsewhere
+```
+
+- It does nothing outside HELIX, so the runner still works when run by hand.
+- It works from threads, child processes, `extra_commands`, and the evaluator
+  sidecar. Every process inherits `HELIX_TIMING_LOG`, and HELIX reads the file
+  back after each run.
+- The runner image needs `helix` installed to import it. Otherwise, append one
+  JSON line per call to the file named by `HELIX_TIMING_LOG`:
+  `{"name": "sam3", "seconds": 0.84, "example": "12"}`.
+- A model served from a separate container or machine can't see that file.
+  Time the request where the runner makes it, or pass the server's own latency
+  to `timed.record`.
+- GPU calls return before their kernels finish. Time up to the point the
+  result is used (`.cpu()`, `torch.cuda.synchronize()`), not just the launch.
+- Timing is telemetry only. It never reaches mutation prompts, scores, or
+  acceptance, so it can't change what HELIX selects.
+
 ## Running And Monitoring
 
 Common commands:
@@ -242,6 +275,8 @@ helix history --dir .
 helix log --dir .
 helix attempts --dir .
 helix attempts --skips --dir .
+helix timing --dir .
+helix timing --perfetto trace.json --dir .
 helix clean --dir .
 ```
 

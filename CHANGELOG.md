@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`true`) is unchanged. User MCP servers and plugins still load, and the
   shell can still reach the network; a strict no-web run needs the Docker
   sandbox. Resuming with `web_access` changed is rejected.
+- `helix timing` now splits each agent call into `model`, `tool:<name>` and
+  `other` time, read from the backend's transcript (`claude`, `codex`,
+  `opencode`; `cursor` and `agy` are reported as `unavailable`).
+- `from helix import timed`: time your own operations (`with timed("sam3",
+  example=...)`, `@timed(...)`, `timed.record(...)`) in the evaluator, its
+  sidecar and child processes, and scripts the agent runs. HELIX totals them per
+  name and example into `detail` records in `.helix/timing.jsonl`.
 - Every run now appends a timing trace to `.helix/timing.jsonl`
   (`helix.timing`), always on like budget accounting. `start`/`end` records
   cover the run, each generation, proposal slots, mutation, merge, seed

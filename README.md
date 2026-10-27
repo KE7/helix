@@ -810,6 +810,14 @@ $ helix timing
 │ git        │     1.1s │     2.1s │      0.0s │         0.0s │  3.1s │
 │ state save │     0.0s │     0.0s │      0.0s │         0.0s │  0.0s │
 └────────────┴──────────┴──────────┴───────────┴──────────────┴───────┘
+                  Inside agent and evaluator calls
+┏━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃ Within ┃ Name      ┃ Calls ┃ Accepted ┃ Rejected ┃ Total ┃   Max ┃
+┡━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ agent  │ model     │    10 │    4m09s │    2m45s │ 6m54s │ 1m11s │
+│ agent  │ other     │    10 │     8.5s │     9.9s │ 18.4s │  2.7s │
+│ agent  │ tool:exec │    97 │     4.6s │     6.4s │ 10.9s │  0.6s │
+└────────┴───────────┴───────┴──────────┴──────────┴───────┴───────┘
 Candidates: 6 accepted, 5 rejected, 0 undecided
 Wall: 1h37m over 10 generations (mean 9m42s, slowest gen 9: 11m04s)
 Work adds up across parallel proposal slots, so it can exceed wall time.
@@ -821,12 +829,72 @@ ones, the same way their tokens are charged to the budget. Parallel proposal
 slots each add their own work, so work can exceed wall time. Every duration
 leaves out time the machine slept, so a closed lid doesn't count.
 
+In this run, evaluation dominates, and the evaluator calls an LLM of its own.
+Each evaluation runs the candidate's solver for up to 600 seconds, then asks a
+refiner LLM (also `gpt-6-luna`, through Codex) to rewrite the code, and runs
+the rewrite too. So "evaluator" time here includes that refiner, separate from
+the mutation agent, whose 10 calls took about 7 minutes in total, almost all
+of it waiting on the model.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/helix-timing-dark.png">
+  <img alt="Chart of the same run: every generation but one spent about 10 minutes in the evaluator (solver runs plus its refiner LLM) and under a minute in the mutation agent; inside the agent, nearly all of each call was the model, with tools and startup taking a few seconds; across all 10 generations the evaluator took 90 minutes (92%) and the agent 7.4 minutes (8%)" src="docs/images/helix-timing-light.png">
+</picture>
+
 To see a run as a timeline instead, `helix timing --perfetto trace.json`
 writes the trace in Chrome's trace format. Drag that file into
 [ui.perfetto.dev](https://ui.perfetto.dev) (or `chrome://tracing`) to get one
 track per thread: the parallel proposal slots, what each spent its time on, and
 where siblings waited on each other. It's an optional viewer, not a
 dependency; nothing is installed.
+
+#### Inside agent and evaluator calls
+
+The second table splits each agent call, and anything you time yourself.
+
+**Agent calls** are split using the backend's own transcript:
+- `tool:<name>` is each tool call, from its start to its result.
+- `model` is the rest of the transcript's time, when the agent was waiting on
+  the model (thinking, writing, compacting, retrying).
+- `other` is the call's time outside the transcript: CLI and MCP startup and,
+  in sandboxed runs, container start plus HELIX copying the worktree into the
+  sandbox and back (large repositories make this grow).
+
+This works for `claude`, `codex` and `opencode`. `cursor` (no timestamps) and
+`agy` (step timestamps only, to the second) get one `unavailable` row rather
+than a guess.
+
+**Your own operations** are timed with `helix.timed`, which works in the
+evaluator, its `extra_commands`, its child processes, the evaluator sidecar,
+and scripts the agent runs during a mutation:
+
+```python
+from helix import timed
+
+with timed("sam3", example=example_id):
+    masks = sam3(frame)
+
+@timed("molmo")                       # sync or async functions
+def point(image, query): ...
+
+timed.record("owl-vit", 0.41)         # a duration measured elsewhere
+```
+
+Outside HELIX it does nothing, so the same code runs locally. Each call appends
+one line, `{"name": "sam3", "seconds": 0.84, "example": "12"}`, to the file
+named by `HELIX_TIMING_LOG`. Code in another language, or in an image without
+`helix` installed, can write that line itself. HELIX totals the file per name
+and example after each call, so a tool called thousands of times adds one record
+per evaluation, not thousands.
+
+- **GPU work:** a GPU call returns before its kernels finish, so time up to the
+  point the result is used (`.cpu()`, `synchronize()`) or around the request to
+  an inference server.
+- **Other services:** a model served by a separate container or machine can't
+  see `HELIX_TIMING_LOG`. Time the request where your evaluator makes it, or
+  pass a latency the server reports to `timed.record`.
+- **Overlap:** names can nest (`rollout` around `sam3`) and examples can run in
+  parallel, so totals are per name and don't add up to the evaluator's time.
 
 #### Record format
 
@@ -846,6 +914,9 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 - `run_id` separates `evolve` from each later `resume` in the same file.
 - `outcome` is `"ok"` or `"error"`; on error, `error_type` names the exception
   class, never its message.
+- `detail` records hold the totals above, with `within` (`agent` or
+  `evaluate`), `source` (`transcript` or `timed`), `name`, `example`, `count`,
+  `seconds` and `max_seconds`.
 - Each candidate gets one `decision` record. A candidate with none was still
   undecided when the run stopped, and a `start` with no `end` was in flight
   when the process died.

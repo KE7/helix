@@ -24,7 +24,16 @@ from helix.sandbox import (
     current_evaluator_sidecar_runtime,
     run_sandboxed_commands,
 )
-from helix.timing import evaluation_attrs, traced
+from helix.timing import (
+    HELIX_TIMING_LOG_ENV,
+    MAX_LOG_BYTES,
+    detail,
+    evaluation_attrs,
+    read_timed_log,
+    timed_log_name,
+    timed_totals,
+    traced,
+)
 from helix.trace import TRACE, EventType
 
 logger = logging.getLogger(__name__)
@@ -261,18 +270,25 @@ def run_evaluator(
     # use the absolute ``/workspace/...`` form to remove that
     # assumption.
     helix_log_sandbox_path = f"/workspace/{helix_log_name}"
+    # ``helix.timed`` calls land in their own per-invocation file, read the
+    # same two ways as the ASI log above.
+    timing_log_name = timed_log_name()
+    timing_log_path = Path(candidate.worktree_path) / timing_log_name
+    timing_log_sandbox_path = f"/workspace/{timing_log_name}"
+    timing_marker = f"HELIX_TIMING_LOG_{uuid.uuid4().hex}"
     cmd_tokens = _validate_and_split_command(evaluator.command)
     if config.sandbox.enabled and config.sandbox.evaluator:
         env[HELIX_ASI_LOG_ENV] = helix_log_sandbox_path
+        env[HELIX_TIMING_LOG_ENV] = timing_log_sandbox_path
         if current_evaluator_sidecar_runtime() is None:
             raise ValueError(
                 "Sandboxed sidecar evaluation requires an active evaluator sidecar. "
                 "Run evaluations through helix.evolution.run_evolution."
             )
-        # The trailing ``cat`` command captures the JSONL log file from
-        # inside the sidecar.  ``2>/dev/null || true`` keeps a missing
-        # file (no ``helix.log()`` calls) from looking like a sandbox
-        # error.  Cleanup is deliberately asymmetric vs. the host path
+        # The trailing command captures both JSONL log files from inside
+        # the sidecar in one container: the ``helix.log`` file, a marker
+        # line, then the ``helix.timed`` file.  ``2>/dev/null`` keeps a
+        # missing file (no calls) from looking like a sandbox error.  Cleanup is deliberately asymmetric vs. the host path
         # below: the worktree is disposed by the caller after
         # evaluation, so we do not need to ``rm`` the log inside the
         # sandbox.  If worktrees become reusable, reintroduce an
@@ -284,7 +300,10 @@ def run_evaluator(
                 [
                     "sh",
                     "-c",
-                    f"cat {shlex.quote(helix_log_sandbox_path)} 2>/dev/null || true",
+                    f"cat {shlex.quote(helix_log_sandbox_path)} 2>/dev/null; "
+                    f"echo; echo {timing_marker}; "
+                    f"head -c {MAX_LOG_BYTES} "
+                    f"{shlex.quote(timing_log_sandbox_path)} 2>/dev/null; true",
                 ],
             ],
             cwd=candidate.worktree_path,
@@ -296,7 +315,10 @@ def run_evaluator(
             agent_backend=config.agent.backend,
         )
         result = command_results[0]
-        helix_log_text = read_asi_log_text(command_results[-1].stdout)
+        asi_text, _, timing_log_text = command_results[-1].stdout.partition(
+            f"\n{timing_marker}\n"
+        )
+        helix_log_text = read_asi_log_text(asi_text)
         extra_outputs = [(item.stdout, item.stderr) for item in command_results[1:-1]]
     else:
         # Host path: the same env var also propagates to ``extra_commands``
@@ -304,6 +326,7 @@ def run_evaluator(
         # if they call ``helix.log()``.  Notes from extras are merged in
         # invocation order with the main command's notes.
         env[HELIX_ASI_LOG_ENV] = str(helix_log_path)
+        env[HELIX_TIMING_LOG_ENV] = str(timing_log_path)
         try:
             result = subprocess.run(
                 cmd_tokens,
@@ -326,8 +349,12 @@ def run_evaluator(
                 )
                 extra_outputs.append((extra_result.stdout, extra_result.stderr))
             helix_log_text = read_asi_log(helix_log_path)
+            timing_log_text = read_timed_log(timing_log_path)
         finally:
             clear_asi_log(helix_log_path)
+            timing_log_path.unlink(missing_ok=True)
+    for total in timed_totals(timing_log_text):
+        detail("evaluate", "timed", total)
 
     stdout = result.stdout
     stderr = result.stderr

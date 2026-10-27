@@ -26,6 +26,9 @@ import pathlib
 import urllib.request
 import urllib.error
 
+# Shows up in `helix timing`; a no-op outside a HELIX run.
+from helix import timed
+
 
 def _read_batch_ids() -> list[str] | None:
     """Return HELIX's requested ids, or None for standalone full-split runs."""
@@ -221,11 +224,13 @@ def evaluate():
         match_mode = qdata.get("match_mode", "exact")
 
         # Resolve ground truth (may do a live network fetch)
-        expected, gt_source = resolve_ground_truth(qdata)
+        with timed("ground_truth", example=q_id):
+            expected, gt_source = resolve_ground_truth(qdata)
 
         # Run the agent
         try:
-            got = agent.solve(question_text)
+            with timed("solve", example=q_id):
+                got = agent.solve(question_text)
             if not isinstance(got, str):
                 got = str(got) if got is not None else ""
         except Exception:

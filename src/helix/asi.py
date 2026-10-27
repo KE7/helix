@@ -22,8 +22,7 @@ def log(*values: object, sep: str = " ", **fields: Any) -> None:
     Outside a HELIX evaluator invocation this is a no-op, which lets evaluator
     code keep the same imports in local debug runs.
     """
-    path = os.environ.get(HELIX_ASI_LOG_ENV)
-    if not path:
+    if not os.environ.get(HELIX_ASI_LOG_ENV):
         return
 
     record: dict[str, Any] = {}
@@ -32,22 +31,29 @@ def log(*values: object, sep: str = " ", **fields: Any) -> None:
     record.update(fields)
     if not record:
         return
+    append_line(HELIX_ASI_LOG_ENV, json.dumps(record, sort_keys=True, default=str) + "\n")
 
-    # Single ``write`` call so the JSON record + trailing newline land
-    # together: POSIX guarantees ``write(2)`` of <= ``PIPE_BUF`` bytes
-    # to a file opened ``O_APPEND`` is atomic across processes /
-    # threads, so concurrent ``helix.log()`` calls from a multi-worker
-    # evaluator can interleave whole records but never split a single
-    # record across two appends.
-    line = json.dumps(record, sort_keys=True, default=str) + "\n"
+
+def append_line(env_var: str, line: str) -> None:
+    """Append *line* to the file named by ``$env_var``; a no-op when it is unset.
+
+    Shared by ``helix.log`` and ``helix.timed``.  A single ``write`` call, so
+    the record and its newline land together: POSIX guarantees ``write(2)``
+    of <= ``PIPE_BUF`` bytes to a file opened ``O_APPEND`` is atomic across
+    processes and threads, so concurrent callers interleave whole records
+    but never split one.
+
+    Best-effort: if the worktree filesystem is read-only or full the line is
+    dropped rather than turning an observability call into a hard crash.
+    Tested in ``test_asi.py``.
+    """
+    path = os.environ.get(env_var)
+    if not path:
+        return
     try:
         with Path(path).open("a", encoding="utf-8") as fh:
             fh.write(line)
     except OSError:
-        # Logging is best-effort: if the worktree filesystem is
-        # read-only or full we silently drop the note rather than
-        # turning an evaluator-side observability call into a hard
-        # crash.  Tested in ``test_asi.py``.
         return
 
 
