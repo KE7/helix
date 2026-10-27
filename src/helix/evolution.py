@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -15,6 +16,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -96,6 +98,7 @@ from helix.state import (
     save_eval_cache,
     save_state,
 )
+from helix.timing import TIMING_FILE_NAME, recording, span, traced
 from helix.trace import TRACE, EventType
 from helix.worktree import (
     create_seed_worktree,
@@ -871,6 +874,15 @@ def _candidate_content_key(candidate: Candidate) -> str:
     return candidate.id
 
 
+@traced(
+    "cached_evaluate",
+    lambda a: {
+        "candidate_id": a["candidate"].id,
+        "split": a["split"],
+        "examples": None,
+        "evaluation_phase": None,
+    },
+)
 def _cached_eval(
     candidate: Candidate,
     config: HelixConfig,
@@ -893,6 +905,15 @@ def _cached_eval(
     return result, False
 
 
+@traced(
+    "cached_evaluate",
+    lambda a: {
+        "candidate_id": a["candidate"].id,
+        "split": a["split"],
+        "examples": len(a["example_ids"]),
+        "evaluation_phase": a["evaluation_phase"],
+    },
+)
 def _cached_evaluate_batch(
     candidate: Candidate,
     example_ids: list[str],
@@ -1074,6 +1095,7 @@ def _cached_evaluate_batch(
     return merged, num_actual_evals
 
 
+@traced("validate", lambda a: {"candidate_id": a["candidate"].id})
 def _run_full_val_eval(
     candidate: Candidate,
     state: EvolutionState,
@@ -1471,6 +1493,14 @@ def _plan_proposals(
 # upstream's ``ReflectiveMutationProposer.propose``, though upstream
 # batches these stages across all sampled tasks per iteration instead
 # of running one call per proposal slot.
+@traced(
+    "proposal",
+    lambda a: {
+        "candidate_id": a["pre_ctx"][3],
+        "parent": a["pre_ctx"][0].id,
+        "generation": a["gen"],
+    },
+)
 def _run_proposal_worker(
     pre_ctx: ProposalContext,
     *,
@@ -1714,8 +1744,10 @@ def _dispatch_proposals(
     _w_max = min(len(presample_contexts), max_workers)
     if len(presample_contexts) > 1:
         with ThreadPoolExecutor(max_workers=_w_max) as _wpool:
+            # Each slot runs in a copy of this context so its timing spans
+            # nest under the generation that dispatched it.
             _wfutures = {
-                _wpool.submit(worker, _pctx): _widx
+                _wpool.submit(contextvars.copy_context().run, worker, _pctx): _widx
                 for _widx, _pctx in enumerate(presample_contexts)
             }
             for _wf in as_completed(_wfutures):
@@ -1793,21 +1825,24 @@ def run_evolution(
             "config.evolution.max_generations to a positive integer, or "
             "config.evolution.max_evaluations > 0."
         )
-    if config.sandbox.enabled and config.sandbox.evaluator:
-        if config.evaluator.sidecar is None:
-            raise HelixError(
-                "Docker sandboxing requires [evaluator.sidecar].",
-                operation="start evaluator sidecar",
-                suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
-            )
-        with start_evaluator_sidecar(
-            config.evaluator.sidecar,
-            passthrough_env=config.passthrough_env,
-            fixed_env=config.env,
-            extra_hosts=config.sandbox.extra_hosts,
-        ):
-            return _run_evolution_impl(config, project_root, base_dir)
-    return _run_evolution_impl(config, project_root, base_dir)
+    # Timing is always on, like budget accounting: every run appends its
+    # spans to .helix/timing.jsonl.
+    with recording(base_dir / TIMING_FILE_NAME), span("run"):
+        if config.sandbox.enabled and config.sandbox.evaluator:
+            if config.evaluator.sidecar is None:
+                raise HelixError(
+                    "Docker sandboxing requires [evaluator.sidecar].",
+                    operation="start evaluator sidecar",
+                    suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
+                )
+            with start_evaluator_sidecar(
+                config.evaluator.sidecar,
+                passthrough_env=config.passthrough_env,
+                fixed_env=config.env,
+                extra_hosts=config.sandbox.extra_hosts,
+            ):
+                return _run_evolution_impl(config, project_root, base_dir)
+        return _run_evolution_impl(config, project_root, base_dir)
 
 
 def _run_evolution_impl(
@@ -2239,7 +2274,7 @@ def _run_evolution_impl(
         cumulative_budget=state.budget,
         frontier=frontier,
         config_evolution=config.evolution,
-    ) as live:
+    ) as live, ExitStack() as generation_span:
         start_gen = state.generation + 1
         # GEPA parity: discovery-based merge trigger.  merges_due increments
         # when a new candidate is accepted to the frontier.
@@ -2284,6 +2319,13 @@ def _run_evolution_impl(
             # that skips or rewinds ``gen``; budget_api.advance_proposal_counter
             # (which increments state.i) continues to run here unconditionally.
             gen += 1
+            # One ``generation`` span per iteration without re-indenting the
+            # loop: closing the stack ends the previous generation's span
+            # (however its body exited, ``continue`` included), and leaving
+            # the ``with`` ends the last one or records the exception that
+            # escaped it.
+            generation_span.close()
+            generation_span.enter_context(span("generation", generation=gen))
             live.gen = gen
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")

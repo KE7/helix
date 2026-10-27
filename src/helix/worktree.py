@@ -14,6 +14,7 @@ from pathlib import Path
 
 from helix.exceptions import GitError, HelixError, print_helix_error
 from helix.population import Candidate
+from helix.timing import traced
 
 
 # ``git worktree add`` reads every entry under ``.git/worktrees/`` while it
@@ -504,6 +505,9 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
     return candidate
 
 
+@traced(
+    "clone", lambda a: {"candidate_id": a["new_id"], "parent": a["parent"].id}
+)
 def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate:
     """Create a new worktree branched from *parent*.
 
@@ -598,6 +602,7 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
     )
 
 
+@traced("snapshot", lambda a: {"candidate_id": a["candidate"].id})
 def snapshot_candidate(candidate: Candidate, message: str) -> str:
     """Stage all changes in the candidate's worktree and create a commit.
 
