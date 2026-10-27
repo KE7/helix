@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`true`) is unchanged. User MCP servers and plugins still load, and the
   shell can still reach the network; a strict no-web run needs the Docker
   sandbox. Resuming with `web_access` changed is rejected.
+- Every run now appends a timing trace to `.helix/timing.jsonl`
+  (`helix.timing`), always on like budget accounting. `start`/`end` records
+  cover the run, each generation, proposal slots, mutation, merge, seed
+  generation, sibling summaries, every backend call, cached and raw
+  evaluations, full validation, worktree clone/snapshot/remove, state saves,
+  and the sandbox reset. Each record carries `duration_seconds`, `outcome`, identity `attrs`,
+  a `parent_span_id` linking it into a tree, and a `run_id` separating
+  `evolve` from later `resume`s in the same file. Rejected candidates are
+  timed like accepted ones, and a `decision` record per candidate (`accepted`,
+  `reason`) splits the time spent by fate. Every record is stamped with the
+  `generation` and `candidate` its work was for. `helix timing` prints work by
+  kind and candidate fate plus wall time per generation, and `--perfetto FILE`
+  exports a Chrome-trace timeline for ui.perfetto.dev (no extra dependency). A trace that cannot be
+  written is a logged warning, never a failed run.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by

@@ -30,6 +30,7 @@ from helix.backends import (
 )
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.lines import split_lf_lines
+from helix.timing import traced
 
 
 logger = logging.getLogger(__name__)
@@ -358,6 +359,7 @@ def _backend_state_reset_script(agent_backend: str) -> str | None:
     return script
 
 
+@traced("sandbox_reset", lambda a: {"backend": a["agent_backend"]})
 def reset_sandbox_agent_state(
     agent_backend: str,
     *,

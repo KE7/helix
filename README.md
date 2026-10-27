@@ -791,6 +791,87 @@ but successful mutation prompts omit them when structured diagnostics or
 `helix.log()` notes are available; failed evaluations still include stdout and
 stderr as fallback debug context.
 
+### Timing Trace
+
+Every `helix evolve` and `helix resume` appends a timing trace to
+`.helix/timing.jsonl`, the same way it always records its budget; there is
+nothing to turn on. `helix timing` reads it. Here it is on a 10-generation
+run of the circle-packing example with one proposal per generation, so 11
+candidates counting the seed, and Codex `gpt-6-luna` as the mutation agent:
+
+```console
+$ helix timing
+                    Work by kind and candidate fate
+┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Kind       ┃ Accepted ┃ Rejected ┃ Undecided ┃ Unattributed ┃ Total ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━┩
+│ evaluator  │   49m44s │   40m00s │      0.0s │         0.0s │ 1h29m │
+│ agent      │    4m22s │    3m01s │      0.0s │         0.0s │ 7m24s │
+│ git        │     1.1s │     2.1s │      0.0s │         0.0s │  3.1s │
+│ state save │     0.0s │     0.0s │      0.0s │         0.0s │  0.0s │
+└────────────┴──────────┴──────────┴───────────┴──────────────┴───────┘
+Candidates: 6 accepted, 5 rejected, 0 undecided
+Wall: 1h37m over 10 generations (mean 9m42s, slowest gen 9: 11m04s)
+Work adds up across parallel proposal slots, so it can exceed wall time.
+```
+
+*Work* is the time spent on each kind of operation, grouped by what became of
+the candidate it was for. Rejected candidates are timed exactly like accepted
+ones, the same way their tokens are charged to the budget. Parallel proposal
+slots each add their own work, so work can exceed wall time. Every duration
+leaves out time the machine slept, so a closed lid doesn't count.
+
+To see a run as a timeline instead, `helix timing --perfetto trace.json`
+writes the trace in Chrome's trace format. Drag that file into
+[ui.perfetto.dev](https://ui.perfetto.dev) (or `chrome://tracing`) to get one
+track per thread: the parallel proposal slots, what each spent its time on, and
+where siblings waited on each other. It's an optional viewer, not a
+dependency; nothing is installed.
+
+#### Record format
+
+One JSON object per line, flushed as written so a killed run keeps everything
+it finished. Each operation is a *span* with a `start` and an `end` record:
+
+```json
+{"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "generation": 3, "candidate": "g3-s9", "wall_time": 1757400000.1, "thread_id": 6199, "attrs": {"candidate_id": "g2-s4", "split": "train", "examples": 8}}
+{"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
+{"event": "decision", "candidate": "g3-s9", "accepted": false, "reason": "train-gate-rejected candidate", "generation": 3, …}
+```
+
+- `generation` and `candidate` say what the work was for. The example is the
+  evaluation of parent `g2-s4` (`attrs.candidate_id`) that proposal `g3-s9`
+  ran, so it counts as work for `g3-s9`.
+- `parent_span_id` links the spans into a tree.
+- `run_id` separates `evolve` from each later `resume` in the same file.
+- `outcome` is `"ok"` or `"error"`; on error, `error_type` names the exception
+  class, never its message.
+- Each candidate gets one `decision` record. A candidate with none was still
+  undecided when the run stopped, and a `start` with no `end` was in flight
+  when the process died.
+
+| span | measures | `attrs` |
+| --- | --- | --- |
+| `run` | the whole run, sidecar included | |
+| `generation` | one iteration of the generation loop, sequential acceptance included | `generation` |
+| `proposal` | one proposal slot: parent eval, mutation, child eval (slots run in parallel) | `candidate_id`, `parent` |
+| `mutate` / `merge` / `seed` | producing one candidate, its agent call included | `merge`: `candidate_id`, `parents` |
+| `summarize` | the sibling-history change summary | |
+| `agent` | one backend CLI call | `backend`, `model` |
+| `cached_evaluate` | one cache-aware evaluation: worktree lock wait, cache lookup, evaluator run | `candidate_id`, `split`, and `examples` / `evaluation_phase` when set |
+| `evaluate` | one evaluator subprocess, always inside a `cached_evaluate` | `candidate_id`, `split`, and `examples` / `evaluation_phase` when set |
+| `validate` | one full-validation pass | `candidate_id` |
+| `clone` / `snapshot` / `remove` | creating, committing, or removing a candidate worktree | `snapshot`, `remove`: `candidate_id` |
+| `save_state` | one write of `state.json` and the eval-cache pickle (grows with the run) | |
+| `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend` |
+
+Because every record carries `generation` and `candidate`, your own questions
+are flat queries. For example, agent seconds per generation:
+
+```console
+$ jq -s 'map(select(.event == "end" and .span == "agent")) | group_by(.generation) | map({gen: .[0].generation, seconds: (map(.duration_seconds) | add)})' .helix/timing.jsonl
+```
+
 ---
 
 ## 📖 CLI Reference
@@ -809,6 +890,7 @@ stderr as fallback debug context.
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
 | `helix log` | Show semantic mutation log — full trajectory with parent lineage |
 | `helix attempts` | Surface rejected attempt records and perfect-skip events from `.helix/attempts/` and `.helix/skips/` |
+| `helix timing` | Show where the run's time went (work by kind and candidate fate, wall time per generation); `--perfetto FILE` exports a timeline |
 
 ### `helix evolve` Options
 
@@ -849,6 +931,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 ├── config.toml          # Snapshot of helix.toml at run start
 ├── evaluator_manifest.json # Protected evaluator file hashes
 ├── state.json           # Generation, frontier, budget
+├── timing.jsonl         # Timing spans, appended by every run
 ├── lineage.json         # Full ancestry graph
 ├── log/                 # Semantic mutation logs
 │   ├── g1-m0.json
@@ -879,6 +962,7 @@ Pack 26 non-overlapping circles in a unit square, maximizing sum of radii.
 | `lineage.py` | Ancestry graph tracking |
 | `state.py` | Atomic state persistence and resume |
 | `display.py` | Rich terminal UI with phase tracking |
+| `timing.py` | Always-on JSONL timing spans (`.helix/timing.jsonl`) |
 
 ---
 

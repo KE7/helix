@@ -38,6 +38,7 @@ from helix.sibling_history import (
     history_instruction,
     summary_prompt,
 )
+from helix.timing import traced
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,7 @@ def build_seed_generation_prompt(
     )
 
 
+@traced("seed")
 def generate_seed(
     worktree_path: str,
     prompt: str,
@@ -1962,6 +1964,10 @@ def _write_backend_artifacts(
         )
 
 
+@traced(
+    "agent",
+    lambda a: {"backend": a["config"].backend, "model": a["config"].model},
+)
 def invoke_claude_code(
     worktree_path: str,
     prompt: str,
@@ -2491,6 +2497,7 @@ def _revert_summary_side_effects(worktree_path: str, before_tree: str | None) ->
     return changed
 
 
+@traced("summarize")
 def generate_change_summary(
     worktree_path: str,
     config: HelixConfig,
@@ -2571,6 +2578,9 @@ def generate_change_summary(
 # ---------------------------------------------------------------------------
 
 
+# No attrs: a mutation always runs inside its ``proposal`` span, which
+# already names the candidate and its parent.
+@traced("mutate")
 def mutate(
     parent: Candidate,
     eval_result: EvalResult,

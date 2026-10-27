@@ -13,6 +13,7 @@ from helix.config import HelixConfig
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff  # noqa: F401
 from helix.exceptions import MutationError, RateLimitError, print_helix_error
 from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
+from helix.timing import traced
 
 # ---------------------------------------------------------------------------
 # Merge-acceptance subsample selection (GEPA parity)
@@ -223,6 +224,13 @@ def build_merge_prompt(
 # ---------------------------------------------------------------------------
 
 
+@traced(
+    "merge",
+    lambda a: {
+        "candidate_id": a["new_id"],
+        "parents": [a["candidate_a"].id, a["candidate_b"].id],
+    },
+)
 def merge(
     candidate_a: Candidate,
     candidate_b: Candidate,

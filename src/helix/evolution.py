@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -15,6 +16,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,14 @@ from helix.state import (
     load_state,
     save_eval_cache,
     save_state,
+)
+from helix.timing import (
+    TIMING_FILE_NAME,
+    decision,
+    evaluation_attrs,
+    recording,
+    span,
+    traced,
 )
 from helix.trace import TRACE, EventType
 from helix.worktree import (
@@ -576,7 +586,11 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
     :func:`_reconcile_incomplete_attempts_on_resume` all need the same
     "best-effort remove + warn" behaviour.  Extracting this avoids 9× copies
     of the same try/except.
+
+    Being the one exit for a discarded candidate, it also records that
+    candidate's fate in the timing trace, with *label* as the reason.
     """
+    decision(candidate.id, accepted=False, reason=label)
     try:
         remove_worktree(candidate)
     except Exception as exc:
@@ -871,6 +885,7 @@ def _candidate_content_key(candidate: Candidate) -> str:
     return candidate.id
 
 
+@traced("cached_evaluate", evaluation_attrs(None))
 def _cached_eval(
     candidate: Candidate,
     config: HelixConfig,
@@ -893,6 +908,7 @@ def _cached_eval(
     return result, False
 
 
+@traced("cached_evaluate", evaluation_attrs("example_ids"))
 def _cached_evaluate_batch(
     candidate: Candidate,
     example_ids: list[str],
@@ -1074,6 +1090,7 @@ def _cached_evaluate_batch(
     return merged, num_actual_evals
 
 
+@traced("validate", lambda a: {"candidate_id": a["candidate"].id})
 def _run_full_val_eval(
     candidate: Candidate,
     state: EvolutionState,
@@ -1471,6 +1488,13 @@ def _plan_proposals(
 # upstream's ``ReflectiveMutationProposer.propose``, though upstream
 # batches these stages across all sampled tasks per iteration instead
 # of running one call per proposal slot.
+@traced(
+    "proposal",
+    lambda a: {
+        "candidate_id": a["pre_ctx"][3],
+        "parent": a["pre_ctx"][0].id,
+    },
+)
 def _run_proposal_worker(
     pre_ctx: ProposalContext,
     *,
@@ -1714,8 +1738,10 @@ def _dispatch_proposals(
     _w_max = min(len(presample_contexts), max_workers)
     if len(presample_contexts) > 1:
         with ThreadPoolExecutor(max_workers=_w_max) as _wpool:
+            # Each slot runs in a copy of this context so its timing spans
+            # nest under the generation that dispatched it.
             _wfutures = {
-                _wpool.submit(worker, _pctx): _widx
+                _wpool.submit(contextvars.copy_context().run, worker, _pctx): _widx
                 for _widx, _pctx in enumerate(presample_contexts)
             }
             for _wf in as_completed(_wfutures):
@@ -1793,21 +1819,24 @@ def run_evolution(
             "config.evolution.max_generations to a positive integer, or "
             "config.evolution.max_evaluations > 0."
         )
-    if config.sandbox.enabled and config.sandbox.evaluator:
-        if config.evaluator.sidecar is None:
-            raise HelixError(
-                "Docker sandboxing requires [evaluator.sidecar].",
-                operation="start evaluator sidecar",
-                suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
-            )
-        with start_evaluator_sidecar(
-            config.evaluator.sidecar,
-            passthrough_env=config.passthrough_env,
-            fixed_env=config.env,
-            extra_hosts=config.sandbox.extra_hosts,
-        ):
-            return _run_evolution_impl(config, project_root, base_dir)
-    return _run_evolution_impl(config, project_root, base_dir)
+    # Timing is always on, like budget accounting: every run appends its
+    # spans to .helix/timing.jsonl.
+    with recording(base_dir / TIMING_FILE_NAME), span("run"):
+        if config.sandbox.enabled and config.sandbox.evaluator:
+            if config.evaluator.sidecar is None:
+                raise HelixError(
+                    "Docker sandboxing requires [evaluator.sidecar].",
+                    operation="start evaluator sidecar",
+                    suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
+                )
+            with start_evaluator_sidecar(
+                config.evaluator.sidecar,
+                passthrough_env=config.passthrough_env,
+                fixed_env=config.env,
+                extra_hosts=config.sandbox.extra_hosts,
+            ):
+                return _run_evolution_impl(config, project_root, base_dir)
+        return _run_evolution_impl(config, project_root, base_dir)
 
 
 def _run_evolution_impl(
@@ -2025,12 +2054,16 @@ def _run_evolution_impl(
     _eval_cache_cleared = [False]
 
     def _save_state(s: EvolutionState) -> None:
-        save_state(s, project_root)
-        if minibatch_cache is not None:
-            save_eval_cache(minibatch_cache._cache, project_root)
-        elif not _eval_cache_cleared[0]:
-            clear_eval_cache(project_root)
-            _eval_cache_cleared[0] = True
+        # Rewrites the whole eval-cache pickle, so its cost grows with the run.
+        # A ``span`` rather than ``@traced``: decorating this per-run closure
+        # would register it, and everything it captures, for good.
+        with span("save_state"):
+            save_state(s, project_root)
+            if minibatch_cache is not None:
+                save_eval_cache(minibatch_cache._cache, project_root)
+            elif not _eval_cache_cleared[0]:
+                clear_eval_cache(project_root)
+                _eval_cache_cleared[0] = True
 
     def _sync_frontier_state() -> None:
         assert state is not None
@@ -2195,6 +2228,7 @@ def _run_evolution_impl(
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
+        decision(seed.id, accepted=True, reason="seed")
         _sync_frontier_state()
         state.instance_scores[seed.id] = seed_result.instance_scores
         # GEPA parity (rng-state-persist audit C/§3): record per-program
@@ -2239,7 +2273,7 @@ def _run_evolution_impl(
         cumulative_budget=state.budget,
         frontier=frontier,
         config_evolution=config.evolution,
-    ) as live:
+    ) as live, ExitStack() as generation_span:
         start_gen = state.generation + 1
         # GEPA parity: discovery-based merge trigger.  merges_due increments
         # when a new candidate is accepted to the frontier.
@@ -2284,6 +2318,13 @@ def _run_evolution_impl(
             # that skips or rewinds ``gen``; budget_api.advance_proposal_counter
             # (which increments state.i) continues to run here unconditionally.
             gen += 1
+            # One ``generation`` span per iteration without re-indenting the
+            # loop: closing the stack ends the previous generation's span
+            # (however its body exited, ``continue`` included), and leaving
+            # the ``with`` ends the last one or records the exception that
+            # escaped it.
+            generation_span.close()
+            generation_span.enter_context(span("generation", generation=gen))
             live.gen = gen
             live.current_usage = UsageStats()
             live.update(phase=f"Starting Generation {gen}")
@@ -2493,6 +2534,7 @@ def _run_evolution_impl(
                     if merged is None:
                         # GEPA parity (M2/B3): merge operator failed before
                         # any eval; no attempt, fall through to mutation.
+                        decision(merge_id, accepted=False, reason="failed merge")
                         # The failed merge still spent tokens — charge them.
                         if merge_usage:
                             live.update(usage=merge_usage[-1])
@@ -2711,6 +2753,7 @@ def _run_evolution_impl(
                                 merges_due -= 1
                                 budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
+                                decision(merged.id, accepted=True, reason="merge")
                                 _sync_frontier_state()
                                 state.instance_scores[merged.id] = (
                                     full_val_result.instance_scores
@@ -2987,6 +3030,7 @@ def _run_evolution_impl(
 
                 if isinstance(wr, MutationFailedProposal):
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
+                    decision(_new_id, accepted=False, reason="failed mutation")
                     return None
 
                 if isinstance(wr, SkippedProposal):
@@ -3006,6 +3050,7 @@ def _run_evolution_impl(
                     semantic_skip_count += 1
                     if _subsample_ids is not None:
                         retryable_semantic_skip_count += 1
+                    decision(_new_id, accepted=False, reason="perfect parent subsample")
                     return None
 
                 if isinstance(wr, TamperedProposal):
@@ -3305,6 +3350,7 @@ def _run_evolution_impl(
                 _save_evaluation(base_dir, val_result)
                 _record_sibling(_parent.id, child, val_result, accepted=True)
                 frontier.add(child, val_result)
+                decision(child.id, accepted=True, reason="mutation")
                 _sync_frontier_state()
                 state.instance_scores[child.id] = val_result.instance_scores
                 # GEPA parity (rng-state-persist audit C/§3): record per-program
