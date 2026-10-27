@@ -653,6 +653,7 @@ def snapshot_candidate(candidate: Candidate, message: str) -> str:
     return result.stdout.strip()
 
 
+@traced("remove", lambda a: {"candidate_id": a["candidate"].id})
 def remove_worktree(candidate: Candidate) -> None:
     """Remove a candidate's worktree and its tracking branch.
 

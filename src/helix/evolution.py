@@ -98,7 +98,7 @@ from helix.state import (
     save_eval_cache,
     save_state,
 )
-from helix.timing import TIMING_FILE_NAME, recording, span, traced
+from helix.timing import TIMING_FILE_NAME, decision, recording, span, traced
 from helix.trace import TRACE, EventType
 from helix.worktree import (
     create_seed_worktree,
@@ -579,7 +579,11 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
     :func:`_reconcile_incomplete_attempts_on_resume` all need the same
     "best-effort remove + warn" behaviour.  Extracting this avoids 9× copies
     of the same try/except.
+
+    Being the one exit for a discarded candidate, it also records that
+    candidate's fate in the timing trace, with *label* as the reason.
     """
+    decision(candidate.id, accepted=False, reason=label)
     try:
         remove_worktree(candidate)
     except Exception as exc:
@@ -2059,6 +2063,8 @@ def _run_evolution_impl(
     # run.
     _eval_cache_cleared = [False]
 
+    # Rewrites the whole eval-cache pickle, so its cost grows with the run.
+    @traced("save_state")
     def _save_state(s: EvolutionState) -> None:
         save_state(s, project_root)
         if minibatch_cache is not None:
@@ -2230,6 +2236,7 @@ def _run_evolution_impl(
 
         _save_evaluation(base_dir, seed_result)
         frontier.add(seed, seed_result)
+        decision(seed.id, accepted=True, reason="seed")
         _sync_frontier_state()
         state.instance_scores[seed.id] = seed_result.instance_scores
         # GEPA parity (rng-state-persist audit C/§3): record per-program
@@ -2535,6 +2542,7 @@ def _run_evolution_impl(
                     if merged is None:
                         # GEPA parity (M2/B3): merge operator failed before
                         # any eval; no attempt, fall through to mutation.
+                        decision(merge_id, accepted=False, reason="failed merge")
                         # The failed merge still spent tokens — charge them.
                         if merge_usage:
                             live.update(usage=merge_usage[-1])
@@ -2753,6 +2761,7 @@ def _run_evolution_impl(
                                 merges_due -= 1
                                 budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
+                                decision(merged.id, accepted=True, reason="merge")
                                 _sync_frontier_state()
                                 state.instance_scores[merged.id] = (
                                     full_val_result.instance_scores
@@ -3029,6 +3038,7 @@ def _run_evolution_impl(
 
                 if isinstance(wr, MutationFailedProposal):
                     print_warning(f"Mutation {_new_id} failed -- skipping.")
+                    decision(_new_id, accepted=False, reason="failed mutation")
                     return None
 
                 if isinstance(wr, SkippedProposal):
@@ -3048,6 +3058,7 @@ def _run_evolution_impl(
                     semantic_skip_count += 1
                     if _subsample_ids is not None:
                         retryable_semantic_skip_count += 1
+                    decision(_new_id, accepted=False, reason="perfect parent subsample")
                     return None
 
                 if isinstance(wr, TamperedProposal):
@@ -3347,6 +3358,7 @@ def _run_evolution_impl(
                 _save_evaluation(base_dir, val_result)
                 _record_sibling(_parent.id, child, val_result, accepted=True)
                 frontier.add(child, val_result)
+                decision(child.id, accepted=True, reason="mutation")
                 _sync_frontier_state()
                 state.instance_scores[child.id] = val_result.instance_scores
                 # GEPA parity (rng-state-persist audit C/§3): record per-program

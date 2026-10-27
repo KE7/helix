@@ -194,6 +194,24 @@ class TestSpan:
         assert all(g["parent_span_id"] is None for g in gens)
 
 
+class TestDecision:
+    def test_records_the_fate_under_the_open_span(self, tmp_path: Path) -> None:
+        path = tmp_path / "t.jsonl"
+        with recording(path), span("generation"):
+            timing.decision("g1-s0", accepted=False, reason="train-gate-rejected")
+
+        start, mark, _end = _read(path)
+        assert mark["event"] == "decision"
+        assert mark["candidate_id"] == "g1-s0"
+        assert mark["accepted"] is False
+        assert mark["reason"] == "train-gate-rejected"
+        assert mark["parent_span_id"] == start["span_id"]
+        assert mark["run_id"] == start["run_id"]
+
+    def test_outside_a_recording_is_a_no_op(self) -> None:
+        timing.decision("g1-s0", accepted=True, reason="mutation")
+
+
 class TestThreads:
     def test_copied_context_keeps_the_parent_and_lines_stay_whole(
         self, tmp_path: Path
@@ -416,7 +434,7 @@ class TestEndToEnd:
         }
         assert {
             "run", "generation", "validate", "proposal", "mutate", "agent",
-            "cached_evaluate", "evaluate",
+            "cached_evaluate", "evaluate", "save_state",
         } <= {r["span"] for r in ends}
 
         # One tree: every span but the run has a recorded parent.
@@ -425,6 +443,26 @@ class TestEndToEnd:
         assert all(
             r["parent_span_id"] in by_id for r in ends if r is not run
         )
+
+        # Rejected candidates are timed like accepted ones, and every
+        # candidate the run worked on ends with exactly one decision.
+        decisions = [r for r in records if r["event"] == "decision"]
+        decided = [d["candidate_id"] for d in decisions]
+        assert len(decided) == len(set(decided))
+        worked_on = {
+            r["attrs"]["candidate_id"]
+            for r in ends
+            if r["span"] in {"proposal", "merge"}
+        }
+        assert worked_on | {seed.id} == set(decided)
+        fates = {d["candidate_id"]: d for d in decisions}
+        assert fates[seed.id]["accepted"] is True
+        rejected = {c for c, d in fates.items() if not d["accepted"]}
+        assert rejected, "the stub evaluator never improves, so children are rejected"
+        for cid in rejected:
+            assert {"proposal", "mutate", "cached_evaluate"} <= {
+                r["span"] for r in ends if r["attrs"].get("candidate_id") == cid
+            }
 
         def parent(r: dict[str, Any]) -> str:
             return str(by_id[r["parent_span_id"]]["span"])
@@ -444,6 +482,8 @@ class TestEndToEnd:
             elif r["span"] == "agent":
                 assert parent(r) == "mutate"
                 assert r["attrs"]["backend"] == config.agent.backend
+            elif r["span"] == "save_state":
+                assert parent(r) in {"run", "generation"}
             elif r["span"] == "evaluate":
                 assert parent(r) == "cached_evaluate"
                 assert r["attrs"]["split"] in {"train", "val"}

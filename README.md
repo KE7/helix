@@ -822,12 +822,13 @@ message).
 | `cached_evaluate` | one cache-aware evaluation: worktree lock wait, cache lookup, evaluator run | `candidate_id`, `split`, `examples`, `evaluation_phase` |
 | `evaluate` | one evaluator subprocess, always inside a `cached_evaluate` | `candidate_id`, `split`, `examples`, `evaluation_phase` |
 | `validate` | one full-validation pass | `candidate_id` |
-| `clone` / `snapshot` | creating a candidate worktree / committing it | `candidate_id` |
+| `clone` / `snapshot` / `remove` | creating, committing, or removing a candidate worktree | `candidate_id` |
+| `save_state` | one write of `state.json` and the eval-cache pickle (grows with the run) | |
 | `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend`, `generation` |
 
 Time in a span that none of its children account for is HELIX's own work, such
 as a `cached_evaluate` with no `evaluate` child (a full cache hit) or the gaps
-in a `generation` (frontier updates, state saves, worktree removal). Spans
+in a `generation` (frontier updates, parent selection, display). Spans
 that run in parallel overlap, so adding up `proposal` durations overstates wall
 time; read wall time from `generation` and `run`:
 
@@ -835,8 +836,32 @@ time; read wall time from `generation` and `run`:
 $ jq -c 'select(.event=="end" and .span=="generation") | {run_id, gen: .attrs.generation, seconds: .duration_seconds}' .helix/timing.jsonl
 ```
 
+Rejected candidates are timed exactly like accepted ones, the same way their
+tokens are charged to the budget whatever their fate. Each candidate's fate is
+one more record, written when HELIX keeps or discards it:
+
+```json
+{"event": "decision", "candidate_id": "g1-s2", "accepted": false, "reason": "train-gate-rejected candidate", "parent_span_id": "…", "run_id": "…", "wall_time": 1757400013.0, …}
+```
+
+Seconds of work per fate, counting each candidate's spans that sit directly under
+a `generation` (or the `run`, for the seed); a `proposal` includes the parent
+minibatch eval it ran for that child. Parallel slots overlap, so this is work
+done, not wall time:
+
+```console
+$ jq -s '
+  (map(select(.event == "start" and (.span == "run" or .span == "generation")) | {key: .span_id, value: true}) | from_entries) as $top
+  | (map(select(.event == "decision") | {key: .candidate_id, value: (if .accepted then "accepted" else "rejected" end)}) | from_entries) as $fate
+  | map(select(.event == "end" and .attrs.candidate_id != null and $top[.parent_span_id]))
+  | group_by($fate[.attrs.candidate_id] // "undecided")
+  | map({fate: ($fate[.[0].attrs.candidate_id] // "undecided"), candidates: (map(.attrs.candidate_id) | unique | length), seconds: (map(.duration_seconds) | add)})
+' .helix/timing.jsonl
+```
+
 A run's spans are complete only if its last record is the `end` of its `run`
-span; a `start` with no `end` is what was in flight when the process died.
+span; a `start` with no `end` is what was in flight when the process died, and
+a candidate with no `decision` was still undecided when the run stopped.
 
 ---
 

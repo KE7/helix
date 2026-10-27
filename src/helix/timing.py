@@ -21,6 +21,11 @@ code that hands work to a thread pool must submit through
 ``contextvars.copy_context().run`` for the child spans to keep their parent.
 A span whose parent was lost is still recorded, with ``parent_span_id: null``.
 
+Spans are written whatever becomes of the candidate they worked on, the same
+way its tokens are charged whatever its fate.  :func:`decision` then records
+that fate once per candidate, so time can be split into what went to accepted
+and to rejected candidates.
+
 Unrelated to :mod:`helix.trace`, the in-memory event bus used for GEPA
 differential testing.
 """
@@ -155,6 +160,25 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
         if error_type is not None:
             record["error_type"] = error_type
         _write(record)
+
+
+def decision(candidate_id: str, *, accepted: bool, reason: str) -> None:
+    """Record a candidate's fate: kept on the frontier, or discarded and why."""
+    if _sink is None:
+        return
+    _write(
+        {
+            "event": "decision",
+            "candidate_id": candidate_id,
+            "accepted": accepted,
+            "reason": reason,
+            "parent_span_id": _parent.get(),
+            "run_id": _run_id,
+            "wall_time": time.time(),
+            "monotonic": time.monotonic(),
+            "thread_id": threading.get_ident(),
+        }
+    )
 
 
 def traced(
