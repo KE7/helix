@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `parent_span_id` linking it into a tree, and a `run_id` separating
   `evolve` from later `resume`s in the same file. Rejected candidates are
   timed like accepted ones, and a `decision` record per candidate (`accepted`,
-  `reason`) splits the time spent by fate. A trace that cannot be
+  `reason`) splits the time spent by fate. Every record is stamped with the
+  `generation` and `candidate` its work was for. `helix timing` prints work by
+  kind and candidate fate plus wall time per generation, and `--perfetto FILE`
+  exports a Chrome-trace timeline for ui.perfetto.dev (no extra dependency). A trace that cannot be
   written is a logged warning, never a failed run.
 - Sandboxed runs now reset the backend CLI's session state in its
   `helix-auth-<backend>` volume at the start of every generation

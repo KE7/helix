@@ -795,21 +795,56 @@ stderr as fallback debug context.
 
 Every `helix evolve` and `helix resume` appends a timing trace to
 `.helix/timing.jsonl`, the same way it always records its budget; there is
-nothing to turn on. Each slow operation is a *span* with a `start` and an `end`
-record, one JSON object per line, flushed as written so a killed run keeps
-everything it finished:
+nothing to turn on. `helix timing` reads it:
 
-```json
-{"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "wall_time": 1757400000.1, "monotonic": 1234.5, "thread_id": 6199, "attrs": {"candidate_id": "g1-s2", "split": "train", "examples": 8, "evaluation_phase": null}}
-{"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
+```console
+$ helix timing
+                    Work by kind and candidate fate                     
+┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ Kind       ┃ Accepted ┃ Rejected ┃ Undecided ┃ Unattributed ┃  Total ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ agent      │    2h11m │    9h48m │      0.0s │         0.0s │ 12h00m │
+│ evaluator  │    1h02m │    3h20m │      0.0s │         0.0s │  4h22m │
+│ git        │    4m10s │   15m02s │      0.0s │         0.0s │ 19m12s │
+│ state save │     0.0s │     0.0s │      0.0s │        41.3s │  41.3s │
+└────────────┴──────────┴──────────┴───────────┴──────────────┴────────┘
+Candidates: 76 accepted, 724 rejected, 0 undecided
+Wall: 5h12m over 200 generations (mean 1m34s, slowest gen 37: 6m02s)
 ```
 
-`parent_span_id` links each span to the one it ran inside, so a run's spans form
-a tree; `run_id` tells apart the runs appended to the same file (`evolve`, then
-each `resume`). `duration_seconds` comes from the monotonic clock; `wall_time`
-is Unix epoch seconds for lining up with other logs. `outcome` is `"ok"` or
-`"error"`, and on error `error_type` names the exception class (never its
-message).
+*Work* is the time spent on each kind of operation, grouped by what became of
+the candidate it was for. Rejected candidates are timed exactly like accepted
+ones, the same way their tokens are charged to the budget. Parallel proposal
+slots each add their own work, so work can exceed wall time.
+
+To see a run as a timeline instead, `helix timing --perfetto trace.json`
+writes the trace in Chrome's trace format. Drag that file into
+[ui.perfetto.dev](https://ui.perfetto.dev) (or `chrome://tracing`) to get one
+track per thread: the parallel proposal slots, what each spent its time on, and
+where siblings waited on each other. It's an optional viewer, not a
+dependency; nothing is installed.
+
+#### Record format
+
+One JSON object per line, flushed as written so a killed run keeps everything
+it finished. Each operation is a *span* with a `start` and an `end` record:
+
+```json
+{"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "generation": 3, "candidate": "g3-s9", "wall_time": 1757400000.1, "monotonic": 1234.5, "thread_id": 6199, "attrs": {"candidate_id": "g2-s4", "split": "train", "examples": 8, "evaluation_phase": null}}
+{"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
+{"event": "decision", "candidate": "g3-s9", "accepted": false, "reason": "train-gate-rejected candidate", "generation": 3, …}
+```
+
+- `generation` and `candidate` say what the work was for. The example is the
+  evaluation of parent `g2-s4` (`attrs.candidate_id`) that proposal `g3-s9`
+  ran, so it counts as work for `g3-s9`.
+- `parent_span_id` links the spans into a tree.
+- `run_id` separates `evolve` from each later `resume` in the same file.
+- `outcome` is `"ok"` or `"error"`; on error, `error_type` names the exception
+  class, never its message.
+- Each candidate gets one `decision` record. A candidate with none was still
+  undecided when the run stopped, and a `start` with no `end` was in flight
+  when the process died.
 
 | span | measures | `attrs` |
 | --- | --- | --- |
@@ -826,42 +861,12 @@ message).
 | `save_state` | one write of `state.json` and the eval-cache pickle (grows with the run) | |
 | `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend`, `generation` |
 
-Time in a span that none of its children account for is HELIX's own work, such
-as a `cached_evaluate` with no `evaluate` child (a full cache hit) or the gaps
-in a `generation` (frontier updates, parent selection, display). Spans
-that run in parallel overlap, so adding up `proposal` durations overstates wall
-time; read wall time from `generation` and `run`:
+Because every record carries `generation` and `candidate`, your own questions
+are flat queries. For example, agent seconds per generation:
 
 ```console
-$ jq -c 'select(.event=="end" and .span=="generation") | {run_id, gen: .attrs.generation, seconds: .duration_seconds}' .helix/timing.jsonl
+$ jq -s 'map(select(.event == "end" and .span == "agent")) | group_by(.generation) | map({gen: .[0].generation, seconds: (map(.duration_seconds) | add)})' .helix/timing.jsonl
 ```
-
-Rejected candidates are timed exactly like accepted ones, the same way their
-tokens are charged to the budget whatever their fate. Each candidate's fate is
-one more record, written when HELIX keeps or discards it:
-
-```json
-{"event": "decision", "candidate_id": "g1-s2", "accepted": false, "reason": "train-gate-rejected candidate", "parent_span_id": "…", "run_id": "…", "wall_time": 1757400013.0, …}
-```
-
-Seconds of work per fate, counting each candidate's spans that sit directly under
-a `generation` (or the `run`, for the seed); a `proposal` includes the parent
-minibatch eval it ran for that child. Parallel slots overlap, so this is work
-done, not wall time:
-
-```console
-$ jq -s '
-  (map(select(.event == "start" and (.span == "run" or .span == "generation")) | {key: .span_id, value: true}) | from_entries) as $top
-  | (map(select(.event == "decision") | {key: .candidate_id, value: (if .accepted then "accepted" else "rejected" end)}) | from_entries) as $fate
-  | map(select(.event == "end" and .attrs.candidate_id != null and $top[.parent_span_id]))
-  | group_by($fate[.attrs.candidate_id] // "undecided")
-  | map({fate: ($fate[.[0].attrs.candidate_id] // "undecided"), candidates: (map(.attrs.candidate_id) | unique | length), seconds: (map(.duration_seconds) | add)})
-' .helix/timing.jsonl
-```
-
-A run's spans are complete only if its last record is the `end` of its `run`
-span; a `start` with no `end` is what was in flight when the process died, and
-a candidate with no `decision` was still undecided when the run stopped.
 
 ---
 
@@ -881,6 +886,7 @@ a candidate with no `decision` was still undecided when the run stopped.
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
 | `helix log` | Show semantic mutation log — full trajectory with parent lineage |
 | `helix attempts` | Surface rejected attempt records and perfect-skip events from `.helix/attempts/` and `.helix/skips/` |
+| `helix timing` | Show where the run's time went (work by kind and candidate fate, wall time per generation); `--perfetto FILE` exports a timeline |
 
 ### `helix evolve` Options
 

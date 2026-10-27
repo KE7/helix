@@ -11,15 +11,19 @@ keeps every record it got to.  A span is a ``start`` record on entry and an
 ``end`` record on exit::
 
     {"event": "start", "span": "evaluate", "span_id": "...",
-     "parent_span_id": "...", "run_id": "...", "wall_time": 1757400000.1,
-     "monotonic": 1234.5, "thread_id": 6199, "attrs": {...}}
+     "parent_span_id": "...", "run_id": "...", "generation": 3,
+     "candidate": "g3-s9", "wall_time": 1757400000.1, "monotonic": 1234.5,
+     "thread_id": 6199, "attrs": {...}}
     {"event": "end", ..., "duration_seconds": 12.2, "outcome": "ok"}
 
 ``parent_span_id`` is the span that was open when this one started, so the
-records form a tree rooted at the run.  It is carried in a context variable;
-code that hands work to a thread pool must submit through
-``contextvars.copy_context().run`` for the child spans to keep their parent.
-A span whose parent was lost is still recorded, with ``parent_span_id: null``.
+records form a tree rooted at the run.  ``generation`` and ``candidate`` say
+what the work was for: the outermost enclosing span that names one decides it
+(a proposal's evaluation of its *parent* is still work for the child), so every
+question about a generation or a candidate is a flat group-by.  All three are
+carried in a context variable; code that hands work to a thread pool must
+submit through ``contextvars.copy_context().run`` for them to follow.  A span
+that lost its context is still recorded, with those fields ``null``.
 
 Spans are written whatever becomes of the candidate they worked on, the same
 way its tokens are charged whatever its fate.  :func:`decision` then records
@@ -39,7 +43,9 @@ import json
 import logging
 import threading
 import time
+from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, ParamSpec, TextIO, TypeVar
 from uuid import uuid4
@@ -59,8 +65,10 @@ _lock = threading.Lock()
 _sink: TextIO | None = None
 _run_id: str | None = None
 _write_failed = False
-_parent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "helix_timing_parent", default=None
+#: What the open span hands to the spans inside it: its id (their parent),
+#: and the generation and candidate the work is for.
+_context: contextvars.ContextVar[tuple[str | None, int | None, str | None]] = (
+    contextvars.ContextVar("helix_timing_context", default=(None, None, None))
 )
 _attrs_failed: set[str] = set()
 
@@ -122,12 +130,19 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
         yield
         return
     span_id = uuid4().hex
+    parent, generation, candidate = _context.get()
+    if generation is None:
+        generation = attrs.get("generation")
+    if candidate is None:
+        candidate = attrs.get("candidate_id")
     record: dict[str, Any] = {
         "event": "start",
         "span": name,
         "span_id": span_id,
-        "parent_span_id": _parent.get(),
+        "parent_span_id": parent,
         "run_id": _run_id,
+        "generation": generation,
+        "candidate": candidate,
         "wall_time": time.time(),
         "monotonic": time.monotonic(),
         "thread_id": threading.get_ident(),
@@ -135,7 +150,7 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
     }
     _write(record)
     started = record["monotonic"]
-    token = _parent.set(span_id)
+    token = _context.set((span_id, generation, candidate))
     outcome, error_type = "ok", None
     try:
         yield
@@ -144,7 +159,7 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
         raise
     finally:
         try:
-            _parent.reset(token)
+            _context.reset(token)
         except ValueError:
             # Exited in a different context than it was entered in; the
             # parent pointer there was never this span's to restore.
@@ -166,14 +181,16 @@ def decision(candidate_id: str, *, accepted: bool, reason: str) -> None:
     """Record a candidate's fate: kept on the frontier, or discarded and why."""
     if _sink is None:
         return
+    parent, generation, _ = _context.get()
     _write(
         {
             "event": "decision",
-            "candidate_id": candidate_id,
+            "candidate": candidate_id,
             "accepted": accepted,
             "reason": reason,
-            "parent_span_id": _parent.get(),
+            "parent_span_id": parent,
             "run_id": _run_id,
+            "generation": generation,
             "wall_time": time.time(),
             "monotonic": time.monotonic(),
             "thread_id": threading.get_ident(),
@@ -219,3 +236,126 @@ def traced(
         return wrapper
 
     return decorate
+
+
+# ---------------------------------------------------------------------------
+# Reading a trace (``helix timing``)
+# ---------------------------------------------------------------------------
+
+#: Spans that never contain one another, so their durations add up to the
+#: work done without counting anything twice.
+WORK_KINDS = {
+    "agent": "agent",
+    "evaluate": "evaluator",
+    "clone": "git",
+    "snapshot": "git",
+    "remove": "git",
+    "save_state": "state save",
+    "sandbox_reset": "sandbox reset",
+}
+
+
+def read_records(path: Path) -> list[dict[str, Any]]:
+    """Every record in *path*, skipping a line torn by a killed run."""
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records
+
+
+def _fates(records: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        r["candidate"]: "accepted" if r["accepted"] else "rejected"
+        for r in records
+        if r["event"] == "decision"
+    }
+
+
+@dataclass
+class Summary:
+    """Where a trace's time went, as ``helix timing`` reports it."""
+
+    #: kind (a :data:`WORK_KINDS` value) -> fate of the candidate it was for
+    #: (``accepted``, ``rejected``, ``undecided``, or ``unattributed`` for
+    #: work done for no candidate) -> seconds.
+    work: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: fate -> number of candidates.
+    candidates: dict[str, int] = field(default_factory=dict)
+    #: Wall seconds of every ``run`` span (``evolve`` plus each ``resume``).
+    run_seconds: float = 0.0
+    #: generation -> wall seconds.  A generation redone after a resume adds up.
+    generation_seconds: dict[int, float] = field(default_factory=dict)
+
+
+def summarize(records: list[dict[str, Any]]) -> Summary:
+    """Total each kind of work by the fate of the candidate it was for."""
+    fates = _fates(records)
+    work: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    generations: dict[int, float] = defaultdict(float)
+    seen: set[str] = set()
+    run_seconds = 0.0
+    for r in records:
+        if r["event"] != "end":
+            continue
+        candidate = r.get("candidate")
+        if candidate is not None:
+            seen.add(candidate)
+        if r["span"] == "run":
+            run_seconds += r["duration_seconds"]
+        elif r["span"] == "generation":
+            generations[r["attrs"]["generation"]] += r["duration_seconds"]
+        kind = WORK_KINDS.get(r["span"])
+        if kind is not None:
+            fate = "unattributed" if candidate is None else fates.get(candidate, "undecided")
+            work[kind][fate] += r["duration_seconds"]
+    candidates: dict[str, int] = defaultdict(int)
+    for candidate in seen | set(fates):
+        candidates[fates.get(candidate, "undecided")] += 1
+    return Summary(
+        work={kind: dict(by_fate) for kind, by_fate in work.items()},
+        candidates=dict(candidates),
+        run_seconds=run_seconds,
+        generation_seconds=dict(generations),
+    )
+
+
+def to_perfetto(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Chrome trace JSON for ui.perfetto.dev: one process per run, one track
+    per thread, fates as instant events.  Wall clock, so an ``evolve`` and its
+    ``resume`` line up in real time."""
+    fates = _fates(records)
+    pids: dict[str, int] = {}
+    events: list[dict[str, Any]] = []
+    for r in records:
+        pid = pids.setdefault(r["run_id"], len(pids) + 1)
+        candidate = r.get("candidate")
+        if r["event"] == "end":
+            events.append({
+                "name": r["span"],
+                "ph": "X",
+                "ts": (r["wall_time"] - r["duration_seconds"]) * 1e6,
+                "dur": r["duration_seconds"] * 1e6,
+                "pid": pid,
+                "tid": r["thread_id"],
+                "args": {
+                    **r["attrs"],
+                    "generation": r.get("generation"),
+                    "candidate": candidate,
+                    "fate": None if candidate is None else fates.get(candidate, "undecided"),
+                    "outcome": r["outcome"],
+                },
+            })
+        elif r["event"] == "decision":
+            events.append({
+                "name": "accepted" if r["accepted"] else "rejected",
+                "ph": "i",
+                "s": "t",
+                "ts": r["wall_time"] * 1e6,
+                "pid": pid,
+                "tid": r["thread_id"],
+                "args": {"candidate": candidate, "reason": r["reason"]},
+            })
+    return {"traceEvents": events}

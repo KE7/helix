@@ -30,6 +30,7 @@ from helix.exceptions import RateLimitError, ResumeIncompatibleError, print_heli
 from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
+from helix import timing
 from helix.worktree import remove_worktree
 
 logger = logging.getLogger(__name__)
@@ -893,6 +894,82 @@ def log_cmd(project_dir: Path | None) -> None:
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# timing
+# ---------------------------------------------------------------------------
+
+
+def _fmt_seconds(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds // 3600:.0f}h{seconds % 3600 // 60:02.0f}m"
+    if seconds >= 60:
+        return f"{seconds // 60:.0f}m{seconds % 60:02.0f}s"
+    return f"{seconds:.1f}s"
+
+
+@cli.command("timing")
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root directory (defaults to current working directory).",
+)
+@click.option(
+    "--perfetto",
+    "perfetto_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Also write a Chrome trace JSON to open in ui.perfetto.dev.",
+)
+def timing_cmd(project_dir: Path | None, perfetto_path: Path | None) -> None:
+    """Show where the run's time went, from .helix/timing.jsonl."""
+    project_root = project_dir if project_dir is not None else Path.cwd()
+    trace_path = _helix_dir(project_root) / timing.TIMING_FILE_NAME
+    if not trace_path.exists():
+        print_warning("No timing trace found. Run `helix evolve` first.")
+        return
+    records = timing.read_records(trace_path)
+    summary = timing.summarize(records)
+
+    fates = ["accepted", "rejected", "undecided", "unattributed"]
+    table = Table(title="Work by kind and candidate fate")
+    table.add_column("Kind", style="cyan")
+    for fate in fates:
+        table.add_column(fate.capitalize(), justify="right")
+    table.add_column("Total", justify="right", style="bold")
+    for kind, by_fate in sorted(
+        summary.work.items(), key=lambda item: -sum(item[1].values())
+    ):
+        table.add_row(
+            kind,
+            *(_fmt_seconds(by_fate.get(fate, 0.0)) for fate in fates),
+            _fmt_seconds(sum(by_fate.values())),
+        )
+    console.print(table)
+    console.print(
+        "Candidates: "
+        + ", ".join(
+            f"{summary.candidates.get(fate, 0)} {fate}" for fate in fates[:3]
+        )
+    )
+    gens = summary.generation_seconds
+    if gens:
+        slowest = max(gens, key=lambda g: gens[g])
+        console.print(
+            f"Wall: {_fmt_seconds(summary.run_seconds)} over {len(gens)} "
+            f"generations (mean {_fmt_seconds(sum(gens.values()) / len(gens))}, "
+            f"slowest gen {slowest}: {_fmt_seconds(gens[slowest])})"
+        )
+    console.print(
+        "[dim]Work adds up across parallel proposal slots, so it can exceed wall time.[/dim]"
+    )
+
+    if perfetto_path is not None:
+        perfetto_path.write_text(json.dumps(timing.to_perfetto(records)))
+        print_success(f"Wrote {perfetto_path}; open it at https://ui.perfetto.dev")
 
 
 # ---------------------------------------------------------------------------

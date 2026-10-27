@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
@@ -13,11 +14,13 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from click.testing import CliRunner
 
 # Imported for their ``@traced`` decorations, so ``timing.TRACED`` is complete.
 import helix.evolution  # noqa: F401
 import helix.merger  # noqa: F401
 from helix import executor, mutator, timing
+from helix.cli import cli
 from helix.config import (
     DatasetConfig,
     EvaluatorConfig,
@@ -194,6 +197,116 @@ class TestSpan:
         assert all(g["parent_span_id"] is None for g in gens)
 
 
+class TestStamping:
+    def test_outermost_generation_and_candidate_win(self, tmp_path: Path) -> None:
+        path = tmp_path / "t.jsonl"
+        with recording(path), span("run"):
+            with span("generation", generation=3):
+                with span("proposal", candidate_id="g3-s1", generation=3):
+                    # The proposal's eval of its parent is work for the child.
+                    with span("cached_evaluate", candidate_id="g2-s0"):
+                        with span("evaluate", candidate_id="g2-s0"):
+                            pass
+                    with span("agent"):
+                        pass
+                timing.decision("g3-s1", accepted=False, reason="rejected")
+
+        by_span = {r["span"]: r for r in _read(path) if r["event"] == "end"}
+        assert (by_span["run"]["generation"], by_span["run"]["candidate"]) == (None, None)
+        assert by_span["generation"]["generation"] == 3
+        assert by_span["generation"]["candidate"] is None
+        for name in ("proposal", "cached_evaluate", "evaluate", "agent"):
+            assert by_span[name]["generation"] == 3
+            assert by_span[name]["candidate"] == "g3-s1"
+        assert by_span["evaluate"]["attrs"]["candidate_id"] == "g2-s0"
+        (mark,) = [r for r in _read(path) if r["event"] == "decision"]
+        assert (mark["generation"], mark["candidate"]) == (3, "g3-s1")
+
+    def test_a_thread_pool_inherits_through_a_copied_context(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "t.jsonl"
+        with recording(path), span("generation", generation=5):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pool.submit(contextvars.copy_context().run, span("agent").__enter__).result()
+
+        agent = next(r for r in _read(path) if r["span"] == "agent")
+        assert agent["generation"] == 5
+
+
+class TestReading:
+    def _trace(self, tmp_path: Path) -> list[dict[str, Any]]:
+        path = tmp_path / "t.jsonl"
+        with recording(path), span("run"):
+            for gen, child, accepted in ((1, "g1-s1", True), (2, "g2-s2", False)):
+                with span("generation", generation=gen):
+                    with span("proposal", candidate_id=child):
+                        with span("agent"):
+                            time.sleep(0.01)
+                        with span("evaluate", candidate_id=child):
+                            pass
+                    with span("save_state"):
+                        pass
+                    timing.decision(child, accepted=accepted, reason="r")
+            with span("generation", generation=3), span("proposal", candidate_id="g3-s3"):
+                with span("agent"):
+                    pass
+        with path.open("a") as f:
+            f.write('{"event": "end", "span": "tor')  # killed mid-write
+        return timing.read_records(path)
+
+    def test_read_records_skips_a_torn_last_line(self, tmp_path: Path) -> None:
+        records = self._trace(tmp_path)
+        assert records[-1]["span"] == "run"
+
+    def test_summarize_splits_work_by_fate(self, tmp_path: Path) -> None:
+        summary = timing.summarize(self._trace(tmp_path))
+        assert set(summary.work) == {"agent", "evaluator", "state save"}
+        assert set(summary.work["agent"]) == {"accepted", "rejected", "undecided"}
+        assert summary.work["agent"]["accepted"] >= 0.01
+        assert set(summary.work["state save"]) == {"unattributed"}
+        assert summary.candidates == {"accepted": 1, "rejected": 1, "undecided": 1}
+        assert sorted(summary.generation_seconds) == [1, 2, 3]
+        assert summary.run_seconds >= sum(summary.generation_seconds.values())
+
+    def test_perfetto_export_has_one_slice_per_span_and_the_fates(
+        self, tmp_path: Path
+    ) -> None:
+        records = self._trace(tmp_path)
+        events = timing.to_perfetto(records)["traceEvents"]
+        slices = [e for e in events if e["ph"] == "X"]
+        assert len(slices) == sum(r["event"] == "end" for r in records)
+        assert {e["name"] for e in events if e["ph"] == "i"} == {"accepted", "rejected"}
+        agent = next(e for e in slices if e["name"] == "agent")
+        assert agent["args"]["candidate"] == "g1-s1"
+        assert agent["args"]["fate"] == "accepted"
+        assert agent["dur"] >= 10_000  # microseconds
+        json.dumps(events)
+
+    def test_cli_prints_the_summary_and_writes_perfetto(self, tmp_path: Path) -> None:
+        helix_dir = tmp_path / ".helix"
+        helix_dir.mkdir()
+        trace_dir = tmp_path / "src"
+        trace_dir.mkdir()
+        self._trace(trace_dir)
+        (trace_dir / "t.jsonl").rename(helix_dir / timing.TIMING_FILE_NAME)
+        out = tmp_path / "trace.json"
+
+        result = CliRunner().invoke(
+            cli, ["timing", "--dir", str(tmp_path), "--perfetto", str(out)]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Work by kind and candidate fate" in result.output
+        assert "1 accepted, 1 rejected, 1 undecided" in result.output
+        assert json.loads(out.read_text())["traceEvents"]
+
+    def test_cli_without_a_trace_says_so(self, tmp_path: Path) -> None:
+        result = CliRunner().invoke(cli, ["timing", "--dir", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "No timing trace found" in result.output
+
+
 class TestDecision:
     def test_records_the_fate_under_the_open_span(self, tmp_path: Path) -> None:
         path = tmp_path / "t.jsonl"
@@ -202,7 +315,7 @@ class TestDecision:
 
         start, mark, _end = _read(path)
         assert mark["event"] == "decision"
-        assert mark["candidate_id"] == "g1-s0"
+        assert mark["candidate"] == "g1-s0"
         assert mark["accepted"] is False
         assert mark["reason"] == "train-gate-rejected"
         assert mark["parent_span_id"] == start["span_id"]
@@ -447,7 +560,7 @@ class TestEndToEnd:
         # Rejected candidates are timed like accepted ones, and every
         # candidate the run worked on ends with exactly one decision.
         decisions = [r for r in records if r["event"] == "decision"]
-        decided = [d["candidate_id"] for d in decisions]
+        decided = [d["candidate"] for d in decisions]
         assert len(decided) == len(set(decided))
         worked_on = {
             r["attrs"]["candidate_id"]
@@ -455,7 +568,7 @@ class TestEndToEnd:
             if r["span"] in {"proposal", "merge"}
         }
         assert worked_on | {seed.id} == set(decided)
-        fates = {d["candidate_id"]: d for d in decisions}
+        fates = {d["candidate"]: d for d in decisions}
         assert fates[seed.id]["accepted"] is True
         rejected = {c for c, d in fates.items() if not d["accepted"]}
         assert rejected, "the stub evaluator never improves, so children are rejected"
@@ -463,6 +576,30 @@ class TestEndToEnd:
             assert {"proposal", "mutate", "cached_evaluate"} <= {
                 r["span"] for r in ends if r["attrs"].get("candidate_id") == cid
             }
+
+        # Stamped fields make every question a flat group-by: everything
+        # inside a generation knows it, and an agent call knows the child it
+        # was for.
+        def ancestors(r: dict[str, Any]) -> list[dict[str, Any]]:
+            chain = []
+            while r["parent_span_id"] is not None:
+                r = by_id[r["parent_span_id"]]
+                chain.append(r)
+            return chain
+
+        for r in ends:
+            gen = next(
+                (a["attrs"]["generation"] for a in ancestors(r) if a["span"] == "generation"),
+                None,
+            )
+            if gen is not None:
+                assert r["generation"] == gen
+        proposals = {r["span_id"]: r for r in ends if r["span"] == "proposal"}
+        for r in ends:
+            if r["span"] == "agent":
+                owner = by_id[by_id[r["parent_span_id"]]["parent_span_id"]]
+                assert r["candidate"] == owner["attrs"]["candidate_id"]
+                assert owner["span_id"] in proposals
 
         def parent(r: dict[str, Any]) -> str:
             return str(by_id[r["parent_span_id"]]["span"])
