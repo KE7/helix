@@ -8,6 +8,7 @@ import logging
 import os
 import random as _random
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -810,50 +811,56 @@ def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
 def _candidate_content_key(candidate: Candidate) -> str:
     """Return a stable content key for cache reuse across equivalent candidates.
 
-    Contract: the caller is responsible for ensuring the candidate's worktree
-    has its evaluation-relevant content committed (clean working tree, no
-    untracked files). The key is derived from ``HEAD^{tree}``, which is
-    content-addressable over the *committed* tracked tree only — it does not
-    reflect uncommitted modifications, the staged index, or untracked files.
+    The key is the tree ``snapshot_candidate`` would commit: ``git add -A``
+    into a throwaway copy of the worktree's index, then ``git write-tree``.
+    It therefore covers uncommitted edits and untracked (non-ignored) files,
+    leaves the worktree, its real index and its history untouched, and equals
+    ``HEAD^{tree}`` once the candidate is snapshotted.  This matters because
+    a child is evaluated on its minibatch before the apply phase commits it
+    (``mutate()``/``merge()`` deliberately do not snapshot, so state can be
+    saved before the commit); keying by ``HEAD^{tree}`` alone would have to
+    reject every such child as dirty.
 
-    Defensive behavior: if the worktree is detected to be dirty (modified
-    tracked files or untracked, non-ignored files present), we fall back to
-    ``candidate.id`` so that two candidates with identical HEAD trees but
-    differing dirty state cannot collide on the same cache key. Submodule
-    contents are summarized as gitlinks inside the parent tree, so changing
-    the submodule pointer changes the key but in-place edits inside an
-    uncommitted submodule do not — keep submodule state committed for
-    reliable reuse.
+    Submodule contents are summarized as gitlinks inside the parent tree, so
+    changing the submodule pointer changes the key but in-place edits inside
+    an uncommitted submodule do not — keep submodule state committed for
+    reliable reuse.  Falls back to ``candidate.id`` if git fails.
     """
+    worktree = Path(candidate.worktree_path)
     try:
-        tree_proc = subprocess.run(
-            ["git", "rev-parse", "HEAD^{tree}"],
-            cwd=candidate.worktree_path,
+        index_proc = subprocess.run(
+            ["git", "rev-parse", "--git-path", "index"],
+            cwd=worktree,
             check=True,
             capture_output=True,
             text=True,
         )
-        sha = tree_proc.stdout.strip()
-        if not sha:
-            return candidate.id
-
-        # Reject the tree SHA if the worktree is dirty or has untracked
-        # (non-ignored) files; otherwise we'd risk a false cache hit.
-        status_proc = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
-            cwd=candidate.worktree_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if status_proc.stdout.strip():
-            logger.warning(
-                "Candidate %s worktree is not clean; falling back to id cache "
-                "key to avoid stale-content cache hits.",
-                candidate.id,
+        real_index = worktree / index_proc.stdout.strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            # Start from a copy of the real index so ``git add -A`` reuses its
+            # stat cache instead of rehashing every file.
+            temp_index = Path(tmp) / "index"
+            if real_index.exists():
+                shutil.copyfile(real_index, temp_index)
+            env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=worktree,
+                env=env,
+                check=True,
+                capture_output=True,
             )
-            return candidate.id
-        return sha
+            tree_proc = subprocess.run(
+                ["git", "write-tree"],
+                cwd=worktree,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        sha = tree_proc.stdout.strip()
+        if sha:
+            return sha
     except Exception as exc:
         logger.warning(
             "Could not resolve git tree for candidate %s (%s); falling back "
@@ -3369,7 +3376,7 @@ def _run_evolution_impl(
             _seen_child_keys: dict[str, str] = {}
             # With a single slot per iteration there is no sibling for a child
             # to be identical to, so the default configuration pays nothing
-            # for the content keys (two git invocations each).
+            # for the content keys (three git invocations each).
             _dedupe_batch = len(worker_results) > 1
 
             def _drop_duplicate_child(gated: GatedProposal) -> bool:
@@ -3383,7 +3390,7 @@ def _run_evolution_impl(
                 whatever that point happens to be.
 
                 ``_candidate_content_key`` falls back to the candidate id
-                when it cannot resolve a clean tree, so an unresolvable child
+                when git cannot resolve a tree, so an unresolvable child
                 is treated as unique: this collapses children it can prove
                 identical and never guesses.
                 """
