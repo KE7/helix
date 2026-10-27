@@ -75,7 +75,43 @@ helix history
 helix log
 helix attempts
 helix attempts --skips
+helix timing
+helix timing --perfetto trace.json
 ```
+
+### Where the time went
+
+Every run appends timing to `.helix/timing.jsonl`; there is nothing to turn
+on. `helix timing` prints:
+
+- **Work by kind and candidate fate:** agent, evaluator, git, state save and
+  sandbox reset time, split by whether the candidate it was for was accepted
+  or rejected. Parallel proposal slots each add their own work, so work can
+  exceed wall time.
+- **Inside agent and evaluator calls:**
+  - each agent call split into `model`, `tool:<name>` and `other`
+    (startup and container start), read from the backend's transcript;
+  - anything the evaluator timed with `helix.timed`, per name.
+
+  An `unavailable` row means the backend's transcript can't be split:
+  `cursor` has no timestamps and `agy` only per-second step times. The agent
+  call's total is still counted.
+- **Candidates and wall time:** counts by fate, total wall time, and the mean
+  and slowest generation.
+
+When a total looks wrong, check whether the time went to rejected
+candidates (a stalled search), to `model` (slow or overloaded model), to one
+tool, or to `other` (slow startup or container start).
+
+For a timeline, `helix timing --perfetto trace.json` writes Chrome trace JSON.
+Drag it into <https://ui.perfetto.dev> or `chrome://tracing` to see one track
+per thread: parallel proposal slots, siblings waiting on a shared parent's
+worktree lock inside `cached_evaluate`, and the `helix.timed` totals in each
+`evaluate` slice's args.
+
+Every record carries `generation` and `candidate`, so other questions are flat
+`jq` queries over `.helix/timing.jsonl`; the README's "Timing Trace" section
+has the record format.
 
 Useful files:
 
@@ -89,6 +125,7 @@ Useful files:
   worktrees/gN-sN/
   attempts/           (per-rejected-candidate JSON records)
   skips/              (per-generation perfect-skip event lists)
+  timing.jsonl        (timing spans; read with `helix timing`)
 ```
 
 For backend diagnostics in a candidate worktree, inspect:

@@ -20,11 +20,19 @@ An evolved agent that *also* fetches live data will stay perfectly aligned with 
 evaluator as library versions advance — a naive offline agent will drift.
 """
 
+import contextlib
 import json
 import os
 import pathlib
 import urllib.request
 import urllib.error
+
+try:
+    # Shows up in `helix timing`; a no-op outside a HELIX run.
+    from helix import timed
+except ImportError:  # running without HELIX installed
+    def timed(name, example=None):
+        return contextlib.nullcontext()
 
 
 def _read_batch_ids() -> list[str] | None:
@@ -221,11 +229,13 @@ def evaluate():
         match_mode = qdata.get("match_mode", "exact")
 
         # Resolve ground truth (may do a live network fetch)
-        expected, gt_source = resolve_ground_truth(qdata)
+        with timed("ground_truth", example=q_id):
+            expected, gt_source = resolve_ground_truth(qdata)
 
         # Run the agent
         try:
-            got = agent.solve(question_text)
+            with timed("solve", example=q_id):
+                got = agent.solve(question_text)
             if not isinstance(got, str):
                 got = str(got) if got is not None else ""
         except Exception:
