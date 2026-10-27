@@ -310,6 +310,38 @@ class TestReading:
         assert "No timing trace found" in result.output
 
 
+class TestWallClock:
+    def _record(
+        self, event: str, span: str, span_id: str, wall: float, **extra: Any
+    ) -> dict[str, Any]:
+        return {
+            "event": event, "span": span, "span_id": span_id, "run_id": "r",
+            "wall_time": wall, "thread_id": 1, "attrs": {}, "parent_span_id": None,
+            "generation": None, "candidate": None, **extra,
+        }
+
+    def test_a_run_still_going_counts_up_to_its_latest_record(self) -> None:
+        records = [
+            self._record("start", "run", "run", 100.0),
+            self._record("start", "generation", "g", 101.0),
+            self._record("end", "generation", "g", 130.0, duration_seconds=29.0,
+                         outcome="ok", attrs={"generation": 1}),
+        ]
+        assert timing.summarize(records).run_seconds == 30.0
+
+    def test_perfetto_slices_span_their_wall_time_across_sleep(self) -> None:
+        # The machine slept 60 s inside "evaluate": duration_seconds leaves it out.
+        records = [
+            self._record("start", "proposal", "p", 100.0),
+            self._record("start", "evaluate", "e", 101.0),
+            self._record("end", "evaluate", "e", 171.0, duration_seconds=10.0, outcome="ok"),
+            self._record("end", "proposal", "p", 172.0, duration_seconds=12.0, outcome="ok"),
+        ]
+        slices = {e["name"]: e for e in timing.to_perfetto(records)["traceEvents"]}
+        assert slices["evaluate"]["ts"] == 101.0e6 and slices["evaluate"]["dur"] == 70.0e6
+        assert slices["proposal"]["ts"] == 100.0e6 and slices["proposal"]["dur"] == 72.0e6
+
+
 class TestDecision:
     def test_records_the_fate_under_the_open_span(self, tmp_path: Path) -> None:
         path = tmp_path / "t.jsonl"

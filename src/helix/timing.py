@@ -299,7 +299,8 @@ class Summary:
     work: dict[str, dict[str, float]] = field(default_factory=dict)
     #: fate -> number of candidates.
     candidates: dict[str, int] = field(default_factory=dict)
-    #: Wall seconds of every ``run`` span (``evolve`` plus each ``resume``).
+    #: Wall-clock seconds of every run (``evolve`` plus each ``resume``), sleep
+    #: included; a run still going counts up to its latest record.
     run_seconds: float = 0.0
     #: generation -> wall seconds.  A generation redone after a resume adds up.
     generation_seconds: dict[int, float] = field(default_factory=dict)
@@ -311,16 +312,18 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
     work: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     generations: dict[int, float] = defaultdict(float)
     seen: set[str] = set()
-    run_seconds = 0.0
+    run_started: dict[str, float] = {}
+    run_latest: dict[str, float] = defaultdict(float)
     for r in records:
+        run_latest[r["run_id"]] = max(run_latest[r["run_id"]], r["wall_time"])
+        if r["event"] == "start" and r["span"] == "run":
+            run_started[r["run_id"]] = r["wall_time"]
         if r["event"] != "end":
             continue
         candidate = r.get("candidate")
         if candidate is not None:
             seen.add(candidate)
-        if r["span"] == "run":
-            run_seconds += r["duration_seconds"]
-        elif r["span"] == "generation":
+        if r["span"] == "generation":
             generations[r["attrs"]["generation"]] += r["duration_seconds"]
         kind = WORK_KINDS.get(r["span"])
         if kind is not None:
@@ -332,7 +335,7 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
     return Summary(
         work={kind: dict(by_fate) for kind, by_fate in work.items()},
         candidates=dict(candidates),
-        run_seconds=run_seconds,
+        run_seconds=sum(run_latest[run] - start for run, start in run_started.items()),
         generation_seconds=dict(generations),
     )
 
@@ -340,19 +343,26 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
 def to_perfetto(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Chrome trace JSON for ui.perfetto.dev: one process per run, one track
     per thread, fates as instant events.  Wall clock, so an ``evolve`` and its
-    ``resume`` line up in real time."""
+    ``resume`` line up in real time.
+
+    Each slice runs from its ``start`` record's wall time to its ``end``
+    record's.  ``duration_seconds`` leaves out time the machine slept, so a
+    slice drawn from it would start late and its children would spill out.
+    """
     fates = _fates(records)
+    started = {r["span_id"]: r["wall_time"] for r in records if r["event"] == "start"}
     pids: dict[str, int] = {}
     events: list[dict[str, Any]] = []
     for r in records:
         pid = pids.setdefault(r["run_id"], len(pids) + 1)
         candidate = r.get("candidate")
         if r["event"] == "end":
+            start = started.get(r["span_id"], r["wall_time"] - r["duration_seconds"])
             events.append({
                 "name": r["span"],
                 "ph": "X",
-                "ts": (r["wall_time"] - r["duration_seconds"]) * 1e6,
-                "dur": r["duration_seconds"] * 1e6,
+                "ts": start * 1e6,
+                "dur": (r["wall_time"] - start) * 1e6,
                 "pid": pid,
                 "tid": r["thread_id"],
                 "args": {

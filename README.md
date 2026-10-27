@@ -815,7 +815,9 @@ Wall: 5h12m over 200 generations (mean 1m34s, slowest gen 37: 6m02s)
 *Work* is the time spent on each kind of operation, grouped by what became of
 the candidate it was for. Rejected candidates are timed exactly like accepted
 ones, the same way their tokens are charged to the budget. Parallel proposal
-slots each add their own work, so work can exceed wall time.
+slots each add their own work, so work can exceed wall time. Work and
+generation times leave out time the machine slept; the total wall time
+includes it.
 
 To see a run as a timeline instead, `helix timing --perfetto trace.json`
 writes the trace in Chrome's trace format. Drag that file into
