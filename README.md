@@ -838,7 +838,7 @@ of it waiting on the model.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/helix-timing-dark.png">
-  <img alt="Two segmented bars for the same run: across all 10 generations the evaluator (solver runs plus its refiner LLM) took 89.5 minutes (92%) and the mutation agent 7.4 minutes (8%); inside the mutation agent, the model took 6.9 minutes (93%), tools 11 seconds (2%) and startup 18 seconds (4%)" src="docs/images/helix-timing-light.png">
+  <img alt="Chart of the same run: every generation but one spent about 10 minutes in the evaluator (solver runs plus its refiner LLM) and under a minute in the mutation agent; inside the agent, nearly all of each call was the model, with tools and startup taking a few seconds; across all 10 generations the evaluator took 90 minutes (92%) and the agent 7.4 minutes (8%)" src="docs/images/helix-timing-light.png">
 </picture>
 
 To see a run as a timeline instead, `helix timing --perfetto trace.json`
