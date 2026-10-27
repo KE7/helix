@@ -924,11 +924,29 @@ def _validate_agent_effort(agent: AgentConfig) -> None:
         )
 
 
-def load_config(path: Path) -> HelixConfig:
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Return *base* with *overrides* applied: dicts merge, anything else replaces."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(
+    path: Path, overrides: dict[str, Any] | None = None
+) -> HelixConfig:
     """Load a HelixConfig from a TOML file.
 
     Supports both flat format (``objective = "..."`` at root) and the
     ``[project]`` section format (fields are merged into the root).
+
+    *overrides* is a nested dict shaped like the TOML (e.g.
+    ``{"evolution": {"max_generations": 3}}``), deep-merged into the file
+    before the one validation, so CLI flags get the same checks and error
+    output as the file.  Any config error exits with status 2.
     """
     _load_dotenv_file(path.parent / ".env")
     try:
@@ -941,7 +959,7 @@ def load_config(path: Path) -> HelixConfig:
             f"   Please check your TOML syntax.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(2)
 
     # If a [project] section is present, promote its keys to the root level
     # (values already at root take precedence over those inside [project]).
@@ -952,11 +970,15 @@ def load_config(path: Path) -> HelixConfig:
         }
         data = merged
 
+    if overrides:
+        data = _deep_merge(data, overrides)
+
     try:
         return HelixConfig.model_validate(data)
     except ValidationError as e:
+        source = f"{path} (with command-line overrides)" if overrides else str(path)
         print(
-            f"❌ Configuration validation error in {path}:\n",
+            f"❌ Configuration validation error in {source}:\n",
             file=sys.stderr,
         )
         for error in e.errors():
@@ -981,4 +1003,4 @@ def load_config(path: Path) -> HelixConfig:
                     "   Hint: Check that the value is the correct type", file=sys.stderr
                 )
             print(file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)

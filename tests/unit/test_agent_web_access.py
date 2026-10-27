@@ -92,11 +92,12 @@ def test_evolve_validates_backend_override(
         assert run.call_args[0][0].agent.backend == backend
 
 
-def test_evolve_override_error_is_not_read_as_rich_markup(
+def test_evolve_override_error_uses_config_error_output(
     tmp_path: Path, mocker: Any
 ) -> None:
-    # Unescaped, Rich reads pydantic's ``[type=value_error, ...]`` as a tag
-    # and drops it (and a ``[/x]`` in an echoed value raises MarkupError).
+    # Flags are validated by load_config with the file, so a bad override
+    # gets the same plain-text report as a bad helix.toml (no Rich markup,
+    # which would eat pydantic's ``[...]``).
     (tmp_path / "helix.toml").write_text(
         'objective = "test"\n\n[evaluator]\ncommand = "true"\n\n'
         "[agent]\nweb_access = false\n"
@@ -107,7 +108,9 @@ def test_evolve_override_error_is_not_read_as_rich_markup(
     )
     assert result.exit_code == 2, result.output
     output = " ".join(result.output.split())
-    assert "[type=value_error" in output
+    assert "(with command-line overrides)" in output
+    assert "Field: agent" in output
+    assert "(supported: claude, codex, opencode)" in output
 
 
 @pytest.mark.parametrize(

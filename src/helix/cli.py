@@ -10,13 +10,12 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import click
-from rich.markup import escape
 from rich.table import Table
 from rich.tree import Tree
 
 from helix import __version__
 from helix.backends import BACKENDS
-from helix.config import AgentConfig, EvolutionConfig, load_config
+from helix.config import load_config
 from helix.logging_config import setup_file_logging
 from helix.sandbox import run_sandbox_auth_command, sandbox_auth_volume_name
 from helix.display import (
@@ -636,8 +635,32 @@ def evolve(
     if not cfg_file.is_absolute():
         cfg_file = project_root / cfg_file
 
+    # CLI overrides are merged into the TOML before its one validation, so a
+    # flag gets every check a helix.toml value does, cross-field ones included.
+    overrides: dict[str, Any] = {}
+    if objective:
+        overrides["objective"] = objective
+    if evaluator:
+        overrides["evaluator"] = {"command": evaluator}
+    evolution_overrides: dict[str, Any] = {}
+    if generations is not None:
+        evolution_overrides["max_generations"] = generations
+    if stop_at_score is not None:
+        evolution_overrides["stop_at_score"] = stop_at_score
+    if no_merge:
+        evolution_overrides["merge_enabled"] = False
+    if evolution_overrides:
+        overrides["evolution"] = evolution_overrides
+    agent_overrides = {
+        key: value
+        for key, value in {"backend": backend, "model": model, "effort": effort}.items()
+        if value is not None
+    }
+    if agent_overrides:
+        overrides["agent"] = agent_overrides
+
     try:
-        config = load_config(cfg_file)
+        config = load_config(cfg_file, overrides)
     except FileNotFoundError:
         # Fix 5b: clear actionable error message when helix.toml is missing.
         print_error(
@@ -645,62 +668,6 @@ def evolve(
             "Run [cyan]helix init[/cyan] first, or cd into a directory that contains one."
         )
         raise SystemExit(1)
-
-    # Apply CLI overrides
-    if objective:
-        config = config.model_copy(update={"objective": objective})
-    if evaluator:
-        config = config.model_copy(
-            update={
-                "evaluator": config.evaluator.model_copy(update={"command": evaluator})
-            }
-        )
-    if generations is not None:
-        config = config.model_copy(
-            update={
-                "evolution": config.evolution.model_copy(
-                    update={"max_generations": generations}
-                )
-            }
-        )
-    if stop_at_score is not None:
-        # Re-validate rather than model_copy: click's FLOAT accepts nan/inf,
-        # which helix.toml rejects and which would never trigger the stop.
-        try:
-            evolution = EvolutionConfig.model_validate(
-                {**config.evolution.model_dump(), "stop_at_score": stop_at_score}
-            )
-        except ValueError as exc:
-            print_error(escape(str(exc)))
-            raise SystemExit(2)
-        config = config.model_copy(update={"evolution": evolution})
-    if no_merge:
-        config = config.model_copy(
-            update={
-                "evolution": config.evolution.model_copy(
-                    update={"merge_enabled": False}
-                )
-            }
-        )
-    if backend is not None or model is not None or effort is not None:
-        agent_updates: dict[str, Any] = {}
-        if backend is not None:
-            agent_updates["backend"] = backend
-        if model is not None:
-            agent_updates["model"] = model
-        if effort is not None:
-            agent_updates["effort"] = effort
-        # model_validate, not model_copy: the overridden agent is validated
-        # (e.g. web_access = false with a backend that cannot honor it)
-        # before the run starts.
-        try:
-            agent = AgentConfig.model_validate(
-                {**config.agent.model_dump(), **agent_updates}
-            )
-        except ValueError as exc:
-            print_error(f"Invalid agent override: {escape(str(exc))}")
-            raise SystemExit(2)
-        config = config.model_copy(update={"agent": agent})
 
     base_dir = _helix_dir(project_root)
     setup_file_logging(base_dir)
