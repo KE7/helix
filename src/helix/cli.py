@@ -581,6 +581,13 @@ def sandbox_logout(
 @click.option("--evaluator", default=None, help="Override the evaluator command.")
 @click.option("--generations", default=None, type=int, help="Override max_generations.")
 @click.option(
+    "--stop-at-score",
+    "stop_at_score",
+    default=None,
+    type=float,
+    help="Override stop_at_score: end the run once the best val score reaches it.",
+)
+@click.option(
     "--no-merge",
     "no_merge",
     is_flag=True,
@@ -611,6 +618,7 @@ def evolve(
     objective: str | None,
     evaluator: str | None,
     generations: int | None,
+    stop_at_score: float | None,
     no_merge: bool,
     backend: str | None,
     model: str | None,
@@ -652,6 +660,14 @@ def evolve(
             update={
                 "evolution": config.evolution.model_copy(
                     update={"max_generations": generations}
+                )
+            }
+        )
+    if stop_at_score is not None:
+        config = config.model_copy(
+            update={
+                "evolution": config.evolution.model_copy(
+                    update={"stop_at_score": stop_at_score}
                 )
             }
         )

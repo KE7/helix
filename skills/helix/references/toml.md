@@ -118,6 +118,7 @@ objective instead of starting from the current working tree. `train_path` and
 max_generations = 20
 perfect_score_threshold = 1.0
 max_evaluations = -1
+# stop_at_score = 2.635983  # end the run once the best val score reaches it; unset = off
 
 minibatch_size = 3
 num_parallel_proposals = 4
@@ -142,6 +143,17 @@ merge_subsample_size = 5
 
 Important choices:
 
+- A run ends on `max_generations`, on `max_evaluations` (`<= 0` disables it),
+  or on `stop_at_score`, whichever comes first. `stop_at_score` (unset by
+  default; `helix evolve --stop-at-score X` overrides it) is checked at the
+  start of every generation: once the best mean validation score of any
+  accepted candidate is `>= stop_at_score`, the run stops the same way budget
+  exhaustion does, with state saved and the frontier printed. It mirrors GEPA's
+  `ScoreThresholdStopper`. `helix resume` under the same target stops again
+  straight away; raise or unset it to keep evolving.
+- `perfect_score_threshold` is not a stop. It is GEPA's skip-perfect gate: a
+  parent whose minibatch scores all reach it is not mutated that generation,
+  and the run carries on. Use `stop_at_score` to end a run at a score.
 - The four frontier modes mirror GEPA's `FrontierType`; `frontier_type =
   "instance"` is the HELIX default and needs no objective
   scores beyond the per-example results from the built-in `helix_result` parser.

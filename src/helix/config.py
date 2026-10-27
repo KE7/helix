@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tomllib
@@ -304,6 +305,13 @@ class EvolutionConfig(BaseModel):
     # per uncached example; single-task/no-example evaluator calls consume 0/1
     # metric calls (cached=0, uncached=1 because no per-example ids exist).
     max_evaluations: int = -1
+    # Score target that ends the run. `None` (default) disables it. Checked at
+    # the start of every generation against the best mean validation score of
+    # any accepted candidate; the run stops once that is >= this value (GEPA
+    # parity: ScoreThresholdStopper in utils/stop_condition.py). Unlike
+    # `perfect_score_threshold`, which only skips mutating a parent whose
+    # minibatch is already perfect, this ends the run.
+    stop_at_score: float | None = None
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False
     # Total cap on merge invocations across the entire run (not per-gen).
@@ -593,6 +601,11 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
+        if self.stop_at_score is not None and not math.isfinite(self.stop_at_score):
+            raise ValueError(
+                "evolution.stop_at_score must be a finite number "
+                f"(got {self.stop_at_score})"
+            )
         if self.max_workers < 1:
             raise ValueError(
                 f"evolution.max_workers must be >= 1 (got {self.max_workers})"

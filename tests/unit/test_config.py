@@ -416,3 +416,39 @@ class TestAgentEffortValidation:
                 assert messages == [], (
                     f"{backend!r} is unrestricted but emitted warnings: {messages}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# evolution.stop_at_score validation
+# ---------------------------------------------------------------------------
+
+
+class TestStopAtScore:
+    def test_default_is_off(self) -> None:
+        assert EvolutionConfig().stop_at_score is None
+
+    def test_loads_from_toml(self, tmp_path: Path) -> None:
+        toml = write_toml(tmp_path, """
+            objective = "x"
+
+            [evaluator]
+            command = "python evaluate.py"
+
+            [evolution]
+            stop_at_score = 2.635983362593453
+        """)
+
+        assert load_config(toml).evolution.stop_at_score == 2.635983362593453
+
+    @pytest.mark.parametrize("value", [-3.5, 0.0, 1, 1e9])
+    def test_accepts_any_finite_number(self, value: float) -> None:
+        assert EvolutionConfig(stop_at_score=value).stop_at_score == value
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_rejects_non_finite(self, value: float) -> None:
+        with pytest.raises(ValueError, match="stop_at_score must be a finite number"):
+            EvolutionConfig(stop_at_score=value)
+
+    def test_rejects_non_numeric(self) -> None:
+        with pytest.raises(ValidationError):
+            EvolutionConfig(stop_at_score="high")
