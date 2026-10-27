@@ -829,13 +829,16 @@ ones, the same way their tokens are charged to the budget. Parallel proposal
 slots each add their own work, so work can exceed wall time. Every duration
 leaves out time the machine slept, so a closed lid doesn't count.
 
-In this run, evaluation dominates: each child's solver runs for up to its
-600-second limit before a refiner LLM rewrites it. The mutation agent's 10
-calls took about 7 minutes in total, almost all of it waiting on the model.
+In this run, evaluation dominates, and the evaluator calls an LLM of its own.
+Each evaluation runs the candidate's solver for up to 600 seconds, then asks a
+refiner LLM (also `gpt-6-luna`, through Codex) to rewrite the code, and runs
+the rewrite too. So "evaluator" time here includes that refiner, separate from
+the mutation agent, whose 10 calls took about 7 minutes in total, almost all
+of it waiting on the model.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/helix-timing-dark.png">
-  <img alt="Bar chart of the same run: every generation but one spent about 10 minutes in the evaluator and under a minute in the mutation agent; across all 10 generations the evaluator took 90 minutes (92%) and the agent 7.4 minutes (8%), of which 6.9 minutes was waiting on the model" src="docs/images/helix-timing-light.png">
+  <img alt="Bar chart of the same run: every generation but one spent about 10 minutes in the evaluator (solver runs plus its refiner LLM) and under a minute in the mutation agent; across all 10 generations the evaluator took 90 minutes (92%) and the agent 7.4 minutes (8%), of which 6.9 minutes was waiting on the model" src="docs/images/helix-timing-light.png">
 </picture>
 
 To see a run as a timeline instead, `helix timing --perfetto trace.json`
