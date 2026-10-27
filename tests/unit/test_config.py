@@ -176,7 +176,7 @@ class TestMissingRequiredFields:
         """)
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
 
     def test_missing_evaluator_command_raises(self, tmp_path):
         """evaluator.command is required."""
@@ -187,7 +187,7 @@ class TestMissingRequiredFields:
         """)
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
 
     def test_missing_evaluator_section_raises(self, tmp_path):
         """evaluator section itself is required."""
@@ -196,7 +196,7 @@ class TestMissingRequiredFields:
         """)
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
 
     def test_removed_parser_key_raises(self, tmp_path):
         """The removed parser setting is rejected as an unknown key."""
@@ -416,3 +416,129 @@ class TestAgentEffortValidation:
                 assert messages == [], (
                     f"{backend!r} is unrestricted but emitted warnings: {messages}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# evolution.stop_at_score validation
+# ---------------------------------------------------------------------------
+
+
+class TestStopAtScore:
+    def test_default_is_off(self) -> None:
+        assert EvolutionConfig().stop_at_score is None
+
+    def test_loads_from_toml(self, tmp_path: Path) -> None:
+        toml = write_toml(tmp_path, """
+            objective = "x"
+
+            [evaluator]
+            command = "python evaluate.py"
+
+            [evolution]
+            stop_at_score = 0.75
+        """)
+
+        assert load_config(toml).evolution.stop_at_score == 0.75
+
+    @pytest.mark.parametrize("value", [-3.5, 0.0, 1, 1e9])
+    def test_accepts_any_finite_number(self, value: float) -> None:
+        assert EvolutionConfig(stop_at_score=value).stop_at_score == value
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_rejects_non_finite(self, value: float) -> None:
+        with pytest.raises(ValueError, match="stop_at_score must be a finite number"):
+            EvolutionConfig(stop_at_score=value)
+
+    def test_rejects_non_numeric(self) -> None:
+        with pytest.raises(ValidationError):
+            EvolutionConfig(stop_at_score="high")
+
+
+# ---------------------------------------------------------------------------
+# load_config overrides (the path every `helix evolve` flag takes)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfigOverrides:
+    BASE = """
+        objective = "x"
+
+        [evaluator]
+        command = "python evaluate.py"
+
+        [evolution]
+        max_generations = 7
+        max_evaluations = 50
+    """
+
+    def test_dicts_merge_and_scalars_replace(self, tmp_path: Path) -> None:
+        cfg = load_config(
+            write_toml(tmp_path, self.BASE),
+            {"objective": "y", "evolution": {"max_generations": 3}},
+        )
+
+        assert cfg.objective == "y"
+        assert cfg.evolution.max_generations == 3
+        # Sibling keys in the same TOML table are kept.
+        assert cfg.evolution.max_evaluations == 50
+        assert cfg.evaluator.command == "python evaluate.py"
+
+    def test_override_runs_helix_config_cross_field_checks(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Re-validating only the sub-model skipped HelixConfig.model_post_init,
+        # so an empty objective slipped past the seedless check.
+        toml = write_toml(tmp_path, self.BASE + "\n[seedless]\nenabled = true\n")
+
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(toml, {"objective": " "})
+        assert exc_info.value.code == 2
+        assert "must be non-empty when seedless.enabled=True" in capsys.readouterr().err
+
+    def test_cli_backend_override_triggers_effort_warning(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        from click.testing import CliRunner
+
+        from helix.cli import cli
+
+        write_toml(tmp_path, self.BASE + '\n[agent]\neffort = "high"\n')
+        run = mocker.patch("helix.evolution.run_evolution")
+
+        with pytest.warns(UserWarning, match="does not propagate an effort"):
+            result = CliRunner().invoke(
+                cli, ["evolve", "--dir", str(tmp_path), "--backend", "cursor"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert run.call_args[0][0].agent.backend == "cursor"
+
+    @pytest.mark.parametrize(
+        ("flags", "message"),
+        [
+            (["--objective", ""], "must be non-empty when seedless.enabled=True"),
+            (["--evaluator", ""], "evaluator.command must be non-empty"),
+        ],
+    )
+    def test_cli_empty_string_override_reaches_validation(
+        self, tmp_path: Path, mocker, flags: list[str], message: str
+    ) -> None:
+        # An empty flag is an override, not "no flag": it must be validated
+        # rather than silently dropped.
+        from click.testing import CliRunner
+
+        from helix.cli import cli
+
+        write_toml(tmp_path, self.BASE + "\n[seedless]\nenabled = true\n")
+        run = mocker.patch("helix.evolution.run_evolution")
+
+        result = CliRunner().invoke(cli, ["evolve", "--dir", str(tmp_path), *flags])
+
+        assert result.exit_code == 2, result.output
+        assert message in " ".join(result.output.split())
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("command", ["", "   "])
+    def test_empty_evaluator_command_rejected(self, command: str) -> None:
+        with pytest.raises(ValueError, match="evaluator.command must be non-empty"):
+            EvaluatorConfig(command=command)

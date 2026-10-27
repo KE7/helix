@@ -41,7 +41,7 @@ class TestTOMLParsingErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Error parsing TOML file" in captured.err
         assert str(toml) in captured.err
@@ -60,7 +60,7 @@ class TestTOMLParsingErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Error parsing TOML file" in captured.err
 
@@ -80,7 +80,7 @@ class TestTOMLParsingErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Error parsing TOML file" in captured.err
 
@@ -100,7 +100,7 @@ class TestValidationErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "objective" in captured.err
@@ -117,7 +117,7 @@ class TestValidationErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "command" in captured.err
@@ -131,7 +131,7 @@ class TestValidationErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "evaluator" in captured.err
@@ -150,7 +150,7 @@ class TestValidationErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert removed_key in captured.err
@@ -171,7 +171,7 @@ class TestValidationErrors:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "max_generations" in captured.err
@@ -204,7 +204,7 @@ class TestUnknownKeysRejected:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "batch_sampler" in captured.err
@@ -224,7 +224,7 @@ class TestUnknownKeysRejected:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "batch_samplr" in captured.err
@@ -243,7 +243,7 @@ class TestUnknownKeysRejected:
         with pytest.raises(SystemExit) as exc_info:
             load_config(toml)
 
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert "Configuration validation error" in captured.err
         assert "bogus_top_level" in captured.err

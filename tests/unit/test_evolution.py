@@ -112,6 +112,7 @@ def make_config(
     merge_val_overlap_floor: int = 5,
     merge_subsample_size: int = 5,
     frontier_type: str = "hybrid",
+    stop_at_score: float | None = None,
 ) -> HelixConfig:
     """Build a HelixConfig for evolution unit tests.
 
@@ -133,6 +134,7 @@ def make_config(
         merge_val_overlap_floor=merge_val_overlap_floor,
         merge_subsample_size=merge_subsample_size,
         frontier_type=frontier_type,
+        stop_at_score=stop_at_score,
     )
     return HelixConfig(
         objective="Improve the code",
@@ -2759,3 +2761,97 @@ class TestSandboxAgentStateResetPerGeneration:
 
         reset.assert_not_called()
         assert [e for e, _ in events] == ["candidate-transcript-copy"] * 2
+
+
+# ---------------------------------------------------------------------------
+# run_evolution — stop_at_score target
+# ---------------------------------------------------------------------------
+
+
+class TestStopAtScore:
+    """``stop_at_score`` ends the run once the best val score reaches it."""
+
+    def _run(self, tmp_path, all_mocks, *, stop_at_score, seed_score=0.3):
+        # Each generation's child scores 0.1 above the previous one.
+        all_mocks["create_seed_worktree"].return_value = make_candidate("g0-s0")
+        all_mocks["mutate"].side_effect = lambda **kw: make_candidate(
+            kw["new_id"], generation=int(kw["new_id"].split("-")[0][1:])
+        )
+
+        def run_eval(candidate, config, split=None, instances=None, **kwargs):
+            gen = int(candidate.id.split("-")[0][1:])
+            return make_eval_result(candidate.id, {"i1": seed_score + 0.1 * gen})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        saved_generations: list[int] = []
+        all_mocks["save_state"].side_effect = (
+            lambda state, path: saved_generations.append(state.generation)
+        )
+        config = make_config(
+            max_generations=10,
+            max_evaluations=10000,
+            perfect_score_threshold=None,
+            stop_at_score=stop_at_score,
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+        return result, saved_generations
+
+    def test_stops_after_generation_that_crosses_target(self, tmp_path, all_mocks):
+        # Seed 0.3, gen-1 child 0.4, gen-2 child 0.5: the first >= 0.45.
+        result, saved = self._run(tmp_path, all_mocks, stop_at_score=0.45)
+
+        assert all_mocks["mutate"].call_count == 2
+        assert result.best_candidate.generation == 2
+        # State was saved at the end of generation 2 and never advanced past it.
+        assert saved[-1] == 2
+        all_mocks["render_budget"].assert_called_once()
+
+    def test_target_is_inclusive(self, tmp_path, all_mocks):
+        """GEPA's ScoreThresholdStopper uses >=, so hitting it exactly stops."""
+        self._run(tmp_path, all_mocks, stop_at_score=0.5, seed_score=0.5)
+
+        all_mocks["mutate"].assert_not_called()
+
+    def test_seed_already_at_target_never_mutates(self, tmp_path, all_mocks):
+        # Same path as ``helix resume`` of a run that already met its target:
+        # the rehydrated frontier meets it, so the loop stops before gen 1.
+        result, saved = self._run(tmp_path, all_mocks, stop_at_score=0.2)
+
+        all_mocks["mutate"].assert_not_called()
+        assert result.best_candidate.id == "g0-s0"
+        assert saved[-1] == 0
+
+    def test_unreached_target_runs_all_generations(self, tmp_path, all_mocks):
+        self._run(tmp_path, all_mocks, stop_at_score=100.0)
+
+        assert all_mocks["mutate"].call_count == 10
+
+    def _invoke_evolve(self, tmp_path, mocker, value: str):
+        from click.testing import CliRunner
+
+        from helix.cli import cli
+
+        (tmp_path / "helix.toml").write_text(
+            'objective = "x"\n[evaluator]\ncommand = "true"\n'
+            "[evolution]\nstop_at_score = 0.5\n"
+        )
+        run = mocker.patch("helix.evolution.run_evolution")
+        result = CliRunner().invoke(
+            cli, ["evolve", "--dir", str(tmp_path), "--stop-at-score", value]
+        )
+        return result, run
+
+    def test_evolve_cli_override(self, tmp_path, mocker):
+        result, run = self._invoke_evolve(tmp_path, mocker, "2.5")
+
+        assert result.exit_code == 0, result.output
+        assert run.call_args[0][0].evolution.stop_at_score == 2.5
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_evolve_cli_rejects_non_finite(self, tmp_path, mocker, value):
+        # click's FLOAT parses these; a nan target would never fire.
+        result, run = self._invoke_evolve(tmp_path, mocker, value)
+
+        assert result.exit_code == 2, result.output
+        assert "stop_at_score must be a finite number" in result.output
+        run.assert_not_called()

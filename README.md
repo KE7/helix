@@ -385,6 +385,8 @@ max_evaluations = -1             # evaluation budget cap (-1 = no cap)
                                  # NOTE: at least one stopping condition is required —
                                  # max_generations must be > 0 or max_evaluations must be > 0;
                                  # setting both to ≤ 0 raises ValueError at evolution start.
+# stop_at_score = 0.95           # end the run once the best val score is >= this (unset = off);
+                                 # unlike perfect_score_threshold, this stops the run
 merge_enabled = false            # enable merge/crossover operations
 max_merge_invocations = 5        # total merge cap across entire run
 merge_val_overlap_floor = 5      # minimum val-set overlap for merge candidates

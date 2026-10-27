@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tomllib
@@ -118,6 +119,12 @@ class EvaluatorConfig(BaseModel):
             "mutations/merges (e.g. evaluator helpers, goldens)."
         ),
     )
+
+    def model_post_init(self, __context: object) -> None:
+        # Rejected here, not only at run_evolution's preflight, so an empty
+        # helix.toml value or `--evaluator ""` fails before .helix/ is created.
+        if not self.command.strip():
+            raise ValueError("evaluator.command must be non-empty")
 
 
 class DatasetConfig(BaseModel):
@@ -304,6 +311,13 @@ class EvolutionConfig(BaseModel):
     # per uncached example; single-task/no-example evaluator calls consume 0/1
     # metric calls (cached=0, uncached=1 because no per-example ids exist).
     max_evaluations: int = -1
+    # Score target that ends the run. `None` (default) disables it. Checked at
+    # the start of every generation against the best mean validation score of
+    # any accepted candidate; the run stops once that is >= this value (GEPA
+    # parity: ScoreThresholdStopper in utils/stop_condition.py). Unlike
+    # `perfect_score_threshold`, which only skips mutating a parent whose
+    # minibatch is already perfect, this ends the run.
+    stop_at_score: float | None = None
     # Merge is OFF by default (GEPA parity: merge = None in GEPAConfig).
     merge_enabled: bool = False
     # Total cap on merge invocations across the entire run (not per-gen).
@@ -593,6 +607,11 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
+        if self.stop_at_score is not None and not math.isfinite(self.stop_at_score):
+            raise ValueError(
+                "evolution.stop_at_score must be a finite number "
+                f"(got {self.stop_at_score})"
+            )
         if self.max_workers < 1:
             raise ValueError(
                 f"evolution.max_workers must be >= 1 (got {self.max_workers})"
@@ -911,11 +930,29 @@ def _validate_agent_effort(agent: AgentConfig) -> None:
         )
 
 
-def load_config(path: Path) -> HelixConfig:
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Return *base* with *overrides* applied: dicts merge, anything else replaces."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(
+    path: Path, overrides: dict[str, Any] | None = None
+) -> HelixConfig:
     """Load a HelixConfig from a TOML file.
 
     Supports both flat format (``objective = "..."`` at root) and the
     ``[project]`` section format (fields are merged into the root).
+
+    *overrides* is a nested dict shaped like the TOML (e.g.
+    ``{"evolution": {"max_generations": 3}}``), deep-merged into the file
+    before the one validation, so CLI flags get the same checks and error
+    output as the file.  Any config error exits with status 2.
     """
     _load_dotenv_file(path.parent / ".env")
     try:
@@ -928,7 +965,7 @@ def load_config(path: Path) -> HelixConfig:
             f"   Please check your TOML syntax.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(2)
 
     # If a [project] section is present, promote its keys to the root level
     # (values already at root take precedence over those inside [project]).
@@ -939,11 +976,15 @@ def load_config(path: Path) -> HelixConfig:
         }
         data = merged
 
+    if overrides:
+        data = _deep_merge(data, overrides)
+
     try:
         return HelixConfig.model_validate(data)
     except ValidationError as e:
+        source = f"{path} (with command-line overrides)" if overrides else str(path)
         print(
-            f"❌ Configuration validation error in {path}:\n",
+            f"❌ Configuration validation error in {source}:\n",
             file=sys.stderr,
         )
         for error in e.errors():
@@ -968,4 +1009,4 @@ def load_config(path: Path) -> HelixConfig:
                     "   Hint: Check that the value is the correct type", file=sys.stderr
                 )
             print(file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)

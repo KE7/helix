@@ -169,8 +169,9 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
         prompts contain, not what any saved score means.  Omitted
         deliberately so it can be switched on mid-run: resuming with it
         newly enabled just starts recording from the next child.
-      * ``evolution.max_generations`` / ``max_evaluations`` / parallelism:
-        budgets and concurrency, not score interpretation.
+      * ``evolution.max_generations`` / ``max_evaluations`` /
+        ``stop_at_score`` / parallelism: stop conditions and concurrency,
+        not score interpretation.
       * ``agent.*``: changing the mutation backend / model / effort
         affects only future proposals, not the meaning of saved scores.
         (GEPA likewise treats the LM client as out-of-band of the
@@ -2248,6 +2249,23 @@ def _run_evolution_impl(
 
         gen = start_gen - 1
         while gen < config.evolution.max_generations:
+            # GEPA parity: ScoreThresholdStopper (utils/stop_condition.py),
+            # which GEPAEngine.run checks before each iteration, stops once
+            # max(program_full_scores_val_set) >= threshold.  The frontier is
+            # append-only, so ``frontier.best()`` (the candidate the run
+            # reports) is the max over every accepted candidate's val score.
+            # Checked before ``gen`` advances so a stopped run (and a resume
+            # of it under the same target) uses no generation number.
+            _target = config.evolution.stop_at_score
+            if _target is not None and len(frontier):
+                _best = frontier.get_result(frontier.best().id)
+                if _best is not None and _best.aggregate_score() >= _target:
+                    print_success(
+                        f"Score target reached ({_best.aggregate_score():.6g} >= "
+                        f"stop_at_score {_target:.6g}) -- stopping."
+                    )
+                    break
+
             # GEPA parity: increment generation UNCONDITIONALLY
             # at the top of the loop body, before any proposal work.  GEPA
             # advances ``state.i`` unconditionally at the top of
