@@ -795,21 +795,32 @@ stderr as fallback debug context.
 
 Every `helix evolve` and `helix resume` appends a timing trace to
 `.helix/timing.jsonl`, the same way it always records its budget; there is
-nothing to turn on. `helix timing` reads it:
+nothing to turn on. `helix timing` reads it. Here it is on a 10-generation
+run of the circle-packing example, with Codex `gpt-6-luna` as the mutation
+agent:
 
 ```console
 $ helix timing
-                    Work by kind and candidate fate                     
-┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┓
-┃ Kind       ┃ Accepted ┃ Rejected ┃ Undecided ┃ Unattributed ┃  Total ┃
-┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━┩
-│ agent      │    2h11m │    9h48m │      0.0s │         0.0s │ 12h00m │
-│ evaluator  │    1h02m │    3h20m │      0.0s │         0.0s │  4h22m │
-│ git        │    4m10s │   15m02s │      0.0s │         0.0s │ 19m12s │
-│ state save │     0.0s │     0.0s │      0.0s │        41.3s │  41.3s │
-└────────────┴──────────┴──────────┴───────────┴──────────────┴────────┘
-Candidates: 76 accepted, 724 rejected, 0 undecided
-Wall: 5h12m over 200 generations (mean 1m34s, slowest gen 37: 6m02s)
+                    Work by kind and candidate fate
+┏━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Kind       ┃ Accepted ┃ Rejected ┃ Undecided ┃ Unattributed ┃ Total ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━┩
+│ evaluator  │   49m44s │   40m00s │      0.0s │         0.0s │ 1h29m │
+│ agent      │    4m22s │    3m01s │      0.0s │         0.0s │ 7m24s │
+│ git        │     1.1s │     2.1s │      0.0s │         0.0s │  3.1s │
+│ state save │     0.0s │     0.0s │      0.0s │         0.0s │  0.0s │
+└────────────┴──────────┴──────────┴───────────┴──────────────┴───────┘
+                  Inside agent and evaluator calls
+┏━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃ Within ┃ Name      ┃ Calls ┃ Accepted ┃ Rejected ┃ Total ┃   Max ┃
+┡━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ agent  │ model     │    10 │    4m09s │    2m45s │ 6m54s │ 1m11s │
+│ agent  │ other     │    10 │     8.5s │     9.9s │ 18.4s │  2.7s │
+│ agent  │ tool:exec │    97 │     4.6s │     6.4s │ 10.9s │  0.6s │
+└────────┴───────────┴───────┴──────────┴──────────┴───────┴───────┘
+Candidates: 6 accepted, 5 rejected, 0 undecided
+Wall: 2h34m over 10 generations (mean 9m42s, slowest gen 9: 11m04s)
+Work adds up across parallel proposal slots, so it can exceed wall time.
 ```
 
 *Work* is the time spent on each kind of operation, grouped by what became of
@@ -817,7 +828,11 @@ the candidate it was for. Rejected candidates are timed exactly like accepted
 ones, the same way their tokens are charged to the budget. Parallel proposal
 slots each add their own work, so work can exceed wall time. Work and
 generation times leave out time the machine slept; the total wall time
-includes it.
+includes it (this run's machine slept for about an hour).
+
+In this run, evaluation dominates: each child's solver runs for up to its
+600-second limit before a refiner LLM rewrites it. The mutation agent's 10
+calls took about 7 minutes in total, almost all of it waiting on the model.
 
 To see a run as a timeline instead, `helix timing --perfetto trace.json`
 writes the trace in Chrome's trace format. Drag that file into
@@ -826,22 +841,11 @@ track per thread: the parallel proposal slots, what each spent its time on, and
 where siblings waited on each other. It's an optional viewer, not a
 dependency; nothing is installed.
 
+![One proposal from the circle-packing run in Perfetto: the parent's quick cached re-evaluation, the mutation with its 40-second agent call, then the child's long evaluation](docs/images/helix-timing-perfetto.png)
+
 #### Inside agent and evaluator calls
 
-`helix timing` also splits each agent call, and anything you time yourself:
-
-```console
-                       Inside agent and evaluator calls                        
-┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┓
-┃ Within           ┃ Name      ┃ Calls ┃ Accepted ┃ Rejected ┃  Total ┃   Max ┃
-┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━╇━━━━━━━┩
-│ agent            │ model     │   800 │    1h40m │    7h31m │  9h11m │ 4m02s │
-│ agent            │ tool:Bash │  9214 │   22m10s │    1h48m │  2h10m │ 9m55s │
-│ agent            │ other     │   800 │    4m01s │   17m33s │ 21m34s │ 41.0s │
-│ evaluate (timed) │ sam3      │ 61440 │   19m02s │   58m41s │  1h17m │  3.1s │
-│ evaluate (timed) │ molmo     │ 30720 │   11m20s │   34m09s │ 45m29s │  2.4s │
-└──────────────────┴───────────┴───────┴──────────┴──────────┴────────┴───────┘
-```
+The second table splits each agent call, and anything you time yourself.
 
 **Agent calls** are split using the backend's own transcript:
 - `tool:<name>` is each tool call, from its start to its result.
