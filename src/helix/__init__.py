@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from helix.asi import log
-from helix.custom_timing import timed
+from helix.timing import timed
 from helix.population import (
     Candidate,
     CandidateSummary,

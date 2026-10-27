@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from click.testing import CliRunner
 
-from helix import agent_timing, custom_timing, timed, timing
+from helix import agent_timing, timed, timing
 from helix.cli import cli
 from helix.config import AgentConfig, EvaluatorSidecarConfig, SandboxConfig
 from helix.executor import run_evaluator
@@ -39,8 +39,8 @@ def _details(path: Path) -> list[dict[str, Any]]:
 
 @pytest.fixture
 def timing_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = tmp_path / custom_timing.log_name()
-    monkeypatch.setenv(custom_timing.HELIX_TIMING_LOG_ENV, str(path))
+    path = tmp_path / timing.timed_log_name()
+    monkeypatch.setenv(timing.HELIX_TIMING_LOG_ENV, str(path))
     return path
 
 
@@ -121,7 +121,7 @@ class TestTimed:
     def test_outside_helix_it_is_a_no_op(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(custom_timing.HELIX_TIMING_LOG_ENV, raising=False)
+        monkeypatch.delenv(timing.HELIX_TIMING_LOG_ENV, raising=False)
         with timed("x"):
             pass
         timed.record("y", 1.0)
@@ -142,7 +142,7 @@ class TestTimed:
             '{"name": "torn", "seco',
         ])
 
-        totals = {(t["name"], t["example"]): t for t in custom_timing.totals(raw)}
+        totals = {(t["name"], t["example"]): t for t in timing.timed_totals(raw)}
 
         assert set(totals) == {("sam3", "a"), ("sam3", "b"), ("molmo", None)}
         assert totals[("sam3", "a")] == {
@@ -151,7 +151,7 @@ class TestTimed:
         }
 
     def test_read_is_empty_for_a_missing_file(self, tmp_path: Path) -> None:
-        assert custom_timing.read(tmp_path / "missing.jsonl") == ""
+        assert timing.read_timed_log(tmp_path / "missing.jsonl") == ""
 
 
 class TestEvaluatorChannel:
@@ -216,7 +216,7 @@ class TestEvaluatorChannel:
 
         commands = run.call_args.args[0]
         assert len(commands) == 2  # the evaluator and one capture command
-        log_path = run.call_args.kwargs["env"][custom_timing.HELIX_TIMING_LOG_ENV]
+        log_path = run.call_args.kwargs["env"][timing.HELIX_TIMING_LOG_ENV]
         assert log_path.startswith("/workspace/.helix_timing_")
         assert log_path in commands[-1][2]
         assert "note" in result.asi["log"]
@@ -352,7 +352,7 @@ class TestAgentChannel:
 
         def agent(args: list[str], **kwargs: Any) -> MagicMock:
             # A script the agent ran reports its own timing.
-            log = Path(kwargs["env"][custom_timing.HELIX_TIMING_LOG_ENV])
+            log = Path(kwargs["env"][timing.HELIX_TIMING_LOG_ENV])
             log.write_text(json.dumps({"name": "sam3", "seconds": 2.5}) + "\n")
             return MagicMock(stdout=json.dumps({"result": "ok"}), stderr="", returncode=0)
 

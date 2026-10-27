@@ -39,8 +39,15 @@ from helix.sibling_history import (
     history_instruction,
     summary_prompt,
 )
-from helix import agent_timing, custom_timing
-from helix.timing import detail, traced
+from helix import agent_timing
+from helix.timing import (
+    HELIX_TIMING_LOG_ENV,
+    detail,
+    read_timed_log,
+    timed_log_name,
+    timed_totals,
+    traced,
+)
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -2042,8 +2049,8 @@ def invoke_claude_code(
     # Scripts the agent runs can report ``helix.timed`` calls; the sandbox
     # copies its workspace back, so the file is read from the worktree either way.
     sandboxed = sandbox is not None and sandbox.enabled
-    timing_log_name = custom_timing.log_name()
-    backend_env[custom_timing.HELIX_TIMING_LOG_ENV] = (
+    timing_log_name = timed_log_name()
+    backend_env[HELIX_TIMING_LOG_ENV] = (
         f"/workspace/{timing_log_name}"
         if sandboxed
         else str(Path(worktree_path) / timing_log_name)
@@ -2095,7 +2102,7 @@ def invoke_claude_code(
         )
     agent_seconds = time.monotonic() - started
     timing_log = Path(worktree_path) / timing_log_name
-    for total in custom_timing.totals(custom_timing.read(timing_log)):
+    for total in timed_totals(read_timed_log(timing_log)):
         detail("agent", "timed", total)
     timing_log.unlink(missing_ok=True)
 
