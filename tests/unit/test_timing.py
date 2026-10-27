@@ -72,9 +72,8 @@ class TestSpan:
         assert start["run_id"] == end["run_id"]
         assert end["attrs"] == {"candidate_id": "g1-s0"}
         assert end["outcome"] == "ok" and "error_type" not in end
-        assert end["duration_seconds"] == pytest.approx(
-            end["monotonic"] - start["monotonic"]
-        )
+        assert end["duration_seconds"] >= 0
+        assert end["wall_time"] >= start["wall_time"]
 
     def test_nested_spans_link_to_their_parent(self, tmp_path: Path) -> None:
         path = tmp_path / "t.jsonl"

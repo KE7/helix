@@ -98,7 +98,14 @@ from helix.state import (
     save_eval_cache,
     save_state,
 )
-from helix.timing import TIMING_FILE_NAME, decision, recording, span, traced
+from helix.timing import (
+    TIMING_FILE_NAME,
+    decision,
+    evaluation_attrs,
+    recording,
+    span,
+    traced,
+)
 from helix.trace import TRACE, EventType
 from helix.worktree import (
     create_seed_worktree,
@@ -878,15 +885,7 @@ def _candidate_content_key(candidate: Candidate) -> str:
     return candidate.id
 
 
-@traced(
-    "cached_evaluate",
-    lambda a: {
-        "candidate_id": a["candidate"].id,
-        "split": a["split"],
-        "examples": None,
-        "evaluation_phase": None,
-    },
-)
+@traced("cached_evaluate", evaluation_attrs(None))
 def _cached_eval(
     candidate: Candidate,
     config: HelixConfig,
@@ -909,15 +908,7 @@ def _cached_eval(
     return result, False
 
 
-@traced(
-    "cached_evaluate",
-    lambda a: {
-        "candidate_id": a["candidate"].id,
-        "split": a["split"],
-        "examples": len(a["example_ids"]),
-        "evaluation_phase": a["evaluation_phase"],
-    },
-)
+@traced("cached_evaluate", evaluation_attrs("example_ids"))
 def _cached_evaluate_batch(
     candidate: Candidate,
     example_ids: list[str],

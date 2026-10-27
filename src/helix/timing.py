@@ -12,8 +12,8 @@ keeps every record it got to.  A span is a ``start`` record on entry and an
 
     {"event": "start", "span": "evaluate", "span_id": "...",
      "parent_span_id": "...", "run_id": "...", "generation": 3,
-     "candidate": "g3-s9", "wall_time": 1757400000.1, "monotonic": 1234.5,
-     "thread_id": 6199, "attrs": {...}}
+     "candidate": "g3-s9", "wall_time": 1757400000.1, "thread_id": 6199,
+     "attrs": {...}}
     {"event": "end", ..., "duration_seconds": 12.2, "outcome": "ok"}
 
 ``parent_span_id`` is the span that was open when this one started, so the
@@ -144,12 +144,13 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
         "generation": generation,
         "candidate": candidate,
         "wall_time": time.time(),
-        "monotonic": time.monotonic(),
         "thread_id": threading.get_ident(),
         "attrs": attrs,
     }
     _write(record)
-    started = record["monotonic"]
+    # Durations come from the monotonic clock, which never jumps; its raw
+    # value means nothing outside this process, so it is not recorded.
+    started = time.monotonic()
     token = _context.set((span_id, generation, candidate))
     outcome, error_type = "ok", None
     try:
@@ -164,12 +165,10 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
             # Exited in a different context than it was entered in; the
             # parent pointer there was never this span's to restore.
             pass
-        now = time.monotonic()
         record.update(
             event="end",
             wall_time=time.time(),
-            monotonic=now,
-            duration_seconds=now - started,
+            duration_seconds=time.monotonic() - started,
             outcome=outcome,
         )
         if error_type is not None:
@@ -192,7 +191,6 @@ def decision(candidate_id: str, *, accepted: bool, reason: str) -> None:
             "run_id": _run_id,
             "generation": generation,
             "wall_time": time.time(),
-            "monotonic": time.monotonic(),
             "thread_id": threading.get_ident(),
         }
     )
@@ -236,6 +234,22 @@ def traced(
         return wrapper
 
     return decorate
+
+
+def evaluation_attrs(ids: str | None) -> AttrsFn:
+    """Attrs for an evaluation span, reading the example ids from parameter
+    *ids* (``None``: the function always evaluates the whole split)."""
+
+    def attrs(a: dict[str, Any]) -> dict[str, Any]:
+        examples = None if ids is None else a[ids]
+        return {
+            "candidate_id": a["candidate"].id,
+            "split": a["split"],
+            "examples": None if examples is None else len(examples),
+            "evaluation_phase": a.get("evaluation_phase"),
+        }
+
+    return attrs
 
 
 # ---------------------------------------------------------------------------

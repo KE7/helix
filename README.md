@@ -830,7 +830,7 @@ One JSON object per line, flushed as written so a killed run keeps everything
 it finished. Each operation is a *span* with a `start` and an `end` record:
 
 ```json
-{"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "generation": 3, "candidate": "g3-s9", "wall_time": 1757400000.1, "monotonic": 1234.5, "thread_id": 6199, "attrs": {"candidate_id": "g2-s4", "split": "train", "examples": 8, "evaluation_phase": null}}
+{"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "generation": 3, "candidate": "g3-s9", "wall_time": 1757400000.1, "thread_id": 6199, "attrs": {"candidate_id": "g2-s4", "split": "train", "examples": 8, "evaluation_phase": null}}
 {"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
 {"event": "decision", "candidate": "g3-s9", "accepted": false, "reason": "train-gate-rejected candidate", "generation": 3, …}
 ```
