@@ -902,11 +902,12 @@ def log_cmd(project_dir: Path | None) -> None:
 
 
 def _fmt_seconds(seconds: float) -> str:
-    if seconds >= 3600:
-        return f"{seconds // 3600:.0f}h{seconds % 3600 // 60:02.0f}m"
-    if seconds >= 60:
-        return f"{seconds // 60:.0f}m{seconds % 60:02.0f}s"
-    return f"{seconds:.1f}s"
+    if seconds < 59.95:
+        return f"{seconds:.1f}s"
+    whole = round(seconds)
+    if whole >= 3600:
+        return f"{whole // 3600}h{whole % 3600 // 60:02d}m"
+    return f"{whole // 60}m{whole % 60:02d}s"
 
 
 @cli.command("timing")

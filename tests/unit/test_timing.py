@@ -623,3 +623,20 @@ class TestEndToEnd:
             elif r["span"] == "evaluate":
                 assert parent(r) == "cached_evaluate"
                 assert r["attrs"]["split"] in {"train", "val"}
+
+
+class TestFormatting:
+    @pytest.mark.parametrize(
+        "seconds,text",
+        [(0.04, "0.0s"), (59.94, "59.9s"), (59.96, "1m00s"), (119.7, "2m00s"),
+         (3599.6, "1h00m"), (7322.0, "2h02m")],
+    )
+    def test_fmt_seconds_never_shows_60(self, seconds: float, text: str) -> None:
+        from helix.cli import _fmt_seconds
+
+        assert _fmt_seconds(seconds) == text
+
+    def test_runs_do_not_grow_the_traced_registry(self) -> None:
+        # Runs after TestEndToEnd in this file: a per-run closure decorated
+        # with @traced would be registered once per run_evolution call.
+        assert "save_state" not in [name for name, _, _ in timing.TRACED]

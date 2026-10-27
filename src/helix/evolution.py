@@ -2054,15 +2054,17 @@ def _run_evolution_impl(
     # run.
     _eval_cache_cleared = [False]
 
-    # Rewrites the whole eval-cache pickle, so its cost grows with the run.
-    @traced("save_state")
     def _save_state(s: EvolutionState) -> None:
-        save_state(s, project_root)
-        if minibatch_cache is not None:
-            save_eval_cache(minibatch_cache._cache, project_root)
-        elif not _eval_cache_cleared[0]:
-            clear_eval_cache(project_root)
-            _eval_cache_cleared[0] = True
+        # Rewrites the whole eval-cache pickle, so its cost grows with the run.
+        # A ``span`` rather than ``@traced``: decorating this per-run closure
+        # would register it, and everything it captures, for good.
+        with span("save_state"):
+            save_state(s, project_root)
+            if minibatch_cache is not None:
+                save_eval_cache(minibatch_cache._cache, project_root)
+            elif not _eval_cache_cleared[0]:
+                clear_eval_cache(project_root)
+                _eval_cache_cleared[0] = True
 
     def _sync_frontier_state() -> None:
         assert state is not None
