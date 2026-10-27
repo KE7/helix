@@ -22,7 +22,12 @@ network that [`examples/circle_packing_sandbox/`](../../examples/circle_packing_
 provides (see [Agent sandbox](#agent-sandbox)). The evaluator runs on the host,
 as optimize_anything's did.
 
-No run of this experiment has been recorded yet.
+One run is recorded, with a different proposer from the one configured here:
+Codex `gpt-6-luna` on the host, with GEPA's GPT-5.1 refiner. It reached
+2.6359830847 and first passed 2.63598 at metric call 23 (optimize_anything:
+call 63). optimize_anything's final 2.6359833626 is higher only through the
+validator's `1e-6` overlap tolerance; with no tolerance, this run's packing is
+the larger. See [Recorded run](#recorded-run).
 
 ---
 
@@ -115,8 +120,12 @@ environment.
 | Best known packing | 2.63598+ | [Erich Friedman's Packing Center](https://erich-friedman.github.io/packing/cirRsqu/) |
 | optimize_anything | 2.635983362593453 | The published run's StateTracker log (`state_tracker_logs.json` of the [artifact](https://github.com/gepa-ai/optimize-anything-artifact/tree/58cdf89d/acm_cais_artifact_evaluation/domains/circle_packing/logs)): first ≥ 2.63598 at metric call 63, final best at 114, 133 metric calls in total |
 | AlphaEvolve | 2.635 | [AlphaEvolve results notebook](https://github.com/google-deepmind/alphaevolve_results/blob/main/mathematical_results.ipynb), section B.12 |
+| HELIX ([recorded run](#recorded-run)) | 2.635983084711534 | Codex `gpt-6-luna` proposer, GPT-5.1 refiner: first ≥ 2.63598 at metric call 23, final best at 54, stopped by hand at 73 |
 
-These are best known values, not proven optima. The
+These are best known values, not proven optima. optimize_anything's value
+uses the validator's tolerance: its packing overlaps by up to 9.6e-8, and
+without overlaps the same centers give at most 2.6359828435 (see
+[Tolerance](#tolerance)). The
 [paper](https://arxiv.org/abs/2605.19633) reports 2.63598+; its controlled
 comparison reaches 2.63598 in 63 evaluations for about $3.18.
 
@@ -130,6 +139,101 @@ uv run --no-project --python 3.11 --with-requirements requirements.txt python3 -
   "import gepa_fitness as g; r = g.execute_code(open('../../docs/experiments/circle-packing/reference_known_best.py').read(), 600); print(r['success'], r['result']['validation_details']['sum_radii'])"
 # True 2.6359815211
 ```
+
+---
+
+## Recorded run
+
+One run, on 2026-10-27, with HELIX at `main` 8b9efc1 plus this experiment.
+It is not the configuration above: the proposer is OpenAI's small model in
+its own harness rather than Claude Haiku in Claude Code, so it ran outside the
+agent sandbox. Everything that decides a score is the experiment's.
+
+| | This run | `helix.toml` as committed |
+|---|---|---|
+| Proposer | Codex `gpt-6-luna`, on the host | Claude Code `claude-haiku-4-5`, in the agent sandbox |
+| No web | `web_access = false` (Codex gets `web_search="disabled"`, `features.apps=false`), plus `--ignore-user-config` so no user plugins or MCP servers load | `web_access = false` and the gateway network |
+| Refiner | GEPA's `make_refiner` on `openai/gpt-5.1`, reached through Arena's OpenAI-compatible API (`api_base="https://api.arena.ai/v1"`) | the same, through OpenAI |
+| Budget | 200 metric calls, with `stop_at_score` just above 2.635983362593453 | 200 metric calls |
+
+### Result
+
+| Metric call | Best score |
+|---:|---|
+| 1 | 0.9797642170 (seed) |
+| 3 | 2.0539999979 |
+| 5 | 2.5756912447 |
+| 8 | 2.6304187081 |
+| 23 | 2.6359830842 (first ≥ 2.63598) |
+| 54 | 2.6359830847 (final best) |
+| 73 | stopped by hand |
+
+The run stopped at metric call 73 of 200, after 9.5 hours: the last 19 calls
+had not improved the score, and nothing above it was left except the
+tolerance below. The jump past 2.63598 (generation 11) came from the
+mutation agent's own code; the gains after it, in the ninth and tenth
+decimal places, came from GPT-5.1's refinements of agent code. For comparison, optimize_anything's published run first
+reached 2.63598 at metric call 63 and its final best at 114. One run of each
+is not a statistical comparison.
+
+### Tolerance
+
+`validate_packing` accepts a pair of circles when `dist >= r_i + r_j - 1e-6`
+and a circle within `1e-6` outside the square. Both best packings, measured
+the same way:
+
+| Packing | Score | Overlapping pairs (largest overlap) | Best sum at the same centers with no overlap |
+|---|---|---|---|
+| optimize_anything (published log) | 2.635983362593453 | 28 (9.6e-8) | 2.6359828435 |
+| HELIX (this run) | 2.635983084711534 | 5 (7.5e-11, rounding) | 2.6359830847 |
+
+The last column keeps each packing's centers and solves a linear program for
+the radii with no tolerance (solver tolerance 1e-10), then removes any
+remaining overlap by shrinking each circle by half its largest one. No circle
+of either packing crosses the square's edge. The 2.8e-7 by which
+optimize_anything leads comes from overlaps the validator allows; without
+them, this run's packing is larger by 2.4e-7.
+[`circle-packing/tolerance_check.py`](circle-packing/tolerance_check.py)
+reproduces the table from two `state_tracker_logs.json` files:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/examples/circle_packing"
+uv run --no-project --python 3.11 --with-requirements requirements.txt python3 \
+  ../../docs/experiments/circle-packing/tolerance_check.py \
+  optimize_anything /path/to/published/state_tracker_logs.json \
+  helix /path/to/run/.helix/gepa_state_tracker/state_tracker_logs.json
+```
+
+### Where the time went
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="circle-packing/timing-dark.png">
+  <img alt="Chart of the recorded run: generations 1 to 10 took 1 to 3 minutes each; from generation 11 on, every generation took about 21 minutes, nearly all of it in the evaluator, while the mutation agent took 17 to 106 seconds per call, almost all of it waiting on the model with about a second of tool time; across the 35 generations and the seed, the evaluator took 8.8 hours (95%) and the agent 25 minutes" src="circle-packing/timing-light.png">
+</picture>
+
+The evaluator is the run. From generation 11 on, candidate code uses its whole
+600-second budget, and so does the refined code GPT-5.1 writes from it, so
+every evaluation takes about 21 minutes. The mutation agent's calls take 17 to
+106 seconds, nearly all of it waiting on the model.
+
+The run predates `.helix/timing.jsonl`, so these timings are reconstructed:
+each agent call is its Codex session log (first to last event, split into model
+and tool time by `helix.agent_timing`), and a generation ends when HELIX wrote
+its candidate's result. A generation's time outside its agent call is shown as
+evaluator time, so it includes a few seconds of HELIX's own work. Generation
+36, interrupted when the run was stopped, is left out (9.2 of 9.5 hours shown).
+
+### Checks
+
+- **No web, no files outside the candidate.** The 36 agent sessions made 298
+  tool calls, all shell commands: no web search, no MCP calls, no network
+  commands, and no path outside the candidate's worktree. The agent ran on the
+  host, so this was checked rather than enforced.
+- **No downloaded packing.** The code behind the best packing has no network
+  calls.
+- Agents did copy the best packing from the evaluator's feedback into
+  `solve.py` as a starting layout, which the loop allows: GEPA hands every
+  candidate the same packing as `current_best_solution`.
 
 ---
 
