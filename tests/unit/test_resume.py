@@ -2,20 +2,17 @@
 
 Covers:
 - test_state_saved_before_crash: state.json is written when an exception occurs mid-generation
-- test_rate_limit_triggers_clean_exit: RateLimitError raised from invoke_claude_code on rate-limit errors
 - test_resume_skips_missing_worktrees: missing worktrees are dropped from frontier with a warning
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from helix.exceptions import RateLimitError, ResumeIncompatibleError
-from helix.mutator import MutationError, invoke_claude_code, _looks_like_rate_limit
+from helix.exceptions import ResumeIncompatibleError
 from helix.state import BudgetState, EvolutionState, load_state, save_state
 
 
@@ -120,74 +117,6 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
     assert loaded is not None, "Could not load state after crash"
     # The seed was evaluated successfully so it should be in the frontier
     assert "g0-s0" in loaded.frontier, "Seed should be in frontier after successful seed eval"
-
-
-# ---------------------------------------------------------------------------
-# test_rate_limit_triggers_clean_exit
-# ---------------------------------------------------------------------------
-
-
-def test_looks_like_rate_limit_keywords() -> None:
-    """_looks_like_rate_limit should detect all expected keywords."""
-    assert _looks_like_rate_limit("You have hit a rate limit")
-    assert _looks_like_rate_limit("Claude is overloaded right now")
-    assert _looks_like_rate_limit("HTTP 529")
-    assert _looks_like_rate_limit("You have exceeded your usage limit")
-    assert _looks_like_rate_limit("You have used your extra usage")
-    assert not _looks_like_rate_limit("Everything is fine")
-
-
-def test_rate_limit_raises_rate_limit_error(tmp_path: Path) -> None:
-    """invoke_claude_code raises RateLimitError when subprocess returns rate-limit stderr."""
-    from helix.config import AgentConfig
-
-    config = AgentConfig()
-
-    fake_result = MagicMock()
-    fake_result.returncode = 1
-    fake_result.stderr = "Error: You have hit a rate limit. Please try again later."
-    fake_result.stdout = ""
-
-    with patch("subprocess.run", return_value=fake_result):
-        with pytest.raises(RateLimitError):
-            invoke_claude_code(str(tmp_path), "test prompt", config)
-
-
-def test_rate_limit_not_raised_for_normal_errors(tmp_path: Path) -> None:
-    """invoke_claude_code raises MutationError (not RateLimitError) for ordinary failures."""
-    from helix.config import AgentConfig
-
-    config = AgentConfig()
-
-    fake_result = MagicMock()
-    fake_result.returncode = 1
-    fake_result.stderr = "Error: file not found"
-    fake_result.stdout = ""
-
-    with patch("subprocess.run", return_value=fake_result):
-        with pytest.raises(MutationError):
-            invoke_claude_code(str(tmp_path), "test prompt", config)
-
-
-def test_rate_limit_in_json_result(tmp_path: Path) -> None:
-    """invoke_claude_code raises RateLimitError when JSON result contains overload error."""
-    from helix.config import AgentConfig
-
-    config = AgentConfig()
-
-    json_payload = json.dumps({
-        "is_error": True,
-        "error": "Claude is overloaded",
-        "result": "",
-    })
-    fake_result = MagicMock()
-    fake_result.returncode = 0
-    fake_result.stderr = ""
-    fake_result.stdout = json_payload
-
-    with patch("subprocess.run", return_value=fake_result):
-        with pytest.raises(RateLimitError):
-            invoke_claude_code(str(tmp_path), "test prompt", config)
 
 
 # ---------------------------------------------------------------------------

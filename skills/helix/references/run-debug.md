@@ -216,7 +216,8 @@ Checks:
 - Backend command output: inspect `.helix_backend_stderr.txt`.
 - Prompt quality: inspect `.helix_mutation_prompt.md`.
 - Protected file rejection: check `.helix/helix.log` for manifest errors.
-- Rate limits: HELIX reports backend rate-limit failures and can resume later.
+- Rate limits: a rate-limited backend call fails like any other; the slot is
+  skipped. Check `.helix_backend_stderr.txt`, then `helix resume` later.
 - Sandbox write issues: check Docker daemon, image tag, and native Linux UID
   ownership behavior. HELIX chowns the temporary workspace to `node` and back.
 

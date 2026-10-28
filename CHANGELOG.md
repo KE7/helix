@@ -69,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdout envelope carries no per-tool events.
 
 ### Changed
+- A rate-limited backend call is now an ordinary failed mutation or merge,
+  as in GEPA. `RateLimitError` and its keyword matching are gone: the matching
+  also fired on transcripts that merely quoted "rate limit" or "529", and a
+  rate-limited merge stopped the whole run while a rate-limited mutation only
+  skipped its slot. The agent CLIs retry their own API calls.
 - **BREAKING** (`examples/circle_packing`): the example was a different
   experiment from optimize_anything's, and one that leaked its answer: the
   agent background stated the record score and a solution recipe, the record

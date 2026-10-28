@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from helix.display import UsageStats
-from helix.exceptions import RateLimitError
 from helix.population import Candidate, EvalResult
 from helix.config import AgentConfig, HelixConfig, EvaluatorConfig, SandboxConfig
 from helix.sibling_history import SUMMARY_ARTIFACT_NAME
@@ -2793,32 +2792,6 @@ class TestMutateRecordsUsageOnFailure:
         )
 
         assert result is None, "the None-on-failure contract still holds"
-        assert spent == [usage]
-
-    def test_usage_is_reported_when_the_mutation_is_rate_limited(
-        self, tmp_path: Path, mocker
-    ):
-        usage = UsageStats(input_tokens=7, output_tokens=3)
-        parent = make_candidate("g0-s0")
-        er = make_eval_result()
-        config = make_config()
-        child_path = tmp_path / "g1-s0"
-        child_path.mkdir()
-        child = make_candidate("g1-s0", str(child_path))
-        mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch(
-            "helix.mutator.invoke_claude_code",
-            side_effect=RateLimitError("429", usage=usage),
-        )
-        mocker.patch("helix.mutator.remove_worktree")
-        mocker.patch("helix.mutator.snapshot_candidate")
-
-        spent: list[UsageStats] = []
-        with pytest.raises(RateLimitError):
-            mutate(
-                parent, er, "g1-s0", config, Path("/tmp"), record_usage=spent.append
-            )
-
         assert spent == [usage]
 
     def test_usage_is_reported_exactly_once_on_success(self, tmp_path: Path, mocker):

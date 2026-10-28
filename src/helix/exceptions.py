@@ -140,21 +140,6 @@ class ResumeIncompatibleError(HelixError):
     """
 
 
-class RateLimitError(HelixError):
-    """Raised when Claude Code hits a rate / usage limit.
-
-    Inherits from :class:`HelixError` so that the parallel futures handler in
-    ``evolution.py`` (which catches ``HelixError``) can route it properly —
-    logging the failure and returning ``None`` for that proposal slot rather
-    than crashing the entire run.
-
-    Detected heuristically from non-zero exit codes or JSON error fields that
-    contain keywords such as "rate limit", "overloaded", "529", "usage limit",
-    or "extra usage".  After retries are exhausted the error bubbles up to the
-    evolution loop, which logs it and continues with a smaller proposal set.
-    """
-
-
 # ---------------------------------------------------------------------------
 # Formatted error printing
 # ---------------------------------------------------------------------------

@@ -53,7 +53,6 @@ from helix.display import (
 from helix.exceptions import (
     HelixError,
     PromptArtifactCollisionError,
-    RateLimitError,
     ResumeIncompatibleError,
     print_helix_error,
 )
@@ -1622,24 +1621,12 @@ def _run_proposal_worker(
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
         if isinstance(_mu_exc, PromptArtifactCollisionError):
             raise
-        # For HelixError / RateLimitError and other errors, log and return llm_failed
+        # For HelixError and other errors, log and return llm_failed
         if isinstance(_mu_exc, HelixError):
             _mu_exc.operation = (
                 _mu_exc.operation or f"parallel mutate {_new_id}"
             )
             print_helix_error(_mu_exc)
-            if isinstance(_mu_exc, RateLimitError):
-                logger.error(
-                    "Mutation %s (parent: %s, gen %d) failed after all retries: "
-                    "%s: %s — proposal slot skipped.",
-                    _new_id, _parent.id, gen,
-                    type(_mu_exc).__name__, _mu_exc,
-                )
-                print_error(
-                    f"Mutation [bold]{_new_id}[/bold] hit rate limit after all "
-                    f"retries — proposal slot skipped. "
-                    f"Run [cyan]helix resume[/cyan] when rate limits clear."
-                )
         else:
             print_error(
                 f"Parallel mutation {_new_id} (parent: {_parent.id}, gen {gen}) "
