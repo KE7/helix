@@ -907,7 +907,7 @@ def test_sandbox_auth_status_command_uses_backend_command():
     )
 
     assert "helix-auth-claude:/home/node:rw" in args
-    assert args[-3:-1] == ["sh", "-lc"]
+    assert args[-3:-1] == ["sh", "-c"]
     script = args[-1]
     assert script.startswith("set -eu; ")
     assert "claude auth status --text" in script
@@ -965,7 +965,7 @@ def test_sandbox_auth_agy_status_uses_credential_file_probe():
     )
 
     assert "helix-auth-agy:/home/node:rw" in args
-    assert args[-3:-1] == ["sh", "-lc"]
+    assert args[-3:-1] == ["sh", "-c"]
     script = args[-1]
     assert (
         'test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"'
@@ -982,7 +982,7 @@ def test_sandbox_auth_agy_logout_only_removes_its_own_state_directory():
         action="logout",
     )
 
-    assert args[-3:-1] == ["sh", "-lc"]
+    assert args[-3:-1] == ["sh", "-c"]
     script = args[-1]
     assert '"${HOME:-/home/node}/.gemini/antigravity-cli"' in script
     assert script.count(".gemini") == 1

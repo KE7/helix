@@ -654,6 +654,34 @@ def _looks_like_rate_limit(text: str) -> bool:
     return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
 
 
+def _backend_failure_text(result: subprocess.CompletedProcess[str]) -> str:
+    """Return what the backend CLI itself said about a failed run.
+
+    Stderr, plus the error events (codex/opencode ``error`` and
+    ``turn.failed``) or errored envelope (claude ``is_error``) in stdout.
+    The rest of stdout is the agent's transcript, which quotes whatever files
+    and tool output the agent saw, so a keyword there is not evidence.  A CLI
+    that printed no JSON at all has spoken nowhere else, so its raw stdout
+    is used.
+    """
+    stdout = result.stdout or ""
+    texts = [result.stderr or ""]
+    saw_json = False
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        saw_json = True
+        if event.get("type") in {"error", "turn.failed"} or event.get("is_error") is True:
+            texts.append(line)
+    if not saw_json:
+        texts.append(stdout)
+    return "\n".join(texts)
+
+
 # ---------------------------------------------------------------------------
 # Rendered-mutation-prompt artifact
 # ---------------------------------------------------------------------------
@@ -2153,7 +2181,7 @@ def invoke_claude_code(
                     )
             return parsed, usage
 
-        rate_limit_source = result.stderr or result.stdout
+        rate_limit_source = _backend_failure_text(result)
         if _looks_like_rate_limit(rate_limit_source):
             logger.error(
                 "Rate limit detected in subprocess exit for %s (code %d): %s",

@@ -156,6 +156,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
+- A backend that exits non-zero is reported as rate-limited only when its
+  stderr or its own error event says so. The agent's transcript in stdout is
+  no longer scanned, so a run whose transcript merely quotes "rate limit" or
+  "529" is reported as an ordinary failure instead of aborting a merge.
+- Sandbox auth commands (`helix sandbox status`/`logout`) run under `sh -c`
+  instead of a login shell, which sourced `$HOME/.profile` from the login
+  volume that every candidate container mounts writable.
 - Every proposal slot's spend is now charged, whatever happens to the
   candidate. All slots in a batch run in parallel before the sequential apply
   phase, but their parent evaluations, child minibatch evaluations and

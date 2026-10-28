@@ -94,7 +94,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # confirmed against a completed sign-in.
         "status": [
             "sh",
-            "-lc",
+            "-c",
             'set -eu; test -s "${HOME:-/home/node}/.gemini/antigravity-cli/antigravity-oauth-token"',
         ],
         # Surgical: only remove agy's own state directory. ``~/.gemini`` also
@@ -102,7 +102,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # would destroy state this backend does not own.
         "logout": [
             "sh",
-            "-lc",
+            "-c",
             'set -eu; rm -rf "${HOME:-/home/node}/.gemini/antigravity-cli"',
         ],
     },
@@ -115,7 +115,7 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         # localised in some CLI versions).
         "status": [
             "sh",
-            "-lc",
+            "-c",
             "set -eu; "
             "claude auth status --text 2>&1 || true; "
             'test -s "${HOME:-/home/node}/.claude/.credentials.json"',

@@ -152,6 +152,60 @@ class TestFix2RateLimitDiagnostics:
         assert err.command != ""
         assert err.suggestion != ""
 
+    def test_transcript_mentioning_a_rate_limit_is_not_a_rate_limit(
+        self, mocker: MagicMock
+    ) -> None:
+        """A non-zero exit whose transcript merely quotes rate-limit wording
+        (e.g. a file the agent read) is a code failure, not a quota failure."""
+        import json
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "aggregated_output": '_RATE_LIMIT_KEYWORDS = ["rate limit", "529"]',
+                    },
+                }
+            )
+            + "\n"
+        )
+        mock_result.stderr = ""
+        mocker.patch("helix.mutator.subprocess.run", return_value=mock_result)
+
+        with pytest.raises(MutationError) as exc_info:
+            invoke_claude_code("/tmp/wt", "test prompt", AgentConfig(backend="codex"))
+        assert not isinstance(exc_info.value, RateLimitError)
+
+    @pytest.mark.parametrize(
+        ("backend", "event"),
+        [
+            ("codex", {"type": "error", "message": "You've hit your usage limit."}),
+            ("codex", {"type": "turn.failed", "error": {"message": "rate limit exceeded"}}),
+            (
+                "claude",
+                {"type": "result", "is_error": True, "result": "Claude AI usage limit reached"},
+            ),
+        ],
+    )
+    def test_backend_error_event_on_nonzero_exit_is_a_rate_limit(
+        self, mocker: MagicMock, backend: str, event: dict[str, object]
+    ) -> None:
+        """The backend's own error event in stdout still counts on a non-zero exit."""
+        import json
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = json.dumps(event) + "\n"
+        mock_result.stderr = ""
+        mocker.patch("helix.mutator.subprocess.run", return_value=mock_result)
+
+        with pytest.raises(RateLimitError):
+            invoke_claude_code("/tmp/wt", "test prompt", AgentConfig(backend=backend))
+
     def test_rate_limit_error_format_full_includes_all_fields(self) -> None:
         """format_full() on RateLimitError should include all diagnostic fields."""
         err = RateLimitError(
