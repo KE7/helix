@@ -11,7 +11,7 @@ from helix.display import UsageStats
 from helix.population import Candidate, EvalResult
 from helix.config import HelixConfig
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff  # noqa: F401
-from helix.exceptions import MutationError, RateLimitError, print_helix_error
+from helix.exceptions import MutationError, print_helix_error
 from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
 from helix.timing import traced
 
@@ -374,15 +374,6 @@ def merge(
         except Exception:
             pass
         return None
-    except RateLimitError as exc:
-        # Rate limit — clean up orphaned worktree, then re-raise.
-        if record_usage is not None and exc.usage is not None:
-            record_usage(exc.usage)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
-        raise
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.
     # The caller (evolution.py) is responsible for calling save_state()

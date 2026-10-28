@@ -27,7 +27,6 @@ from helix.exceptions import (
     HelixError,
     MutationError,
     PromptArtifactCollisionError,
-    RateLimitError,
     print_helix_error,
 )
 from helix.executor import _scrub_environment
@@ -633,25 +632,6 @@ def build_mutation_prompt(
         sections.append(turn_budget.strip())
 
     return "\n\n".join(sections) + "\n"
-
-
-# ---------------------------------------------------------------------------
-# Rate-limit detection
-# ---------------------------------------------------------------------------
-
-_RATE_LIMIT_KEYWORDS = [
-    "rate limit",
-    "overloaded",
-    "529",
-    "usage limit",
-    "extra usage",
-]
-
-
-def _looks_like_rate_limit(text: str) -> bool:
-    """Return True if *text* contains a rate-limit / overload keyword."""
-    lower = text.lower()
-    return any(kw in lower for kw in _RATE_LIMIT_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -2131,50 +2111,7 @@ def invoke_claude_code(
                 worktree_path=worktree_path,
             )
             usage = _normalise_usage_stats(parsed)
-            if backend == "claude":
-                error_text = str(parsed.get("error", ""))
-                if _looks_like_rate_limit(error_text):
-                    logger.error(
-                        "Rate limit detected in JSON response: %s", error_text[:200]
-                    )
-                    raise RateLimitError(
-                        f"{backend_name} returned a rate/usage limit error in JSON response",
-                        operation=f"{backend_name} invocation",
-                        phase="JSON parsing",
-                        command=cmd_str,
-                        cwd=str(worktree_path),
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        exit_code=result.returncode,
-                        suggestion=(
-                            f"{backend_name} reported a rate limit. "
-                            "Retry after backoff or check your API quota."
-                        ),
-                    )
             return parsed, usage
-
-        rate_limit_source = result.stderr or result.stdout
-        if _looks_like_rate_limit(rate_limit_source):
-            logger.error(
-                "Rate limit detected in subprocess exit for %s (code %d): %s",
-                backend_name,
-                result.returncode,
-                rate_limit_source[:200],
-            )
-            raise RateLimitError(
-                f"{backend_name} hit a rate/usage limit (exit code {result.returncode})",
-                operation=f"{backend_name} invocation",
-                phase="subprocess exit",
-                command=cmd_str,
-                cwd=str(worktree_path),
-                stdout=result.stdout,
-                stderr=result.stderr,
-                exit_code=result.returncode,
-                suggestion=(
-                    f"{backend_name} reported a rate limit. "
-                    "Retry after backoff or check your quota."
-                ),
-            )
 
         # Claude's max-turns exhaustion is intentionally treated as partial
         # success because the subprocess may have already produced useful edits.
@@ -2602,7 +2539,7 @@ def generate_change_summary(
             artifact_infix=SUMMARY_BACKEND_ARTIFACT_INFIX,
         )
     except HelixError as exc:
-        # Includes RateLimitError and prompt-artifact collisions: neither is a
+        # Includes prompt-artifact collisions, which are no
         # reason to discard a mutation that already succeeded.  A call that
         # raised may still have edited files before it did, so the revert runs
         # on this path too.
@@ -2742,18 +2679,6 @@ def mutate(
         except Exception:
             pass
         return None
-    except RateLimitError as exc:
-        # Rate limit — clean up orphaned worktree, then re-raise so the parallel
-        # futures handler in evolution.py can log it and continue with a smaller
-        # proposal set.  A rate-limited invocation can still have burned tokens
-        # before the limit hit, so the same handoff applies.
-        if record_usage is not None and exc.usage is not None:
-            record_usage(exc.usage)
-        try:
-            remove_worktree(child)
-        except Exception:
-            pass
-        raise
 
     # NOTE: snapshot_candidate() is intentionally NOT called here.
     # The caller (evolution.py) is responsible for calling save_state()
