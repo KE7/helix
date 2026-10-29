@@ -1,0 +1,10 @@
+# This file replaces the .gitignore HELIX writes into a new project, so it
+# keeps the entries from HELIX's list that matter here.
+__pycache__/
+*.pyc
+.env
+.venv/
+.pytest_cache/
+.DS_Store
+# Written by HELIX, and by the check command in [agent].background.
+helix_batch.json
