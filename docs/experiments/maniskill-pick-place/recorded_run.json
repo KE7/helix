@@ -1,0 +1,830 @@
+{
+ "description": "Recorded run 11 of examples/maniskill_pick_place, trimmed from its .helix/ directory, the agent's Claude Code transcript (kept by HELIX's sandbox), and a replay of the best candidate (g1-s1) on the train, validation and held-out trials.",
+ "date": "2026-10-29",
+ "helix_commit": "ad9f020",
+ "lineage": [
+  {
+   "id": "g0-s0",
+   "parent": null,
+   "generation": 0,
+   "operation": "seed"
+  },
+  {
+   "id": "g1-s1",
+   "parent": "g0-s0",
+   "generation": 1,
+   "operation": "mutate"
+  }
+ ],
+ "validation_scores": {
+  "g0-s0": {
+   "pickcube__26": 0.1411,
+   "pickcube__27": 0.034,
+   "pickcube__28": 0.0239,
+   "pickcube__29": 0.0462,
+   "pickcube__30": 0.0321,
+   "pickcube__31": 0.0316,
+   "pushcube__26": 0.0479,
+   "pushcube__27": 0.048,
+   "pushcube__28": 0.069,
+   "pushcube__29": 0.0479,
+   "pushcube__30": 0.0702,
+   "pushcube__31": 0.048,
+   "stackcube__26": 0.0988,
+   "stackcube__27": 0.0484,
+   "stackcube__28": 0.0986,
+   "stackcube__29": 0.1173,
+   "stackcube__30": 0.0676,
+   "stackcube__31": 0.0818
+  },
+  "g1-s1": {
+   "pickcube__26": 1.0,
+   "pickcube__27": 1.0,
+   "pickcube__28": 1.0,
+   "pickcube__29": 1.0,
+   "pickcube__30": 1.0,
+   "pickcube__31": 1.0,
+   "pushcube__26": 1.0,
+   "pushcube__27": 1.0,
+   "pushcube__28": 1.0,
+   "pushcube__29": 1.0,
+   "pushcube__30": 1.0,
+   "pushcube__31": 1.0,
+   "stackcube__26": 1.0,
+   "stackcube__27": 1.0,
+   "stackcube__28": 1.0,
+   "stackcube__29": 1.0,
+   "stackcube__30": 1.0,
+   "stackcube__31": 1.0
+  }
+ },
+ "skipped_generations": [
+  {
+   "generation": 2,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pickcube__7": 1.0,
+    "pickcube__4": 1.0,
+    "stackcube__7": 1.0,
+    "stackcube__10": 1.0,
+    "pushcube__2": 1.0,
+    "pushcube__6": 1.0
+   }
+  },
+  {
+   "generation": 3,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "stackcube__0": 1.0,
+    "stackcube__9": 1.0,
+    "pushcube__9": 1.0,
+    "pushcube__0": 1.0,
+    "pickcube__9": 1.0,
+    "pickcube__10": 1.0
+   }
+  },
+  {
+   "generation": 4,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pushcube__5": 1.0,
+    "pushcube__8": 1.0,
+    "pickcube__2": 1.0,
+    "pickcube__6": 1.0,
+    "stackcube__2": 1.0,
+    "stackcube__4": 1.0
+   }
+  },
+  {
+   "generation": 5,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pickcube__3": 1.0,
+    "pickcube__0": 1.0,
+    "stackcube__8": 1.0,
+    "stackcube__1": 1.0,
+    "pushcube__3": 1.0,
+    "pushcube__10": 1.0
+   }
+  },
+  {
+   "generation": 6,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pushcube__9": 1.0,
+    "pushcube__10": 1.0,
+    "pickcube__10": 1.0,
+    "pickcube__3": 1.0,
+    "stackcube__2": 1.0,
+    "stackcube__8": 1.0
+   }
+  },
+  {
+   "generation": 7,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pickcube__6": 1.0,
+    "pickcube__5": 1.0,
+    "stackcube__9": 1.0,
+    "stackcube__0": 1.0,
+    "pushcube__0": 1.0,
+    "pushcube__6": 1.0
+   }
+  },
+  {
+   "generation": 8,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "stackcube__5": 1.0,
+    "stackcube__3": 1.0,
+    "pushcube__3": 1.0,
+    "pushcube__5": 1.0,
+    "pickcube__8": 1.0,
+    "pickcube__2": 1.0
+   }
+  },
+  {
+   "generation": 9,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pushcube__8": 1.0,
+    "pushcube__7": 1.0,
+    "pickcube__4": 1.0,
+    "pickcube__1": 1.0,
+    "stackcube__10": 1.0,
+    "stackcube__1": 1.0
+   }
+  },
+  {
+   "generation": 10,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pickcube__9": 1.0,
+    "pickcube__7": 1.0,
+    "stackcube__6": 1.0,
+    "stackcube__7": 1.0,
+    "pushcube__2": 1.0,
+    "pushcube__1": 1.0
+   }
+  },
+  {
+   "generation": 11,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "stackcube__0": 1.0,
+    "stackcube__1": 1.0,
+    "pushcube__3": 1.0,
+    "pushcube__5": 1.0,
+    "pickcube__7": 1.0,
+    "pickcube__6": 1.0
+   }
+  },
+  {
+   "generation": 12,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pushcube__9": 1.0,
+    "pushcube__2": 1.0,
+    "pickcube__10": 1.0,
+    "pickcube__0": 1.0,
+    "stackcube__4": 1.0,
+    "stackcube__6": 1.0
+   }
+  },
+  {
+   "generation": 13,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pickcube__9": 1.0,
+    "pickcube__5": 1.0,
+    "stackcube__9": 1.0,
+    "stackcube__10": 1.0,
+    "pushcube__4": 1.0,
+    "pushcube__0": 1.0
+   }
+  },
+  {
+   "generation": 14,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "stackcube__3": 1.0,
+    "stackcube__5": 1.0,
+    "pushcube__7": 1.0,
+    "pushcube__10": 1.0,
+    "pickcube__1": 1.0,
+    "pickcube__3": 1.0
+   }
+  },
+  {
+   "generation": 15,
+   "parent_id": "g1-s1",
+   "reason": "perfect_subsample",
+   "minibatch": {
+    "pushcube__8": 1.0,
+    "pushcube__1": 1.0,
+    "pickcube__2": 1.0,
+    "pickcube__8": 1.0,
+    "stackcube__8": 1.0,
+    "stackcube__2": 1.0
+   }
+  }
+ ],
+ "evaluation_budget_used": 132,
+ "agent_sessions": {
+  "g1-s1": {
+   "backend": "claude",
+   "sandboxed": true,
+   "num_turns": 6,
+   "output_tokens": 2766,
+   "cache_read_input_tokens": 143830,
+   "cost_usd": 0.1401,
+   "duration_ms": 40179,
+   "tool_calls": [
+    "Read: /workspace/.agent_task_prompt.md",
+    "Bash: cd /workspace; ls; cat API_REFERENCE.md; ls solver; wc -l solver/*.py",
+    "Bash: cd /workspace/solver; cat __init__.py common.py main.py; ls tasks; cat tasks/*.py; cat ../check.py | head -50",
+    "Bash: cd /workspace/solver/tasks; cat > pushcube.py <<'E' \"\"\"``pushcube`` routine: pusher behind the cube, then push through it.\"\"\" from __future__ import annotations import math from typing import Any from",
+    "Bash: cd /workspace; ls splits/train | wc -l; ids=$(ls splits/train | sed 's/.json//' | shuf -n 14 --random-source=<(yes)); python3 check.py $ids 2>&1 | grep -E \"^=== \""
+   ]
+  }
+ },
+ "replay_of_g1_s1": {
+  "pushcube__0": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__1": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__2": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__3": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__5": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__6": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__7": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__8": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__9": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__10": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__0": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__1": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__2": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__3": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__5": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__6": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__7": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__8": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__9": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__10": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__0": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__1": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__2": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__3": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__5": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__6": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__7": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__8": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__9": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__10": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__26": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__27": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__28": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__29": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__30": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__31": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__26": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__27": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__28": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__29": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__30": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__31": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__26": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__27": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__28": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__29": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__30": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__31": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__1431072": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__1464500": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__1684658": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__1837208": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__2315639": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__2696748": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__3171132": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__3177901": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__3566995": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__3901034": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4147175": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4198787": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4365715": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4473652": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4813802": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__4907322": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__5291303": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__5355432": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__6348011": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__6478242": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__7179989": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__7452036": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__7840177": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__7851017": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__8045647": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__8070176": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__8265920": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__9141871": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__9261966": {
+   "score": 1.0,
+   "success": true
+  },
+  "pushcube__9300182": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__1431072": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__1464500": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__1684658": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__1837208": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__2315639": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__2696748": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__3171132": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__3177901": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__3566995": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__3901034": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4147175": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4198787": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4365715": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4473652": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4813802": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__4907322": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__5291303": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__5355432": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__6348011": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__6478242": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__7179989": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__7452036": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__7840177": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__7851017": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__8045647": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__8070176": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__8265920": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__9141871": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__9261966": {
+   "score": 1.0,
+   "success": true
+  },
+  "pickcube__9300182": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__1431072": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__1464500": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__1684658": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__1837208": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__2315639": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__2696748": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__3171132": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__3177901": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__3566995": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__3901034": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4147175": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4198787": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4365715": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4473652": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4813802": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__4907322": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__5291303": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__5355432": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__6348011": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__6478242": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__7179989": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__7452036": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__7840177": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__7851017": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__8045647": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__8070176": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__8265920": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__9141871": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__9261966": {
+   "score": 1.0,
+   "success": true
+  },
+  "stackcube__9300182": {
+   "score": 1.0,
+   "success": true
+  }
+ }
+}

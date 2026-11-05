@@ -1,0 +1,90 @@
+[project]
+objective = """Maximize task success on ManiSkill 3 tabletop manipulation with a \
+Franka Panda arm. Each instance id names one deterministic trial from a family: \
+pushcube__N (push the cube into the goal region), pickcube__N (grasp the cube and \
+hold it at a 3-D goal point), or stackcube__N (stack cube A on cube B and release). \
+After a 40-step settle, a trial scores 1.0 if the environment's own success \
+check passes on the final state, otherwise the environment's shaped reward for \
+that final state, capped at 0.95. Improve solver/ so every family succeeds."""
+
+[evaluator]
+# Pin the interpreter and the simulator stack (requirements.txt) so evaluation
+# does not depend on the host python3. -I keeps the working directory off
+# sys.path, so a candidate's top-level file cannot shadow a module the
+# evaluator imports. ManiSkill also needs a Vulkan driver; see README.md.
+command = "uv run --no-project --python 3.12 --with-requirements requirements.txt python3 -I evaluate.py"
+# A candidate that modifies a protected file is rejected.
+protected_files = [
+    "evaluate.py",
+    "sim",
+    "splits",
+    "requirements.txt",
+    "solver.Dockerfile",
+    "check.py",
+    "check_server.py",
+    "run.sh",
+    "API_REFERENCE.md",
+    "README.md",
+    "helix.toml",
+]
+
+[seedless]
+# HELIX reads instance ids from the file stems in these directories
+# (e.g. "pickcube__0") even with seedless mode off.
+enabled = false
+train_path = "splits/train"
+val_path = "splits/val"
+
+[evolution]
+max_generations = 15
+max_evaluations = 600
+# Two trials from each of the three families in every minibatch (ids are
+# grouped on "__").
+batch_sampler = "stratified"
+num_sampled_groups = 3
+num_examples_per_group = 2
+minibatch_size = 6
+# Skip mutation when the parent scores 1.0 on every trial of its minibatch.
+perfect_score_threshold = 1.0
+cache_evaluation = true
+merge_enabled = false
+
+[sandbox]
+# The agent runs in HELIX's Docker sandbox and sees only solver/, the training
+# ids, API_REFERENCE.md and check.py. The evaluator runs on the host.
+enabled = true
+evaluator = false
+# Lets check.py reach the check service on Linux; Docker Desktop has it already.
+add_host_gateway = true
+omit_from_agent = [
+    "evaluate.py",
+    "sim",
+    "splits/val",
+    "README.md",
+    "requirements.txt",
+    "solver.Dockerfile",
+    "check_server.py",
+    "run.sh",
+]
+
+[agent]
+backend = "claude"
+model = "sonnet"
+effort = "medium"
+max_turns = 30
+background = """
+ManiSkill 3 tabletop manipulation benchmark (Franka Panda). The evolving
+artifact is the solver/ package; its entry point solver.run(ctx) receives
+one trial context.
+
+- Read API_REFERENCE.md first: it documents ctx.get_observation(),
+  ctx.move_to(x, y, z), ctx.open_gripper(), ctx.close_gripper(), the
+  observation schema per family, and the per-trial step budget.
+- Edit only the solver/ package. Every other file is protected; a candidate
+  that changes one is rejected.
+- Do not branch on trial ids or memorize coordinates; use observations.
+- Check a change on training trials before finishing, for example:
+    python3 check.py pushcube__0 pickcube__0 stackcube__0
+  It runs the trials on the host and prints the feedback HELIX would show.
+  It accepts only training ids (the file stems under splits/train).
+"""
