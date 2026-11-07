@@ -80,4 +80,5 @@ nav:
   - Experiments:
       - ManiSkill pick and place: experiments/maniskill-pick-place.md
       - Circle packing: experiments/circle-packing.md
+  - Contributing: contributing.md
   - Changelog: changelog.md

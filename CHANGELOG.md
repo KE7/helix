@@ -202,6 +202,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cover 3.15; the locked pydantic-core 2.41.5 had none. An evaluator can still
   run on another Python through its own command, as `examples/circle_packing`
   does with 3.11.
+- `CONTRIBUTING.md` now sets the rules for every PR, human or agent: each
+  description shows the change working on the real system (**Evidence**:
+  a real `helix evolve` run with a real backend and model, not mocks) and
+  gives **Try it by hand** steps from a clean checkout. Before the PR is
+  opened, CI must pass locally and the author's coding agent must review the
+  diff (`/code-review`, `/review`, or a prompt any agent can run). `.github/pull_request_template.md`
+  carries the same sections, and the rules are on the docs site.
+  `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
+  working on this repository to those rules.
+- The HELIX agent skill is registered for Claude Code as a project skill,
+  `.claude/skills/helix` (a symlink to `skills/helix/`), in place of the
+  `.claude/commands/helix.md` command. `/helix` still loads it; to use it in
+  other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
 - Seedless mode now gives the agent its task. Every backend is told to read
