@@ -19,6 +19,54 @@ if str(_DIFF_ROOT.parent.parent) not in sys.path:
     sys.path.insert(0, str(_DIFF_ROOT.parent.parent))
 
 
+#: The operator's real home, captured before any test redirects ``$HOME``.
+REAL_HOME = Path.home().resolve()
+
+
+def reads_real_home_state(path: object) -> bool:
+    """True for a path inside a dot-directory of the real home (``~/.local``...)."""
+    resolved = Path(str(path)).resolve()
+    if not resolved.is_relative_to(REAL_HOME) or resolved == REAL_HOME:
+        return False
+    return resolved.relative_to(REAL_HOME).parts[0].startswith(".")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_home(tmp_path_factory, monkeypatch):
+    """Point ``$HOME`` at an empty directory so no test reads the real one.
+
+    Backend transcript collection globs the agent CLIs' stores under
+    ``Path.home()`` when unsandboxed; with the real home a test copied the
+    operator's ``~/.local/share/opencode/opencode.db`` (gigabytes, with the
+    opencode account's tokens in it) into pytest's temp dir and filled the
+    disk.  ``shutil.copy2`` additionally refuses any source in a dot-directory
+    of the real home (where every agent CLI keeps its state), so a code path
+    that resolves the home some other way fails loudly; the checkout itself
+    may live under the real home and stays copyable.  Git identity comes from
+    the environment, since ``~/.gitconfig`` is gone.
+    """
+    import shutil
+
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("XDG_DATA_HOME", "XDG_STATE_HOME", "HELIX_CLAUDE_TRANSCRIPT_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(name, "HELIX Tests")
+    for name in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(name, "tests@helix.invalid")
+
+    real_copy2 = shutil.copy2
+
+    def guarded_copy2(src, dst, *args, **kwargs):
+        if reads_real_home_state(src):
+            raise AssertionError(f"test copied {src} from the real home directory")
+        return real_copy2(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copy2", guarded_copy2)
+    yield home
+
+
 @pytest.fixture(autouse=True)
 def _trace_bus_clean_between_tests():
     """Guarantee ``TRACE.enabled`` is False and ``TRACE.events`` empty per test.
