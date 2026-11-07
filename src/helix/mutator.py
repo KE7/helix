@@ -2609,20 +2609,34 @@ def _revert_summary_side_effects(worktree_path: str, before_tree: str | None) ->
     never worth corrupting a candidate for.
 
     Returns the paths it had to restore (empty when the call behaved).
+    Never raises: like the rest of the summary step it is best-effort, and a
+    revert that fails (a path it cannot write, say) must not cost the
+    mutation that already succeeded.  The failure is logged as a warning, and
+    the evaluator-tamper check still runs on the candidate afterwards.
     """
     if before_tree is None:
         return []
-    after_tree = _content_tree_hash(worktree_path)
-    if after_tree is None or after_tree == before_tree:
+    try:
+        after_tree = _content_tree_hash(worktree_path)
+        if after_tree is None or after_tree == before_tree:
+            return []
+        listing = subprocess.run(
+            ["git", "diff", "--name-only", before_tree, after_tree],
+            cwd=worktree_path, capture_output=True, text=True, check=False,
+        )
+        changed = [p for p in listing.stdout.splitlines() if p.strip()]
+        if not changed:
+            return []
+        _restore_paths_from_tree(worktree_path, before_tree, changed)
+    except Exception as exc:
+        logger.warning(
+            "could not revert the change-summary call's edits in %s (%s: %s); "
+            "keeping the mutation as it stands.",
+            worktree_path,
+            type(exc).__name__,
+            exc,
+        )
         return []
-    listing = subprocess.run(
-        ["git", "diff", "--name-only", before_tree, after_tree],
-        cwd=worktree_path, capture_output=True, text=True, check=False,
-    )
-    changed = [p for p in listing.stdout.splitlines() if p.strip()]
-    if not changed:
-        return []
-    _restore_paths_from_tree(worktree_path, before_tree, changed)
     logger.warning(
         "change-summary call modified candidate content in %s (%s); reverted. "
         "The summary is advisory and must never alter what gets scored.",
