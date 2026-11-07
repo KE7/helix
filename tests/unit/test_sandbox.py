@@ -1530,6 +1530,31 @@ def test_backend_transcript_sync_refuses_a_symlinked_directory(
     assert not copied.exists() or not any(copied.rglob("reference.py"))
 
 
+def test_synthetic_repo_ignores_what_the_candidate_repo_excludes(tmp_path: Path):
+    """HELIX artifacts are ignored through the candidate repo's exclude file,
+    not its ``.gitignore``, so the synthetic repo must carry that file too or
+    the agent's ``git status`` would list them as its own changes."""
+    from helix.mutator import _ignore_helix_artifacts
+    from helix.sandbox import _copy_tree_contents, _init_synthetic_git_repo
+
+    source = tmp_path / "candidate"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=source, check=True)
+    _ignore_helix_artifacts(source)
+    (source / "solver.py").write_text("x = 1\n")
+    (source / "helix_batch.json").write_text("[]\n")
+    (source / ".agent_task_prompt.md").write_text("prompt\n")
+    workspace = tmp_path / "workspace"
+    _copy_tree_contents(source, workspace)
+
+    _init_synthetic_git_repo(workspace, source)
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=workspace, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert tracked == ["solver.py"]
+
+
 @pytest.mark.parametrize("replacement", ["removed", "symlink", "file"])
 def test_sync_back_keeps_omitted_paths_when_agent_replaces_their_parent(
     tmp_path: Path, replacement: str

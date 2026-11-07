@@ -31,6 +31,7 @@ from helix.backends import (
 from helix.config import EvaluatorSidecarConfig, SandboxConfig
 from helix.lines import split_lf_lines
 from helix.timing import traced
+from helix.worktree import git_exclude_path
 
 
 logger = logging.getLogger(__name__)
@@ -802,8 +803,13 @@ def _sync_back_backend_transcripts(src: Path, dst: Path) -> None:
         logger.warning("skipping backend transcript artifact copy from %s: %s", source, exc)
 
 
-def _init_synthetic_git_repo(workspace: Path) -> None:
-    """Create local-only git metadata so agent CLIs can inspect status."""
+def _init_synthetic_git_repo(workspace: Path, source: Path | None = None) -> None:
+    """Create local-only git metadata so agent CLIs can inspect status.
+
+    The exclude file of *source*'s repository is copied in first, so the
+    workspace ignores what the candidate worktree ignores, HELIX's own
+    artifacts included (``helix.mutator._ignore_helix_artifacts``).
+    """
     # Build a clean environment that ignores host-level git config and any
     # GIT_* overrides inherited from the parent process so the synthetic repo
     # is fully self-contained.
@@ -835,6 +841,14 @@ def _init_synthetic_git_repo(workspace: Path) -> None:
         capture_output=True,
         env=env,
     )
+    exclude = git_exclude_path(source) if source is not None else None
+    if exclude is not None and exclude.is_file() and not exclude.is_symlink():
+        try:
+            rules = exclude.read_text()
+            (workspace / ".git" / "info").mkdir(parents=True, exist_ok=True)
+            (workspace / ".git" / "info" / "exclude").write_text(rules)
+        except OSError as exc:
+            logger.warning("could not copy git exclude file %s: %s", exclude, exc)
     subprocess.run(
         ["git", "add", "-A"], cwd=workspace, check=True, capture_output=True, env=env
     )
@@ -1405,7 +1419,7 @@ def run_sandboxed_commands(
             skip_special_files=sandbox.skip_special_files,
             omit_paths=omit_paths,
         )
-        _init_synthetic_git_repo(workspace)
+        _init_synthetic_git_repo(workspace, source)
         _docker_chown_workspace(workspace, docker_image, "node:node")
         sidecar_runtime = (
             current_evaluator_sidecar_runtime() if scope == "evaluator" else None

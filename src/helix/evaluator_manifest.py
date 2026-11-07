@@ -154,6 +154,39 @@ def _collect_protected_evaluator_paths(
     return sorted(protected)
 
 
+def _resolve_omit_from_agent(config: HelixConfig, project_root: Path) -> list[str]:
+    """Return ``sandbox.omit_from_agent`` as repo-relative POSIX paths.
+
+    Normalised like ``evaluator.protected_files``: the sandbox compares these
+    with workspace-relative paths, so ``/abs/project/evaluate.py`` or
+    ``data/../evaluate.py`` would otherwise match nothing and the file would
+    be copied to the agent.  A path outside the project raises.
+    """
+    resolved: list[str] = []
+    for path_str in config.sandbox.omit_from_agent:
+        rel = _to_repo_relative(path_str, project_root)
+        if rel is None:
+            raise HelixError(
+                f"sandbox.omit_from_agent path is outside project root: {path_str}",
+                operation="resolve sandbox.omit_from_agent",
+                suggestion="Use repo-relative paths under the project root.",
+            )
+        resolved.append(rel)
+    return resolved
+
+
+def _paths_hidden_from_agent(config: HelixConfig, project_root: Path) -> list[str]:
+    """Protected evaluator paths plus ``omit_from_agent``, repo-relative.
+
+    What must never reach a prompt built from the host worktree (the
+    change-summary call's diff and new-file listing).
+    """
+    return sorted(
+        set(_collect_protected_evaluator_paths(config, project_root))
+        | set(_resolve_omit_from_agent(config, project_root))
+    )
+
+
 def _copy_protected_path(source: Path, destination: Path) -> None:
     """Refresh one protected file/directory in a candidate worktree."""
     if source.resolve(strict=False) == destination.resolve(strict=False):
@@ -324,6 +357,36 @@ def _load_evaluator_integrity_manifest(base_dir: Path) -> dict[str, str] | None:
     return manifest
 
 
+def _foreign_symlinks(candidate_path: Path, project_path: Path) -> list[str]:
+    """Symlinks at or under *candidate_path* the project does not have.
+
+    Returned relative to *candidate_path* (``"."`` for the path itself).  A
+    link counts as the project's when *project_path* holds the same link at
+    the same place; nothing is followed.
+    """
+
+    def foreign(path: Path, rel: str) -> bool:
+        twin = project_path / rel
+        try:
+            return not twin.is_symlink() or os.readlink(twin) != os.readlink(path)
+        except OSError:
+            return True
+
+    if candidate_path.is_symlink():
+        return ["."] if foreign(candidate_path, ".") else []
+    if not candidate_path.is_dir():
+        return []
+    found: list[str] = []
+    for dirpath_str, dirnames, filenames in os.walk(candidate_path):
+        for name in [*dirnames, *filenames]:
+            path = Path(dirpath_str) / name
+            if path.is_symlink():
+                rel = path.relative_to(candidate_path).as_posix()
+                if foreign(path, rel):
+                    found.append(rel)
+    return sorted(found)
+
+
 def _detect_evaluator_tamper(
     candidate: Candidate,
     manifest: dict[str, str],
@@ -362,9 +425,17 @@ def _detect_evaluator_tamper(
             config, project_root
         ):
             candidate_path = worktree_root / protected_rel
+            # A link keeps every hash intact while what it points at changes
+            # (``mv tests t; ln -s t tests``), and a linked directory is never
+            # walked for new files, so one the project does not have is
+            # tampering.
+            linked = _foreign_symlinks(candidate_path, project_root / protected_rel)
+            if linked:
+                violations.update((Path(protected_rel) / rel).as_posix() for rel in linked)
+                continue
             # Only directories can hold *new* files; single-file protected
             # paths are fully covered by the manifest loop above.
-            if not candidate_path.is_dir() or candidate_path.is_symlink():
+            if not candidate_path.is_dir():
                 continue
             for entry_rel, _ in _iter_protected_manifest_files(
                 candidate_path, protected_rel

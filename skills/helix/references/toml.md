@@ -129,7 +129,7 @@ max_workers = 32
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
 val_stage_size = 10
-sibling_history = false  # show the mutator every earlier child of the same parent
+sibling_history = false  # show the mutator every earlier child of the same parent (train-gate score)
 sibling_summary_max_words = 150  # word budget for each of those summaries
 # sibling_history_max_entries = 5  # prompt shows only the N most recent; unset = all
 

@@ -41,5 +41,7 @@ protected_files = [
 
 At run start, HELIX hashes the evaluator command target plus any
 `evaluator.protected_files` entries and writes the manifest to
-`.helix/evaluator_manifest.json`. Candidates that modify any protected file are
-rejected before evaluation.
+`.helix/evaluator_manifest.json`. Candidates that modify any protected file,
+add a file under a protected directory, or put a symlink at or under a
+protected path that the project itself does not have are rejected before
+evaluation.

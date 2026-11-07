@@ -122,6 +122,8 @@ from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatib
     _extract_script_token,
     _iter_protected_manifest_files,  # noqa: F401
     _load_evaluator_integrity_manifest,
+    _paths_hidden_from_agent,
+    _resolve_omit_from_agent,
     _looks_like_script_file,
     _build_evaluator_integrity_manifest,
     _refresh_and_snapshot_protected_evaluator_files,
@@ -1632,6 +1634,7 @@ def _run_proposal_worker(
             ),
             record_usage=_spent_usage.append,
             sibling_history=sibling_history,
+            hidden_paths=_paths_hidden_from_agent(config, project_root),
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
@@ -1823,6 +1826,15 @@ def run_evolution(
             "config.evolution.max_generations to a positive integer, or "
             "config.evolution.max_evaluations > 0."
         )
+    # The sandbox matches omit_from_agent against workspace-relative paths, so
+    # resolve the entries once here (raises on a path outside the project).
+    config = config.model_copy(
+        update={
+            "sandbox": config.sandbox.model_copy(
+                update={"omit_from_agent": _resolve_omit_from_agent(config, project_root)}
+            )
+        }
+    )
     # Timing is always on, like budget accounting: every run appends its
     # spans to .helix/timing.jsonl.
     with recording(base_dir / TIMING_FILE_NAME), span("run"):
@@ -2171,7 +2183,6 @@ def _run_evolution_impl(
             seed_prompt = build_seed_generation_prompt(
                 objective=config.objective,
                 background=config.agent.background,
-                evaluator_cmd=config.evaluator.command,
                 dataset_examples=_dataset_examples,
             )
             # Single attempt, fail-fast — matches GEPA's _generate_seed_candidate.
@@ -3004,6 +3015,13 @@ def _run_evolution_impl(
                 ``child.summary`` was read back in ``mutate`` while the
                 worktree still existed, so this works even for a child whose
                 worktree has since been removed.
+
+                ``result`` is always the child's train gate result (minibatch,
+                or full train without one), never a val result: the history
+                is shown to the mutation agent, and GEPA's
+                ``ReflectiveMutationProposer.propose`` shows the reflection
+                step only the train minibatch.  Using one stage for every
+                child also keeps the recorded scores comparable.
                 """
                 if not config.evolution.sibling_history:
                     return
@@ -3280,7 +3298,7 @@ def _run_evolution_impl(
                             stage="val_stage", example_ids=list(stage_val_example_ids),
                         )
                         _record_sibling(
-                            _parent.id, child, stage_result, accepted=False
+                            _parent.id, child, gated.gating_result, accepted=False
                         )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -3356,7 +3374,7 @@ def _run_evolution_impl(
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
                 _save_evaluation(base_dir, val_result)
-                _record_sibling(_parent.id, child, val_result, accepted=True)
+                _record_sibling(_parent.id, child, gated.gating_result, accepted=True)
                 frontier.add(child, val_result)
                 decision(child.id, accepted=True, reason="mutation")
                 _sync_frontier_state()

@@ -10,9 +10,10 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from helix.backends import (
     BACKEND_AUTH_ENV,
@@ -47,7 +48,12 @@ from helix.timing import (
     timed_totals,
     traced,
 )
-from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
+from helix.worktree import (  # noqa: F401
+    clone_candidate,
+    git_exclude_path,
+    remove_worktree,
+    snapshot_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,14 +261,15 @@ def _render_evaluator_output_fallback(eval_result: EvalResult) -> str:
 def build_seed_generation_prompt(
     objective: str,
     background: str | None = None,
-    evaluator_cmd: str | None = None,
     dataset_examples: list[str] | None = None,
 ) -> str:
     """Construct the seed generation prompt for the configured backend.
 
     Mirrors GEPA's ``_build_seed_generation_prompt`` — a single structured
     prompt that gives the LLM everything it needs to write a first candidate
-    from scratch.
+    from scratch.  Like GEPA's, it has no evaluator section: the evaluator
+    command can carry an inline scorer or held-out ids, and the mutation
+    prompts do not show it either.
 
     Parameters
     ----------
@@ -270,8 +277,6 @@ def build_seed_generation_prompt(
         Natural-language description of what to optimise.
     background:
         Optional domain context / constraints.
-    evaluator_cmd:
-        Optional evaluator command shown to the LLM for context.
     dataset_examples:
         Optional list of representative dataset inputs used to ground the LLM,
         matching GEPA's ``_build_seed_generation_prompt`` ``dataset`` argument.
@@ -282,17 +287,8 @@ def build_seed_generation_prompt(
     str
         The formatted seed-generation prompt.
     """
-    background_lines: list[str] = []
-    if background:
-        background_lines.append(f"\n## Domain Context & Constraints\n\n{background}")
-    if evaluator_cmd:
-        background_lines.append(
-            f"\n## Evaluator\n\nYour candidate will be evaluated by running:\n\n"
-            f"    {evaluator_cmd}\n\n"
-            f"Make sure your implementation is compatible with this command."
-        )
-    background_section = "\n".join(background_lines) + (
-        "\n" if background_lines else ""
+    background_section = (
+        f"\n## Domain Context & Constraints\n\n{background}\n" if background else ""
     )
 
     # Mirror GEPA's dataset grounding: include up to 3 representative examples
@@ -647,7 +643,7 @@ def build_mutation_prompt(
 
 #: Filename of the post-hoc mutation-prompt artifact persisted in each
 #: candidate's worktree root alongside ``helix_batch.json``.  The leading
-#: dot + per-worktree ``.gitignore`` entry keep it out of the candidate
+#: dot + git exclude entry keep it out of the candidate
 #: git tree.
 MUTATION_PROMPT_ARTIFACT_NAME = ".agent_task_prompt.md"
 MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/task_prompt.md"
@@ -689,8 +685,13 @@ def _prompt_file_instruction(prompt_artifact_name: str) -> str:
     )
 
 
+#: Serialises appends to the exclude file, which every candidate worktree of
+#: one repository shares.
+_EXCLUDE_LOCK = threading.Lock()
+
+
 def _ignore_helix_artifacts(worktree_path: Path) -> None:
-    """Append HELIX artifact names to ``<worktree>/.gitignore``.
+    """Add HELIX artifact names to the worktree's git exclude file.
 
     The candidate worktree is a real git tree; anything committed there
     bakes into the candidate's evolutionary history.  HELIX writes
@@ -700,10 +701,19 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     artifact as part of the codebase and the lineage grows a
     meaningless file-rename trail.
 
-    Idempotent: only appends patterns that aren't already present.
-    Creates the ``.gitignore`` file if missing.
+    The patterns go in ``info/exclude`` (``git rev-parse --git-path``), not
+    in ``.gitignore``: the candidate tree is the agent's, so editing it would
+    make every first child "change" ``.gitignore``, and writing through a
+    ``.gitignore`` the agent linked to another file would edit that file.
+    The sandbox's synthetic repository copies this file (see
+    ``helix.sandbox._init_synthetic_git_repo``).
+
+    Idempotent: only appends patterns that aren't already present.  Does
+    nothing outside a git work tree root.
     """
-    gitignore = worktree_path / ".gitignore"
+    exclude = git_exclude_path(worktree_path)
+    if exclude is None:
+        return
     patterns = [
         "# HELIX per-invocation artifacts (never commit to candidate tree)",
         MUTATION_PROMPT_ARTIFACT_NAME,
@@ -729,20 +739,21 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         # the candidate git tree free of opencode's session/session files.
         ".helix_opencode_state/",
     ]
-    if gitignore.is_symlink():
-        # The candidate tree comes from an agent.  Write through the link only
-        # when it resolves to a regular file inside the worktree; any other
-        # link (possibly to a host file) is replaced by a regular file.
-        resolved = os.path.realpath(gitignore)
-        inside = resolved.startswith(os.path.realpath(worktree_path) + os.sep)
-        if not (inside and os.path.isfile(resolved)):
-            gitignore.unlink()
-    existing = gitignore.read_text() if gitignore.exists() else ""
-    to_append = [p for p in patterns if p not in existing]
-    if not to_append:
-        return
-    sep = "" if existing.endswith("\n") or not existing else "\n"
-    gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
+    with _EXCLUDE_LOCK:
+        if exclude.is_symlink():
+            logger.warning("not writing git exclude file %s: it is a symlink", exclude)
+            return
+        try:
+            existing = exclude.read_text() if exclude.exists() else ""
+            to_append = [p for p in patterns if p not in existing.splitlines()]
+            if not to_append:
+                return
+            sep = "" if existing.endswith("\n") or not existing else "\n"
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a") as f:
+                f.write(sep + "\n".join(to_append) + "\n")
+        except OSError as exc:
+            logger.warning("could not update git exclude file %s: %s", exclude, exc)
 
 
 def _write_mutation_prompt_artifact(
@@ -756,7 +767,7 @@ def _write_mutation_prompt_artifact(
 
     Writes to a reserved stable path (``<worktree>/.agent_task_prompt.md``)
     with deterministic fallback (``<worktree>/.agent_internal/task_prompt.md``)
-    and ensures the per-worktree ``.gitignore`` excludes the file.  Existing
+    and ensures the git exclude file lists it.  Existing
     files are treated as user-owned collisions and are never overwritten.
     Returns the artifact filename chosen for this invocation.
     """
@@ -2057,7 +2068,6 @@ def _write_backend_artifacts(
     result_name, stdout_name, stderr_name = _backend_artifact_names(artifact_infix)
     try:
         wt = Path(worktree_path)
-        _ignore_helix_artifacts(wt)
         (wt / stdout_name).write_text(result.stdout or "")
         (wt / stderr_name).write_text(result.stderr or "")
         # ``parsed is None`` means the strict parse failed.  Record the
@@ -2160,6 +2170,10 @@ def invoke_claude_code(
     """
     if _MUTATOR_OVERRIDE is not None:
         return _MUTATOR_OVERRIDE(worktree_path, prompt, config)
+    # Before the backend runs, so its artifacts are ignored from the moment
+    # they exist, in the agent's ``git status`` (sandbox copies this rule
+    # set) and in every snapshot.
+    _ignore_helix_artifacts(Path(worktree_path))
     backend = config.backend
     backend_name = backend_display_name(backend)
     backend_worktree_path = (
@@ -2373,7 +2387,21 @@ def capture_base_commit(worktree_path: str) -> str | None:
     return sha or None
 
 
-def _child_diff(worktree_path: str, base_sha: str | None) -> str:
+def _hidden_pathspec(hidden_paths: Sequence[str]) -> list[str]:
+    """Pathspec that limits a git listing to everything but *hidden_paths*."""
+    if not hidden_paths:
+        return []
+    return ["--", ".", *(f":(exclude,literal){p}" for p in hidden_paths)]
+
+
+def _is_hidden(rel: str, hidden_paths: Sequence[str]) -> bool:
+    """Whether *rel* is one of *hidden_paths* or lies under one."""
+    return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in hidden_paths)
+
+
+def _child_diff(
+    worktree_path: str, base_sha: str | None, hidden_paths: Sequence[str] = ()
+) -> str:
     """Return what this mutation changed, as a diff against its parent.
 
     Diffed from *base_sha* — the commit the worktree sat at before the backend
@@ -2389,17 +2417,22 @@ def _child_diff(worktree_path: str, base_sha: str | None) -> str:
     Files the agent created but never added to git are invisible to
     ``git diff``; :func:`_new_files_section` covers those.
 
+    *hidden_paths* (protected evaluator files and ``omit_from_agent``) are
+    left out entirely: the diff goes into a prompt, and a change to one of
+    them must not carry its contents there.
+
     Returns ``""`` on any git failure or when nothing changed; the caller then
     builds a diff-less prompt rather than failing the mutation.
     """
     ref = base_sha or "HEAD"
-    patch = _git_stdout(worktree_path, "diff", "--no-color", ref).strip()
+    pathspec = _hidden_pathspec(hidden_paths)
+    patch = _git_stdout(worktree_path, "diff", "--no-color", ref, *pathspec).strip()
     if not patch:
         return ""
     if len(patch) > _MAX_DIFF_CHARS:
         patch = patch[:_MAX_DIFF_CHARS] + _DIFF_TRUNCATION_MARKER
 
-    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref).strip()
+    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref, *pathspec).strip()
     return f"{diffstat}\n\n{patch}" if diffstat else patch
 
 
@@ -2486,7 +2519,7 @@ def _fenced(text: str, language: str) -> str:
     return f"{fence}{language}\n{text.rstrip(chr(10))}\n{fence}"
 
 
-def _new_files_section(worktree_path: str) -> str:
+def _new_files_section(worktree_path: str, hidden_paths: Sequence[str] = ()) -> str:
     """Render the contents of untracked new files for the summary prompt.
 
     A mutation that puts its whole idea in a new module is invisible to
@@ -2497,9 +2530,14 @@ def _new_files_section(worktree_path: str) -> str:
     budget is spent the remaining files are still named -- every new file is
     at least listed -- but not shown.
 
+    Files at or under *hidden_paths* are neither shown nor named.
+
     Returns ``""`` when there are no new files or git cannot list them.
     """
-    names = _untracked_files(worktree_path)
+    names = [
+        name for name in _untracked_files(worktree_path)
+        if not _is_hidden(name, hidden_paths)
+    ]
     if not names:
         return ""
     root = Path(worktree_path)
@@ -2534,7 +2572,7 @@ def _content_tree_hash(worktree_path: str) -> str | None:
     disturbed by a read-only integrity check.
 
     Ignored files are excluded by construction, so the change summary and the
-    backend artifacts -- all gitignored -- never register as changes.
+    backend artifacts -- all git-excluded -- never register as changes.
     """
     fd, tmp_index = tempfile.mkstemp(prefix="helix-idx-")
     os.close(fd)
@@ -2629,6 +2667,7 @@ def generate_change_summary(
     worktree_path: str,
     config: HelixConfig,
     base_sha: str | None = None,
+    hidden_paths: Sequence[str] = (),
 ) -> tuple[str | None, UsageStats | None]:
     """Describe the change just made in *worktree_path* via one extra call.
 
@@ -2647,14 +2686,18 @@ def generate_change_summary(
     :func:`capture_base_commit`.  Passing it is what makes the diff survive an
     agent that commits its own work; ``None`` falls back to ``HEAD``, which
     only sees uncommitted changes.
+
+    ``hidden_paths`` (the protected evaluator files and
+    ``sandbox.omit_from_agent``) never reach the prompt: the worktree is the
+    host's copy and holds them even when the agent's copy did not.
     """
     # One number drives both the request and the read-back truncation; passing
     # it to only one of them would cut every long summary mid-sentence.
     max_words = config.evolution.sibling_summary_max_words
     prompt = summary_prompt(
         objective=config.objective,
-        diff=_child_diff(worktree_path, base_sha),
-        new_files=_new_files_section(worktree_path),
+        diff=_child_diff(worktree_path, base_sha, hidden_paths),
+        new_files=_new_files_section(worktree_path, hidden_paths),
         max_words=max_words,
     )
     # A fresh turn budget: the mutation's own limit governs editing code and is
@@ -2668,8 +2711,8 @@ def generate_change_summary(
             primary_name=SUMMARY_PROMPT_ARTIFACT_NAME,
             fallback_name=SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
         )
-        # Taken after the prompt artifact and .gitignore are settled, so only
-        # the summary call's own doing can move this hash.
+        # Taken after the prompt artifact and the git exclude file are
+        # settled, so only the summary call's own doing can move this hash.
         before_tree = _content_tree_hash(worktree_path)
         _, usage = invoke_claude_code(
             worktree_path,
@@ -2718,6 +2761,7 @@ def mutate(
     prepare_worktree: Callable[[Candidate], None] | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
     sibling_history: str | None = None,
+    hidden_paths: Sequence[str] = (),
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -2749,6 +2793,9 @@ def mutate(
         ``None`` to disable sibling tracking for this mutation entirely (see
         :func:`build_mutation_prompt`).  When it is not ``None``, the agent's
         self-report is read back into ``child.summary`` before returning.
+    hidden_paths:
+        Repo-relative paths kept out of the change-summary prompt: the
+        protected evaluator files and ``sandbox.omit_from_agent``.
 
     Returns
     -------
@@ -2771,7 +2818,7 @@ def mutate(
     # Persist the rendered prompt to the worktree for post-hoc inspection:
     # what did the mutator actually see on this generation?  Sits next to
     # ``helix_batch.json`` in the worktree root.  The leading dot and the
-    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
+    # git exclude entry (see ``_ignore_helix_artifacts``)
     # keep it out of the candidate git tree — otherwise it'd leak into
     # every subsequent mutation's diff and the mutator would see its own
     # prior prompt file as part of the codebase.
@@ -2801,7 +2848,7 @@ def mutate(
             # gate rejects has its worktree removed immediately after, and by
             # default that content is unrecoverable.
             child.summary, summary_usage = generate_change_summary(
-                child.worktree_path, config, base_sha
+                child.worktree_path, config, base_sha, hidden_paths
             )
             if summary_usage is not None:
                 # Accumulate into a copy.  ``child.usage`` IS the object already

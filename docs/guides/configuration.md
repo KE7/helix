@@ -85,7 +85,8 @@ cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate; passing results carry into the tail
 sibling_history = false          # show the mutator every child already proposed from the same
-                                 # parent: each one's score, whether it was kept, and a note on
+                                 # parent: its score on the train minibatch it was gated on
+                                 # (never a val score), whether it was kept, and a note on
                                  # what it changed. Every child is kept in state.
                                  # Advisory only — HELIX never filters a proposal on it.
 sibling_summary_max_words = 150  # budget for each of those notes; quoted to the summarising
@@ -118,7 +119,8 @@ evaluator = false                # true (with enabled = true) = run evaluation i
 network = "bridge"               # "bridge" | "none" | "host" | an existing Docker network
                                  # (for example an --internal network with an egress proxy)
 skip_special_files = true        # skip FIFOs/sockets/devices during workspace sync
-# omit_from_agent = ["evaluate.py", "data/val"]  # paths left out of the agent's copy
+# omit_from_agent = ["evaluate.py", "data/val"]  # paths left out of the agent's copy;
+                                 # must be inside the project
 # Agent containers mount a persistent Docker auth volume named
 # helix-auth-<backend>. Run `helix sandbox login <backend>` once per backend.
 # auth_volume = "my-run-home"    # optional: mount this volume at /home/node instead;

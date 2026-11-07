@@ -100,6 +100,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the site.
 
 ### Changed
+- HELIX no longer edits each candidate's `.gitignore` to hide its own files
+  (`.agent_task_prompt.md`, `helix_batch.json`, `.helix_backend_*`, ...). It
+  adds them to the repository's git exclude file (`.git/info/exclude`) instead,
+  so a first child no longer "changes" `.gitignore` and its commit holds only
+  the agent's work, and a `.gitignore` symlinked to another file (say the
+  evaluator) is never written through. The sandbox's workspace repository
+  carries the same rules. Because the exclude file is shared, those names are
+  also ignored by `git status` in your project checkout.
+- With `sibling_history = true`, each earlier child's score is now its mean on
+  the train minibatch it was gated on (the full train set without a
+  minibatch), not its val score: the history goes into the mutation prompt,
+  which like GEPA's reflective proposer sees only training data. Scores from
+  earlier 0.3 development builds already in `state.json` are shown as stored.
+- The seedless seed prompt no longer shows `[evaluator].command`, which can
+  carry an inline scorer or held-out ids; GEPA's seed prompt has no evaluator
+  either. Describe the expected interface in `objective` or
+  `[agent].background` instead.
+- `[sandbox].omit_from_agent` entries are normalised like
+  `evaluator.protected_files`: `/abs/project/evaluate.py` and
+  `data/../evaluate.py` now omit `evaluate.py` (they used to match nothing, so
+  the file reached the agent), and a path outside the project stops the run.
 - The README is now a short overview: demo, results, papers built with HELIX,
   a quickstart and the examples. The reference material it held
   (configuration, sandboxing, dataset modes, evaluator integrity, parallelism,
@@ -217,6 +238,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Sandbox sync-back no longer deletes `[sandbox].omit_from_agent` paths when
+  the agent removes or replaces their parent directory (`rm -rf data` with
+  `omit_from_agent = ["data/val"]` used to delete `data/val` from the
+  candidate, commit the deletion and show the omitted contents in the
+  change-summary diff). The rest of the agent's change to that directory
+  still syncs back.
+- The `sibling_history` change-summary prompt, built from the host worktree,
+  no longer includes protected evaluator files or `omit_from_agent` paths in
+  its diff or new-file sections.
+- Tamper detection now rejects a candidate that puts a symlink at or under a
+  protected path (for example `mv tests tests_real; ln -s tests_real tests`
+  and a new `tests_real/conftest.py`). Links the project itself has are
+  allowed.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess

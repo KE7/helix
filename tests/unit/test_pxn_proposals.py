@@ -1070,6 +1070,80 @@ class TestSiblingHistory:
         assert len(handed) == 3
         assert len(_final_state(all_mocks).sibling_history[seed.id]) == 3
 
+    def test_an_accepted_child_is_recorded_with_its_train_gate_score(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The history reaches the mutation prompt, which (as in GEPA's
+        ``ReflectiveMutationProposer``) sees only training data: the score
+        shown is the train-minibatch gate's, never the child's val score."""
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _wire_siblings(all_mocks, seed.id)
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            ids = instance_ids or ["v1"]
+            if candidate.id == seed.id:
+                return _make_result(candidate.id, {i: 0.3 for i in ids})
+            return _make_result(
+                candidate.id, {i: 0.9 if split == "train" else 0.6 for i in ids}
+            )
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=1,
+            sibling_history=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        [entry] = _final_state(all_mocks).sibling_history[seed.id]
+        assert entry["accepted"] is True
+        assert entry["score"] == pytest.approx(0.9)
+
+    def test_mutate_is_told_which_paths_to_keep_out_of_the_summary(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """Protected evaluator files and ``omit_from_agent`` (normalised) are
+        handed to ``mutate`` for the change-summary prompt."""
+        from helix.config import SandboxConfig
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _wire_siblings(all_mocks, seed.id)
+        hidden: list[Any] = []
+        inner = all_mocks["mutate"].side_effect
+
+        def capture(**kwargs: Any) -> Candidate:
+            hidden.append(kwargs.get("hidden_paths"))
+            return inner(**kwargs)
+
+        all_mocks["mutate"].side_effect = capture
+        config = _make_config(
+            train_path, num_parallel_proposals=1, mutations_per_parent=1,
+            sibling_history=True,
+        )
+        config = config.model_copy(
+            update={
+                "evaluator": config.evaluator.model_copy(
+                    update={"protected_files": ["splits"]}
+                ),
+                "sandbox": SandboxConfig(omit_from_agent=[str(tmp_path / "secret")]),
+            }
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert hidden == [["secret", "splits"]]
+
     def test_max_entries_windows_the_prompt_but_not_the_record(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:

@@ -188,6 +188,32 @@ class TestRunEvolutionSeedless:
 
         seedless_mocks["generate_seed"].assert_called_once()
 
+    def test_seed_prompt_does_not_show_the_evaluator_command(
+        self, tmp_path, seedless_mocks, mocker
+    ):
+        """The command can carry an inline scorer or held-out ids, and the
+        prompt is an agent-visible file; GEPA's seed prompt has no evaluator."""
+        from helix.mutator import build_seed_generation_prompt
+
+        mocker.patch(
+            "helix.evolution.build_seed_generation_prompt",
+            side_effect=build_seed_generation_prompt,
+        )
+        config = make_config(seedless=True)
+        config = config.model_copy(
+            update={
+                "evaluator": EvaluatorConfig(
+                    command="python -c 'print(\"HELD-OUT-ANSWER\")'"
+                )
+            }
+        )
+
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        prompt = seedless_mocks["generate_seed"].call_args.args[1]
+        assert config.objective in prompt
+        assert "HELD-OUT-ANSWER" not in prompt
+
     def test_seedless_generate_seed_receives_prompt(self, tmp_path, seedless_mocks):
         """generate_seed must be called with the prompt returned by build_seed_generation_prompt."""
         config = make_config(seedless=True)

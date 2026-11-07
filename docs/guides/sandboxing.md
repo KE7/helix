@@ -24,6 +24,12 @@ project root, parent directories, or home directory by default.
 `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX runtime artifacts are also
 excluded from sandbox workspace copies/sync-back so agents cannot read sidecar
 configuration or mutate run settings.
+Paths in `[sandbox].omit_from_agent` (repo-relative; absolute paths inside the
+project are accepted, paths outside it are an error) are left out of the
+agent's copy and are never deleted or replaced by sync-back: if the agent
+removes or replaces a directory that holds one, the rest of that directory's
+changes sync back and the omitted paths stay. They are also kept out of the
+change-summary prompt that `sibling_history` builds from the host worktree.
 During copy and sync, HELIX skips unsupported special files such as FIFOs,
 sockets, and device nodes by default. Set `skip_special_files = false` only if
 you want unsupported workspace file types to raise instead of being ignored.

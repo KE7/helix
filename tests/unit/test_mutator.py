@@ -720,45 +720,34 @@ class TestMutationPromptArtifact:
         assert config.objective in content
         assert "Task instructions:" in content
 
-    def test_gitignore_excludes_helix_artifacts(self, tmp_path: Path, mocker):
-        """``.gitignore`` in the worktree gains entries for the prompt
-        file AND ``helix_batch.json`` so neither file enters the
-        candidate diff on the next generation."""
+    def test_git_exclude_lists_helix_artifacts(self, tmp_path: Path, mocker):
+        """The repo's ``info/exclude`` gains entries for the prompt file AND
+        ``helix_batch.json`` so neither enters the candidate diff on the next
+        generation, and the candidate's ``.gitignore`` is left alone."""
         parent, er, config, wt = self._build(tmp_path, mocker)
+        subprocess.run(["git", "init", "-q", "."], cwd=wt, check=True)
         mutate(parent, er, "g1-s0", config, tmp_path)
 
-        gi = (wt / ".gitignore").read_text()
-        assert ".agent_task_prompt.md" in gi
-        assert ".agent_internal/" in gi
-        assert "helix_batch.json" in gi
-
-    def test_gitignore_append_is_idempotent(self, tmp_path: Path, mocker):
-        """A pre-existing ``.gitignore`` with HELIX patterns already
-        present must not grow duplicate entries on subsequent mutate()
-        calls — otherwise long runs balloon the gitignore."""
-        parent, er, config, wt = self._build(tmp_path, mocker)
-        # Seed a gitignore with the patterns already present + other lines.
-        (wt / ".gitignore").write_text(
-            "*.pyc\n"
-            "# HELIX per-invocation artifacts (never commit to candidate tree)\n"
-            ".agent_task_prompt.md\n"
-            ".agent_internal/\n"
-            "helix_batch.json\n"
-        )
-        mutate(parent, er, "g1-s0", config, tmp_path)
-
-        gi = (wt / ".gitignore").read_text()
-        assert gi.count(".agent_task_prompt.md") == 1
-        assert gi.count(".agent_internal/") == 1
-        assert gi.count("helix_batch.json") == 1
-        assert "*.pyc" in gi  # existing content preserved
-
-    def test_gitignore_created_when_absent(self, tmp_path: Path, mocker):
-        parent, er, config, wt = self._build(tmp_path, mocker)
-        # Ensure no pre-existing gitignore.
+        excluded = (wt / ".git" / "info" / "exclude").read_text().splitlines()
+        assert ".agent_task_prompt.md" in excluded
+        assert ".agent_internal/" in excluded
+        assert "helix_batch.json" in excluded
         assert not (wt / ".gitignore").exists()
+
+    def test_git_exclude_append_is_idempotent(self, tmp_path: Path, mocker):
+        """Patterns already present are not appended again — otherwise long
+        runs balloon the exclude file every worktree of the repo shares."""
+        parent, er, config, wt = self._build(tmp_path, mocker)
+        subprocess.run(["git", "init", "-q", "."], cwd=wt, check=True)
+        exclude = wt / ".git" / "info" / "exclude"
+        exclude.write_text("*.pyc\nhelix_batch.json\n")
         mutate(parent, er, "g1-s0", config, tmp_path)
-        assert (wt / ".gitignore").exists()
+        mutate(parent, er, "g1-s0", config, tmp_path)
+
+        lines = exclude.read_text().splitlines()
+        assert lines.count(".agent_task_prompt.md") == 1
+        assert lines.count("helix_batch.json") == 1
+        assert lines[0] == "*.pyc"  # existing content preserved
 
 
 # ---------------------------------------------------------------------------
@@ -1716,6 +1705,42 @@ class TestNewFilesSection:
         assert "def sparse(n):" in prompt
         assert "No diff was available" not in prompt
 
+    def test_summary_prompt_leaves_out_hidden_paths(self, tmp_path: Path, mocker):
+        """The summary prompt is built from the host worktree, which holds the
+        protected and omitted files even when the agent's copy did not: their
+        contents must not reach it as a diff or as a new file."""
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        wt = self._repo(tmp_path)
+        (wt / "evaluate.py").write_text("def score():\n    return 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "e"],
+            cwd=wt, check=True,
+        )
+        base = capture_base_commit(str(wt))
+        (wt / "evaluate.py").write_text("def score():\n    return 'SCORING-SECRET'\n")
+        (wt / "data" / "val").mkdir(parents=True)
+        (wt / "data" / "val" / "answers.json").write_text('{"q7": "SECRET-ANSWER"}\n')
+        (wt / "solve.py").write_text("def solve(n):\n    return n + 1\n")
+
+        prompts: list[str] = []
+
+        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
+            prompts.append(prompt)
+            return ({}, UsageStats())
+
+        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
+        generate_change_summary(
+            str(wt), make_config(), base_sha=base,
+            hidden_paths=["evaluate.py", "data/val"],
+        )
+
+        prompt = prompts[0]
+        assert "return n + 1" in prompt
+        assert "SCORING-SECRET" not in prompt and "evaluate.py" not in prompt
+        assert "SECRET-ANSWER" not in prompt and "answers.json" not in prompt
+
 
 class TestSummaryCallCannotAlterTheCandidate:
     """The summary call runs in the live worktree before the candidate is
@@ -2139,11 +2164,12 @@ class TestMutateGeneratesChangeSummary:
             _ignore_helix_artifacts,
         )
 
+        subprocess.run(["git", "init", "-q", "."], cwd=tmp_path, check=True)
         _ignore_helix_artifacts(tmp_path)
 
-        text = (tmp_path / ".gitignore").read_text()
-        assert SUMMARY_ARTIFACT_NAME in text
-        assert SUMMARY_PROMPT_ARTIFACT_NAME in text
+        lines = (tmp_path / ".git" / "info" / "exclude").read_text().splitlines()
+        assert SUMMARY_ARTIFACT_NAME in lines
+        assert SUMMARY_PROMPT_ARTIFACT_NAME in lines
 
 
 # ---------------------------------------------------------------------------
@@ -2732,23 +2758,15 @@ class TestOpenCodeSubprocessIsolation:
             )
 
     def test_opencode_isolation_dir_gitignored(self, tmp_path: Path, mocker):
-        """The per-candidate opencode state directory is added to .gitignore."""
-        mock_run = mocker.patch("helix.mutator.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout='{"type":"result","sessionID":"ses_abc"}\n',
-            stderr="",
-            returncode=0,
-        )
+        """The per-candidate opencode state directory is git-excluded."""
+        from helix.mutator import _ignore_helix_artifacts
 
-        invoke_claude_code(
-            str(tmp_path), "prompt", AgentConfig(backend="opencode")
-        )
+        subprocess.run(["git", "init", "-q", "."], cwd=tmp_path, check=True)
+        _ignore_helix_artifacts(tmp_path)
 
-        gitignore_path = tmp_path / ".gitignore"
-        assert gitignore_path.exists(), ".gitignore must be created in the worktree"
-        gitignore_text = gitignore_path.read_text()
-        assert ".helix_opencode_state/" in gitignore_text, (
-            ".helix_opencode_state/ must be gitignored to keep it out of candidate history"
+        lines = (tmp_path / ".git" / "info" / "exclude").read_text().splitlines()
+        assert ".helix_opencode_state/" in lines, (
+            ".helix_opencode_state/ must be ignored to keep it out of candidate history"
         )
 
 
@@ -3293,45 +3311,113 @@ class TestToolCountsFromNativeTranscript:
 
 
 # ---------------------------------------------------------------------------
-# .gitignore handling never writes through a symlink that leaves the worktree
+# HELIX ignores its own artifacts through git's exclude file, never .gitignore
 # ---------------------------------------------------------------------------
 
 
-def test_ignore_helix_artifacts_replaces_a_symlink_to_a_host_file(tmp_path: Path) -> None:
+def _git_repo_with_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A project repo and a linked worktree of it, like a HELIX candidate."""
+    import subprocess as sp
+
+    project = tmp_path / "project"
+    project.mkdir()
+    sp.run(["git", "init", "-q", "."], cwd=project, check=True)
+    (project / "evaluate.py").write_text("SECRET = 42\n")
+    (project / "solver.py").write_text("x = 1\n")
+    sp.run(["git", "add", "-A"], cwd=project, check=True)
+    sp.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
+        cwd=project, check=True,
+    )
+    worktree = tmp_path / "g1-s1"
+    sp.run(
+        ["git", "worktree", "add", "-q", "--detach", str(worktree), "HEAD"],
+        cwd=project, check=True,
+    )
+    return project, worktree
+
+
+def test_helix_artifacts_are_ignored_without_editing_the_candidate_tree(
+    tmp_path: Path,
+) -> None:
+    """The candidate's own files, ``.gitignore`` included, stay untouched, so a
+    first child does not "change" ``.gitignore`` and its commit holds only the
+    agent's work."""
+    import subprocess as sp
+
+    from helix.mutator import _write_mutation_prompt_artifact
+
+    _, worktree = _git_repo_with_linked_worktree(tmp_path)
+
+    _write_mutation_prompt_artifact(str(worktree), "prompt")
+    (worktree / "helix_batch.json").write_text("[]\n")
+    (worktree / ".helix_backend_stdout.txt").write_text("out\n")
+
+    assert not (worktree / ".gitignore").exists()
+    status = sp.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=worktree, capture_output=True, text=True, check=True,
+    ).stdout
+    assert status == ""
+
+
+def test_helix_artifacts_never_write_through_a_gitignore_symlink(
+    tmp_path: Path,
+) -> None:
+    """A ``.gitignore`` linked to the evaluator must not be appended to: that
+    edits the protected file and puts it in the change-summary diff."""
     import os
+    import subprocess as sp
 
-    from helix.mutator import _ignore_helix_artifacts
+    from helix.mutator import _write_mutation_prompt_artifact
 
-    host = tmp_path / "host"
-    host.mkdir()
-    victim = host / "victim.txt"
-    victim.write_text("do not touch\n")
-    worktree = tmp_path / "wt"
-    worktree.mkdir()
-    os.symlink(str(victim), worktree / ".gitignore")
+    _, worktree = _git_repo_with_linked_worktree(tmp_path)
+    os.symlink("evaluate.py", worktree / ".gitignore")
 
-    _ignore_helix_artifacts(worktree)
+    _write_mutation_prompt_artifact(str(worktree), "prompt")
 
-    assert victim.read_text() == "do not touch\n"
-    gitignore = worktree / ".gitignore"
-    assert not gitignore.is_symlink()
-    text = gitignore.read_text()
-    assert "helix_batch.json" in text and "do not touch" not in text
-
-
-def test_ignore_helix_artifacts_writes_through_an_in_tree_link(tmp_path: Path) -> None:
-    import os
-
-    from helix.mutator import _ignore_helix_artifacts
-
-    worktree = tmp_path / "wt"
-    worktree.mkdir()
-    (worktree / "ignore_rules").write_text("__pycache__/\n")
-    os.symlink("ignore_rules", worktree / ".gitignore")
-
-    _ignore_helix_artifacts(worktree)
-
-    # The tracked link stays a link; its in-tree target gains the patterns.
+    assert (worktree / "evaluate.py").read_text() == "SECRET = 42\n"
     assert (worktree / ".gitignore").is_symlink()
-    rules = (worktree / "ignore_rules").read_text()
-    assert rules.startswith("__pycache__/\n") and "helix_batch.json" in rules
+    status = sp.run(
+        ["git", "status", "--porcelain"],
+        cwd=worktree, capture_output=True, text=True, check=True,
+    ).stdout
+    assert ".agent_task_prompt.md" not in status
+
+
+def test_git_exclude_path_is_the_file_git_reads(tmp_path: Path) -> None:
+    """Same answer as ``git rev-parse --git-path info/exclude`` for the main
+    checkout and for a linked worktree (which shares the common one)."""
+    import os
+    import subprocess as sp
+
+    from helix.worktree import git_exclude_path
+
+    project, worktree = _git_repo_with_linked_worktree(tmp_path)
+    for root in (project, worktree):
+        out = sp.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        expected = Path(out) if Path(out).is_absolute() else root / out
+        found = git_exclude_path(root)
+        assert found is not None
+        assert os.path.realpath(found) == os.path.realpath(expected)
+
+
+def test_ignore_helix_artifacts_skips_a_directory_that_is_not_a_repo_root(
+    tmp_path: Path,
+) -> None:
+    """A plain directory nested in some other repo must not have HELIX write
+    that repo's exclude file."""
+    from helix.mutator import _ignore_helix_artifacts
+
+    project, _ = _git_repo_with_linked_worktree(tmp_path)
+    nested = project / "sub"
+    nested.mkdir()
+    exclude = project / ".git" / "info" / "exclude"
+    before = exclude.read_text() if exclude.exists() else ""
+
+    _ignore_helix_artifacts(nested)
+
+    assert (exclude.read_text() if exclude.exists() else "") == before

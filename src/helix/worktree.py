@@ -50,6 +50,43 @@ def helix_git_env() -> dict[str, str]:
     }
 
 
+def git_exclude_path(worktree: Path) -> Path | None:
+    """Return the ``info/exclude`` file git reads for *worktree*.
+
+    The same file ``git rev-parse --git-path info/exclude`` names: for a
+    linked worktree it lives in the common ``.git`` directory, which every
+    candidate of the repository shares.  Resolved from the ``.git`` entry
+    rather than by running git, so the backend invocation that calls this
+    spawns nothing but the backend.
+
+    ``None`` when *worktree* has no ``.git`` of its own, so a plain directory
+    that merely sits inside some other repository never has that
+    repository's exclude file written.
+    """
+    dotgit = worktree / ".git"
+    try:
+        if dotgit.is_dir():
+            common = dotgit
+        elif dotgit.is_file():
+            # Linked worktree: ``.git`` is ``gitdir: <path>``, and that
+            # directory's ``commondir`` points at the shared repository.
+            text = dotgit.read_text().strip()
+            if not text.startswith("gitdir:"):
+                return None
+            gitdir = Path(text[len("gitdir:"):].strip())
+            if not gitdir.is_absolute():
+                gitdir = worktree / gitdir
+            commondir = gitdir / "commondir"
+            common = (
+                gitdir / commondir.read_text().strip() if commondir.is_file() else gitdir
+            )
+        else:
+            return None
+    except OSError:
+        return None
+    return common / "info" / "exclude"
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

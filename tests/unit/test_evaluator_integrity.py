@@ -334,3 +334,122 @@ def test_refresh_snapshot_normalizes_protected_file_baseline(tmp_path):
 
     (worktree / "evaluate.py").write_text("backend tampered\n")
     assert _detect_evaluator_tamper(candidate, manifest) == ["evaluate.py"]
+
+
+def _tests_project(tmp_path: Path) -> tuple[Path, HelixConfig]:
+    project = tmp_path / "project"
+    (project / "tests").mkdir(parents=True)
+    (project / "evaluate.py").write_text("print(1)\n")
+    (project / "tests" / "test_a.py").write_text("def test_a(): assert True\n")
+    config = HelixConfig(
+        objective="x",
+        evaluator=EvaluatorConfig(command="python evaluate.py", protected_files=["tests"]),
+    )
+    return project, config
+
+
+def test_symlinked_protected_directory_is_tampering(tmp_path):
+    """``mv tests tests_real; ln -s tests_real tests`` keeps every hash intact,
+    so a file added behind the link went unnoticed and was then scored."""
+    import os
+
+    project, config = _tests_project(tmp_path)
+    manifest = _build_evaluator_integrity_manifest(config, project, project)
+    candidate_dir = tmp_path / "candidate"
+    shutil.copytree(project, candidate_dir)
+    os.rename(candidate_dir / "tests", candidate_dir / "tests_real")
+    os.symlink("tests_real", candidate_dir / "tests")
+    (candidate_dir / "tests_real" / "conftest.py").write_text("evil\n")
+
+    violations = _detect_evaluator_tamper(
+        _candidate(str(candidate_dir)), manifest, config, project
+    )
+    assert "tests" in violations
+
+
+def test_symlink_inside_protected_directory_is_tampering(tmp_path):
+    """A linked sub-directory is not walked, so whatever it holds was unseen."""
+    import os
+
+    project, config = _tests_project(tmp_path)
+    manifest = _build_evaluator_integrity_manifest(config, project, project)
+    candidate_dir = tmp_path / "candidate"
+    shutil.copytree(project, candidate_dir)
+    (candidate_dir / "elsewhere").mkdir()
+    (candidate_dir / "elsewhere" / "conftest.py").write_text("evil\n")
+    os.symlink("../elsewhere", candidate_dir / "tests" / "sub")
+
+    violations = _detect_evaluator_tamper(
+        _candidate(str(candidate_dir)), manifest, config, project
+    )
+    assert violations == ["tests/sub"]
+
+
+def test_symlink_the_project_itself_has_is_not_tampering(tmp_path):
+    """A link the project itself keeps under a protected directory (shared
+    fixtures, say) reaches every candidate as that same link."""
+    import os
+
+    project, config = _tests_project(tmp_path)
+    (project / "fixtures").mkdir()
+    (project / "fixtures" / "case.json").write_text("{}\n")
+    os.symlink("../fixtures", project / "tests" / "fixtures")
+    manifest = _build_evaluator_integrity_manifest(config, project, project)
+    candidate_dir = tmp_path / "candidate"
+    shutil.copytree(project, candidate_dir, symlinks=True)
+
+    assert (
+        _detect_evaluator_tamper(_candidate(str(candidate_dir)), manifest, config, project)
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "entry", ["{root}/evaluate.py", "data/../evaluate.py", "./evaluate.py"]
+)
+def test_omit_from_agent_entries_are_normalised(tmp_path, entry):
+    from helix.config import SandboxConfig
+    from helix.evaluator_manifest import _resolve_omit_from_agent
+
+    config = HelixConfig(
+        objective="x",
+        evaluator=EvaluatorConfig(command="python evaluate.py"),
+        sandbox=SandboxConfig(omit_from_agent=[entry.format(root=tmp_path)]),
+    )
+    assert _resolve_omit_from_agent(config, tmp_path) == ["evaluate.py"]
+
+
+def test_run_evolution_hands_the_sandbox_normalised_omit_paths(tmp_path, mocker):
+    """An absolute or ``..`` entry used to reach the sandbox unchanged, match
+    no workspace path, and leave the evaluator in the agent's copy."""
+    from helix.config import SandboxConfig
+    from helix.evolution import run_evolution
+
+    project = tmp_path / "project"
+    project.mkdir()
+    config = HelixConfig(
+        objective="x",
+        evaluator=EvaluatorConfig(command="python evaluate.py"),
+        sandbox=SandboxConfig(
+            omit_from_agent=[str(project / "evaluate.py"), "data/../splits/val"]
+        ),
+    )
+    impl = mocker.patch("helix.evolution._run_evolution_impl")
+
+    run_evolution(config, project, project / ".helix")
+
+    seen = impl.call_args.args[0]
+    assert seen.sandbox.omit_from_agent == ["evaluate.py", "splits/val"]
+
+
+def test_omit_from_agent_rejects_a_path_outside_the_project(tmp_path):
+    from helix.config import SandboxConfig
+    from helix.evaluator_manifest import _resolve_omit_from_agent
+
+    config = HelixConfig(
+        objective="x",
+        evaluator=EvaluatorConfig(command="python evaluate.py"),
+        sandbox=SandboxConfig(omit_from_agent=["../secrets"]),
+    )
+    with pytest.raises(HelixError, match="outside project root"):
+        _resolve_omit_from_agent(config, tmp_path / "project")
