@@ -31,7 +31,7 @@ from helix.lineage import load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
 from helix import timing
-from helix.worktree import remove_worktree
+from helix.worktree import export_candidate, remove_worktree
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +787,7 @@ def best(project_dir: Path | None, export_path: str | None) -> None:
         if dest.exists():
             print_error(f"Export path already exists: {dest}")
             raise SystemExit(1)
-        shutil.copytree(best_cand.worktree_path, str(dest))
+        export_candidate(best_cand, dest)
         print_success(f"Exported best candidate to: {dest}")
 
 
