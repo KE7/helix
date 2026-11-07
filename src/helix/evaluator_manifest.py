@@ -164,10 +164,34 @@ def agent_hidden_paths(config: HelixConfig, project_root: Path) -> list[str]:
     """
     hidden = set(_collect_protected_evaluator_paths(config, project_root))
     for path_str in config.sandbox.omit_from_agent:
-        rel = _to_repo_relative(path_str, project_root)
-        if rel is not None:
-            hidden.add(rel)
+        # Both spellings: the path as written, and where it resolves.  A path
+        # that is now a symlink out of the repo (``val -> /data/val``) resolves
+        # outside it, yet the candidates' history still holds ``val/``.
+        for rel in (
+            _lexical_repo_relative(path_str, project_root),
+            _to_repo_relative(path_str, project_root),
+        ):
+            if rel is not None:
+                hidden.add(rel)
     return sorted(hidden)
+
+
+def _lexical_repo_relative(path_str: str, project_root: Path) -> str | None:
+    """*path_str* relative to *project_root* without following symlinks."""
+    path = Path(path_str)
+    if path.is_absolute():
+        for base in (project_root, project_root.resolve()):
+            try:
+                path = path.relative_to(base)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    rel = os.path.normpath(path.as_posix())
+    if rel == ".." or rel.startswith("../"):
+        return None
+    return rel
 
 
 def _copy_protected_path(source: Path, destination: Path) -> None:

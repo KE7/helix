@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import threading
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from dataclasses import replace
@@ -129,6 +129,7 @@ from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatib
     _sha256_file,  # noqa: F401
     _to_repo_relative,  # noqa: F401
     _write_evaluator_integrity_manifest,
+    agent_hidden_paths,
     # Constants needed by _check_evaluator_script_exists (which stays in this module)
     _NO_SCRIPT_COMMANDS,
     _SHELL_COMMAND_FLAGS,
@@ -822,7 +823,9 @@ def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
         return lock
 
 
-def _candidate_content_key(candidate: Candidate) -> str:
+def _candidate_content_key(
+    candidate: Candidate, exclude: Iterable[str] = ()
+) -> str:
     """Return a stable content key for cache reuse across equivalent candidates.
 
     The key is the tree ``snapshot_candidate`` would commit: ``git add -A``
@@ -839,6 +842,9 @@ def _candidate_content_key(candidate: Candidate) -> str:
     changing the submodule pointer changes the key but in-place edits inside
     an uncommitted submodule do not — keep submodule state committed for
     reliable reuse.  Falls back to ``candidate.id`` if git fails.
+
+    *exclude* names repo-relative files or directories to leave out of the
+    tree, so two candidates that differ only there get the same key.
     """
     worktree = Path(candidate.worktree_path)
     try:
@@ -864,6 +870,16 @@ def _candidate_content_key(candidate: Candidate) -> str:
                 check=True,
                 capture_output=True,
             )
+            pathspec = [f":(literal){os.path.normpath(p)}" for p in exclude]
+            if pathspec:
+                subprocess.run(
+                    ["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch",
+                     "--", *pathspec],
+                    cwd=worktree,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                )
             tree_proc = subprocess.run(
                 ["git", "write-tree"],
                 cwd=worktree,
@@ -2567,6 +2583,7 @@ def _run_evolution_impl(
                                 source="merge",
                             )
 
+                        merge_hidden = agent_hidden_paths(config, project_root)
                         merge_tamper = _detect_evaluator_tamper(
                             merged,
                             evaluator_manifest,
@@ -2582,12 +2599,15 @@ def _run_evolution_impl(
                                 f"({', '.join(merge_tamper)}) -- rejecting."
                             )
                             _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
-                        elif _candidate_content_key(merged) in {
-                            _candidate_content_key(a),
-                            _candidate_content_key(b),
+                        elif _candidate_content_key(merged, merge_hidden) in {
+                            _candidate_content_key(a, merge_hidden),
+                            _candidate_content_key(b, merge_hidden),
                         }:
                             # The agent left the tree equal to a parent: there
-                            # is no merge to evaluate.  GEPA builds its merge
+                            # is no merge to evaluate.  Protected and omitted
+                            # paths are left out of the comparison, since
+                            # ``prepare_worktree`` may have refreshed them in
+                            # the merge but not in an older parent.  GEPA builds its merge
                             # in code, which guarantees it takes something
                             # from the other parent: ``filter_ancestors`` keeps
                             # only triplets passing

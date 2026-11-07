@@ -1492,9 +1492,9 @@ class TestMergeBehavior:
         real_key = evolution._candidate_content_key
         mocker.patch(
             "helix.evolution._candidate_content_key",
-            side_effect=lambda c: "tree-g1-s1"
+            side_effect=lambda c, exclude=(): "tree-g1-s1"
             if c.id in {"g1-s1", "g2-m1"}
-            else real_key(c),
+            else real_key(c, exclude),
         )
         config = make_config(
             max_generations=2,
@@ -1513,6 +1513,52 @@ class TestMergeBehavior:
         assert attempt["reason"] == "merge_no_change"
         # Fell through to mutation in gen 2, as after any pre-eval reject.
         assert all_mocks["mutate"].call_count == 2
+
+    def test_no_change_check_ignores_a_protected_file_refresh(
+        self, tmp_path, monkeypatch
+    ):
+        """``prepare_worktree`` refreshes protected files in the merge, not in
+        an older parent.  A merge whose only difference from its parent is
+        that refresh is still no change, so the key the no-change check
+        compares leaves those paths out (real git worktrees)."""
+        from helix.evolution import _candidate_content_key
+        from helix.worktree import (
+            clone_candidate,
+            create_seed_worktree,
+            snapshot_candidate,
+        )
+
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "solve.py").write_text("ANSWER = 0\n")
+        (project / "evaluate.py").write_text("print('v1')\n")
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+        worktrees = tmp_path / "worktrees"
+        seed = create_seed_worktree(project, worktrees)
+        parent = clone_candidate(seed, "g1-s1", worktrees)
+        (Path(parent.worktree_path) / "solve.py").write_text("ANSWER = 41\n")
+        snapshot_candidate(parent, "parent")
+        merged = clone_candidate(parent, "g2-m1", worktrees)
+        # The refresh after an evaluator update on resume; the agent then
+        # changes nothing.
+        (Path(merged.worktree_path) / "evaluate.py").write_text("print('v2')\n")
+        snapshot_candidate(merged, "refresh protected files")
+
+        assert _candidate_content_key(merged) != _candidate_content_key(parent)
+        hidden = ["evaluate.py"]
+        assert _candidate_content_key(merged, hidden) == _candidate_content_key(
+            parent, hidden
+        )
+        # A real edit still counts.
+        (Path(merged.worktree_path) / "solve.py").write_text("ANSWER = 42\n")
+        assert _candidate_content_key(merged, hidden) != _candidate_content_key(
+            parent, hidden
+        )
 
     def test_merge_past_its_gate_is_kept_when_budget_runs_out(
         self, mocker, tmp_path, all_mocks

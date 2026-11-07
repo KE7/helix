@@ -571,3 +571,51 @@ def test_merge_prompt_diffs_a_seed_ancestor_without_protected_files(
     assert "+ANSWER = 41" in prompt
     assert "+HELPER = 2" in prompt
     assert "SECRET" not in prompt
+
+
+def test_merge_prompt_hides_an_omitted_dir_that_now_links_outside(
+    tmp_path: Path, mocker, monkeypatch
+):
+    """``omit_from_agent = ["val"]`` and ``val`` is now a symlink out of the
+    repo, while the candidates' history still holds ``val/``.  The path
+    resolves outside the repo, but its historical diff must stay hidden."""
+    import os
+    import shutil
+    import subprocess
+
+    from helix.worktree import clone_candidate, create_seed_worktree, snapshot_candidate
+
+    for key in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+        monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+    project = tmp_path / "project"
+    (project / "val").mkdir(parents=True)
+    (project / "val" / "case.json").write_text('"old"\n')
+    (project / "solve.py").write_text("ANSWER = 0\n")
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+    worktrees = tmp_path / "worktrees"
+    seed = create_seed_worktree(project, worktrees)
+    a = clone_candidate(seed, "g1-s1", worktrees)
+    (Path(a.worktree_path) / "solve.py").write_text("ANSWER = 41\n")
+    (Path(a.worktree_path) / "val" / "case.json").write_text('"SECRET_ANSWER"\n')
+    snapshot_candidate(a, "A")
+    b = clone_candidate(seed, "g1-s2", worktrees)
+    (Path(b.worktree_path) / "helper.py").write_text("HELPER = 2\n")
+    snapshot_candidate(b, "B")
+    # The project's val/ now lives outside the repo.
+    outside = tmp_path / "datasets" / "val"
+    outside.mkdir(parents=True)
+    shutil.rmtree(project / "val")
+    os.symlink(outside, project / "val")
+
+    config = HelixConfig(objective="goal", evaluator=EvaluatorConfig(command="pytest -q"))
+    config.sandbox.omit_from_agent = ["val"]
+    invoke = mocker.patch("helix.merger.invoke_claude_code", return_value=({}, {}))
+
+    merge(a, b, "g2-m1", config, worktrees, ancestor=seed, project_root=project)
+
+    prompt = invoke.call_args[0][1]
+    assert "+ANSWER = 41" in prompt
+    assert "SECRET" not in prompt

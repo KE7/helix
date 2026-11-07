@@ -233,13 +233,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it is evaluated, recorded under `.helix/attempts/` with reason
   `merge_no_change`, and the generation goes on to mutation. It used to be
   scored, tie its parent at the subsample gate, and enter the frontier as a
-  duplicate of that parent.
+  duplicate of that parent. The comparison leaves out protected and omitted
+  paths, so HELIX's own refresh of the protected files does not count as a
+  change.
 - The merge prompt no longer shows the parents' validation ids or scores
   (the "Candidate A/B Strengths" sections). Nothing from validation reaches
   an agent now; GEPA's merge shows no scores either.
 - Diffs in the merge prompt leave out protected evaluator files and
   `[sandbox].omit_from_agent` paths, which a candidate's history can hold
-  (for example after a protected-file refresh on resume).
+  (for example after a protected-file refresh on resume). An omitted path is
+  left out as written even when it is now a symlink out of the project.
 - Merges of two children of the seed now show the agent both parents' diffs.
   The seed's worktree is detached, so diffs against its branch name failed
   and came back empty; diffs now use each candidate's commit, and a diff
