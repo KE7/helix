@@ -176,6 +176,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sum_scores` mapping in the result schema are unchanged and still
   reported; sums also still drive the acceptance gate, which does match
   upstream's `StrictImprovementAcceptance`.
+- Python 3.13, 3.14 and 3.15 are tested in CI and listed in the package
+  classifiers, alongside 3.11 and 3.12 (`requires-python` stays `>=3.11`).
+  The lockfile moves to pydantic 2.14.1 (pydantic-core 2.50.1), whose wheels
+  cover 3.15; the locked pydantic-core 2.41.5 had none.
 
 ### Fixed
 - A project with no `[dataset]` (single-task mode) can now be scored. The
