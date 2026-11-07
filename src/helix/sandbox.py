@@ -448,6 +448,15 @@ def _matches_omitted_path(path: Path, omitted: set[Path]) -> bool:
     return False
 
 
+def _omitted_below(rel: Path, omitted: set[Path]) -> set[Path]:
+    """Return the omitted paths strictly under ``rel``, relative to ``rel``.
+
+    Non-empty means the directory ``rel`` holds files the agent never saw, so
+    sync-back must not delete or replace it as a whole.
+    """
+    return {path.relative_to(rel) for path in omitted if rel in path.parents}
+
+
 def _copy_tree_contents(
     src: Path,
     dst: Path,
@@ -477,6 +486,18 @@ def _copy_tree_contents(
         except OSError as exc:
             logger.warning("skipping inaccessible sandbox path %s: %s", child, exc)
             continue
+        nested = _omitted_below(rel, omitted)
+        if not child_is_dir or child_is_symlink:
+            if nested and _is_real_directory(target):
+                # Replacing this directory would delete files the agent was
+                # never shown (``sandbox.omit_from_agent``).
+                logger.warning(
+                    "keeping directory %s: it holds paths left out of the "
+                    "agent's copy, so it is not replaced by the agent's %s",
+                    target,
+                    "symlink" if child_is_symlink else "file",
+                )
+                continue
         if child_is_symlink:
             if target.exists() or target.is_symlink():
                 if target.is_dir() and not target.is_symlink():
@@ -493,11 +514,7 @@ def _copy_tree_contents(
                 target,
                 for_sync=for_sync,
                 skip_special_files=skip_special_files,
-                omit_paths={
-                    path.relative_to(rel)
-                    for path in omitted
-                    if path != rel and rel in path.parents
-                },
+                omit_paths=nested,
             )
         else:
             if target.exists() or target.is_symlink():
@@ -512,12 +529,18 @@ def _copy_tree_contents(
 
 
 def _remove_extraneous_files(
-    src: Path,
+    src: Path | None,
     dst: Path,
     *,
     skip_special_files: bool = True,
     omit_paths: set[Path] | None = None,
 ) -> None:
+    """Delete what ``dst`` has and ``src`` lacks; ``src=None`` is an empty source.
+
+    A directory holding an omitted path is never removed as a whole: the agent
+    could not see those files, so ``rm -rf`` of their parent (or replacing it
+    with a file or link) empties it of everything else and keeps them.
+    """
     omitted = omit_paths or set()
     try:
         children = list(dst.iterdir())
@@ -530,9 +553,11 @@ def _remove_extraneous_files(
             continue
         if skip_special_files and not _is_supported_workspace_file(child):
             continue
-        source_child = src / rel
+        source_child = None if src is None else src / rel
         try:
-            source_exists = source_child.exists() or source_child.is_symlink()
+            source_exists = source_child is not None and (
+                source_child.exists() or source_child.is_symlink()
+            )
         except OSError as exc:
             logger.warning(
                 "keeping %s because sandbox source %s is inaccessible: %s",
@@ -541,23 +566,29 @@ def _remove_extraneous_files(
                 exc,
             )
             continue
-        if not source_exists:
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
+        if not (child.is_dir() and not child.is_symlink()):
+            if not source_exists:
                 child.unlink()
             continue
-        if child.is_dir() and not child.is_symlink():
+        nested = _omitted_below(rel, omitted)
+        if source_child is not None and _is_real_directory(source_child):
             _remove_extraneous_files(
-                src / rel,
+                source_child,
                 child,
                 skip_special_files=skip_special_files,
-                omit_paths={
-                    path.relative_to(rel)
-                    for path in omitted
-                    if path != rel and rel in path.parents
-                },
+                omit_paths=nested,
             )
+        elif nested:
+            # Gone, or no longer a directory, in the agent's copy: empty it
+            # of what the agent could see and keep what it could not.
+            _remove_extraneous_files(
+                None,
+                child,
+                skip_special_files=skip_special_files,
+                omit_paths=nested,
+            )
+        elif not source_exists:
+            shutil.rmtree(child)
 
 
 def _safe_rmtree(path: Path, *, docker_image: str | None = None) -> None:

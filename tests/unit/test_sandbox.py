@@ -1528,3 +1528,37 @@ def test_backend_transcript_sync_refuses_a_symlinked_directory(
 
     copied = source / ".helix_artifacts"
     assert not copied.exists() or not any(copied.rglob("reference.py"))
+
+
+@pytest.mark.parametrize("replacement", ["removed", "symlink", "file"])
+def test_sync_back_keeps_omitted_paths_when_agent_replaces_their_parent(
+    tmp_path: Path, replacement: str
+):
+    """``rm -rf data`` (or swapping ``data`` for a link or a file) in the
+    agent's copy must not delete ``data/val``, which the agent never saw."""
+    import shutil
+
+    from helix.sandbox import _copy_tree_contents, _sync_back_workspace
+
+    worktree = tmp_path / "worktree"
+    (worktree / "data" / "val").mkdir(parents=True)
+    (worktree / "data" / "train").mkdir()
+    (worktree / "data" / "val" / "answers.json").write_text("secret\n")
+    (worktree / "data" / "train" / "a.json").write_text("train\n")
+    (worktree / "pub").mkdir()
+    omit = {Path("data/val")}
+    workspace = tmp_path / "workspace"
+    _copy_tree_contents(worktree, workspace, omit_paths=omit)
+    assert not (workspace / "data" / "val").exists()
+
+    shutil.rmtree(workspace / "data")
+    if replacement == "symlink":
+        os.symlink("pub", workspace / "data")
+    elif replacement == "file":
+        (workspace / "data").write_text("now a file\n")
+    _sync_back_workspace(workspace, worktree, omit_paths=omit)
+
+    assert not (worktree / "data").is_symlink()
+    assert (worktree / "data" / "val" / "answers.json").read_text() == "secret\n"
+    # The agent's removal of what it could see still syncs back.
+    assert not (worktree / "data" / "train").exists()
