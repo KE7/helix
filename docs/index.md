@@ -22,13 +22,13 @@ HELIX optimizes a whole repository against your evaluator. Each mutation is a mu
 
 </div>
 
-One HELIX mutation by Claude Sonnet rewrote a Franka Panda solver package on ManiSkill 3: validation went from 0.064 to 1.0, and the evolved package solves all 141 train, validation and held-out trials. The videos show validation trial 26 of each task, with the wrist camera in the top left. [Read the write-up](experiments/maniskill-pick-place.md).
+One HELIX mutation by Claude Sonnet 5.5 rewrote a Franka Panda solver package on ManiSkill 3: validation went from 0.064 to 1.0, and the evolved package solves all 141 train, validation and held-out trials. The videos show validation trial 26 of each task, with the wrist camera in the top left. [Read the write-up](experiments/maniskill-pick-place.md).
 
 ## Results
 
 | | |
 |---|---|
-| **0.064 → 1.0** | ManiSkill push, pick and stack: one Claude Sonnet mutation (40 s of agent time, $0.14) solves all 141 trials, including 90 held out. [Write-up](experiments/maniskill-pick-place.md) |
+| **0.064 → 1.0** | ManiSkill push, pick and stack: one Claude Sonnet 5.5 mutation (40 s of agent time, $0.14) solves all 141 trials, including 90 held out. [Write-up](experiments/maniskill-pick-place.md) |
 | **99.0%** | [RHO](https://rho-robotics.github.io/) on Robosuite: HELIX-evolved robot-policy repositories reach 99.0% single-turn success (693/700), against CaP-Agent0's 68.29% with multi-turn correction. |
 | **12.2× faster** | RHO's evolved repositories run as fixed code with no LLM calls in the control loop: 9.31 s per trial, against CaP-Agent0's 113.6 s. |
 

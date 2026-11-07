@@ -34,7 +34,7 @@
   </tr>
 </table>
 
-<p align="center"><sub>One HELIX mutation by Claude Sonnet rewrote a Franka Panda solver package on ManiSkill 3: validation went from 0.064 to 1.0, and the evolved package solves all 141 train, validation and held-out trials. Validation trial 26 of each task, wrist camera top left. <a href="https://ke7.github.io/helix/experiments/maniskill-pick-place.html">Write-up</a></sub></p>
+<p align="center"><sub>One HELIX mutation by Claude Sonnet 5.5 rewrote a Franka Panda solver package on ManiSkill 3: validation went from 0.064 to 1.0, and the evolved package solves all 141 train, validation and held-out trials. Validation trial 26 of each task, wrist camera top left. <a href="https://ke7.github.io/helix/experiments/maniskill-pick-place.html">Write-up</a></sub></p>
 
 HELIX optimizes a whole repository against your evaluator. Each mutation is a multi-turn session of a coding agent, such as Claude Code or Codex, that reads, edits, runs and tests code in its own git worktree before HELIX scores the result. Candidates are kept on an instance-level Pareto frontier, so a program that is best on any one case survives. The search loop comes from GEPA's [optimize_anything](https://doi.org/10.1145/3786335.3813167).
 
@@ -44,7 +44,7 @@ Unlike a single coding-agent session, HELIX keeps going: it runs many attempts a
 
 | | |
 |---|---|
-| **0.064 → 1.0** | ManiSkill push, pick and stack: one Claude Sonnet mutation (40 s of agent time, $0.14) solves all 141 trials, including 90 held out. [Write-up](https://ke7.github.io/helix/experiments/maniskill-pick-place.html) |
+| **0.064 → 1.0** | ManiSkill push, pick and stack: one Claude Sonnet 5.5 mutation (40 s of agent time, $0.14) solves all 141 trials, including 90 held out. [Write-up](https://ke7.github.io/helix/experiments/maniskill-pick-place.html) |
 | **99.0%** | [RHO](https://rho-robotics.github.io/) on Robosuite: HELIX-evolved robot-policy repositories reach 99.0% single-turn success (693/700), against CaP-Agent0's 68.29% with multi-turn correction. |
 | **12.2× faster** | RHO's evolved repositories run as fixed code with no LLM calls in the control loop: 9.31 s per trial, against CaP-Agent0's 113.6 s. |
 
