@@ -119,10 +119,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carry an inline scorer or held-out ids; GEPA's seed prompt has no evaluator
   either. State the file name, callable and input/output contract the
   evaluator expects in `objective` or `[agent].background`.
-- `[sandbox].omit_from_agent` entries are normalised like
-  `evaluator.protected_files`: `/abs/project/evaluate.py` and
-  `data/../evaluate.py` now omit `evaluate.py` (they used to match nothing, so
-  the file reached the agent), and a path outside the project stops the run.
+- `[sandbox].omit_from_agent` entries are normalised: `/abs/project/evaluate.py`
+  and `data/../evaluate.py` now omit `evaluate.py` (they used to match
+  nothing, so the file reached the agent). Normalisation is by path text and
+  never follows symlinks, so `data/val` linked to a mounted dataset is still
+  omitted; an entry written outside the project (`../x`, `/etc/x`) stops the
+  run.
 - The README is now a short overview: demo, results, papers built with HELIX,
   a quickstart and the examples. The reference material it held
   (configuration, sandboxing, dataset modes, evaluator integrity, parallelism,

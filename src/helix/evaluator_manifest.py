@@ -157,21 +157,38 @@ def _collect_protected_evaluator_paths(
 def _resolve_omit_from_agent(config: HelixConfig, project_root: Path) -> list[str]:
     """Return ``sandbox.omit_from_agent`` as repo-relative POSIX paths.
 
-    Normalised like ``evaluator.protected_files``: the sandbox compares these
-    with workspace-relative paths, so ``/abs/project/evaluate.py`` or
-    ``data/../evaluate.py`` would otherwise match nothing and the file would
-    be copied to the agent.  A path outside the project raises.
+    The sandbox compares these with workspace-relative paths, so
+    ``/abs/project/evaluate.py`` or ``data/../evaluate.py`` would otherwise
+    match nothing and the file would be copied to the agent.
+
+    Normalised lexically, never following symlinks: the entry names a place
+    in the candidate tree, and ``data/val`` linked to a mounted dataset
+    (``/mnt/val``) is still ``data/val`` there.  Raises only when the path
+    as written lies outside the project.
     """
+    roots = {os.path.abspath(project_root), os.path.realpath(project_root)}
+    escapes = (os.pardir, os.pardir + os.sep)
+
+    def repo_relative(path_str: str) -> str | None:
+        if not os.path.isabs(path_str):
+            rel = os.path.normpath(path_str)
+            return None if rel == os.pardir or rel.startswith(escapes) else rel
+        for root in roots:
+            rel = os.path.relpath(os.path.normpath(path_str), root)
+            if not (rel == os.pardir or rel.startswith(escapes)):
+                return rel
+        return None
+
     resolved: list[str] = []
     for path_str in config.sandbox.omit_from_agent:
-        rel = _to_repo_relative(path_str, project_root)
+        rel = repo_relative(path_str)
         if rel is None:
             raise HelixError(
                 f"sandbox.omit_from_agent path is outside project root: {path_str}",
                 operation="resolve sandbox.omit_from_agent",
                 suggestion="Use repo-relative paths under the project root.",
             )
-        resolved.append(rel)
+        resolved.append(Path(rel).as_posix())
     return resolved
 
 

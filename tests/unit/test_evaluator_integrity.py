@@ -442,14 +442,72 @@ def test_run_evolution_hands_the_sandbox_normalised_omit_paths(tmp_path, mocker)
     assert seen.sandbox.omit_from_agent == ["evaluate.py", "splits/val"]
 
 
-def test_omit_from_agent_rejects_a_path_outside_the_project(tmp_path):
+@pytest.mark.parametrize("entry", ["../secrets", "data/../../secrets", "/etc/passwd"])
+def test_omit_from_agent_rejects_a_path_outside_the_project(tmp_path, entry):
     from helix.config import SandboxConfig
     from helix.evaluator_manifest import _resolve_omit_from_agent
 
     config = HelixConfig(
         objective="x",
         evaluator=EvaluatorConfig(command="python evaluate.py"),
-        sandbox=SandboxConfig(omit_from_agent=["../secrets"]),
+        sandbox=SandboxConfig(omit_from_agent=[entry]),
     )
     with pytest.raises(HelixError, match="outside project root"):
         _resolve_omit_from_agent(config, tmp_path / "project")
+
+
+def test_omit_from_agent_keeps_a_dataset_linked_from_outside_the_project(
+    tmp_path, mocker
+):
+    """``data/val -> /mnt/val`` is a common layout: the entry names the link's
+    place in the tree, so it must neither raise nor reach the agent."""
+    import os
+
+    from helix.config import SandboxConfig
+    from helix.evaluator_manifest import _resolve_omit_from_agent
+    from helix.sandbox import run_sandboxed_command
+
+    mounted = tmp_path / "mnt" / "val"
+    mounted.mkdir(parents=True)
+    (mounted / "answers.json").write_text('{"q7": "SECRET-ANSWER"}\n')
+    project = tmp_path / "project"
+    (project / "data").mkdir(parents=True)
+    (project / "solver.py").write_text("x = 1\n")
+    os.symlink(str(mounted), project / "data" / "val")
+    config = HelixConfig(
+        objective="x",
+        evaluator=EvaluatorConfig(command="python evaluate.py"),
+        sandbox=SandboxConfig(
+            enabled=True, omit_from_agent=["data/val", str(project / "data" / "val")]
+        ),
+    )
+
+    omit = _resolve_omit_from_agent(config, project)
+    assert omit == ["data/val", "data/val"]
+
+    seen: list[str] = []
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and "-v" in args:
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            if (workspace / "solver.py").exists():
+                seen.extend(
+                    str(p.relative_to(workspace)) for p in workspace.rglob("*")
+                )
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=project,
+        env={},
+        sandbox=config.sandbox.model_copy(update={"omit_from_agent": omit}),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert "solver.py" in seen
+    assert not any(p.startswith("data/val") for p in seen)
+    assert (project / "data" / "val").is_symlink()  # sync-back left it alone
