@@ -217,6 +217,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Seedless search now builds on its seed. The seed agent's files were never
+  committed, so every child was cloned from an empty tree and had to rewrite
+  the solver from scratch while being scored against the seed. HELIX now
+  commits the generated seed before evaluating it, as it does a mutation.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess

@@ -2186,6 +2186,10 @@ def _run_evolution_impl(
                     candidate_id=seed.id,
                     source="seed_generation",
                 )
+                # Commit what the agent wrote, as a mutation is committed
+                # before its gate: children branch from the seed's commit,
+                # so an uncommitted seed would leave them without its code.
+                snapshot_candidate(seed, "helix: generated seed")
             except Exception:
                 _safe_remove_worktree(seed, label="failed seed generation")
                 raise
