@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
 ### Added
 - `[agent].web_access = false` turns off the mutation agent's built-in web
   tools through each CLI's own flags (claude, codex, opencode; agy and cursor
@@ -79,6 +81,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/assets/logo/make_logo.py` from Archivo Black (SIL OFL 1.1). `docs/experiments/maniskill-pick-place/render_rollouts.py`
   records the seed and evolved ManiSkill rollouts shown in the README and on
   the site.
+- New CLI subcommand `helix attempts` — surfaces rejected attempt records and
+  perfect-skip events; supports filtering by `--generation`, `--stage`,
+  `--reason`, `--cid`; `--skips` flag to show only perfect-skip entries;
+  `--json` for machine-readable output. (PR #30)
+- New artifact directories `.helix/attempts/` and `.helix/skips/` — per-rejected-candidate
+  JSON files and per-generation perfect-skip event lists persisted alongside
+  `.helix/evaluations/` and `.helix/worktrees/`. (PR #30)
+- 5-backend `tool_event_count` / `tool_names` tracking in `UsageStats` —
+  normalised tool-use metrics for claude, codex, cursor, gemini, and opencode
+  backends extracted from transcript artifacts. (PR #32)
+- `session_id`, `to_dict`, `from_dict` helpers on `UsageStats`. (PR #32)
+- New module `src/helix/evaluator_manifest.py` — SHA-256 manifest for
+  protected evaluator files; refresh helpers for mutation and merge candidates.
+  (PR #30 refactor)
+- `evolution.mutations_per_parent` (N, default 1) proposes N children from
+  each sampled parent, so one iteration proposes
+  `num_parallel_proposals` (P) x N children. Each slot draws its own
+  minibatch. `evolution.proposal_selection` chooses which proposals that
+  pass the acceptance gate go to full validation: `all_improvements`
+  (default), `best_improvement`, or `top_k` (needs `evolution.proposal_top_k`,
+  between 1 and P x N; rejected for the other two). Ties go to the earlier
+  sampled slot. `max_evaluations` is checked between iterations, so a wider
+  batch can overshoot it by more.
+- `evolution.candidate_selection_strategy` picks the parent: `pareto`
+  (default, unchanged), `current_best`, `epsilon_greedy` (needs
+  `candidate_selection_epsilon` in [0, 1]) or `top_k_pareto` (needs
+  `candidate_selection_top_k` >= 1). These are the strategies in
+  `gepa.strategies.candidate_selector`. The new strategies rank by mean
+  validation score and place unscored candidates last. A setting that
+  belongs to a different strategy is rejected.
+- `evolution.batch_sampler = "stratified"` accepts `num_sampled_groups` and
+  `num_examples_per_group` (set together): each minibatch takes that many
+  groups and that many examples from each. Unset keeps one example from each
+  of `minibatch_size` groups.
+- `evolution.sibling_history` (default `false`): the mutation prompt lists
+  the children already proposed from the same parent, with each score,
+  whether it was kept, and a short description of what it changed. The
+  description comes from a separate call that reads the mutation's diff.
+  `sibling_summary_max_words` (default 150) bounds each description and
+  `sibling_history_max_entries` shows only the most recent N. With the
+  default, prompts and state are unchanged. State `schema_version` is now 3;
+  older state files load with defaults.
+- `evolution.stop_at_score` and `helix evolve --stop-at-score X` end the run
+  once the best mean validation score of an accepted candidate is `>=` the
+  target (checked at the start of each generation, as GEPA's
+  `ScoreThresholdStopper`). Unlike `perfect_score_threshold`, which only
+  skips mutating a perfect parent, this stops the run. NaN and infinite
+  values are rejected. A resumed run that already meets the target stops
+  immediately. A hard bound (`max_generations` or `max_evaluations` > 0) is
+  still required.
+- `evolution.retain_rejected_worktrees` (default `false`) keeps the worktree
+  of a candidate rejected by the validation-stage gate. Identity, lineage and
+  scores are recorded in `.helix/lineage.json` and `.helix/attempts/` either
+  way. Each retained worktree is a full repository; `helix clean` reclaims
+  them.
+- The `publish-runners` workflow also runs weekly (Mondays 12:00 UTC), so
+  `latest` follows the agent CLIs' releases instead of only `v*` tags, and a
+  pull-request check builds and probes every runner image.
 
 ### Changed
 - The README is now a short overview: demo, results, papers built with HELIX,
@@ -176,6 +236,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sum_scores` mapping in the result schema are unchanged and still
   reported; sums also still drive the acceptance gate, which does match
   upstream's `StrictImprovementAcceptance`.
+- **GEPA structural alignment**: generation counter advances unconditionally per
+  GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
+  bypassed when re-evaluating the parent's minibatch, ensuring consistent
+  parent-comparison semantics across resume scenarios. (PR #32)
+- Scalar evaluator results now populate every requested instance ID in multi-example runs. (PR #32)
+- **BREAKING**: Removed `agent.allowed_tools`. HELIX no longer filters the
+  backend's tool list; containerized runs expose each CLI's native tools.
+  Configs that still set the field are rejected. Delete it.
+- **BREAKING**: `evolution.num_parallel_proposals` no longer accepts `"auto"`
+  (it resolved to `max_workers // minibatch_size`); set an integer. It and
+  `evolution.max_workers` must be >= 1 (a zero was previously accepted).
+  `max_workers` now caps how many proposal slots run concurrently and does
+  not bound full validation.
+- **BREAKING**: Every configuration error (TOML syntax or validation, from
+  the file or a flag) exits with status 2 instead of 1. A missing
+  `helix.toml` still exits 1.
+- `helix evolve` applies `--objective`, `--evaluator`, `--generations`,
+  `--no-merge`, `--backend`, `--model`, `--effort` and `--stop-at-score` by
+  merging them into the parsed config before one validation
+  (`load_config(path, overrides)`), so flags get the cross-field checks and
+  warnings a `helix.toml` value gets. An empty `evaluator.command`
+  (including `--evaluator ""`) is rejected at load time.
+- Byte-identical children proposed in one batch (for example two siblings of
+  one parent) collapse to one frontier entry instead of two.
+- `evolution.val_stage_size`: a validation stage that passes is kept for
+  final validation, which evaluates only the remaining ids and merges the
+  two results in id order. The stage call sets `HELIX_EVALUATION_PHASE=val_stage`
+  in the evaluator's environment. The evaluator must give the same per-id
+  results on a subset; do not combine this with batch-relative scores or
+  cross-example normalization.
+- The mutation prompt no longer carries the synthetic
+  `top_k_best_example_history` rows. Reflection sees only the current
+  minibatch's feedback; `evolution.minibatch_size` is the single minibatch
+  knob.
+- The flat Diagnostics renderer (one `side_info` for the whole batch) labels
+  the reserved `scores` key `Scores (Higher is Better)`, as the per-example
+  renderer already did. Only the prompt text changes.
+- Runner images are published for `linux/amd64` and `linux/arm64`, built on
+  native runners, so Apple Silicon hosts no longer pull an emulated amd64
+  image.
 
 ### Fixed
 - A project with no `[dataset]` (single-task mode) can now be scored. The
@@ -252,39 +352,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different `PYTHONHASHSEED` values. Upstream GEPA indexes programs by
   integer, so it was never exposed to this; HELIX's port changed the
   identifier type.
-
-## [0.2.2] - 2026-05-13
-
-### Added
-- New CLI subcommand `helix attempts` — surfaces rejected attempt records and
-  perfect-skip events; supports filtering by `--generation`, `--stage`,
-  `--reason`, `--cid`; `--skips` flag to show only perfect-skip entries;
-  `--json` for machine-readable output. (PR #30)
-- New artifact directories `.helix/attempts/` and `.helix/skips/` — per-rejected-candidate
-  JSON files and per-generation perfect-skip event lists persisted alongside
-  `.helix/evaluations/` and `.helix/worktrees/`. (PR #30)
-- 5-backend `tool_event_count` / `tool_names` tracking in `UsageStats` —
-  normalised tool-use metrics for claude, codex, cursor, gemini, and opencode
-  backends extracted from transcript artifacts. (PR #32)
-- `session_id`, `to_dict`, `from_dict` helpers on `UsageStats`. (PR #32)
-- New module `src/helix/evaluator_manifest.py` — SHA-256 manifest for
-  protected evaluator files; refresh helpers for mutation and merge candidates.
-  (PR #30 refactor)
-
-### Changed
-- **GEPA structural alignment**: generation counter advances unconditionally per
-  GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
-  bypassed when re-evaluating the parent's minibatch, ensuring consistent
-  parent-comparison semantics across resume scenarios. (PR #32)
-- Scalar evaluator results now populate every requested instance ID in multi-example runs. (PR #32)
-
-### Fixed
 - Mandatory stop-condition enforcement: `run_evolution` now raises `ValueError`
   at startup if both `max_generations ≤ 0` and `max_evaluations ≤ 0`. Previously
   a config with both set to negative values would loop indefinitely. (PR #32)
 - Resume reconciliation: incomplete attempts and orphaned worktrees from a
   crashed run are cleaned up at resume time before the first new generation
   starts. (PR #30)
+- `opencode` runs with several parallel proposals no longer fail with
+  `PRAGMA journal_mode = WAL`: unsandboxed runs give each candidate its own
+  `XDG_DATA_HOME` (`<worktree>/.helix_opencode_state/`) and so its own
+  database.
+- `opencode` mutations now pass `--auto` in place of the permission-skip flag
+  the current CLI rejects, so sandboxed `opencode` mutations run again.
+- Cached evaluations keep per-example `side_info`; a cache hit or partial
+  hit used to return scores without the feedback for the selected examples.
+- The evaluation cache rejects a batch whose `outputs`, `scores`,
+  `objective_scores` or `side_info` do not match the number of example ids,
+  with "Evaluator batch cardinality mismatch", before writing. A short batch
+  used to leave a partial write that later lookups served as hits; a long one
+  was truncated silently.
+- Concurrent `git worktree add`, `remove`, `prune` and `branch -D` are
+  serialised in-process. With enough candidates in flight, an `add` could
+  fail with `failed to read .git/worktrees/<id>/commondir` and drop a
+  proposal slot.
+- Docker startup errors no longer print `passthrough_env` values: tracebacks
+  and logs show `-e KEY=<redacted>` for `-e`, `--env`, `-eKEY=VALUE` and
+  `--env=KEY=VALUE`, for `CalledProcessError`, `TimeoutExpired` and
+  `CompletedProcess.args`.
+- Backend usage normalization reads fields that fell through to zero: Codex
+  `reasoning_output_tokens` and `cache_write_input_tokens`, Cursor
+  `cacheReadTokens` and `cacheWriteTokens`, OpenCode `reasoning` and
+  `tokens.cache.read`/`tokens.cache.write`. Existing aliases and field names
+  are unchanged.
+- A child that has not been committed yet is cached and de-duplicated by the
+  tree it would commit, not by candidate id. This removes the per-proposal
+  "worktree is not clean; falling back to id cache key" warning, and
+  identical child content now hits the cache. Non-ignored files an evaluator
+  writes into the worktree are part of that key.
 
 ## [0.2.1] - 2026-05-10
 
