@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
 from helix.exceptions import GitError, HelixError, print_helix_error
@@ -706,8 +707,16 @@ def remove_worktree(candidate: Candidate) -> None:
         )
 
 
-def get_diff(candidate_a: Candidate, candidate_b: Candidate) -> str:
-    """Return the unified diff between two candidates' branch tips.
+def get_diff(
+    candidate_a: Candidate,
+    candidate_b: Candidate,
+    exclude: Iterable[str] = (),
+) -> str:
+    """Return the unified diff between two candidates' committed states.
+
+    Each side is the ``HEAD`` commit of that candidate's worktree, the same
+    commit :func:`clone_candidate` branches from.  Not ``branch_name``: the
+    seed's worktree is detached, so its ``helix/g0-s0`` branch never exists.
 
     Parameters
     ----------
@@ -715,17 +724,33 @@ def get_diff(candidate_a: Candidate, candidate_b: Candidate) -> str:
         Base candidate (left side of diff).
     candidate_b:
         Target candidate (right side of diff).
+    exclude:
+        Repo-relative files or directories left out of the diff.
 
     Returns
     -------
     str
-        Output of ``git diff <branch_a> <branch_b>``.
+        Output of ``git diff <commit_a> <commit_b>``.
+
+    Raises
+    ------
+    GitError
+        When either commit can't be resolved or the diff fails, rather than
+        passing an empty diff off as "no changes".
     """
-    wt_a = Path(candidate_a.worktree_path)
+    commits = [
+        _run(
+            # ``-C`` rather than ``cwd``: a missing worktree is then a git
+            # failure (GitError), not an OSError from spawning the process.
+            ["git", "-C", c.worktree_path, "rev-parse", "HEAD"],
+            operation=f"diff: resolve HEAD of {c.id}",
+        ).stdout.strip()
+        for c in (candidate_a, candidate_b)
+    ]
+    pathspec = [f":(exclude,literal){os.path.normpath(p)}" for p in exclude]
     result = _run(
-        ["git", "diff", candidate_a.branch_name, candidate_b.branch_name],
-        cwd=wt_a,
-        check=False,
+        ["git", "diff", *commits, "--", ".", *pathspec],
+        cwd=Path(candidate_a.worktree_path),
         operation=f"diff {candidate_a.id} vs {candidate_b.id}",
     )
     return result.stdout

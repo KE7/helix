@@ -664,11 +664,12 @@ class TestPerExampleDiagnostics:
 
 
 class TestMutationPromptArtifact:
-    """``mutate()`` writes the rendered prompt to
+    """``mutate()``'s backend call writes the rendered prompt to
     ``<worktree>/.agent_task_prompt.md`` (or reserved fallback)
-    before invoking Claude Code
     and adds the artifact + ``helix_batch.json`` to the worktree's
-    ``.gitignore`` so neither leaks into the candidate git tree."""
+    ``.gitignore`` so neither leaks into the candidate git tree.  That the
+    file exists when the backend starts is pinned for every call site by
+    ``test_backend_argv_names_a_prompt_file_that_exists``."""
 
     def _build(self, tmp_path, mocker):
         parent = make_candidate("g0-s0", str(tmp_path / "parent"))
@@ -678,33 +679,17 @@ class TestMutationPromptArtifact:
         wt.mkdir()
         child = make_candidate("g1-s0", str(wt))
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
+        # Fake only the backend process, so invoke_claude_code itself runs.
         mocker.patch(
-            "helix.mutator.invoke_claude_code", return_value=({"result": "ok"}, {})
+            "helix.mutator.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            ),
         )
+        mocker.patch("helix.mutator._parse_backend_output", return_value={})
         mocker.patch("helix.mutator.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.mutator.remove_worktree")
         return parent, er, config, wt
-
-    def test_artifact_written_before_claude_invocation(self, tmp_path: Path, mocker):
-        """The prompt file must exist at the time ``invoke_claude_code``
-        is called so Claude can in principle read it during the session
-        and so post-hoc inspection works even on a crashed mutation."""
-        parent, er, config, wt = self._build(tmp_path, mocker)
-
-        # Capture whether the artifact exists at the moment
-        # invoke_claude_code is entered.
-        exists_at_invoke: list[bool] = []
-
-        def fake_invoke(*_a, **_kw):
-            exists_at_invoke.append(
-                (wt / ".agent_task_prompt.md").exists()
-                or (wt / ".agent_internal" / "task_prompt.md").exists()
-            )
-            return {"result": "ok"}, {}
-
-        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
-        mutate(parent, er, "g1-s0", config, tmp_path)
-        assert exists_at_invoke == [True]
 
     def test_artifact_contains_rendered_prompt(self, tmp_path: Path, mocker):
         parent, er, config, wt = self._build(tmp_path, mocker)
@@ -767,7 +752,7 @@ class TestMutationPromptArtifact:
 
 
 class TestInvokeClaudeCode:
-    def test_returns_parsed_json_on_success(self, mocker):
+    def test_returns_parsed_json_on_success(self, tmp_path, mocker):
         payload = {"result": "ok", "turns": 3}
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
@@ -776,10 +761,10 @@ class TestInvokeClaudeCode:
             returncode=0,
         )
         config = AgentConfig()
-        result, usage = invoke_claude_code("/tmp/wt", "do something", config)
+        result, usage = invoke_claude_code(str(tmp_path), "do something", config)
         assert result == payload
 
-    def test_raises_on_nonzero_returncode(self, mocker):
+    def test_raises_on_nonzero_returncode(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout="",
@@ -788,9 +773,9 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig()
         with pytest.raises(MutationError, match="exited with code 1"):
-            invoke_claude_code("/tmp/wt", "do something", config)
+            invoke_claude_code(str(tmp_path), "do something", config)
 
-    def test_raises_on_invalid_json(self, mocker):
+    def test_raises_on_invalid_json(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout="not valid json {{{{",
@@ -799,13 +784,13 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig()
         with pytest.raises(MutationError, match="Failed to parse"):
-            invoke_claude_code("/tmp/wt", "do something", config)
+            invoke_claude_code(str(tmp_path), "do something", config)
 
-    def test_cli_args_include_required_flags(self, mocker):
+    def test_cli_args_include_required_flags(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         config = AgentConfig()
-        invoke_claude_code("/tmp/wt", "the prompt", config)
+        invoke_claude_code(str(tmp_path), "the prompt", config)
 
         call_args = mock_run.call_args
         args_list = call_args[0][0]
@@ -823,14 +808,14 @@ class TestInvokeClaudeCode:
         assert ".agent_task_prompt.md" in args_list[-1]
         assert "input" not in call_args[1]
 
-    def test_agy_cli_args_include_required_flags(self, mocker):
+    def test_agy_cli_args_include_required_flags(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"session_id":"sess_123"}', stderr="", returncode=0
         )
         config = AgentConfig(backend="agy", model="test-model", effort="high")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[0] == "agy"
@@ -862,12 +847,12 @@ class TestInvokeClaudeCode:
         assert "input" not in mock_run.call_args[1]
         assert result["session_id"] == "sess_123"
 
-    def test_agy_cli_args_omit_optional_flags_when_unset(self, mocker):
+    def test_agy_cli_args_omit_optional_flags_when_unset(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         config = AgentConfig(backend="agy")
 
-        invoke_claude_code("/tmp/wt", "the prompt", config)
+        invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert "--model" not in args_list
@@ -880,22 +865,22 @@ class TestInvokeClaudeCode:
         assert args_list[-2] == "--print"
         assert ".agent_task_prompt.md" in args_list[-1]
 
-    def test_uses_correct_cwd(self, mocker):
+    def test_uses_correct_cwd(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         config = AgentConfig()
-        invoke_claude_code("/specific/path", "prompt", config)
-        assert mock_run.call_args[1]["cwd"] == "/specific/path"
+        invoke_claude_code(str(tmp_path), "prompt", config)
+        assert mock_run.call_args[1]["cwd"] == str(tmp_path)
 
-    def test_no_timeout_in_subprocess(self, mocker):
+    def test_no_timeout_in_subprocess(self, tmp_path, mocker):
         """subprocess.run should not have a timeout — let Claude run forever."""
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         config = AgentConfig()
-        invoke_claude_code("/tmp/wt", "prompt", config)
+        invoke_claude_code(str(tmp_path), "prompt", config)
         assert "timeout" not in mock_run.call_args[1]
 
-    def test_codex_cli_args_include_required_flags(self, mocker):
+    def test_codex_cli_args_include_required_flags(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"thread.started","thread_id":"thr_123"}\n',
@@ -904,7 +889,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="codex", model="gpt-5", effort="high")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["codex", "exec"]
@@ -919,7 +904,7 @@ class TestInvokeClaudeCode:
         assert "input" not in mock_run.call_args[1]
         assert result["events"][0]["thread_id"] == "thr_123"
 
-    def test_codex_effort_config_value_is_json_quoted(self, mocker):
+    def test_codex_effort_config_value_is_json_quoted(self, tmp_path, mocker):
         # Codex's -c flag accepts key=value pairs where the value must be a
         # valid TOML literal.  We use json.dumps() to produce a JSON string
         # (e.g. "high\"quoted"), which is also valid TOML basic-string syntax
@@ -933,12 +918,12 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="codex", effort='high"quoted')
 
-        invoke_claude_code("/tmp/wt", "the prompt", config)
+        invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert 'model_reasoning_effort="high\\"quoted"' in args_list
 
-    def test_cursor_cli_args_use_stream_json(self, mocker):
+    def test_cursor_cli_args_use_stream_json(self, tmp_path, mocker):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
@@ -947,7 +932,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend="cursor", model="gpt-5")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[:2] == ["cursor", "agent"]
@@ -956,7 +941,7 @@ class TestInvokeClaudeCode:
         assert "stream-json" in args_list
         assert "--yolo" in args_list
         assert "--workspace" in args_list
-        assert "/tmp/wt" in args_list
+        assert str(tmp_path) in args_list
         assert "the prompt" not in args_list
         assert ".agent_task_prompt.md" in args_list[-1]
         assert "input" not in mock_run.call_args[1]
@@ -1211,7 +1196,7 @@ class TestInvokeClaudeCode:
         ],
     )
     def test_opencode_cli_args(
-        self, mocker, backend, expected_prefix, expected_flags
+        self, tmp_path, mocker, backend, expected_prefix, expected_flags
     ):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
@@ -1221,7 +1206,7 @@ class TestInvokeClaudeCode:
         )
         config = AgentConfig(backend=backend, model="test-model")
 
-        result, _ = invoke_claude_code("/tmp/wt", "the prompt", config)
+        result, _ = invoke_claude_code(str(tmp_path), "the prompt", config)
 
         args_list = mock_run.call_args[0][0]
         assert args_list[: len(expected_prefix)] == expected_prefix
@@ -1273,7 +1258,7 @@ class TestInvokeClaudeCode:
             == "ghcr.io/ke7/helix-evo-runner-claude:latest"
         )
 
-    def test_backend_auth_env_is_passed_automatically(self, mocker, monkeypatch):
+    def test_backend_auth_env_is_passed_automatically(self, tmp_path, mocker, monkeypatch):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
             stdout='{"type":"system","subtype":"init","session_id":"sess_123"}\n',
@@ -1282,17 +1267,17 @@ class TestInvokeClaudeCode:
         )
         monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
 
-        invoke_claude_code("/tmp/wt", "prompt", AgentConfig(backend="cursor"))
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="cursor"))
 
         assert mock_run.call_args.kwargs["env"]["CURSOR_API_KEY"] == "cursor-key"
 
-    def test_fixed_env_is_passed_to_backend_subprocess(self, mocker, monkeypatch):
+    def test_fixed_env_is_passed_to_backend_subprocess(self, tmp_path, mocker, monkeypatch):
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://wrong")
 
         invoke_claude_code(
-            "/tmp/wt",
+            str(tmp_path),
             "prompt",
             AgentConfig(),
             passthrough_env=["ANTHROPIC_BASE_URL"],
@@ -3335,3 +3320,67 @@ def test_ignore_helix_artifacts_writes_through_an_in_tree_link(tmp_path: Path) -
     assert (worktree / ".gitignore").is_symlink()
     rules = (worktree / "ignore_rules").read_text()
     assert rules.startswith("__pycache__/\n") and "helix_batch.json" in rules
+
+
+# ---------------------------------------------------------------------------
+# Every backend call delivers the prompt file its argv names
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call_site", ["merge", "mutate", "seed", "summary"])
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_backend_argv_names_a_prompt_file_that_exists(
+    tmp_path: Path, mocker, call_site: str, backend: str
+) -> None:
+    """Every backend's argv says "Read <file> in the current workspace"
+    instead of carrying the prompt.  That file must exist, holding the
+    prompt, when the backend process starts -- for every HELIX call that
+    reaches a backend, not just the ones that remembered to write it.
+    A merge used to start with no task file at all."""
+    import re
+
+    from helix import merger, mutator
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    config = make_config(objective="OBJECTIVE-MARKER")
+    config.agent.backend = backend
+    child = make_candidate("g1-s1", str(worktree))
+
+    real_run = subprocess.run
+    seen: list[tuple[str, str | None]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[0] == "git":
+            return real_run(cmd, *args, **kwargs)
+        match = re.search(r"Read (\S+) in the current workspace", " ".join(cmd))
+        assert match is not None, f"argv names no prompt file: {cmd}"
+        prompt_file = Path(kwargs["cwd"]) / match.group(1)
+        seen.append(
+            (match.group(1), prompt_file.read_text() if prompt_file.exists() else None)
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    mocker.patch("helix.mutator.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.mutator._parse_backend_output", return_value={})
+    mocker.patch("helix.merger.clone_candidate", return_value=child)
+    mocker.patch("helix.merger.get_diff", return_value="")
+    mocker.patch("helix.mutator.clone_candidate", return_value=child)
+
+    if call_site == "merge":
+        merger.merge(
+            make_candidate("g0-s1"), make_candidate("g0-s2"), "g1-s1",
+            config, tmp_path, project_root=tmp_path,
+        )
+    elif call_site == "mutate":
+        mutator.mutate(make_candidate(), make_eval_result(), "g1-s1", config, tmp_path)
+    elif call_site == "seed":
+        mutator.generate_seed(str(worktree), "seed task OBJECTIVE-MARKER", config)
+    else:
+        mutator.generate_change_summary(str(worktree), config)
+
+    assert len(seen) == 1
+    name, content = seen[0]
+    assert content is not None, f"{call_site}: argv names {name}, which does not exist"
+    assert "OBJECTIVE-MARKER" in content

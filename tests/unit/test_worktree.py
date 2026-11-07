@@ -399,6 +399,59 @@ class TestGetDiff:
         diff = get_diff(child_a, child_b)
         assert "+ANSWER = 42" in diff
 
+    def test_diff_against_the_detached_seed(self, tmp_path: Path, monkeypatch) -> None:
+        """The seed worktree is detached, so its ``helix/g0-s0`` branch never
+        exists; a merge whose common ancestor is the seed diffs against it."""
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        (Path(child.worktree_path) / "delta.py").write_text("ANSWER = 42\n")
+        snapshot_candidate(child, "add delta.py")
+
+        assert "+ANSWER = 42" in get_diff(seed, child)
+
+    def test_diff_leaves_out_excluded_paths(self, tmp_path: Path, monkeypatch) -> None:
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+        (wt / "solve.py").write_text("ANSWER = 42\n")
+        (wt / "evaluate.py").write_text("SECRET_SCORER = 1\n")
+        (wt / "data" / "val").mkdir(parents=True)
+        (wt / "data" / "val" / "case.json").write_text('"SECRET_ANSWER"\n')
+        snapshot_candidate(child, "add files")
+
+        diff = get_diff(seed, child, exclude=["evaluate.py", "data/val"])
+
+        assert "+ANSWER = 42" in diff
+        assert "SECRET" not in diff
+
+    def test_diff_failure_raises(self, tmp_path: Path, monkeypatch) -> None:
+        from helix.exceptions import GitError
+
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        gone = clone_candidate(seed, "g1-s1", base_dir)
+        remove_worktree(gone)
+
+        with pytest.raises(GitError):
+            get_diff(seed, gone)
+
 
 # ---------------------------------------------------------------------------
 # HELIX identity tests

@@ -18,7 +18,10 @@ Evaluation caps are dispatch boundaries rather than cancellation points. For
 an admitted evaluation phase, `U` is the bound on uncached evaluation units
 that the phase may still consume (`max_in_flight_evaluations`); HELIX records
 and checks the in-flight bound, and the maximum permitted overshoot is
-`max(0, U - 1)`.
+`max(0, U - 1)`. A merge is not cancelled either: one that passes its
+validation-subsample gate also gets its full validation and joins the
+frontier, as in GEPA, even when those evaluations cross the cap, which is
+checked again at the start of the next iteration.
 
 For this bound, `P` = `evolution.num_parallel_proposals` is the number of parents
 sampled per iteration from HELIX's frequency-weighted Pareto list; HELIX samples

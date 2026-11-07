@@ -69,5 +69,5 @@ Meta-Harness ([Lee et al., 2026](https://arxiv.org/abs/2603.28052)) is concurren
 4. **Mutate** — Spawn the configured agent backend in the candidate's worktree. With `[sandbox].enabled = true`, the backend runs in an isolated Docker workspace, where it can edit candidate files and use its backend auth but does not join the evaluator network
 5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
 6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
-7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend
+7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend. The agent starts in a copy of candidate A and gets the objective and each parent's diff against their common ancestor. The diffs leave out protected evaluator files and `[sandbox].omit_from_agent` paths, and the prompt carries no scores or validation ids. A merge that leaves the code identical to a parent is rejected without being evaluated (`helix attempts --reason merge_no_change`). A merge that passes its validation-subsample gate is always evaluated on the full validation set and joins the frontier, even when that crosses `max_evaluations`, as in GEPA
 8. **Cleanup** — Remove dominated worktrees; persist state; repeat

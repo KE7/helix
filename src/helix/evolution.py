@@ -2527,8 +2527,6 @@ def _run_evolution_impl(
                         config=config,
                         base_dir=worktrees_dir,
                         background=config.agent.background,
-                        eval_result_a=era,
-                        eval_result_b=erb,
                         prepare_worktree=lambda cand: (
                             _refresh_and_snapshot_protected_evaluator_files(
                                 cand, config, project_root
@@ -2536,6 +2534,7 @@ def _run_evolution_impl(
                         ),
                         ancestor=ancestor_candidate,
                         record_usage=merge_usage.append,
+                        project_root=project_root,
                     )
 
                     if merged is None:
@@ -2583,6 +2582,46 @@ def _run_evolution_impl(
                                 f"({', '.join(merge_tamper)}) -- rejecting."
                             )
                             _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
+                        elif _candidate_content_key(merged) in {
+                            _candidate_content_key(a),
+                            _candidate_content_key(b),
+                        }:
+                            # The agent left the tree equal to a parent: there
+                            # is no merge to evaluate.  GEPA builds its merge
+                            # in code, which guarantees it takes something
+                            # from the other parent: ``filter_ancestors`` keeps
+                            # only triplets passing
+                            # ``does_triplet_have_desirable_predictors`` (a
+                            # component one parent changed and the other
+                            # kept), and the merge then takes the changed
+                            # version of that component
+                            # (gepa/proposer/merge.py::
+                            # sample_and_attempt_merge_programs_by_common_predictors;
+                            # ``merges_performed`` dedupes the result).
+                            # HELIX's merge is an agent's edit, which can be
+                            # no edit at all, so it needs this post-check
+                            # instead.  Rejected before any eval, like a
+                            # tamper reject: no eval spent, and the iteration
+                            # falls through to reflective mutation.
+                            print_warning(
+                                f"Merge {merge_id} left the code identical to a "
+                                f"parent ({a.id} or {b.id}) -- rejecting."
+                            )
+                            _save_attempt_result(
+                                base_dir,
+                                EvalResult(
+                                    candidate_id=merged.id,
+                                    scores={},
+                                    asi={},
+                                    instance_scores={},
+                                ),
+                                status="rejected",
+                                reason="merge_no_change",
+                                parent_id=a.id,
+                                generation=gen,
+                                stage="merge",
+                            )
+                            _safe_remove_worktree(merged, label="no-change merge candidate")
                         else:
                             candidates[merged.id] = merged
                             record_entry(
@@ -2667,13 +2706,12 @@ def _run_evolution_impl(
                             )
                             _save_evaluation(base_dir, merge_result)
 
-                            # GEPA parity (Fix 13): mid-generation budget check.
-                            if budget_api.budget_exhausted(state, config):
-                                print_warning(
-                                    "Budget exhausted mid-generation -- stopping."
-                                )
-                                _save_state(state)
-                                break
+                            # No budget check until the next iteration: GEPA's
+                            # ``GEPAEngine.run`` checks ``_should_stop`` only at
+                            # the top of its loop, and runs
+                            # ``_run_full_eval_and_add`` on every merge that
+                            # passes the gate.  A merge whose subsample was
+                            # already paid for is judged, and kept if it passes.
 
                             # Merged subsample sum must be >= max of parent
                             # subsample sums (GEPA merge.py::MergeProposer.propose).
@@ -2750,13 +2788,6 @@ def _run_evolution_impl(
                                     source_single="merge_full_val",
                                 )
                                 _save_evaluation(base_dir, full_val_result)
-
-                                if budget_api.budget_exhausted(state, config):
-                                    print_warning(
-                                        "Budget exhausted during merge full-val eval -- stopping."
-                                    )
-                                    _save_state(state)
-                                    break
 
                                 merges_due -= 1
                                 budget_api.record_merge_invocation(state)
