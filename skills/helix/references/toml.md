@@ -193,6 +193,11 @@ Backend notes:
 - Cursor/OpenCode: check CLI support and model naming before pinning.
 - pi: `pi`; `model` takes `provider/id` (see `pi --list-models`), `effort`
   maps to `--thinking` (off | minimal | low | medium | high | xhigh | max).
+  pi runs a model without thinking support at `off`, without a warning.
+  pi has no turn cap, so `max_turns` is only a request in the prompt.
+  On a local engine that serves one request at a time, parallel proposals can
+  outlive pi's `httpIdleTimeoutMs` (300 s); set it to `"disabled"` in
+  `~/.pi/agent/settings.json`.
 
 No web access:
 

@@ -348,6 +348,11 @@ def generate_seed(
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
+    # Every backend's argv tells the agent to read the prompt file rather
+    # than carrying the prompt itself, so the file must exist here just as
+    # it does for a mutation.  GEPA passes the seed prompt to the LM
+    # directly; this file is HELIX's way of doing the same.
+    prompt_artifact_name = _write_mutation_prompt_artifact(worktree_path, prompt)
     _, usage = invoke_claude_code(
         worktree_path,
         prompt,
@@ -355,6 +360,7 @@ def generate_seed(
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
         sandbox=config.sandbox,
+        prompt_artifact_name=prompt_artifact_name,
     )
     return usage
 
@@ -1158,13 +1164,31 @@ def _parse_backend_output(
                 stdout=result.stdout,
                 stderr=result.stderr,
                 exit_code=result.returncode,
-                suggestion=(
-                    "Check the provider credentials, model name and billing "
-                    "for the model pi was asked to use."
+                suggestion=_pi_failure_suggestion(
+                    parsed["stop_reason"], parsed.get("error_message")
                 ),
             )
         return parsed
     raise ValueError(f"Unsupported backend: {backend}")
+
+
+def _pi_failure_suggestion(stop_reason: str, error_message: object) -> str:
+    """What to check after pi's last model call ended in ``stop_reason``."""
+    if stop_reason == "aborted":
+        return "pi was interrupted before its run finished."
+    if "terminated" in str(error_message):
+        # Seen with a local engine that serves one request at a time: under
+        # parallel proposals a queued request outlives pi's idle timeout.
+        return (
+            "pi's connection to the provider was cut. On a local engine that "
+            "serves one request at a time, parallel proposals can queue a "
+            "request past pi's httpIdleTimeoutMs (300000 ms by default); raise "
+            "it, or set it to \"disabled\", in ~/.pi/agent/settings.json."
+        )
+    return (
+        "Check the provider credentials, model name, billing and endpoint "
+        "for the model pi was asked to use."
+    )
 
 
 def _salvage_backend_usage(

@@ -153,6 +153,28 @@ def test_pi_failed_model_call_is_a_mutation_error(mocker: Any, tmp_path: Path, s
     assert exc_info.value.usage.input_tokens == 400
 
 
+@pytest.mark.parametrize(
+    ("stop", "message", "hint"),
+    [
+        ("error", "Your credit balance is too low", "credentials"),
+        # A stream cut while queued on a one-request local engine (flint-int4
+        # via JITEngine, four parallel pi agents): pi's idle timeout.
+        ("error", "terminated", "httpIdleTimeoutMs"),
+        ("aborted", None, "interrupted"),
+    ],
+)
+def test_pi_failure_suggestion_matches_the_cause(
+    mocker: Any, tmp_path: Path, stop: str, message: str | None, hint: str
+) -> None:
+    extra = {} if message is None else {"errorMessage": message}
+    _run(mocker, _stream(stop, **extra))
+
+    with pytest.raises(MutationError) as exc_info:
+        invoke_claude_code(str(tmp_path), "prompt", AgentConfig(backend="pi"))
+
+    assert hint in (exc_info.value.suggestion or "")
+
+
 def test_pi_malformed_line_still_charges_usage(mocker: Any, tmp_path: Path) -> None:
     _run(mocker, "{truncated\n" + _stream())
 

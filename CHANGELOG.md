@@ -28,9 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `helix-auth-pi` volume; the runner image is
   `ghcr.io/ke7/helix-evo-runner-pi`. Host backend runs now get a closed
   stdin, since pi reads piped stdin before it starts.
+  pi has no turn cap, so `max_turns` is only a prompt hint for it. On a
+  local engine that serves one request at a time, parallel proposals need
+  pi's `httpIdleTimeoutMs` raised (see the configuration guide).
+- The seedless "Generating seed candidate" message and the failed-merge
+  message name the configured backend instead of always saying Claude Code.
 - `helix timing` now splits each agent call into `model`, `tool:<name>` and
   `other` time, read from the backend's transcript (`claude`, `codex`,
-  `opencode`; `cursor` and `agy` are reported as `unavailable`).
+  `opencode`, `pi`; `cursor` and `agy` are reported as `unavailable`).
 - `from helix import timed`: time your own operations (`with timed("sam3",
   example=...)`, `@timed(...)`, `timed.record(...)`) in the evaluator, its
   sidecar and child processes, and scripts the agent runs. HELIX totals them per
@@ -192,6 +197,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
+- Seedless mode now gives the agent its task. Every backend is told to read
+  `.agent_task_prompt.md`, but seed generation never wrote that file, so the
+  seed agent started in an empty worktree with no objective and had to guess
+  (with pi on a local model it searched the disk for the file and produced
+  nothing). `generate_seed` now writes the prompt file the same way a
+  mutation does.
+- Resuming after an interrupted generation no longer fails with "a branch
+  named 'helix/g1-s2' already exists". An interrupt can stop cleanup after
+  it removes a candidate's worktree but before it deletes the branch, and
+  the resumed generation then reuses that candidate id. Cloning a candidate
+  now resets a leftover branch (`git worktree add -B`); git still refuses a
+  branch that a live worktree has checked out.
 - A project with no `[dataset]` (single-task mode) can now be scored. The
   `helix_result` parser needs `helix_batch.json` to line up the evaluator's
   pairs with ids, but only the dataset paths wrote it, so every single-task
