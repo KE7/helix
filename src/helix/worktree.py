@@ -621,17 +621,21 @@ def changed_files(candidate: Candidate, parent: Candidate) -> list[str]:
         base = _run(["git", "rev-parse", "HEAD"], cwd=Path(parent.worktree_path), check=False)
         if base.returncode != 0:
             return []
+        # --no-renames lists both sides of a rename; -z keeps non-ASCII
+        # names verbatim instead of C-quoting them.
         tracked = _run(
-            ["git", "diff", "--name-only", base.stdout.strip(), "--"], cwd=wt, check=False
+            ["git", "diff", "--name-only", "--no-renames", "-z", base.stdout.strip(), "--"],
+            cwd=wt,
+            check=False,
         )
         untracked = _run(
-            ["git", "ls-files", "--others", "--exclude-standard"], cwd=wt, check=False
+            ["git", "ls-files", "-z", "--others", "--exclude-standard"], cwd=wt, check=False
         )
     except OSError:  # a missing worktree directory
         return []
     if tracked.returncode != 0 or untracked.returncode != 0:
         return []
-    return sorted({p for p in (tracked.stdout + untracked.stdout).splitlines() if p})
+    return sorted({p for p in (tracked.stdout + untracked.stdout).split("\0") if p})
 
 
 @traced("snapshot", lambda a: {"candidate_id": a["candidate"].id})

@@ -29,7 +29,7 @@ from helix.display import (
     render_frontier_table,
 )
 from helix.exceptions import ResumeIncompatibleError, print_helix_error
-from helix.lineage import load_lineage
+from helix.lineage import LineageEntry, load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
 from helix import timing
@@ -904,7 +904,13 @@ def _log_rows(project_root: Path, base_dir: Path) -> list[tuple[str, ...]]:
                     summaries[child] = _first_sentence(text)
 
     rows: list[tuple[str, ...]] = []
-    for entry in sorted(lineage.values(), key=lambda e: (e.generation, e.id)):
+    def _run_order(entry: LineageEntry) -> tuple[int, int, str]:
+        # Ids are g<gen>-<s|m><counter>; sort the counter as a number so g1-s10
+        # follows g1-s9, not g1-s1.
+        counter = re.search(r"(\d+)$", entry.id)
+        return (entry.generation, int(counter.group(1)) if counter else 0, entry.id)
+
+    for entry in sorted(lineage.values(), key=_run_order):
         attempt = attempts.get(entry.id)
         result = evaluations.get(entry.id)
         if attempt is not None:

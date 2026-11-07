@@ -674,6 +674,23 @@ class TestChangedFiles:
 
         assert changed_files(child, seed) == ["README.md", "new.py", "old.py", "solve.py"]
 
+    def test_lists_both_sides_of_a_rename_and_non_ascii_names(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        (repo_root / "a.py").write_text("x = 1\n" * 20)
+        _run(["git", "add", "-A"], repo_root)
+        _run(["git", "commit", "-m", "a"], repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+
+        _run(["git", "mv", "a.py", "b.py"], wt)
+        _run(["git", "commit", "-m", "rename"], wt)
+        (wt / "é.py").write_text("y = 1\n")
+
+        assert changed_files(child, seed) == ["a.py", "b.py", "é.py"]
+
     def test_unchanged_child_has_no_files(self, tmp_path: Path) -> None:
         repo_root = tmp_path / "project"
         _make_repo(repo_root)

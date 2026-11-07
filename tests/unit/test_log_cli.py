@@ -140,3 +140,15 @@ def test_log_without_a_saved_front_says_accepted_not_dominated(tmp_path: Path) -
     output = _log(project)
     assert "dominated" not in output
     assert "accepted" in output
+
+
+def test_log_orders_candidates_by_their_counter_not_as_strings(tmp_path: Path) -> None:
+    project = _run(tmp_path)
+    lineage_path = project / ".helix" / "lineage.json"
+    lineage = json.loads(lineage_path.read_text())
+    for n in (10, 9, 11):
+        lineage.append({"id": f"g3-s{n}", "parent": "g1-s1", "parents": ["g1-s1"],
+                        "operation": "mutate", "generation": 3, "files_changed": []})
+    lineage_path.write_text(json.dumps(lineage))
+    output = _log(project)
+    assert output.index("g3-s9") < output.index("g3-s10") < output.index("g3-s11")
