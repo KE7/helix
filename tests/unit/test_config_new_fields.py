@@ -143,7 +143,7 @@ class TestEvolutionConfigNewFields:
             val_stage_size=50,
             batch_sampler="stratified",
             num_sampled_groups=1,
-            num_examples_per_group=4,
+            num_examples_per_group=5,
         )
         assert cfg.minibatch_size == 5
         assert cfg.max_workers == 4
@@ -152,7 +152,7 @@ class TestEvolutionConfigNewFields:
         assert cfg.acceptance_criterion == "improvement_or_equal"
         assert cfg.val_stage_size == 50
         assert cfg.num_sampled_groups == 1
-        assert cfg.num_examples_per_group == 4
+        assert cfg.num_examples_per_group == 5
 
     def test_group_example_sampling_fields_must_be_paired(self):
         with pytest.raises(ValidationError):
@@ -173,6 +173,33 @@ class TestEvolutionConfigNewFields:
                 num_sampled_groups=1,
                 num_examples_per_group=0,
             )
+
+    def test_group_example_sampling_sets_the_minibatch_size(self):
+        """The grouped sampler draws num_sampled_groups * num_examples_per_group
+        ids per minibatch, so that is the minibatch size everything else
+        (budget bounds, the repeat warning) reads."""
+        cfg = EvolutionConfig(
+            batch_sampler="stratified",
+            num_sampled_groups=3,
+            num_examples_per_group=2,
+        )
+        assert cfg.minibatch_size == 6
+
+    def test_group_example_sampling_rejects_a_conflicting_minibatch_size(self):
+        with pytest.raises(ValidationError, match="minibatch_size"):
+            EvolutionConfig(
+                batch_sampler="stratified",
+                num_sampled_groups=3,
+                num_examples_per_group=2,
+                minibatch_size=4,
+            )
+        cfg = EvolutionConfig(
+            batch_sampler="stratified",
+            num_sampled_groups=3,
+            num_examples_per_group=2,
+            minibatch_size=6,
+        )
+        assert cfg.minibatch_size == 6
 
     def test_group_example_sampling_requires_stratified_sampler(self):
         with pytest.raises(ValidationError):
@@ -452,7 +479,7 @@ class TestTomlRoundTrip:
             acceptance_criterion = "improvement_or_equal"
             val_stage_size = 50
             num_sampled_groups = 1
-            num_examples_per_group = 4
+            num_examples_per_group = 7
         """)
         )
         cfg = load_config(toml)
@@ -466,7 +493,7 @@ class TestTomlRoundTrip:
         assert cfg.evolution.acceptance_criterion == "improvement_or_equal"
         assert cfg.evolution.val_stage_size == 50
         assert cfg.evolution.num_sampled_groups == 1
-        assert cfg.evolution.num_examples_per_group == 4
+        assert cfg.evolution.num_examples_per_group == 7
 
     def test_toml_val_path_omitted_falls_back(self, tmp_path):
         toml = tmp_path / "helix.toml"
@@ -498,7 +525,7 @@ class TestTomlRoundTrip:
                 "acceptance_criterion": "improvement_or_equal",
                 "val_stage_size": 25,
                 "num_sampled_groups": 1,
-                "num_examples_per_group": 2,
+                "num_examples_per_group": 4,
             },
         )
         dumped = cfg.model_dump()
@@ -511,7 +538,7 @@ class TestTomlRoundTrip:
         assert restored.evolution.acceptance_criterion == "improvement_or_equal"
         assert restored.evolution.val_stage_size == 25
         assert restored.evolution.num_sampled_groups == 1
-        assert restored.evolution.num_examples_per_group == 2
+        assert restored.evolution.num_examples_per_group == 4
 
 
 # ---------------------------------------------------------------------------

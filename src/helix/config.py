@@ -317,7 +317,7 @@ class EvolutionConfig(BaseModel):
     and parallel proposal settings.
     """
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid")
 
     max_generations: int = 10
     perfect_score_threshold: float | None = None
@@ -457,11 +457,15 @@ class EvolutionConfig(BaseModel):
         description=(
             "Minibatch sampling strategy. "
             "'epoch_shuffled' (default): GEPA-parity EpochShuffledBatchSampler. "
-            "'stratified': StratifiedBatchSampler guarantees each minibatch of "
-            "size K touches K distinct groups, where the group key is derived "
-            "from each instance id via 'evolution.group_key_separator'. Falls "
-            "back to epoch_shuffled behaviour when fewer groups than "
-            "minibatch_size are available."
+            "'stratified': StratifiedBatchSampler, where the group key is "
+            "derived from each instance id via 'evolution.group_key_separator'. "
+            "Each minibatch holds num_sampled_groups distinct groups with "
+            "num_examples_per_group ids from each (by default minibatch_size "
+            "groups with one id each). A group with fewer than "
+            "num_examples_per_group ids is never sampled, and when fewer "
+            "groups than num_sampled_groups are large enough, minibatches are "
+            "drawn epoch_shuffled instead; HELIX warns at the start of the run "
+            "in both cases."
         ),
     )
     num_sampled_groups: int | None = Field(
@@ -478,8 +482,9 @@ class EvolutionConfig(BaseModel):
         default=None,
         description=(
             "Optional stratified sampler example count per sampled group. Must "
-            "be set together with num_sampled_groups. The effective minibatch "
-            "cardinality becomes num_sampled_groups * num_examples_per_group."
+            "be set together with num_sampled_groups. minibatch_size then "
+            "becomes num_sampled_groups * num_examples_per_group; setting "
+            "minibatch_size to anything else is an error."
         ),
     )
     group_key_separator: str = Field(
@@ -760,6 +765,20 @@ class EvolutionConfig(BaseModel):
                 "evolution.num_examples_per_group must be >= 1 "
                 f"(got {self.num_examples_per_group})"
             )
+        # The grouped sampler draws num_sampled_groups * num_examples_per_group
+        # ids per minibatch.  That is the minibatch size, so make it the one
+        # every reader of minibatch_size sees (budget bounds, the repeat
+        # warning, resume checks) instead of ignoring the field silently.
+        if self.num_sampled_groups is not None and self.num_examples_per_group is not None:
+            grouped = self.num_sampled_groups * self.num_examples_per_group
+            if "minibatch_size" in self.model_fields_set and self.minibatch_size != grouped:
+                raise ValueError(
+                    f"evolution.minibatch_size = {self.minibatch_size} conflicts with "
+                    f"num_sampled_groups * num_examples_per_group = {grouped}, the "
+                    "number of ids each grouped minibatch holds; remove "
+                    f"minibatch_size or set it to {grouped}"
+                )
+            self.minibatch_size = grouped
 
 
 class AgentConfig(BaseModel):

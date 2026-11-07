@@ -390,3 +390,47 @@ def test_stratified_fallback_short_circuits_after_engagement() -> None:
     assert call_count["n"] == 0, (
         "fallback path should short-circuit and never re-bucket all_ids()"
     )
+
+
+def test_stratified_warns_about_groups_too_small_to_sample() -> None:
+    """A group with fewer than num_examples_per_group ids is never sampled;
+    the sampler says so instead of dropping it silently."""
+    ids = ["a__0", "a__1", "b__0", "b__1", "c__0"]
+    sampler = StratifiedBatchSampler(
+        minibatch_size=4,
+        group_fn=_group_by_prefix,
+        num_sampled_groups=2,
+        num_examples_per_group=2,
+    )
+
+    problems = sampler.stratification_warnings(ids)
+
+    assert len(problems) == 1
+    assert "never sampled" in problems[0] and "c" in problems[0]
+
+
+def test_stratified_warns_when_it_will_fall_back_to_unstratified() -> None:
+    ids = ["a__0", "a__1", "b__0", "b__1", "c__0"]
+    sampler = StratifiedBatchSampler(
+        minibatch_size=6,
+        group_fn=_group_by_prefix,
+        num_sampled_groups=3,
+        num_examples_per_group=2,
+    )
+
+    problems = sampler.stratification_warnings(ids)
+
+    # One warning: the fallback samples every id, so "never sampled" would
+    # be wrong here.
+    assert len(problems) == 1 and "without stratification" in problems[0]
+    # The warning is accurate: this sampler does fall back.
+    batch = sampler.next_minibatch_ids(_Loader(ids), _State(i=0))
+    assert sampler._fallback is not None
+    assert len(batch) == 6
+
+
+def test_stratified_has_nothing_to_warn_about_balanced_groups() -> None:
+    ids = [f"{g}__{i}" for g in ("a", "b", "c") for i in range(2)]
+    sampler = StratifiedBatchSampler(minibatch_size=3, group_fn=_group_by_prefix)
+
+    assert sampler.stratification_warnings(ids) == []
