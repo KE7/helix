@@ -13,7 +13,7 @@
 | `helix history` | Show the candidate lineage as a tree |
 | `helix resume` | Resume a previously interrupted evolution run |
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
-| `helix log` | Show semantic mutation log — full trajectory with parent lineage |
+| `helix log` | Show every candidate in order: parent, outcome (frontier, dominated or rejected and why), score change against its parent, files changed, and the agent's change summary when `evolution.sibling_history` is on |
 | `helix attempts` | Surface rejected attempt records and perfect-skip events from `.helix/attempts/` and `.helix/skips/` |
 | `helix timing` | Show where the run's time went (work by kind and candidate fate, wall time per generation); `--perfetto FILE` exports a timeline |
 

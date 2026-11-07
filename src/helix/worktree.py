@@ -607,6 +607,33 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
     )
 
 
+def changed_files(candidate: Candidate, parent: Candidate) -> list[str]:
+    """Paths *candidate* changed relative to *parent*'s commit, sorted.
+
+    Covers what the agent committed itself and what is still staged,
+    unstaged or untracked, so it matches what :func:`snapshot_candidate`
+    will commit (``git add -A`` honours ``.gitignore`` the same way
+    ``ls-files --exclude-standard`` does).  Returns ``[]`` when git cannot
+    say; this only feeds ``lineage.json`` and ``helix log``.
+    """
+    wt = Path(candidate.worktree_path)
+    try:
+        base = _run(["git", "rev-parse", "HEAD"], cwd=Path(parent.worktree_path), check=False)
+        if base.returncode != 0:
+            return []
+        tracked = _run(
+            ["git", "diff", "--name-only", base.stdout.strip(), "--"], cwd=wt, check=False
+        )
+        untracked = _run(
+            ["git", "ls-files", "--others", "--exclude-standard"], cwd=wt, check=False
+        )
+    except OSError:  # a missing worktree directory
+        return []
+    if tracked.returncode != 0 or untracked.returncode != 0:
+        return []
+    return sorted({p for p in (tracked.stdout + untracked.stdout).splitlines() if p})
+
+
 @traced("snapshot", lambda a: {"candidate_id": a["candidate"].id})
 def snapshot_candidate(candidate: Candidate, message: str) -> str:
     """Stage all changes in the candidate's worktree and create a commit.

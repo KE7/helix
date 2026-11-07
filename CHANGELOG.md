@@ -217,6 +217,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- `helix log` shows the run. It had never printed anything: it read
+  `.helix/log/`, which nothing wrote. It now joins the records a run already
+  keeps into one row per candidate: generation, parent, outcome (on the
+  frontier and on how many ids, dominated, or rejected and why), score and its
+  change against the parent, files changed, and the first sentence of the
+  agent's change summary when `evolution.sibling_history` is on.
+- `lineage.json` records each mutation's and merge's `files_changed`, which
+  was always empty. It lists every path the child changed against its parent,
+  whether the agent committed it or not, and is written before the minibatch
+  gate, so rejected children keep their list after their worktree is removed.
+  Runs made before this have empty lists.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess

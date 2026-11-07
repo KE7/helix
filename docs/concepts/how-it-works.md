@@ -54,7 +54,7 @@ Meta-Harness ([Lee et al., 2026](https://arxiv.org/abs/2603.28052)) is concurren
 | 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
 | 💾 | **State persistence & resume** | Crash-safe generation-granular resume with `helix resume` |
 | 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
-| 📋 | **Semantic mutation log** | Full trajectory with root-cause analysis, changes made, and parent lineage |
+| 📋 | **Run log** | `helix log` lists every candidate in order: parent, outcome, score change, files changed and what the agent changed |
 
 ## How It Works
 

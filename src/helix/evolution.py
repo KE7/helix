@@ -108,6 +108,7 @@ from helix.timing import (
 )
 from helix.trace import TRACE, EventType
 from helix.worktree import (
+    changed_files,
     create_seed_worktree,
     create_empty_seed_worktree,
     remove_worktree,
@@ -2593,7 +2594,7 @@ def _run_evolution_impl(
                                     parents=[a.id, b.id],
                                     operation="merge",
                                     generation=gen,
-                                    files_changed=[],
+                                    files_changed=changed_files(merged, a),
                                 ),
                             )
                             # Save state BEFORE snapshot so that if the commit
@@ -3092,7 +3093,7 @@ def _run_evolution_impl(
                         parents=[_parent.id],
                         operation="mutate",
                         generation=gen,
-                        files_changed=[],
+                        files_changed=changed_files(child, _parent),
                     ),
                 )
                 # Save state BEFORE snapshot so that if the commit crashes
