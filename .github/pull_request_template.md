@@ -25,7 +25,7 @@ each command with its expected output, and one failure case where it matters. --
 
 ## Checks run locally
 
-- [ ] `uv run --all-extras --python $v pytest tests/unit/ -q` for each `v` in 3.11 to 3.15
+- [ ] `uv run --all-extras --python $v pytest tests/unit/ -q` for each `v` in 3.12 to 3.15
 - [ ] `uv run --all-extras mypy --strict src/helix/`
 - [ ] `uv run --all-extras ruff check src/`
 - [ ] `uv run --only-group docs mkdocs build --strict`

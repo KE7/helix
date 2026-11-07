@@ -72,16 +72,20 @@ Then ask Codex:
 Use $helix to set up this project.
 ```
 
-For Claude Code, this repo includes `.claude/commands/helix.md`, so inside this
-checkout you can run:
+For Claude Code, this checkout registers the same skill at `.claude/skills/helix`
+(a symlink to `skills/helix/`), so Claude Code loads it when a task matches, or
+on demand:
 
 ```text
 /helix set up Docker-sandboxed HELIX for this benchmark
 ```
 
-To use the command from another project, copy or symlink both
-`skills/helix/` and `.claude/commands/helix.md` into that project, preserving
-the same relative paths.
+To use it in every project, link it into your personal Claude Code skills:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -sfn "$(pwd)/skills/helix" ~/.claude/skills/helix
+```
 
 ## Whole-repo-as-candidate Model
 

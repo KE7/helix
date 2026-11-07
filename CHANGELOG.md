@@ -182,6 +182,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gives **Try it by hand** steps from a clean checkout, and CI must pass
   locally before the PR is opened. `.github/pull_request_template.md`
   carries the same sections, and the rules are on the docs site.
+  `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
+  working on this repository to those rules.
+- The HELIX agent skill is registered for Claude Code as a project skill,
+  `.claude/skills/helix` (a symlink to `skills/helix/`), in place of the
+  `.claude/commands/helix.md` command. `/helix` still loads it; to use it in
+  other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
 - A project with no `[dataset]` (single-task mode) can now be scored. The
