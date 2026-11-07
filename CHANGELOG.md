@@ -176,6 +176,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sum_scores` mapping in the result schema are unchanged and still
   reported; sums also still drive the acceptance gate, which does match
   upstream's `StrictImprovementAcceptance`.
+- `CONTRIBUTING.md` now sets the rules for every PR, human or agent: each
+  description shows the change working on the real system (**Evidence**:
+  a real `helix evolve` run with a real backend and model, not mocks) and
+  gives **Try it by hand** steps from a clean checkout, and CI must pass
+  locally before the PR is opened. `.github/pull_request_template.md`
+  carries the same sections, and the rules are on the docs site.
 
 ### Fixed
 - A project with no `[dataset]` (single-task mode) can now be scored. The
