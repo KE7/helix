@@ -88,7 +88,9 @@ helix timing --perfetto trace.json
 ### Where the time went
 
 Every run appends timing to `.helix/timing.jsonl`, and `helix timing` reads it.
-The README's "Timing Trace" section explains each table and the record format.
+The timing guide (`docs/guides/timing.md` in the HELIX repository,
+<https://ke7.github.io/helix/guides/timing/>) explains each table and the
+record format.
 Use it to find what to fix:
 
 - Most work went to **rejected** candidates: the search has stalled.

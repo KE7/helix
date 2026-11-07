@@ -68,13 +68,18 @@ The second table splits each agent call, and anything you time yourself.
   in sandboxed runs, container start plus HELIX copying the worktree into the
   sandbox and back (large repositories make this grow).
 
+The transcript's timestamps are wall clock. If the machine slept during the
+call, the transcript spans more time than the call did, so every tool interval
+is scaled down by the same factor and the split still adds up to the call's
+duration.
+
 This works for `claude`, `codex`, `opencode` and `pi`. `cursor` (no timestamps) and
 `agy` (step timestamps only, to the second) get one `unavailable` row rather
 than a guess.
 
 **Your own operations** are timed with `helix.timed`, which works in the
-evaluator, its `extra_commands`, its child processes, the evaluator sidecar,
-and scripts the agent runs during a mutation:
+evaluator, its `extra_commands`, its child processes, the sandboxed evaluator
+runner, and scripts the agent runs during a mutation (in the sandbox too):
 
 ```python
 from helix import timed
@@ -93,13 +98,15 @@ one line, `{"name": "sam3", "seconds": 0.84, "example": "12"}`, to the file
 named by `HELIX_TIMING_LOG`. Code in another language, or in an image without
 `helix` installed, can write that line itself. HELIX totals the file per name
 and example after each call, so a tool called thousands of times adds one record
-per evaluation, not thousands.
+per evaluation, not thousands. A duration that is not a finite number of
+seconds is dropped.
 
 - **GPU work:** a GPU call returns before its kernels finish, so time up to the
   point the result is used (`.cpu()`, `synchronize()`) or around the request to
   an inference server.
-- **Other services:** a model served by a separate container or machine can't
-  see `HELIX_TIMING_LOG`. Time the request where your evaluator makes it, or
+- **Other services:** a model served by a separate container or machine,
+  including the `[evaluator.sidecar]` service, can't see `HELIX_TIMING_LOG`.
+  Time the request where your evaluator makes it, or
   pass a latency the server reports to `timed.record`.
 - **Overlap:** names can nest (`rollout` around `sam3`) and examples can run in
   parallel, so totals are per name and don't add up to the evaluator's time.
@@ -125,16 +132,19 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 - `detail` records hold the totals above, with `within` (`agent` or
   `evaluate`), `source` (`transcript` or `timed`), `name`, `example`, `count`,
   `seconds` and `max_seconds`.
-- Each candidate gets one `decision` record. A candidate with none was still
-  undecided when the run stopped, and a `start` with no `end` was in flight
-  when the process died.
+- Each attempt at a candidate gets one `decision` record. A `resume` retries
+  an interrupted attempt under the same candidate id, after recording the
+  interrupted one as rejected, so each span counts toward the next `decision`
+  for its candidate later in the file, and each attempt counts as a candidate
+  of its own. Work with no later `decision` was still undecided when the run
+  stopped, and a `start` with no `end` was in flight when the process died.
 
 | span | measures | `attrs` |
 | --- | --- | --- |
 | `run` | the whole run, sidecar included | |
 | `generation` | one iteration of the generation loop, sequential acceptance included | `generation` |
 | `proposal` | one proposal slot: parent eval, mutation, child eval (slots run in parallel) | `candidate_id`, `parent` |
-| `mutate` / `merge` / `seed` | producing one candidate, its agent call included | `merge`: `candidate_id`, `parents` |
+| `mutate` / `merge` / `seed` | producing one candidate, its agent call included | `merge`: `candidate_id`, `parents`; `seed`: `candidate_id` |
 | `summarize` | the sibling-history change summary | |
 | `agent` | one backend CLI call | `backend`, `model` |
 | `cached_evaluate` | one cache-aware evaluation: worktree lock wait, cache lookup, evaluator run | `candidate_id`, `split`, and `examples` / `evaluation_phase` when set |

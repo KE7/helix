@@ -35,11 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message name the configured backend instead of always saying Claude Code.
 - `helix timing` now splits each agent call into `model`, `tool:<name>` and
   `other` time, read from the backend's transcript (`claude`, `codex`,
-  `opencode`, `pi`; `cursor` and `agy` are reported as `unavailable`).
+  `opencode`, `pi`; `cursor` and `agy` are reported as `unavailable`). If the
+  machine slept during a call, tool times are scaled down with it, so the
+  split adds up to the call's duration.
 - `from helix import timed`: time your own operations (`with timed("sam3",
   example=...)`, `@timed(...)`, `timed.record(...)`) in the evaluator, its
-  sidecar and child processes, and scripts the agent runs. HELIX totals them per
-  name and example into `detail` records in `.helix/timing.jsonl`.
+  child processes and `extra_commands`, the sandboxed evaluator runner, and
+  scripts the agent runs (sandboxed or not). The `[evaluator.sidecar]` service
+  never sees `HELIX_TIMING_LOG`; time its requests from the runner. HELIX
+  totals the calls per name and example into `detail` records in
+  `.helix/timing.jsonl`. A duration that is not a finite number is dropped,
+  and `timed` never raises.
 - Every run now appends a timing trace to `.helix/timing.jsonl`
   (`helix.timing`), always on like budget accounting. `start`/`end` records
   cover the run, each generation, proposal slots, mutation, merge, seed
@@ -48,12 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the sandbox reset. Each record carries `duration_seconds`, `outcome`, identity `attrs`,
   a `parent_span_id` linking it into a tree, and a `run_id` separating
   `evolve` from later `resume`s in the same file. Rejected candidates are
-  timed like accepted ones, and a `decision` record per candidate (`accepted`,
-  `reason`) splits the time spent by fate. Every record is stamped with the
-  `generation` and `candidate` its work was for. `helix timing` prints work by
+  timed like accepted ones, and a `decision` record per candidate attempt
+  (`accepted`, `reason`) splits the time spent by fate; a candidate retried
+  after a `resume` counts once per attempt, each with its own fate. Every
+  record is stamped with the `generation` and `candidate` its work was for
+  (seed generation included). `helix timing` prints work by
   kind and candidate fate plus wall time per generation, and `--perfetto FILE`
   exports a Chrome-trace timeline for ui.perfetto.dev (no extra dependency). A trace that cannot be
-  written is a logged warning, never a failed run.
+  written or closed is a logged warning, never a failed run, and a run resumed
+  after a kill that tore the trace's last line starts on a new line.
 - `examples/circle_packing/` is optimize_anything's circle-packing experiment
   (gepa-ai/gepa@133d185a): GEPA's two-component candidate (`solve.py`,
   `refiner_prompt.txt`), its fitness function with the GPT-5.1 refiner,

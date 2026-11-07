@@ -253,13 +253,15 @@ timed.record("owl-vit", server_latency)    # a duration measured elsewhere
 ```
 
 - It does nothing outside HELIX, so the runner still works when run by hand.
-- It works from threads, child processes, `extra_commands`, and the evaluator
-  sidecar. Every process inherits `HELIX_TIMING_LOG`, and HELIX reads the file
-  back after each run.
+- It works from threads, child processes, `extra_commands`, the sandboxed
+  evaluator runner (`runner_image`), and scripts the agent runs. Every process
+  inherits `HELIX_TIMING_LOG`, and HELIX reads the file back after each run.
+  The `[evaluator.sidecar]` service itself never gets it (see below).
 - The runner image needs `helix` installed to import it. Otherwise, append one
   JSON line per call to the file named by `HELIX_TIMING_LOG`:
   `{"name": "sam3", "seconds": 0.84, "example": "12"}`.
-- A model served from a separate container or machine can't see that file.
+- A model served from a separate container or machine, including the
+  evaluator sidecar service, can't see that file.
   Time the request where the runner makes it, or pass the server's own latency
   to `timed.record`.
 - GPU calls return before their kernels finish. Time up to the point the
