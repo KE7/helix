@@ -895,14 +895,29 @@ def _cached_eval(
 
     GEPA parity: cache only when enabled, and key by candidate content rather
     than HELIX's lineage id so equivalent candidates can reuse results.
+
+    This is the single-task (no-dataset) path.  GEPA's ``optimize_anything``
+    (``src/gepa/optimize_anything.py``) handles ``dataset=None, valset=None``
+    by setting ``effective_dataset = [_SINGLE_INSTANCE_SENTINEL]``: a
+    one-element dataset whose evaluator is called without ``example``.  HELIX
+    mirrors that with a one-id ``helix_batch.json`` (``["0"]``), so the
+    evaluator prints one ``[score, side_info]`` pair and the ``helix_result``
+    parser has an id to align it to.  ``HELIX_INSTANCE_IDS`` stays unset, as
+    GEPA does not forward the sentinel to the evaluator.
     """
+
+    def _run() -> EvalResult:
+        with _worktree_lock(candidate.worktree_path):
+            _write_helix_batch(candidate.worktree_path, ["0"])
+            return run_evaluator(candidate, config, split=split)
+
     if cache is None:
-        return run_evaluator(candidate, config, split=split), False
+        return _run(), False
     candidate_key = _candidate_content_key(candidate)
     cached = cache.get(candidate_key, split)
     if cached is not None:
         return EvalResult.from_dict(cached), True
-    result = run_evaluator(candidate, config, split=split)
+    result = _run()
     cache.put(candidate_key, split, result.to_dict())
     return result, False
 

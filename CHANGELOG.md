@@ -161,6 +161,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream's `StrictImprovementAcceptance`.
 
 ### Fixed
+- A project with no `[dataset]` (single-task mode) can now be scored. The
+  `helix_result` parser needs `helix_batch.json` to line up the evaluator's
+  pairs with ids, but only the dataset paths wrote it, so every single-task
+  evaluation failed with "helix_result parser requires helix_batch.json".
+  HELIX now writes `["0"]` before each single-task evaluation, so an
+  evaluator that prints one `[score, side_info]` pair works as the README
+  shows. This mirrors GEPA's `optimize_anything`, which runs
+  `dataset=None, valset=None` on a one-element sentinel dataset.
 - Every proposal slot's spend is now charged, whatever happens to the
   candidate. All slots in a batch run in parallel before the sequential apply
   phase, but their parent evaluations, child minibatch evaluations and
