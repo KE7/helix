@@ -68,7 +68,7 @@ The second table splits each agent call, and anything you time yourself.
   in sandboxed runs, container start plus HELIX copying the worktree into the
   sandbox and back (large repositories make this grow).
 
-This works for `claude`, `codex` and `opencode`. `cursor` (no timestamps) and
+This works for `claude`, `codex`, `opencode` and `pi`. `cursor` (no timestamps) and
 `agy` (step timestamps only, to the second) get one `unavailable` row rather
 than a guess.
 

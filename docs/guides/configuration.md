@@ -103,12 +103,12 @@ frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType pari
                                  # raise MissingObjectiveScoresError at selection.
 
 [agent]
-backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "opencode"
+backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "opencode" | "pi"
 # model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20                   # hard cap for claude; an in-prompt hint for other backends
 # background = "Only modify files under src/. Do not touch tests/ or config/."
-# web_access = true              # false = no built-in web tools (claude/codex/opencode)
+# web_access = true              # false = no built-in web tools (claude/codex/opencode/pi)
 
 [sandbox]
 enabled = false                  # true = run mutation and merge agents in Docker
@@ -129,3 +129,12 @@ skip_special_files = true        # skip FIFOs/sockets/devices during workspace s
 [worktree]
 base_dir = ".helix/worktrees"
 ```
+
+## Backend notes
+
+**pi** (`backend = "pi"`):
+
+- `model` takes pi's `provider/id` form, for example `"anthropic/claude-sonnet-4-5"` or a custom provider from `~/.pi/agent/models.json` such as `"jitengine/flint-int4"`. `pi --list-models` lists them.
+- `effort` becomes `--thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). pi runs a model that has no thinking support at `off`, without a warning.
+- pi has no turn cap, so `max_turns` is only a request in the prompt.
+- A local engine that answers one request at a time, such as JITEngine, queues the requests of parallel proposals. A request that waits longer than pi's `httpIdleTimeoutMs` (300000 ms by default) is cut ("terminated"), and after three retries the mutation fails. With `num_parallel_proposals` x `mutations_per_parent` above 1 on such an engine, set `"httpIdleTimeoutMs": "disabled"` in `~/.pi/agent/settings.json` (in the sandbox, the `helix-auth-pi` volume's copy).

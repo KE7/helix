@@ -82,6 +82,16 @@ class TestBuildSeedGenerationPrompt:
 
 
 class TestGenerateSeed:
+    @pytest.fixture(autouse=True)
+    def _no_prompt_file(self):
+        """These tests check the dispatch to invoke_claude_code with fake
+        paths; the prompt file write is covered in test_evolution_seedless."""
+        with patch(
+            "helix.mutator._write_mutation_prompt_artifact",
+            return_value=".agent_task_prompt.md",
+        ):
+            yield
+
     def test_calls_invoke_claude_code_exactly_once(self):
         """generate_seed must call invoke_claude_code exactly once (no retry loop)."""
         config = make_config()

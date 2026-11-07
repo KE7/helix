@@ -39,9 +39,10 @@ def test_sandbox_status_all_backends(mocker):
     result = CliRunner().invoke(cli, ["sandbox", "status"])
 
     assert result.exit_code == 0
-    assert mock_run.call_count == 5
+    assert mock_run.call_count == 6
     assert "claude" in result.output
     assert "opencode" in result.output
+    assert "pi" in result.output
 
 
 def test_parse_extra_hosts_ipv4_colon_form():

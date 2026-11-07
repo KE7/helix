@@ -27,7 +27,7 @@
 --generations INT   Override max_generations
 --stop-at-score X   Override stop_at_score: end the run once the best val score reaches X
 --no-merge          Disable merge operations
---backend BACKEND   Override the mutation backend [agy|claude|codex|cursor|opencode]
+--backend BACKEND   Override the mutation backend [agy|claude|codex|cursor|opencode|pi]
 --model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
