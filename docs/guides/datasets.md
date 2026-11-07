@@ -11,7 +11,7 @@ HELIX takes the train and validation instance ids from one of two TOML sections:
 
 | Mode | Config | Description |
 |---|---|---|
-| **Single-task / no-example** | none of the four keys set | GEPA O.A. Single-Task Search (`dataset=None`, `valset=None`): evaluator runs without example-id handoff; uncached eval calls count as 1 metric call. |
+| **Single-task / no-example** | none of the four keys set | GEPA O.A. Single-Task Search (`dataset=None`, `valset=None`): HELIX writes `helix_batch.json` holding the single id `["0"]` (and leaves `HELIX_INSTANCE_IDS` unset), and the evaluator prints one `[score, side_info]` pair for it; uncached eval calls count as 1 metric call. |
 | **Example-id handoff, index ids** | `dataset.train_size` / `dataset.val_size` | The ids are the stringified indices `"0"` to `"train_size-1"` for training (sampled into minibatches) and `"0"` to `"val_size-1"` for validation; the evaluator reads them from `helix_batch.json` (a JSON `list[str]`) in cwd and filters its own dataset. |
 | **Example-id handoff, named ids** | `seedless.train_path` / `seedless.val_path` pointing at directories | The ids are the sorted file stems of the `*.json` files, such as `"pushcube__0"`. A JSON array or JSONL file gives index ids `"0"` to `"n-1"` instead. The evaluator still loads the examples itself; HELIX reads only the ids (and, in seedless mode, the first 3 train examples). |
 | **Seedless multi-task** | `seedless.enabled = true`, `seedless.train_path` set | As above, and the seed-generation prompt includes the first 3 training examples for grounding. |

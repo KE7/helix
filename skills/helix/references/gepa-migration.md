@@ -256,7 +256,18 @@ val_path = "splits/val"
 [evolution]
 batch_sampler = "stratified"
 group_key_separator = "__"
+
+[evaluator]
+protected_files = ["evaluate.py", "splits"]
+
+[sandbox]
+enabled = true
+omit_from_agent = ["evaluate.py", "splits/val"]   # held-out files never reach the agent
 ```
+
+`splits/val` lives in the project, so without `omit_from_agent` the sandboxed
+agent's copy would hold the held-out files. Keep them omitted (and protected),
+or keep held-out data outside the project and behind `[evaluator.sidecar]`.
 
 Use stratified sampling when each minibatch should cover multiple tasks.
 
