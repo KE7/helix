@@ -27,8 +27,8 @@ that lost its context is still recorded, with those fields ``null``.
 
 Spans are written whatever becomes of the candidate they worked on, the same
 way its tokens are charged whatever its fate.  :func:`decision` then records
-that fate once per candidate, so time can be split into what went to accepted
-and to rejected candidates.
+that fate once per attempt at a candidate, after its work, so time can be
+split into what went to accepted and to rejected candidates.
 
 The ``helix.timed`` section is the other side: the API that code HELIX runs
 (the evaluator, scripts the agent runs) uses to report its own operations.
@@ -44,6 +44,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -87,13 +88,19 @@ TRACED: list[tuple[str, Callable[..., Any], AttrsFn | None]] = []
 def recording(path: Path) -> Iterator[None]:
     """Append every span opened inside this block to *path*.
 
-    A trace that cannot be opened is logged and the run continues untraced:
+    A trace that cannot be opened or closed is logged and the run continues:
     timing is telemetry and must never be the reason a run fails.
     """
     global _sink, _run_id, _write_failed
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        sink: TextIO | None = open(path, "a", encoding="utf-8")
+        torn = _ends_mid_line(path)
+        opened = open(path, "a", encoding="utf-8")
+        if torn:
+            # A killed run tore its last line; start this run's on a new one
+            # so its first record is not glued onto the torn one and lost.
+            opened.write("\n")
+        sink: TextIO | None = opened
     except OSError as exc:
         logger.warning("Timing trace disabled: cannot open %s: %s", path, exc)
         sink = None
@@ -106,7 +113,23 @@ def recording(path: Path) -> Iterator[None]:
         with _lock:
             _sink, _run_id, _write_failed = previous
         if sink is not None:
-            sink.close()
+            try:
+                # Flushes what a failed write left buffered, so it can fail too.
+                sink.close()
+            except Exception as exc:
+                logger.warning(
+                    "Timing trace close failed: %s: %s", type(exc).__name__, exc
+                )
+
+
+def _ends_mid_line(path: Path) -> bool:
+    """Whether *path* is non-empty and its last line has no newline."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:  # missing or empty
+        return False
 
 
 def _write(record: dict[str, Any]) -> None:
@@ -320,12 +343,20 @@ F = TypeVar("F", bound=Callable[..., Any])
 def _record(
     name: str, seconds: float, *, example: object = None
 ) -> None:
-    """Append one timing line; best-effort, never raises."""
+    """Append one timing line; best-effort, never raises.
+
+    A duration that is not a finite number of seconds is dropped.
+    """
     if not os.environ.get(HELIX_TIMING_LOG_ENV):
         return
-    entry: dict[str, Any] = {"name": str(name), "seconds": float(seconds)}
-    if example is not None:
-        entry["example"] = str(example)
+    try:
+        entry: dict[str, Any] = {"name": str(name), "seconds": float(seconds)}
+        if example is not None:
+            entry["example"] = str(example)
+    except Exception:  # noqa: BLE001 - telemetry must never fail the caller
+        return
+    if not math.isfinite(entry["seconds"]):
+        return
     line = json.dumps(entry) + "\n"
     if len(line.encode()) <= _MAX_LINE_BYTES:
         append_line(HELIX_TIMING_LOG_ENV, line)
@@ -368,19 +399,32 @@ class timed:
         return wrapper  # type: ignore[return-value]
 
 
-def timed_log_name() -> str:
+#: Prefix of the evaluator's log.  Like every ``.helix*`` path it is kept out
+#: of the agent's sandbox workspace, which matters because its lines can name
+#: held-out examples.
+EVALUATOR_TIMED_LOG_PREFIX = ".helix_timing_"
+#: Prefix of the log for scripts the agent runs.  It must come back when the
+#: sandbox syncs the workspace to the worktree, which drops every ``.helix*``
+#: path, so it is an ``.agent_`` artifact like ``.agent_change_summary.md``.
+AGENT_TIMED_LOG_PREFIX = ".agent_timing_"
+
+
+def timed_log_name(prefix: str) -> str:
     """A fresh per-invocation log file name (git-ignored in worktrees)."""
-    return f".helix_timing_{uuid4().hex}.jsonl"
+    return f"{prefix}{uuid4().hex}.jsonl"
 
 
 def timed_totals(raw: str) -> list[dict[str, Any]]:
-    """Total a timing log per ``(name, example)``; malformed lines are skipped."""
+    """Total a timing log per ``(name, example)``; malformed lines and
+    durations that are not finite are skipped."""
     by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
     for line in raw.splitlines():
         try:
             entry = json.loads(line)
             name, seconds = str(entry["name"]), float(entry["seconds"])
         except (ValueError, TypeError, KeyError):
+            continue
+        if not math.isfinite(seconds):
             continue
         example = entry.get("example")
         key = (name, None if example is None else str(example))
@@ -421,23 +465,43 @@ WORK_KINDS = {
 }
 
 
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-finite number {name}")
+
+
 def read_records(path: Path) -> list[dict[str, Any]]:
-    """Every record in *path*, skipping a line torn by a killed run."""
+    """Every record in *path*, skipping a line torn by a killed run and a
+    record holding ``Infinity`` or ``NaN`` (written by a HELIX that accepted
+    them from ``timed.record``), which no total could use."""
     records = []
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
+            records.append(json.loads(line, parse_constant=_reject_constant))
+        except ValueError:
             continue
     return records
 
 
-def _fates(records: list[dict[str, Any]]) -> dict[str, str]:
-    return {
-        r["candidate"]: "accepted" if r["accepted"] else "rejected"
-        for r in records
-        if r["event"] == "decision"
-    }
+def _fates(records: list[dict[str, Any]]) -> list[str | None]:
+    """The fate each record's work counts toward, aligned with *records*:
+    ``None`` for work done for no candidate, else the next ``decision`` for its
+    candidate in file order, or ``undecided`` if none follows.
+
+    The next decision, not the last: a resume retries an interrupted attempt
+    under the same candidate id, after recording the interrupted one as
+    rejected, so each attempt's work is settled by its own decision.
+    """
+    fates: list[str | None] = [None] * len(records)
+    upcoming: dict[str, str] = {}
+    for index in range(len(records) - 1, -1, -1):
+        record = records[index]
+        candidate = record.get("candidate")
+        if candidate is None:
+            continue
+        if record["event"] == "decision":
+            upcoming[candidate] = "accepted" if record["accepted"] else "rejected"
+        fates[index] = upcoming.get(candidate, "undecided")
+    return fates
 
 
 @dataclass
@@ -467,16 +531,16 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
     work: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     generations: dict[int, float] = defaultdict(float)
     details: dict[tuple[str, str, str], dict[str, Any]] = {}
-    seen: set[str] = set()
+    #: One per decision (each attempt at a candidate), plus one per candidate
+    #: with work no decision followed.
+    candidates: dict[str, int] = defaultdict(int)
+    undecided: set[str] = set()
     run_started: dict[str, float] = {}
     run_latest: dict[str, float] = defaultdict(float)
     run_finished: dict[str, float] = {}
 
-    def fate_of(candidate: str | None) -> str:
-        return "unattributed" if candidate is None else fates.get(candidate, "undecided")
-
-    for r in records:
-        candidate = r.get("candidate")
+    for r, fate in zip(records, fates):
+        settled = fate or "unattributed"
         run_latest[r["run_id"]] = max(run_latest[r["run_id"]], r["wall_time"])
         if r["event"] == "start" and r["span"] == "run":
             run_started[r["run_id"]] = r["wall_time"]
@@ -487,21 +551,22 @@ def summarize(records: list[dict[str, Any]]) -> Summary:
             )
             total["count"] += r["count"]
             total["max_seconds"] = max(total["max_seconds"], r["max_seconds"])
-            total["seconds"][fate_of(candidate)] += r["seconds"]
+            total["seconds"][settled] += r["seconds"]
+        if r["event"] == "decision":
+            candidates[settled] += 1
         if r["event"] != "end":
             continue
-        if candidate is not None:
-            seen.add(candidate)
+        if fate == "undecided":
+            undecided.add(r["candidate"])
         if r["span"] == "run":
             run_finished[r["run_id"]] = r["duration_seconds"]
         elif r["span"] == "generation":
             generations[r["attrs"]["generation"]] += r["duration_seconds"]
         kind = WORK_KINDS.get(r["span"])
         if kind is not None:
-            work[kind][fate_of(candidate)] += r["duration_seconds"]
-    candidates: dict[str, int] = defaultdict(int)
-    for candidate in seen | set(fates):
-        candidates[fates.get(candidate, "undecided")] += 1
+            work[kind][settled] += r["duration_seconds"]
+    if undecided:
+        candidates["undecided"] += len(undecided)
     return Summary(
         work={kind: dict(by_fate) for kind, by_fate in work.items()},
         candidates=dict(candidates),
@@ -533,7 +598,7 @@ def to_perfetto(records: list[dict[str, Any]]) -> dict[str, Any]:
             details[r["parent_span_id"]][label] += r["seconds"]
     pids: dict[str, int] = {}
     events: list[dict[str, Any]] = []
-    for r in records:
+    for r, fate in zip(records, fates):
         pid = pids.setdefault(r["run_id"], len(pids) + 1)
         candidate = r.get("candidate")
         if r["event"] == "end":
@@ -549,7 +614,7 @@ def to_perfetto(records: list[dict[str, Any]]) -> dict[str, Any]:
                     **r["attrs"],
                     "generation": r.get("generation"),
                     "candidate": candidate,
-                    "fate": None if candidate is None else fates.get(candidate, "undecided"),
+                    "fate": fate,
                     "outcome": r["outcome"],
                     **({"details": dict(details[r["span_id"]])} if r["span_id"] in details else {}),
                 },

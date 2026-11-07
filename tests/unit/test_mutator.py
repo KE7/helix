@@ -2145,6 +2145,22 @@ class TestMutateGeneratesChangeSummary:
         assert SUMMARY_ARTIFACT_NAME in text
         assert SUMMARY_PROMPT_ARTIFACT_NAME in text
 
+    def test_timed_logs_are_gitignored(self, tmp_path: Path):
+        """A ``helix.timed`` log a crash leaves behind must not be committed."""
+        from helix import timing
+        from helix.mutator import _ignore_helix_artifacts
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        _ignore_helix_artifacts(tmp_path)
+
+        for prefix in (timing.AGENT_TIMED_LOG_PREFIX, timing.EVALUATOR_TIMED_LOG_PREFIX):
+            name = timing.timed_log_name(prefix)
+            (tmp_path / name).write_text("{}\n")
+            ignored = subprocess.run(
+                ["git", "-C", str(tmp_path), "check-ignore", "-q", name]
+            )
+            assert ignored.returncode == 0, name
+
 
 # ---------------------------------------------------------------------------
 # Mutation prompt artifact behaviour

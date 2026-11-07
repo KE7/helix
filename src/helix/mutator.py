@@ -40,6 +40,8 @@ from helix.sibling_history import (
 )
 from helix import agent_timing
 from helix.timing import (
+    AGENT_TIMED_LOG_PREFIX,
+    EVALUATOR_TIMED_LOG_PREFIX,
     HELIX_TIMING_LOG_ENV,
     detail,
     read_timed_log,
@@ -316,7 +318,6 @@ def build_seed_generation_prompt(
     )
 
 
-@traced("seed")
 def generate_seed(
     worktree_path: str,
     prompt: str,
@@ -715,9 +716,11 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         *_backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX),
         ".helix_artifacts/",
         "helix_batch.json",
-        # ``helix.timed`` logs from scripts the agent runs; read and removed
-        # after each call, ignored in case a crash leaves one behind.
-        ".helix_timing_*.jsonl",
+        # ``helix.timed`` logs from scripts the agent runs and from the
+        # evaluator; read and removed after each call, ignored in case a crash
+        # leaves one behind.
+        f"{AGENT_TIMED_LOG_PREFIX}*.jsonl",
+        f"{EVALUATOR_TIMED_LOG_PREFIX}*.jsonl",
         # The change summary and its prompt are notes about the diff, not part
         # of it.  Ignored unconditionally: HELIX reads them straight out of the
         # worktree and never wants them committed, whichever way the feature is
@@ -2177,9 +2180,10 @@ def invoke_claude_code(
     _add_backend_auth_env(backend_env, backend)
     backend_env.update(_no_web_env(config))
     # Scripts the agent runs can report ``helix.timed`` calls; the sandbox
-    # copies its workspace back, so the file is read from the worktree either way.
+    # copies its workspace back (the ``.agent_`` prefix is what lets this file
+    # through), so it is read from the worktree either way.
     sandboxed = sandbox is not None and sandbox.enabled
-    timing_log_name = timed_log_name()
+    timing_log_name = timed_log_name(AGENT_TIMED_LOG_PREFIX)
     backend_env[HELIX_TIMING_LOG_ENV] = (
         f"/workspace/{timing_log_name}"
         if sandboxed

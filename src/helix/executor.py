@@ -25,6 +25,7 @@ from helix.sandbox import (
     run_sandboxed_commands,
 )
 from helix.timing import (
+    EVALUATOR_TIMED_LOG_PREFIX,
     HELIX_TIMING_LOG_ENV,
     MAX_LOG_BYTES,
     detail,
@@ -272,7 +273,7 @@ def run_evaluator(
     helix_log_sandbox_path = f"/workspace/{helix_log_name}"
     # ``helix.timed`` calls land in their own per-invocation file, read the
     # same two ways as the ASI log above.
-    timing_log_name = timed_log_name()
+    timing_log_name = timed_log_name(EVALUATOR_TIMED_LOG_PREFIX)
     timing_log_path = Path(candidate.worktree_path) / timing_log_name
     timing_log_sandbox_path = f"/workspace/{timing_log_name}"
     timing_marker = f"HELIX_TIMING_LOG_{uuid.uuid4().hex}"

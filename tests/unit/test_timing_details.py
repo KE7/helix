@@ -39,7 +39,7 @@ def _details(path: Path) -> list[dict[str, Any]]:
 
 @pytest.fixture
 def timing_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    path = tmp_path / timing.timed_log_name()
+    path = tmp_path / timing.timed_log_name(timing.EVALUATOR_TIMED_LOG_PREFIX)
     monkeypatch.setenv(timing.HELIX_TIMING_LOG_ENV, str(path))
     return path
 
@@ -127,6 +127,15 @@ class TestTimed:
         timed.record("y", 1.0)
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.parametrize(
+        "seconds", [None, "fast", float("inf"), float("-inf"), float("nan")]
+    )
+    def test_a_value_that_is_not_a_finite_number_is_dropped(
+        self, timing_log: Path, seconds: Any
+    ) -> None:
+        timed.record("rpc", seconds)
+        assert not timing_log.exists()
+
     def test_an_oversized_line_is_dropped(self, timing_log: Path) -> None:
         timed.record("x" * 5000, 1.0)
         assert not timing_log.exists()
@@ -149,6 +158,13 @@ class TestTimed:
             "name": "sam3", "example": "a", "count": 2, "seconds": 4.0,
             "max_seconds": 3.0,
         }
+
+    def test_totals_skip_non_finite_seconds(self) -> None:
+        # A writer in another language can put these in the file.
+        raw = '{"name": "a", "seconds": Infinity}\n{"name": "a", "seconds": NaN}\n'
+        raw += '{"name": "a", "seconds": 1e999}\n{"name": "a", "seconds": 2.0}\n'
+        (total,) = timing.timed_totals(raw)
+        assert (total["count"], total["seconds"]) == (1, 2.0)
 
     def test_read_is_empty_for_a_missing_file(self, tmp_path: Path) -> None:
         assert timing.read_timed_log(tmp_path / "missing.jsonl") == ""
@@ -181,10 +197,10 @@ class TestEvaluatorChannel:
         assert not list(worktree.glob(".helix_timing_*"))
 
 
-    def test_a_sidecar_evaluator_reports_through_the_workspace_file(
+    def test_a_sandboxed_evaluator_reports_through_the_workspace_file(
         self, tmp_path: Path, mocker: Any
     ) -> None:
-        """Inside the evaluator sidecar the log lives at ``/workspace/...``
+        """Inside the sandboxed evaluator runner the log lives at ``/workspace/...``
         and comes back after a marker line on the one capture command that
         also returns the ``helix.log`` notes, so it costs no extra container."""
         timed_line = json.dumps({"name": "molmo", "seconds": 0.25, "example": "3"})
@@ -337,6 +353,28 @@ class TestAgentBreakdown:
         assert totals["other"]["seconds"] == 0.0
         assert all(t["seconds"] >= 0 for t in totals.values())
 
+    def test_a_suspension_inside_a_tool_call_is_left_out_of_the_tool(
+        self, tmp_path: Path
+    ) -> None:
+        """The machine slept an hour inside a Bash call: the transcript spans
+        3602 s of wall clock, the call 2 s of awake time.  The split must add
+        up to those 2 s, as the agent's own duration does."""
+        path = _write_jsonl(tmp_path / "c.jsonl", [
+            {"type": "user", "timestamp": "2026-10-27T00:00:00Z",
+             "message": {"content": "do it"}},
+            {"type": "assistant", "timestamp": "2026-10-27T00:00:01Z", "message": {
+                "content": [{"type": "tool_use", "id": "a", "name": "Bash"}]}},
+            {"type": "user", "timestamp": "2026-10-27T01:00:02Z", "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "a"}]}},
+        ])
+
+        totals = _by_name(agent_timing.breakdown("claude", path, 2.0))
+
+        assert totals["tool:Bash"]["seconds"] <= 2.0
+        assert totals["tool:Bash"]["max_seconds"] <= 2.0
+        assert totals["tool:Bash"]["seconds"] + totals["model"]["seconds"] == pytest.approx(2.0)
+        assert totals["other"]["seconds"] == 0.0
+
 
 class TestAgentChannel:
     def test_agent_call_records_its_breakdown_and_its_scripts_timed_calls(
@@ -368,7 +406,39 @@ class TestAgentChannel:
         sources = {(d["source"], d["name"]) for d in details}
         assert ("timed", "sam3") in sources
         assert {("transcript", "model"), ("transcript", "tool:Bash")} <= sources
-        assert not list(worktree.glob(".helix_timing_*"))
+        assert not list(worktree.glob(".agent_timing_*"))
+
+    def test_a_sandboxed_agents_scripts_report_through_the_synced_workspace(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """The sandbox copies the workspace back without HELIX's own files;
+        the agent's timing log must come back with it."""
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+
+        def docker(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ["docker", "run"] and "claude" in args:
+                env = dict(kwargs.get("env") or {})
+                env.update(a.split("=", 1) for a in args if a.startswith("HELIX_"))
+                log = Path(env[timing.HELIX_TIMING_LOG_ENV])
+                workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+                (workspace / log.relative_to("/workspace")).write_text(
+                    json.dumps({"name": "sam3", "seconds": 2.5}) + "\n"
+                )
+                stdout = json.dumps({"result": "ok"})
+                return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        mocker.patch("helix.sandbox.subprocess.run", side_effect=docker)
+        trace = tmp_path / "t.jsonl"
+        with recording(trace), span("mutate", candidate_id="g1-s1"):
+            invoke_claude_code(
+                str(worktree), "do it", AgentConfig(), sandbox=SandboxConfig(enabled=True)
+            )
+
+        timed_details = [d for d in _details(trace) if d["source"] == "timed"]
+        assert [(d["name"], d["seconds"]) for d in timed_details] == [("sam3", 2.5)]
+        assert not list(worktree.glob(".agent_timing_*"))
 
 
 # ---------------------------------------------------------------------------

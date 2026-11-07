@@ -193,13 +193,19 @@ def breakdown(backend: str, transcript: Path | None, agent_seconds: float) -> li
         return [_total("unavailable", agent_seconds, reason=reason)]
 
     start, end, tools = parsed
-    window = min(max(end - start, 0.0), agent_seconds)
+    span = max(end - start, 0.0)
+    window = min(span, agent_seconds)
+    # Transcript timestamps are wall clock; *agent_seconds* leaves out time the
+    # machine slept.  A transcript longer than the call held such a gap (or a
+    # clock jump) somewhere, so every interval shrinks by the same factor and
+    # model plus tools still add up to the window.
+    scale = window / span if span > window else 1.0
     all_tools = [interval for intervals in tools.values() for interval in intervals]
     totals = [
-        _total("model", max(window - _union(all_tools), 0.0)),
+        _total("model", max(window - _union(all_tools) * scale, 0.0)),
         _total("other", agent_seconds - window),
     ]
     for name, intervals in tools.items():
-        durations = [max(e - s, 0.0) for s, e in intervals]
+        durations = [max(e - s, 0.0) * scale for s, e in intervals]
         totals.append(_total(f"tool:{name}", sum(durations), len(durations), max(durations)))
     return totals

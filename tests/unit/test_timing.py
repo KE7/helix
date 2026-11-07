@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextvars
+import errno
 import inspect
 import json
 import logging
@@ -148,6 +149,42 @@ class TestSpan:
         with recording(tmp_path / "t.jsonl"):
             timing._sink = _BrokenSink()  # type: ignore[assignment]
             assert fn() == "value"
+
+    def test_a_sink_that_fails_to_close_never_fails_the_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A full disk fails the buffered write, and ``close`` retries the
+        flush and fails again: neither may fail an otherwise successful run."""
+
+        class FullDisk(_BrokenSink):
+            def close(self) -> None:
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(timing, "open", lambda *_a, **_k: FullDisk(), raising=False)
+        with caplog.at_level(logging.WARNING, logger="helix.timing"):
+            with recording(tmp_path / "t.jsonl"), span("run"):
+                pass
+        assert "Timing trace write failed" in caplog.text
+
+    def test_appending_after_a_torn_last_line_starts_a_new_line(
+        self, tmp_path: Path
+    ) -> None:
+        """A killed run can leave half a line; the next run's first record
+        must not be glued onto it and lost."""
+        path = tmp_path / "t.jsonl"
+        with recording(path), span("run"):
+            pass
+        with path.open("a") as f:
+            f.write('{"event": "end", "span": "ag')  # killed mid-write
+        with recording(path), span("run"):
+            pass
+
+        records = timing.read_records(path)
+        assert [(r["event"], r["span"]) for r in records] == [
+            ("start", "run"), ("end", "run"), ("start", "run"), ("end", "run"),
+        ]
+        assert len({r["run_id"] for r in records}) == 2
 
     def test_each_recording_appends_under_its_own_run_id(self, tmp_path: Path) -> None:
         path = tmp_path / "t.jsonl"
@@ -304,6 +341,23 @@ class TestReading:
         assert "1 accepted, 1 rejected, 1 undecided" in result.output
         assert json.loads(out.read_text())["traceEvents"]
 
+    def test_cli_skips_records_with_non_finite_numbers(self, tmp_path: Path) -> None:
+        """An older HELIX accepted ``timed.record("rpc", inf)`` and wrote it
+        into the trace; that record must not stop the rest being read."""
+        helix_dir = tmp_path / ".helix"
+        helix_dir.mkdir()
+        trace = helix_dir / timing.TIMING_FILE_NAME
+        with recording(trace), span("run"), span("evaluate", candidate_id="g1-s1"):
+            for seconds in (float("inf"), float("nan"), 2.0):
+                timing.detail("evaluate", "timed", {
+                    "name": "rpc", "example": None, "count": 1, "seconds": seconds,
+                    "max_seconds": seconds})
+
+        result = CliRunner().invoke(cli, ["timing", "--dir", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "rpc" in result.output and "2.0s" in result.output
+
     def test_cli_without_a_trace_says_so(self, tmp_path: Path) -> None:
         result = CliRunner().invoke(cli, ["timing", "--dir", str(tmp_path)])
         assert result.exit_code == 0
@@ -348,6 +402,63 @@ class TestWallClock:
         slices = {e["name"]: e for e in timing.to_perfetto(records)["traceEvents"]}
         assert slices["evaluate"]["ts"] == 101.0e6 and slices["evaluate"]["dur"] == 70.0e6
         assert slices["proposal"]["ts"] == 100.0e6 and slices["proposal"]["dur"] == 72.0e6
+
+
+class TestRetriedCandidates:
+    """A resume retries an interrupted attempt under the same candidate id."""
+
+    def _records(self) -> list[dict[str, Any]]:
+        def rec(run: str, event: str, wall: float, **extra: Any) -> dict[str, Any]:
+            return {"event": event, "run_id": run, "wall_time": wall, "thread_id": 1,
+                    "span_id": f"{run}{wall}", "attrs": {}, "outcome": "ok",
+                    "candidate": None, **extra}
+
+        return [
+            rec("A", "start", 0, span="run"),
+            rec("A", "end", 600, span="agent", candidate="g3-s9", duration_seconds=600.0),
+            # Killed.  The resume discards the interrupted attempt, then retries it.
+            rec("B", "start", 1000, span="run"),
+            rec("B", "decision", 1001, candidate="g3-s9", accepted=False,
+                reason="incomplete attempt"),
+            rec("B", "end", 1061, span="agent", candidate="g3-s9", duration_seconds=60.0),
+            rec("B", "decision", 1100, candidate="g3-s9", accepted=True, reason="mutation"),
+            rec("B", "end", 1100, span="run", duration_seconds=100.0),
+        ]
+
+    def test_each_attempt_is_settled_by_its_own_decision(self) -> None:
+        summary = timing.summarize(self._records())
+        assert summary.work["agent"] == {"rejected": 600.0, "accepted": 60.0}
+        assert summary.candidates == {"rejected": 1, "accepted": 1}
+
+    def test_perfetto_shows_each_attempts_own_fate(self) -> None:
+        events = timing.to_perfetto(self._records())["traceEvents"]
+        agents = [e["args"]["fate"] for e in events if e["name"] == "agent"]
+        assert agents == ["rejected", "accepted"]
+
+    def test_work_after_the_last_decision_is_undecided(self) -> None:
+        records = self._records()[:-2]  # killed during the retry's evaluation
+        summary = timing.summarize(records)
+        assert summary.work["agent"] == {"rejected": 600.0, "undecided": 60.0}
+        assert summary.candidates == {"rejected": 1, "undecided": 1}
+
+    def test_removing_a_rejected_worktree_is_rejected_work(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """The decision is recorded after the removal it settles."""
+        from helix.evolution import _safe_remove_worktree
+
+        def remove(candidate: Candidate) -> None:
+            with span("remove", candidate_id=candidate.id):
+                pass
+
+        mocker.patch("helix.evolution.remove_worktree", side_effect=remove)
+        path = tmp_path / "t.jsonl"
+        with recording(path):
+            _safe_remove_worktree(_candidate("g1-s1", tmp_path), label="rejected")
+
+        summary = timing.summarize(timing.read_records(path))
+        assert set(summary.work["git"]) == {"rejected"}
+        assert summary.candidates == {"rejected": 1}
 
 
 class TestDecision:

@@ -188,6 +188,23 @@ class TestRunEvolutionSeedless:
 
         seedless_mocks["generate_seed"].assert_called_once()
 
+    def test_seed_generation_time_is_work_for_the_seed(self, tmp_path, seedless_mocks):
+        """The seed's agent call is timed as work for ``g0-s0``, so it is
+        split by the seed's fate rather than left unattributed."""
+        from helix import timing
+
+        def generate(*_args, **_kwargs):
+            with timing.span("agent"):
+                return UsageStats()
+
+        seedless_mocks["generate_seed"].side_effect = generate
+        run_evolution(make_config(seedless=True), tmp_path, tmp_path / ".helix")
+
+        records = timing.read_records(tmp_path / ".helix" / timing.TIMING_FILE_NAME)
+        seed = next(r for r in records if r.get("span") == "seed" and r["event"] == "end")
+        assert (seed["candidate"], seed["attrs"]) == ("g0-s0", {"candidate_id": "g0-s0"})
+        assert set(timing.summarize(records).work["agent"]) == {"accepted"}
+
     def test_seedless_generate_seed_receives_prompt(self, tmp_path, seedless_mocks):
         """generate_seed must be called with the prompt returned by build_seed_generation_prompt."""
         config = make_config(seedless=True)

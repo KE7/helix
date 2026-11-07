@@ -588,15 +588,18 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
     of the same try/except.
 
     Being the one exit for a discarded candidate, it also records that
-    candidate's fate in the timing trace, with *label* as the reason.
+    candidate's fate in the timing trace, with *label* as the reason.  The
+    fate comes after the removal: work is settled by the next decision for
+    its candidate, so the removal counts as rejected work.
     """
-    decision(candidate.id, accepted=False, reason=label)
     try:
         remove_worktree(candidate)
     except Exception as exc:
         print_warning(
             f"Could not remove worktree for {label} {candidate.id}: {exc}"
         )
+    finally:
+        decision(candidate.id, accepted=False, reason=label)
 
 
 def _check_evaluator_script_exists(evaluator_command: str, project_root: Path) -> None:
@@ -2178,7 +2181,11 @@ def _run_evolution_impl(
             # Clean up the empty worktree if generation raises so we don't
             # leave orphaned worktrees behind on failure.
             try:
-                usage = generate_seed(seed.worktree_path, seed_prompt, config)
+                # Named here, not by ``@traced`` on ``generate_seed``, which
+                # only sees the worktree path: the seed's agent time is work
+                # for the seed, split by its fate like any candidate's.
+                with span("seed", candidate_id=seed.id):
+                    usage = generate_seed(seed.worktree_path, seed_prompt, config)
                 seed.usage = usage
                 budget_api.charge_llm_usage(
                     state,
