@@ -2779,6 +2779,18 @@ def _run_evolution_impl(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
                                     f"max parent {required_score:.4f} -- rejecting."
                                 )
+                                # Its subsample result is already in evaluations/;
+                                # the attempt record is what marks it rejected.
+                                _save_attempt_result(
+                                    base_dir,
+                                    merge_result,
+                                    status="rejected",
+                                    reason="merge_below_parents",
+                                    parent_id=a.id,
+                                    generation=gen,
+                                    stage="merge_subsample",
+                                    example_ids=list(merge_result.instance_scores),
+                                )
                                 _safe_remove_worktree(merged, label="score-rejected merge candidate")
                                 if merged.id in candidates:
                                     del candidates[merged.id]

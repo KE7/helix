@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import click
+from rich.markup import escape
 from rich.table import Table
 from rich.tree import Tree
 
@@ -917,7 +918,10 @@ def _log_rows(project_root: Path, base_dir: Path) -> list[tuple[str, ...]]:
             )
         elif result is not None:
             n = wins.get(entry.id, 0)
-            if not n:
+            if not wins:
+                # No per-instance front saved (runs from before it existed).
+                outcome = "accepted"
+            elif not n:
                 outcome = "accepted, dominated"
             elif state is not None and state.frontier_type == "instance":
                 outcome = f"frontier, best on {n} ids"
@@ -940,8 +944,8 @@ def _log_rows(project_root: Path, base_dir: Path) -> list[tuple[str, ...]]:
                 if entry.operation != "seed"
                 else f"seed, {outcome.removeprefix('accepted, ')}",
                 score,
-                _files_cell(entry.files_changed),
-                summaries.get(entry.id, ""),
+                escape(_files_cell(entry.files_changed)),
+                escape(summaries.get(entry.id, "")),
             )
         )
     return rows

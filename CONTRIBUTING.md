@@ -36,10 +36,10 @@ When a design question comes up, check here first; when a review settles one, ad
 10. **Before you open the PR, CI passes locally (rule 14) and you have reviewed your own diff.** Have your coding agent review it: `/code-review` in Claude Code, `/review` in Codex, or in any other agent this prompt:
 
     ```text
-    Review `git diff main...HEAD` for bugs and for anything that leaks the protected evaluator to the mutation agent. Report only what is worth fixing: a real bug, a leak, or complexity the change adds without need. Skip style nits and speculative findings.
+    Review `git diff main...HEAD` for bugs and for anything that leaks the protected evaluator to the mutation agent. Also list docs, tests or changelog entries that should have changed but didn't. Report only what is worth fixing: a real bug, a leak, a missing update, or complexity the change adds without need. Skip style nits and speculative findings.
     ```
 
-    Judge the findings by the smallest-design principle above: fix the ones that matter with the simplest change, and drop the rest. Say in the PR what the review found and what you did about it. Then re-run CI if you changed code.
+    A diff review cannot see the files a change left untouched, so after `/code-review` or `/review`, also ask your agent the prompt's second sentence. Judge the findings by the smallest-design principle above: fix the ones that matter with the simplest change, and drop the rest. Say in the PR what the review found and what you did about it. Then re-run CI if you changed code.
 11. A PR that fixes an issue links it (`Fixes #N`), so merging closes it.
 12. Keep writing short and concrete: PR descriptions, docs, comments. Say what changed, why, and how you know it works.
 

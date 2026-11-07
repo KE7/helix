@@ -112,7 +112,8 @@ Useful files:
   evaluator_manifest.json
   state.json
   helix.log
-  log/*.json
+  lineage.json        (ancestry and files changed; read with `helix log`)
+  evaluations/        (scores per candidate)
   worktrees/gN-sN/
   attempts/           (per-rejected-candidate JSON records)
   skips/              (per-generation perfect-skip event lists)

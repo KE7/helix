@@ -114,3 +114,29 @@ def test_log_caps_the_files_cell(tmp_path: Path) -> None:
     assert "f4.py" in output
     assert "f5.py" not in output
     assert "... 3 more" in output
+
+
+def test_log_prints_brackets_in_summaries_literally(tmp_path: Path) -> None:
+    project = _run(tmp_path)
+    from helix.state import load_state
+
+    state = load_state(project)
+    assert state is not None
+    state.sibling_history["g0-s0"][0]["summary"] = "Removed the [/INST] delimiter from a[i]."
+    save_state(state, project)
+    output = _log(project)
+    assert "Removed the [/INST] delimiter from a[i]." in output
+
+
+def test_log_without_a_saved_front_says_accepted_not_dominated(tmp_path: Path) -> None:
+    """Runs saved before active_frontier existed have no per-instance front."""
+    project = _run(tmp_path)
+    from helix.state import load_state
+
+    state = load_state(project)
+    assert state is not None
+    state.active_frontier = {}
+    save_state(state, project)
+    output = _log(project)
+    assert "dominated" not in output
+    assert "accepted" in output

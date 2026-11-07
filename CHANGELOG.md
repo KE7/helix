@@ -207,7 +207,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real `helix evolve` run with a real backend and model, not mocks) and
   gives **Try it by hand** steps from a clean checkout. Before the PR is
   opened, CI must pass locally and the author's coding agent must review the
-  diff (`/code-review`, `/review`, or a prompt any agent can run). `.github/pull_request_template.md`
+  diff (`/code-review`, `/review`, or a prompt any agent can run), including
+  docs, tests and changelog entries the change should have touched but didn't. `.github/pull_request_template.md`
   carries the same sections, and the rules are on the docs site.
   `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
   working on this repository to those rules.
@@ -228,6 +229,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whether the agent committed it or not, and is written before the minibatch
   gate, so rejected children keep their list after their worktree is removed.
   Runs made before this have empty lists.
+- A merge rejected for scoring below its parents now leaves an attempt record
+  (`reason = "merge_below_parents"`, `stage = "merge_subsample"`), so
+  `helix attempts` lists it and `helix log` shows it as rejected. Its
+  subsample result was already saved under `evaluations/`, which made it look
+  accepted. Search is unchanged.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
