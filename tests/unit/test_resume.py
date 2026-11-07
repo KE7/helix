@@ -237,6 +237,65 @@ def test_resume_rejects_semantic_config_change() -> None:
         _validate_resume_semantics(state, current_config)
 
 
+def test_resume_allows_state_saved_before_the_group_sampler_keys() -> None:
+    """A state saved before num_sampled_groups/num_examples_per_group existed
+    lacks them; leaving them unset must not block resume (like web_access)."""
+    from helix.config import EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    config = HelixConfig(objective="test", evaluator=EvaluatorConfig(command="echo 1"))
+    state = make_state(frontier=[])
+    state.frontier_type = config.evolution.frontier_type
+    state.resume_semantics = _resume_semantics(config)
+    state.resume_semantics["evolution"].pop("num_sampled_groups", None)
+    state.resume_semantics["evolution"].pop("num_examples_per_group", None)
+
+    _validate_resume_semantics(state, config)
+
+
+def test_resume_rejects_setting_the_group_sampler_keys() -> None:
+    from helix.config import EvaluatorConfig, EvolutionConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    saved = HelixConfig(objective="test", evaluator=EvaluatorConfig(command="echo 1"))
+    current = HelixConfig(
+        objective="test",
+        evaluator=EvaluatorConfig(command="echo 1"),
+        evolution=EvolutionConfig(
+            batch_sampler="stratified",
+            minibatch_size=4,
+            num_sampled_groups=2,
+            num_examples_per_group=2,
+        ),
+    )
+    state = make_state(frontier=[])
+    state.frontier_type = saved.evolution.frontier_type
+    state.resume_semantics = _resume_semantics(saved)
+
+    with pytest.raises(ResumeIncompatibleError, match="num_sampled_groups"):
+        _validate_resume_semantics(state, current)
+
+
+def test_resume_of_a_pre_0_3_state_says_it_cannot_be_resumed() -> None:
+    """A 0.2.x state pins evaluator.score_parser, which 0.3.0 removed: no
+    config can match it, so the error must not say to restore the config."""
+    from helix.config import EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    config = HelixConfig(objective="test", evaluator=EvaluatorConfig(command="echo 1"))
+    state = make_state(frontier=[])
+    state.frontier_type = config.evolution.frontier_type
+    state.resume_semantics = _resume_semantics(config)
+    state.resume_semantics["evaluator"]["score_parser"] = "helix_result"
+
+    with pytest.raises(ResumeIncompatibleError) as exc_info:
+        _validate_resume_semantics(state, config)
+
+    assert "before 0.3.0" in str(exc_info.value)
+    assert "Restore the original config" not in (exc_info.value.suggestion or "")
+    assert "helix clean" in (exc_info.value.suggestion or "")
+
+
 def test_resume_allows_cache_toggle_without_semantic_rejection() -> None:
     """Cache toggles are handled by cache persistence, not semantic rejection."""
     from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig

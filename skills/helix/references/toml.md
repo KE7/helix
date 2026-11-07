@@ -146,8 +146,11 @@ merge_subsample_size = 5
 
 Important choices:
 
-- A run ends on `max_generations`, on `max_evaluations` (`<= 0` disables it),
-  or on `stop_at_score`, whichever comes first. `stop_at_score` (unset by
+- A run ends on `max_generations`, on `max_evaluations`, or on
+  `stop_at_score`, whichever comes first. `<= 0` disables either of the first
+  two (GEPA has no generation cap, so `max_generations = 0` with
+  `max_evaluations` set is GEPA's budget-only stop); disabling both is a
+  config error. `stop_at_score` (unset by
   default; `helix evolve --stop-at-score X` overrides it) is checked at the
   start of every generation: once the best mean validation score of any
   accepted candidate is `>= stop_at_score`, the run stops the same way budget

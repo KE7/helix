@@ -9,7 +9,7 @@
 | `helix sandbox logout BACKEND` | Log out a backend from its persistent Docker auth volume |
 | `helix evolve` | Run the evolutionary loop |
 | `helix frontier` | Display the current Pareto frontier as a table |
-| `helix best` | Show the best candidate; `--export PATH` to copy it out |
+| `helix best` | Show the best candidate; `--export PATH` copies its files (what HELIX committed for it, without HELIX's prompt, logs and batch files) |
 | `helix history` | Show the candidate lineage as a tree |
 | `helix resume` | Resume a previously interrupted evolution run |
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
@@ -24,7 +24,7 @@
 --config PATH       Path to config file (default: helix.toml)
 --objective TEXT     Override the objective string
 --evaluator TEXT     Override the evaluator command
---generations INT   Override max_generations
+--generations INT   Override max_generations (0 = no cap; then max_evaluations must be set)
 --stop-at-score X   Override stop_at_score: end the run once the best val score reaches X
 --no-merge          Disable merge operations
 --backend BACKEND   Override the mutation backend [agy|claude|codex|cursor|opencode|pi]

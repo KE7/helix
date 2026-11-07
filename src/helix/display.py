@@ -119,6 +119,11 @@ class HelixPhase(Enum):
 console = Console(highlight=False)
 
 
+def _generation_label(gen: int, total: int) -> str:
+    """``Generation 3 / 10``, or ``Generation 3`` when there is no cap."""
+    return f"Generation {gen} / {total}" if total > 0 else f"Generation {gen}"
+
+
 def render_status_panel(
     gen: int,
     total: int,
@@ -133,7 +138,7 @@ def render_status_panel(
     """Render a live status panel with current progress and usage stats."""
     phase_str = phase.value if isinstance(phase, HelixPhase) else str(phase)
     lines = [
-        f"[bold]Generation {gen} / {total}[/bold]",
+        f"[bold]{_generation_label(gen, total)}[/bold]",
         f"Status: [cyan]{phase_str}[/cyan]",
         "",
     ]
@@ -348,7 +353,7 @@ def render_generation(
     Displays the current generation number, candidate scores, acceptance
     status, and the current Pareto frontier composition.
     """
-    lines: list[str] = [f"[bold]Generation {gen} / {total}[/bold]"]
+    lines: list[str] = [f"[bold]{_generation_label(gen, total)}[/bold]"]
 
     if result is not None:
         cid = result.candidate_id

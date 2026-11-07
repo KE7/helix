@@ -217,6 +217,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- `max_generations = 0` (or `helix evolve --generations 0`) with
+  `max_evaluations` set now runs until the budget is spent, as the
+  configuration guide documents and as GEPA does (it has no generation
+  cap). It used to run no generations at all. A config with neither cap
+  (`max_generations <= 0` and `max_evaluations <= 0`) is now a config error
+  that exits 2, instead of a `ValueError` traceback from inside the run.
+- `helix best --export PATH` copies only the candidate's files, the ones
+  HELIX committed for it. It used to copy the whole worktree, including the
+  agent's `.agent_task_prompt.md`, `.helix_backend_*` logs,
+  `helix_batch.json`, `.helix_artifacts/` and caches.
+- Resuming a run saved before `num_sampled_groups` / `num_examples_per_group`
+  existed no longer fails with "missing in saved state" when you leave them
+  unset. Resuming a run saved by HELIX 0.2.x now says it cannot be resumed
+  by 0.3.0 (its state pins the removed `evaluator.score_parser`) and to
+  finish it with 0.2.x or start fresh, instead of telling you to restore a
+  config 0.3.0 cannot load.
 - `--dir` with a relative path now works. `helix evolve --dir proj` created
   the seed worktree at `proj/proj/.helix/worktrees/g0-s0` and then evaluated
   `proj/.helix/worktrees/g0-s0`, which failed with "no HELIX_RESULT". Every

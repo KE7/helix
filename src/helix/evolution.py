@@ -171,7 +171,9 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
         affect which examples saved scores were computed against.
       * ``seedless``: enabled flag and external train/val paths.
       * ``evolution``: frontier dimensionality, acceptance, minibatch /
-        sampler shape, val-stage size, and merge policy.
+        sampler shape, val-stage size, and merge policy.  The grouped
+        sampler's ``num_sampled_groups`` / ``num_examples_per_group`` are
+        present only when set, so states saved before they existed resume.
 
     Deliberately omitted (safe to toggle between runs):
       * ``evolution.cache_evaluation``: cache state is handled
@@ -237,8 +239,6 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
             "acceptance_criterion": config.evolution.acceptance_criterion,
             "minibatch_size": config.evolution.minibatch_size,
             "batch_sampler": config.evolution.batch_sampler,
-            "num_sampled_groups": config.evolution.num_sampled_groups,
-            "num_examples_per_group": config.evolution.num_examples_per_group,
             "group_key_separator": config.evolution.group_key_separator,
             "val_stage_size": config.evolution.val_stage_size,
             "merge_enabled": config.evolution.merge_enabled,
@@ -247,6 +247,12 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
             "merge_subsample_size": config.evolution.merge_subsample_size,
         },
     }
+    # Present only when set, like ``web_access`` below, so states saved
+    # before these keys existed still resume while they stay unset.
+    for key in ("num_sampled_groups", "num_examples_per_group"):
+        value = getattr(config.evolution, key)
+        if value is not None:
+            semantics["evolution"][key] = value
     if not config.agent.web_access:
         semantics["agent"] = {"web_access": False}
     return semantics
@@ -325,6 +331,22 @@ def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> No
 
     if not state.resume_semantics:
         return
+
+    # 0.2.x pinned ``evaluator.score_parser``, which 0.3.0 removed, so no
+    # current config can match it and "restore the config" cannot help.
+    if "score_parser" in state.resume_semantics.get("evaluator", {}):
+        raise ResumeIncompatibleError(
+            "This run was saved by HELIX before 0.3.0 (its state pins "
+            "evaluator.score_parser, which 0.3.0 removed) and cannot be "
+            "resumed by this version.",
+            operation="resume",
+            phase="validate_resume_semantics",
+            suggestion=(
+                "Finish the run with HELIX 0.2.x, or export what you want to "
+                "keep (`helix best --export PATH`), run `helix clean` and "
+                "start a fresh run."
+            ),
+        )
 
     diffs = _semantic_diffs(state.resume_semantics, current)
     if diffs:
@@ -1807,22 +1829,6 @@ def run_evolution(
     cross-example normalization, shared warm-up, or an aggregate metric used
     as an objective).
     """
-    # Mirror GEPA's ``optimize`` (``api.py``): at least one stopping condition is required.
-    # Without this, perfect-skip + always-perfect data + no effective bound =
-    # a run that terminates only by the OS.  In HELIX, max_generations (loop
-    # bound) and max_evaluations (budget cap, <= 0 disables) are the two
-    # supported stopping conditions.  max_generations defaults to 10 and is
-    # always a positive int; this guard fires only if a caller explicitly sets
-    # it to <= 0 while leaving max_evaluations disabled.
-    if (
-        config.evolution.max_generations <= 0
-        and config.evolution.max_evaluations <= 0
-    ):
-        raise ValueError(
-            "At least one stopping condition is required: set "
-            "config.evolution.max_generations to a positive integer, or "
-            "config.evolution.max_evaluations > 0."
-        )
     # Timing is always on, like budget accounting: every run appends its
     # spans to .helix/timing.jsonl.
     with recording(base_dir / TIMING_FILE_NAME), span("run"):
@@ -2300,7 +2306,12 @@ def _run_evolution_impl(
         mutations_accepted = 0
 
         gen = start_gen - 1
-        while gen < config.evolution.max_generations:
+        # ``max_generations <= 0`` disables the generation cap; the run then
+        # ends on max_evaluations (EvolutionConfig refuses neither being set).
+        while (
+            config.evolution.max_generations <= 0
+            or gen < config.evolution.max_generations
+        ):
             # GEPA parity: ScoreThresholdStopper (utils/stop_condition.py),
             # which GEPAEngine.run checks before each iteration, stops once
             # max(program_full_scores_val_set) >= threshold.  The frontier is

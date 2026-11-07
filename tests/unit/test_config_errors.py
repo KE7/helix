@@ -312,3 +312,52 @@ class TestValidTOMLStillWorks:
         assert cfg.objective == "Pass all benchmarks"
         assert cfg.evaluator.command == "python evaluate.py"
         assert cfg.evolution.max_generations == 20
+
+
+class TestStoppingCondition:
+    """GEPA's ``optimize`` (api.py) refuses a run with no stopping condition.
+    HELIX checks it with the rest of the config, so it is a config error
+    (exit 2), not a traceback from inside the run."""
+
+    def test_no_stopping_condition_is_a_config_error(self, tmp_path, capsys):
+        toml = write_toml(tmp_path, """
+            objective = "test"
+            [evaluator]
+            command = "python evaluate.py"
+            [evolution]
+            max_generations = 0
+        """)
+
+        with pytest.raises(SystemExit) as exc_info:
+            load_config(toml)
+
+        assert exc_info.value.code == 2
+        assert "stopping condition" in capsys.readouterr().err
+
+    def test_generations_zero_flag_exits_2(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from helix.cli import cli
+
+        write_toml(tmp_path, """
+            objective = "test"
+            [evaluator]
+            command = "python evaluate.py"
+        """)
+        monkeypatch.chdir(tmp_path)
+        result = CliRunner().invoke(cli, ["evolve", "--generations", "0"])
+
+        assert result.exit_code == 2, result.output
+        assert not isinstance(result.exception, ValueError)
+
+    def test_budget_alone_is_a_stopping_condition(self, tmp_path):
+        toml = write_toml(tmp_path, """
+            objective = "test"
+            [evaluator]
+            command = "python evaluate.py"
+            [evolution]
+            max_generations = 0
+            max_evaluations = 50
+        """)
+
+        assert load_config(toml).evolution.max_evaluations == 50
