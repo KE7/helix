@@ -1924,7 +1924,54 @@ class TestMutateGeneratesChangeSummary:
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
+        # The mutation changed something; an unchanged child needs no call
+        # (``test_unchanged_child_skips_the_summary_call``).
+        mocker.patch(
+            "helix.mutator._child_diff", return_value="diff --git a/solver.py b/solver.py"
+        )
         return child
+
+    def test_unchanged_child_skips_the_summary_call(self, tmp_path: Path, mocker):
+        """No diff and no new files: a fixed note, no backend call, no usage."""
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "solver.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+        base = capture_base_commit(str(tmp_path))
+        invoke = mocker.patch("helix.mutator.invoke_claude_code")
+
+        summary, usage = generate_change_summary(str(tmp_path), make_config(), base)
+
+        invoke.assert_not_called()
+        assert summary == "No change: the agent left the parent's files as they were."
+        assert usage is None
+
+    @pytest.mark.parametrize("change", ["edit", "new_file"])
+    def test_changed_child_still_gets_the_summary_call(
+        self, tmp_path: Path, mocker, change: str
+    ):
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "solver.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+        base = capture_base_commit(str(tmp_path))
+        if change == "edit":
+            (tmp_path / "solver.py").write_text("x = 2\n")
+        else:
+            (tmp_path / "helper.py").write_text("y = 1\n")
+        invoke = mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            return_value=({}, UsageStats(output_tokens=3)),
+        )
+
+        _summary, usage = generate_change_summary(str(tmp_path), make_config(), base)
+
+        invoke.assert_called_once()
+        assert usage is not None and usage.output_tokens == 3
 
     def _invocations(self, mocker, *, summary_text: str | None = None) -> list:
         """Patch the backend, recording the artifact each call was handed.
@@ -3764,6 +3811,7 @@ class TestChangeSummaryNeverDropsTheMutation:
         from helix.mutator import generate_change_summary
 
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "solver.py").write_text("x = 1\n")  # a change to summarise
         (tmp_path / ".agent_summary_prompt.md").write_text("other")
         (tmp_path / ".agent_internal").mkdir()
         (tmp_path / ".agent_internal/summary_prompt.md").write_text("other")

@@ -2770,10 +2770,16 @@ def generate_change_summary(
     # One number drives both the request and the read-back truncation; passing
     # it to only one of them would cut every long summary mid-sentence.
     max_words = config.evolution.sibling_summary_max_words
+    diff = _child_diff(worktree_path, base_sha)
+    new_files = _new_files_section(worktree_path)
+    if not diff and not new_files:
+        # Nothing to describe: a paid call would only answer that no diff
+        # was available.  No backend runs, so there is no usage to charge.
+        return "No change: the agent left the parent's files as they were.", None
     prompt = summary_prompt(
         objective=config.objective,
-        diff=_child_diff(worktree_path, base_sha),
-        new_files=_new_files_section(worktree_path),
+        diff=diff,
+        new_files=new_files,
         max_words=max_words,
     )
     # A fresh turn budget: the mutation's own limit governs editing code and is

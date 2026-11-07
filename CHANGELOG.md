@@ -243,7 +243,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutation when its prompt file cannot be written, and rolling back a
   summary call that touched candidate files now restores a renamed file's
   original, executable bits and symlinks, and never writes through a
-  symlink the summary call planted.
+  symlink the summary call planted. A child that changed no files gets the
+  fixed summary "No change: the agent left the parent's files as they were."
+  without a paid summary call.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
