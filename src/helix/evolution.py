@@ -284,6 +284,10 @@ def _semantic_diffs(
     diffs: list[str] = []
     for key in sorted(set(saved) | set(current)):
         path = f"{prefix}.{key}" if prefix else key
+        # A key recorded as null means the same as an absent one: keys pinned
+        # only when set were saved as explicit nulls by earlier builds.
+        if saved.get(key) is None and current.get(key) is None:
+            continue
         if key not in saved:
             diffs.append(
                 f"{path}: missing in saved state, current={_format_diff_value(current[key])}"
@@ -3544,6 +3548,34 @@ def _run_evolution_impl(
             # Write skip records for this generation (GEPA parity — single JSON list)
             if _gen_skip_records:
                 _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
+
+            # With no generation cap only the budget ends the run, and a
+            # generation in which every slot skipped a perfect parent without
+            # charging an evaluation leaves the budget where it was.  That
+            # needs a cached parent score, which only the single-task path
+            # uses (the minibatch path re-evaluates, as GEPA does).  With one
+            # score per candidate the pareto, current_best and top_k_pareto
+            # selectors only ever sample the best scorers, which are perfect,
+            # so every later generation skips the same way (epsilon_greedy's
+            # random draw is the exception and may stop early here).  GEPA
+            # cannot stall: it never caches the parent minibatch eval.
+            if (
+                config.evolution.max_generations <= 0
+                and state.budget.evaluations == _batch_budget_guard.evaluations_before
+                and any(isinstance(wr, SkippedProposal) for wr in worker_results)
+                and all(
+                    wr is None or isinstance(wr, SkippedProposal)
+                    for wr in worker_results
+                )
+            ):
+                print_warning(
+                    f"Generation {gen}: every parent was skipped as perfect on "
+                    "a cached score, so later generations can change nothing "
+                    "and the budget will never run out (max_generations sets "
+                    "no cap) -- stopping."
+                )
+                _save_state(state)
+                break
 
             # Check semantic skip: all proposals were perfect on the minibatch.
             # GEPA parity (mirrors GEPA unconditionally incrementing its own

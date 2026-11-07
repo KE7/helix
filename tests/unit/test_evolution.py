@@ -2312,6 +2312,40 @@ class TestGenerationsFlagOverridesConfig:
         # so we count via mutate calls instead.)
         assert all_mocks["mutate"].call_count == 2
 
+    def test_uncapped_run_stops_when_a_generation_can_change_nothing(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """No dataset, cache on, a perfect seed: every proposal skips on a
+        cached parent score, so generations charge nothing and the budget
+        never runs out.  With no generation cap the run must still end."""
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        mocker.patch("helix.evolution._candidate_content_key", return_value="tree")
+
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, config, **kwargs: make_eval_result(
+                candidate.id, {"i1": 1.0, "i2": 1.0}
+            )
+        )
+        generations: list[int] = []
+
+        def count_generations(state, *args):
+            generations.append(state.generation)
+            if len(set(generations)) > 50:
+                raise AssertionError("uncapped run never stopped")
+
+        all_mocks["save_state"].side_effect = count_generations
+        config = make_config(
+            max_generations=0, max_evaluations=10, perfect_score_threshold=1.0
+        )
+        config.evolution.cache_evaluation = True
+
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        all_mocks["mutate"].assert_not_called()
+        warnings = " ".join(str(c.args[0]) for c in all_mocks["print_warning"].call_args_list)
+        assert "can change nothing" in warnings
+
     def test_zero_generations_runs_until_the_budget(self, mocker, tmp_path, all_mocks):
         """max_generations=0 disables the generation cap (GEPA has none; its
         stop is max_metric_calls), so the run ends on max_evaluations."""

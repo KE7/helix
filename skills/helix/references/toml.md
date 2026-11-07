@@ -150,7 +150,8 @@ Important choices:
   `stop_at_score`, whichever comes first. `<= 0` disables either of the first
   two (GEPA has no generation cap, so `max_generations = 0` with
   `max_evaluations` set is GEPA's budget-only stop); disabling both is a
-  config error. `stop_at_score` (unset by
+  config error. A budget-only run also stops once a generation skips every
+  parent as perfect on a cached score, since the budget would never run out. `stop_at_score` (unset by
   default; `helix evolve --stop-at-score X` overrides it) is checked at the
   start of every generation: once the best mean validation score of any
   accepted candidate is `>= stop_at_score`, the run stops the same way budget

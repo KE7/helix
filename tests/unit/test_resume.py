@@ -253,6 +253,22 @@ def test_resume_allows_state_saved_before_the_group_sampler_keys() -> None:
     _validate_resume_semantics(state, config)
 
 
+def test_resume_allows_state_that_saved_the_group_sampler_keys_as_null() -> None:
+    """States saved by 0.3.0 dev builds record the unset keys as explicit
+    nulls; an unchanged config must still resume."""
+    from helix.config import EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    config = HelixConfig(objective="test", evaluator=EvaluatorConfig(command="echo 1"))
+    state = make_state(frontier=[])
+    state.frontier_type = config.evolution.frontier_type
+    state.resume_semantics = _resume_semantics(config)
+    state.resume_semantics["evolution"]["num_sampled_groups"] = None
+    state.resume_semantics["evolution"]["num_examples_per_group"] = None
+
+    _validate_resume_semantics(state, config)
+
+
 def test_resume_rejects_setting_the_group_sampler_keys() -> None:
     from helix.config import EvaluatorConfig, EvolutionConfig, HelixConfig
     from helix.evolution import _resume_semantics, _validate_resume_semantics
