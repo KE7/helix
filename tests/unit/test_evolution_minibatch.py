@@ -329,6 +329,7 @@ class TestMinibatchGateIntegration:
             "generation": 1,
             "stage": "train_minibatch",
             "example_ids": child_train_ids,
+            "retained": False,
         }
         assert set(attempt["instance_scores"]) == set(child_train_ids)
 
@@ -2502,6 +2503,70 @@ class TestResumeAttemptReconciliation:
         assert state.mutation_counter == 2
         remove_mock.assert_called_once()
         assert remove_mock.call_args.args[0].id == "g3-m1"
+
+    def test_rejected_attempt_whose_removal_was_interrupted_is_removed(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """Real Ctrl-C run: g2-s6 was rejected and recorded, then SIGINT landed
+        during its worktree removal.  Resume finishes the removal without
+        rewinding; a worktree retain_rejected_worktrees kept stays."""
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        attempts_dir = base_dir / "attempts"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        attempts_dir.mkdir(parents=True)
+        records = {
+            "g2-s6": {"status": "rejected", "stage": "train_minibatch", "retained": False},
+            "g2-s7": {"status": "rejected", "stage": "val_stage", "retained": True},
+            # Written before ``retained`` existed: a val-stage worktree may
+            # have been kept on purpose, so it stays.
+            "g1-s3": {"status": "rejected", "stage": "val_stage"},
+        }
+        for cid, attempt in records.items():
+            (worktrees_dir / cid).mkdir()
+            (attempts_dir / f"{cid}.json").write_text(json.dumps({"attempt": attempt}))
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": cid,
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "mutate",
+                        "generation": 2,
+                        "files_changed": [],
+                    }
+                    for cid in records
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=2,
+            frontier=["g0-s0"],
+            instance_scores={},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=7,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert [c.args[0].id for c in remove_mock.call_args_list] == ["g2-s6"]
+        assert remove_mock.call_args.args[0].branch_name == "helix/g2-s6"
+        assert state.generation == 2
+        assert state.mutation_counter == 7
+        # The record stays: the attempt finished, only its cleanup did not.
+        assert (attempts_dir / "g2-s6.json").exists()
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == set(records)
 
     def test_leftover_from_an_earlier_generation_does_not_rewind_the_run(
         self, tmp_path: Path, mocker: Any

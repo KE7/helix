@@ -405,6 +405,7 @@ def _save_attempt_result(
     generation: int,
     stage: str,
     example_ids: list[str] | None = None,
+    retained: bool = False,
 ) -> None:
     """Persist a non-frontier attempt result without polluting evaluations/.
 
@@ -422,6 +423,9 @@ def _save_attempt_result(
         "generation": generation,
         "stage": stage,
         "example_ids": example_ids,
+        # True only when retain_rejected_worktrees kept the worktree; resume
+        # removes any other rejected attempt's worktree that survived.
+        "retained": retained,
     }
     _atomic_write_json(attempts_dir / f"{result.candidate_id}.json", payload)
 
@@ -514,7 +518,9 @@ def _reconcile_incomplete_attempts_on_resume(
     persistence.  Remove those live incomplete attempts, with any evaluation
     they left behind; historical lineage-only entries without worktrees are
     left untouched because they may come from older completed runs that
-    predate attempt artifacts.
+    predate attempt artifacts.  A rejected attempt whose worktree survived
+    (the interrupt landed during its removal) keeps its record and loses the
+    worktree, unless ``retain_rejected_worktrees`` kept it on purpose.
     """
     if not lineage_path.exists():
         return False
@@ -541,8 +547,46 @@ def _reconcile_incomplete_attempts_on_resume(
         if wt_path.is_dir():
             incomplete_ids.add(candidate_id)
 
+    # A rejected attempt is finished, but an interrupt can land while its
+    # worktree is being removed.  Finish that removal; it does not rewind the
+    # run.  Records from before ``retained`` existed keep a val-stage
+    # worktree, the only kind retain_rejected_worktrees ever kept.
+    leftover_rejected: list[str] = []
+    if attempts_dir.exists():
+        for path in sorted(attempts_dir.glob("*.json")):
+            candidate_id = path.stem
+            if candidate_id in state.frontier or not (worktrees_dir / candidate_id).exists():
+                continue
+            try:
+                attempt = json.loads(path.read_text()).get("attempt") or {}
+            except (OSError, ValueError, AttributeError):
+                continue
+            if attempt.get("status") != "rejected":
+                continue
+            if attempt.get("retained", attempt.get("stage") == "val_stage"):
+                continue
+            leftover_rejected.append(candidate_id)
+    for candidate_id in leftover_rejected:
+        _safe_remove_worktree(
+            Candidate(
+                id=candidate_id,
+                worktree_path=str(worktrees_dir / candidate_id),
+                branch_name=f"helix/{candidate_id}",
+                generation=_gen_from_id(candidate_id),
+                parent_id=None,
+                parent_ids=[],
+                operation="rejected",
+            ),
+            label="rejected candidate left by an interrupted removal",
+        )
+    if leftover_rejected:
+        print_warning(
+            "Removed worktree(s) of rejected attempt(s) whose removal was "
+            f"interrupted: {', '.join(leftover_rejected)}."
+        )
+
     if not incomplete_ids:
-        return False
+        return bool(leftover_rejected)
 
     # Only the generation in progress can hold an interrupted attempt: the
     # state was saved at the end of every earlier one.  An older leftover (a
@@ -3353,6 +3397,7 @@ def _run_evolution_impl(
                             status="rejected", reason="val_stage",
                             parent_id=_parent.id, generation=gen,
                             stage="val_stage", example_ids=list(stage_val_example_ids),
+                            retained=config.evolution.retain_rejected_worktrees,
                         )
                         _record_sibling(
                             _parent.id, child, stage_result, accepted=False

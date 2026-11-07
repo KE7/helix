@@ -297,7 +297,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists it; anything else, including a merge interrupted in its full
   validation and an interrupted merge's worktree, is removed with its
   evaluation and the generation runs again (a leftover worktree from an
-  earlier generation is removed without rewinding the run). A merge that
+  earlier generation is removed without rewinding the run, and so is the
+  worktree of a rejected attempt whose removal the interrupt cut short,
+  unless `retain_rejected_worktrees` kept it). A merge that
   fails its subsample gate is now recorded under `.helix/attempts/` (reason
   `merge_subsample`) instead of `.helix/evaluations/`.
 - Single-task mode (no dataset): an evaluator run that raises on the parent
