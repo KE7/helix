@@ -26,6 +26,7 @@ jobs:
           - { name: codex,    command: "codex --version" }
           - { name: cursor,   command: "cursor agent --version" }
           - { name: opencode, command: "opencode --version" }
+          - { name: pi,       command: "pi --version" }
     steps:
       - uses: actions/checkout@v6
       - name: Build base image

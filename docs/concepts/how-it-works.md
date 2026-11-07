@@ -34,7 +34,7 @@ HELIX treats the **entire repository** as the evolving organism, rather than one
 HELIX's search loop (minibatch-gated acceptance, instance-level Pareto parent selection, and merge) is ported from GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335.3813167); see [Acknowledgments](https://github.com/KE7/helix#acknowledgments)). In HELIX:
 
 - The candidate is the whole working tree. There is no `target_file`, and a mutation may create, edit, or delete files.
-- Each mutation is a multi-turn session of a coding-agent CLI (`agy`, `claude`, `codex`, `cursor`, or `opencode`) that can read, edit, and run code in the candidate's worktree before HELIX scores it.
+- Each mutation is a multi-turn session of a coding-agent CLI (`agy`, `claude`, `codex`, `cursor`, `opencode`, or `pi`) that can read, edit, and run code in the candidate's worktree before HELIX scores it.
 - Each candidate lives in its own git worktree.
 - An optional Docker sandbox (`[sandbox].enabled = true`) runs mutation and merge agents in copied workspaces. An optional evaluator sidecar (`[sandbox].enabled = true` and `[sandbox].evaluator = true`, plus `[evaluator.sidecar]`) runs evaluation on a private Docker network that agent containers cannot reach.
 

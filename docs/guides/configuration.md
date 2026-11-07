@@ -103,12 +103,12 @@ frontier_type = "instance"       # Pareto dimensionality (GEPA FrontierType pari
                                  # raise MissingObjectiveScoresError at selection.
 
 [agent]
-backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "opencode"
+backend = "claude"               # "agy" | "claude" | "codex" | "cursor" | "opencode" | "pi"
 # model = "sonnet"               # optional backend-specific model name
 effort = "medium"                # optional: "low" | "medium" | "high" | "xhigh" | "max"
 max_turns = 20                   # hard cap for claude; an in-prompt hint for other backends
 # background = "Only modify files under src/. Do not touch tests/ or config/."
-# web_access = true              # false = no built-in web tools (claude/codex/opencode)
+# web_access = true              # false = no built-in web tools (claude/codex/opencode/pi)
 
 [sandbox]
 enabled = false                  # true = run mutation and merge agents in Docker

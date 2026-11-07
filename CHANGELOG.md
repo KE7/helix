@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`true`) is unchanged. User MCP servers and plugins still load, and the
   shell can still reach the network; a strict no-web run needs the Docker
   sandbox. Resuming with `web_access` changed is rejected.
+- `pi` ([earendil-works/pi](https://github.com/earendil-works/pi), npm
+  `@earendil-works/pi-coding-agent`, verified against 1.5.0) is a mutation
+  backend: `pi --mode json --print`, `agent.model` as `--model`,
+  `agent.effort` as `--thinking` (off | minimal | low | medium | high |
+  xhigh | max). pi asks for no tool approval, so it runs fully autonomous.
+  Usage is summed over every model call in the stream, and a run whose last
+  model call failed (`stopReason` `error` or `aborted`, which pi exits 0 on)
+  is a `MutationError`. Its session transcript is preserved from
+  `~/.pi/agent/sessions`, feeds `helix timing`, and is reset per generation
+  in the sandbox. `web_access = false` needs no flag (pi ships no web tools).
+  `helix sandbox login pi` starts pi's TUI for `/login` into the
+  `helix-auth-pi` volume; the runner image is
+  `ghcr.io/ke7/helix-evo-runner-pi`. Host backend runs now get a closed
+  stdin, since pi reads piped stdin before it starts.
 - `helix timing` now splits each agent call into `model`, `tool:<name>` and
   `other` time, read from the backend's transcript (`claude`, `codex`,
   `opencode`; `cursor` and `agy` are reported as `unavailable`).

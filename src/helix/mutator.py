@@ -1,4 +1,4 @@
-"""HELIX mutator: applies code mutations via agentic coding backends (agy, claude, codex, cursor, opencode)."""
+"""HELIX mutator: applies code mutations via agentic coding backends (agy, claude, codex, cursor, opencode, pi)."""
 
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def _turn_budget_section(max_turns: int | None) -> str:
       limit, and the resulting ``subtype="error_max_turns"`` response is
       detected at :func:`invoke_claude_code` and treated as partial
       success.
-    * ``agy`` / ``codex`` / ``cursor`` / ``opencode`` — soft hint only.
+    * ``agy`` / ``codex`` / ``cursor`` / ``opencode`` / ``pi`` — soft hint only.
       None of these CLIs expose an equivalent flag (verified against
       ``--help`` for the installed binaries), so the in-prompt request is
       the only signal the agent receives.  Whether the agent self-honors
@@ -947,6 +947,18 @@ def _build_backend_args(
         args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
+    if backend == "pi":
+        # pi never asks for tool approval (docs/security.md), and print/JSON
+        # modes cannot show its project-trust prompt, so this already runs
+        # fully autonomous.  Verified against pi 1.5.0.
+        args = ["pi", "--mode", "json", "--print"]
+        if config.model:
+            args.extend(["--model", config.model])
+        if config.effort:
+            args.extend(["--thinking", config.effort])
+        args.append(_prompt_file_instruction(prompt_artifact_name))
+        return args
+
     raise ValueError(f"Unsupported backend: {backend}")
 
 
@@ -1043,10 +1055,68 @@ def _parse_jsonl_output(
             continue
         if isinstance(parsed, dict):
             events.append(parsed)
-    return {
+    result: dict[str, Any] = {
         "events": events,
         "unparsable_lines": unparsable,
     }
+    if backend == "pi":
+        result.update(_pi_run_summary(events))
+    return result
+
+
+def _pi_run_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Totals for one ``pi --mode json`` stream, under the top-level keys
+    ``_normalise_usage_stats`` reads first.
+
+    pi reports usage per assistant message (``message_end``), so a generic
+    first-match walk would charge only the first model call; the messages
+    are summed here instead.  pi's ``input`` excludes cache reads, which it
+    reports separately, and ``reasoning`` is already inside ``output``
+    (docs/message-types.md), so nothing is double-counted.  Every usage key
+    is set, even at zero, so the walk never falls through to a nested
+    field.  ``stop_reason``/``error_message`` come from the last assistant
+    message: pi exits 0 when a provider call fails.
+    """
+    totals = {
+        "input_tokens": 0.0,
+        "output_tokens": 0.0,
+        "cached_input_tokens": 0.0,
+        "cache_read_input_tokens": 0.0,
+        "cache_creation_input_tokens": 0.0,
+        "reasoning_tokens": 0.0,
+        "cost_usd": 0.0,
+    }
+    summary: dict[str, Any] = {"num_turns": 0, "tool_use_count": 0}
+    for event in events:
+        kind = event.get("type")
+        if kind == "session" and isinstance(event.get("id"), str):
+            summary.setdefault("session_id", event["id"])
+        elif kind == "turn_start":
+            summary["num_turns"] += 1
+        elif kind == "tool_execution_start":
+            summary["tool_use_count"] += 1
+        elif kind == "message_end":
+            message = event.get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            summary["stop_reason"] = message.get("stopReason")
+            summary["error_message"] = message.get("errorMessage")
+            usage = message.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            cost = usage.get("cost")
+            for key, value in (
+                ("input_tokens", usage.get("input")),
+                ("output_tokens", usage.get("output")),
+                ("cache_read_input_tokens", usage.get("cacheRead")),
+                ("cache_creation_input_tokens", usage.get("cacheWrite")),
+                ("reasoning_tokens", usage.get("reasoning")),
+                ("cost_usd", cost.get("total") if isinstance(cost, dict) else None),
+            ):
+                number = _coerce_number(value)
+                if number is not None:
+                    totals[key] += number
+    return {**totals, **summary}
 
 
 def _parse_backend_output(
@@ -1065,8 +1135,8 @@ def _parse_backend_output(
             stderr=result.stderr,
             exit_code=result.returncode,
         )
-    if backend in {"codex", "cursor", "opencode"}:
-        return _parse_jsonl_output(
+    if backend in {"codex", "cursor", "opencode", "pi"}:
+        parsed = _parse_jsonl_output(
             result.stdout,
             backend=backend,
             cmd_str=cmd_str,
@@ -1075,6 +1145,25 @@ def _parse_backend_output(
             exit_code=result.returncode,
             strict=result.returncode == 0,
         )
+        if backend == "pi" and parsed.get("stop_reason") in {"error", "aborted"}:
+            # pi exits 0 when the provider call fails (bad key, no credit,
+            # unknown model); the reason is only in the stream.
+            raise MutationError(
+                f"pi run ended with stopReason={parsed['stop_reason']!r}: "
+                f"{parsed.get('error_message') or 'no error message'}",
+                operation="pi invocation",
+                phase="model call",
+                command=cmd_str,
+                cwd=str(worktree_path),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                suggestion=(
+                    "Check the provider credentials, model name and billing "
+                    "for the model pi was asked to use."
+                ),
+            )
+        return parsed
     raise ValueError(f"Unsupported backend: {backend}")
 
 
@@ -1506,6 +1595,34 @@ def _count_opencode_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
     return count, names
 
 
+def _count_pi_stdout_tool_events(path: Path) -> tuple[int, list[str]]:
+    """Count tool invocations from a ``pi --mode json`` stdout artifact.
+
+    pi emits one ``tool_execution_start`` per executed tool call, with the
+    name in ``toolName`` (pi 1.5.0 docs/json.md).
+    """
+    count = 0
+    names: list[str] = []
+    try:
+        for raw in split_lf_lines(path.read_text(encoding="utf-8")):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "tool_execution_start":
+                continue
+            count += 1
+            name = event.get("toolName")
+            if isinstance(name, str) and name:
+                names.append(name)
+    except OSError:
+        return 0, []
+    return count, names
+
+
 def _count_agy_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
     """Count tool invocations from an Antigravity ``transcript.jsonl`` file.
 
@@ -1545,7 +1662,7 @@ def _count_agy_transcript_tool_events(path: Path) -> tuple[int, list[str]]:
 
 # Dispatcher: maps backend name → per-backend counter function.  These read
 # the file HELIX writes for the backend: the stdout artifact for the JSONL
-# backends (codex/cursor/opencode) and the copied native transcript for
+# backends (codex/cursor/opencode/pi) and the copied native transcript for
 # claude and agy (``_collect_backend_transcript_artifacts``).
 #
 # ``agy``'s ``--output-format json`` stdout (observed against agy 1.1.27) is a
@@ -1559,6 +1676,7 @@ _TRANSCRIPT_TOOL_COUNTERS: dict[str, Callable[[Path], tuple[int, list[str]]]] = 
     "codex": _count_codex_stdout_tool_events,
     "cursor": _count_cursor_stdout_tool_events,
     "opencode": _count_opencode_stdout_tool_events,
+    "pi": _count_pi_stdout_tool_events,
 }
 
 
@@ -2084,6 +2202,9 @@ def invoke_claude_code(
         result = subprocess.run(
             args,
             cwd=worktree_path,
+            # The prompt is a file in the worktree; an inherited open pipe
+            # would block a CLI that reads piped stdin first (pi does).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             env=backend_env,

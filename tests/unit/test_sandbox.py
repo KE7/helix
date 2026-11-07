@@ -1131,6 +1131,7 @@ class TestDockerEnvRedaction:
         ("agy", '{"conversation_id":"conv_1","response":"hi"}', "conv_1"),
         ("opencode", '{"type":"step_start","sessionID":"ses_1"}\n', "ses_1"),
         ("cursor", '{"type":"system","sessionId":"cur_1"}\n', "cur_1"),
+        ("pi", '{"type":"session","version":3,"id":"pi_1"}\n{"type":"agent_start"}', "pi_1"),
         ("claude", '{"type":"result","session_id":"cl_1"}', "cl_1"),
         # A codex-shaped id inside claude output is not a claude session id.
         ("claude", '{"type":"thread.started","thread_id":"thr_1"}', None),
