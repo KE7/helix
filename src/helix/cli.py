@@ -107,6 +107,13 @@ enabled = false
 
 _HELIX_DIR = ".helix"
 
+#: Type of every command's ``--dir``.  Resolved to an absolute path because
+#: the root is handed to subprocesses that run in other directories: a
+#: relative ``--dir proj`` put the seed worktree at proj/proj/.helix/...
+_PROJECT_DIR = click.Path(
+    exists=True, file_okay=False, resolve_path=True, path_type=Path
+)
+
 
 def _helix_dir(project_root: Path) -> Path:
     return project_root / _HELIX_DIR
@@ -581,7 +588,7 @@ def sandbox_logout(
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 @click.option("--objective", default=None, help="Override the objective string.")
@@ -707,7 +714,7 @@ def evolve(
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 def frontier_cmd(project_dir: Path | None) -> None:
@@ -737,7 +744,7 @@ def frontier_cmd(project_dir: Path | None) -> None:
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 @click.option(
@@ -794,7 +801,7 @@ def best(project_dir: Path | None, export_path: str | None) -> None:
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 def history(project_dir: Path | None) -> None:
@@ -859,7 +866,7 @@ def history(project_dir: Path | None) -> None:
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 def log_cmd(project_dir: Path | None) -> None:
@@ -915,7 +922,7 @@ def _fmt_seconds(seconds: float) -> str:
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 @click.option(
@@ -1078,14 +1085,20 @@ def _load_skips(base_dir: Path) -> list[dict[str, Any]]:
     "--stage",
     "stage",
     default=None,
-    type=click.Choice(["minibatch_gate", "train_gate", "val_stage"]),
-    help="Filter by rejection gate (attempts view only).",
+    help=(
+        "Filter by the Stage column, the evaluation an attempt was scored on: "
+        "train_minibatch, train or val_stage (attempts view only)."
+    ),
 )
 @click.option(
     "--reason",
     "reason_substr",
     default=None,
-    help="Filter by reason substring (matched against the reason field).",
+    help=(
+        "Filter by reason substring (matched against the reason field), e.g. "
+        "minibatch_gate, train_gate, val_stage, duplicate_child, "
+        "proposal_selection."
+    ),
 )
 @click.option(
     "--cid",
@@ -1101,11 +1114,19 @@ def _load_skips(base_dir: Path) -> list[dict[str, Any]]:
     help="Emit machine-readable JSON to stdout instead of a human table.",
 )
 @click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=_PROJECT_DIR,
+    help="Project root directory (defaults to current working directory).",
+)
+@click.option(
     "--path",
     "helix_path",
     default=None,
     type=click.Path(path_type=Path),
-    help="Path to the .helix/ directory (defaults to ./.helix/).",
+    hidden=True,
+    help="Path to the .helix/ directory itself (older spelling of --dir).",
 )
 def attempts_cmd(
     show_skips: bool,
@@ -1114,6 +1135,7 @@ def attempts_cmd(
     reason_substr: str | None,
     cid: str | None,
     output_json: bool,
+    project_dir: Path | None,
     helix_path: Path | None,
 ) -> None:
     """Show rejected attempt records and perfect-subsample skip records.
@@ -1127,13 +1149,17 @@ def attempts_cmd(
     \b
       helix attempts                        # all rejected attempts
       helix attempts --generation 12        # only generation 12
-      helix attempts --stage minibatch_gate # only minibatch rejections
+      helix attempts --reason minibatch_gate # only minibatch-gate rejections
+      helix attempts --stage val_stage      # only attempts scored on the val stage
       helix attempts --skips                # perfect-subsample skips
       helix attempts --skips --generation 12
       helix attempts --cid g12-s4           # full JSON for one attempt
       helix attempts --json | jq '.[].attempt.reason'
     """
-    base_dir = (helix_path if helix_path is not None else Path.cwd() / ".helix").resolve()
+    if helix_path is not None:
+        base_dir = helix_path.resolve()
+    else:
+        base_dir = _helix_dir(project_dir if project_dir is not None else Path.cwd())
 
     # ------------------------------------------------------------------ skips
     if show_skips:
@@ -1200,7 +1226,7 @@ def attempts_cmd(
         ]
     if stage is not None:
         records = [
-            r for r in records if r.get("attempt", {}).get("reason") == stage
+            r for r in records if r.get("attempt", {}).get("stage") == stage
         ]
     if reason_substr is not None:
         records = [
@@ -1263,7 +1289,7 @@ def attempts_cmd(
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 def resume(config_path: str, project_dir: Path | None) -> None:
@@ -1339,7 +1365,7 @@ def resume(config_path: str, project_dir: Path | None) -> None:
     "--dir",
     "project_dir",
     default=None,
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    type=_PROJECT_DIR,
     help="Project root directory (defaults to current working directory).",
 )
 def clean(project_dir: Path | None) -> None:

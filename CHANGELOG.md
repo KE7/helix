@@ -217,6 +217,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- `--dir` with a relative path now works. `helix evolve --dir proj` created
+  the seed worktree at `proj/proj/.helix/worktrees/g0-s0` and then evaluated
+  `proj/.helix/worktrees/g0-s0`, which failed with "no HELIX_RESULT". Every
+  command now resolves `--dir` to an absolute path.
+- `helix attempts` takes `--dir` (the project directory) like every other
+  command, so `helix attempts --dir .` as the HELIX skill documents works.
+  The old `--path <.helix dir>` still works. `--stage` now filters on the
+  Stage column it is named after (`train_minibatch`, `train`, `val_stage`)
+  instead of the reason; to filter by reason (`minibatch_gate`,
+  `train_gate`, `duplicate_child`, `proposal_selection`, ...) use
+  `--reason`, so `--stage minibatch_gate` becomes `--reason minibatch_gate`.
 - Seedless search now builds on its seed. The seed agent's files were never
   committed, so every child was cloned from an empty tree and had to rewrite
   the solver from scratch while being scored against the seed. HELIX now

@@ -32,4 +32,20 @@
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
 
-Every command takes `--help` for its full options, for example `helix best --help`.
+## `helix attempts` Options
+
+```
+--dir PATH          Project directory (default: .)
+--generation INT    Only this generation
+--stage STAGE       Only attempts whose Stage column is STAGE: train_minibatch | train | val_stage
+--reason TEXT       Only attempts whose reason contains TEXT, e.g. minibatch_gate, duplicate_child
+--cid ID            Full JSON for one attempt
+--json              Machine-readable output
+--skips             Show perfect-subsample skips from .helix/skips/ instead
+```
+
+Every command that reads or writes a run (`evolve`, `resume`, `frontier`,
+`best`, `history`, `log`, `attempts`, `timing`, `clean`) takes `--dir` for
+the project directory; a relative path is resolved against the current
+directory. Every command takes `--help` for its full options, for example
+`helix best --help`.
