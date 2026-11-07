@@ -138,7 +138,7 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.IMAGE_PREFIX }}-base@sha256:%s ' *)
 
-  # ── 3. Build each backend (5 images × 2 arches = 10 jobs), push by digest ─
+  # ── 3. Build each backend (6 images × 2 arches = 12 jobs), push by digest ─
   build-backends:
     name: Build ${{ matrix.image.name }} (${{ matrix.platform }})
     needs: [merge-base, resolve-tag]
@@ -159,6 +159,8 @@ jobs:
             dockerfile: docker/cursor.Dockerfile
           - name: opencode
             dockerfile: docker/opencode.Dockerfile
+          - name: pi
+            dockerfile: docker/pi.Dockerfile
         platform:
           - linux/amd64
           - linux/arm64
@@ -223,6 +225,7 @@ jobs:
           - name: codex
           - name: cursor
           - name: opencode
+          - name: pi
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -282,6 +285,8 @@ jobs:
             command: "cursor agent --version"
           - name: opencode
             command: "opencode --version"
+          - name: pi
+            command: "pi --version"
 
     steps:
       - name: Log in to GHCR

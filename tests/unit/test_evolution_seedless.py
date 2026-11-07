@@ -155,6 +155,23 @@ class TestRunEvolutionSeedless:
         seedless_mocks["create_empty_seed_worktree"].assert_called_once()
         seedless_mocks["create_seed_worktree"].assert_not_called()
 
+    @pytest.mark.parametrize(("backend", "name"), [("pi", "pi"), ("codex", "Codex CLI")])
+    def test_seedless_names_the_configured_backend(
+        self, tmp_path, seedless_mocks, backend, name
+    ):
+        """The seed-generation message names the backend that runs, not Claude Code."""
+        from helix.config import AgentConfig
+
+        config = make_config(seedless=True).model_copy(
+            update={"agent": AgentConfig(backend=backend)}
+        )
+
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        messages = [c.args[0] for c in seedless_mocks["print_info"].call_args_list]
+        assert f"Generating seed candidate via {name} (single attempt)..." in messages
+        assert not any("Claude Code" in m for m in messages)
+
     def test_seedless_calls_build_seed_generation_prompt(self, tmp_path, seedless_mocks):
         """Seedless mode must call build_seed_generation_prompt once."""
         config = make_config(seedless=True)
@@ -321,3 +338,32 @@ class TestRunEvolutionResume:
 
         seedless_mocks["create_seed_worktree"].assert_not_called()
         seedless_mocks["generate_seed"].assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["claude", "pi"])
+def test_generate_seed_writes_the_prompt_file_the_agent_is_told_to_read(
+    tmp_path, mocker, backend
+):
+    """The backend argv says "Read .agent_task_prompt.md"; the seed worktree
+    starts empty, so generate_seed itself must write that file."""
+    import subprocess
+
+    from helix.mutator import MUTATION_PROMPT_ARTIFACT_NAME, generate_seed
+
+    seen: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):
+        prompt_file = tmp_path / MUTATION_PROMPT_ARTIFACT_NAME
+        seen["argv"] = " ".join(cmd)
+        seen["prompt"] = prompt_file.read_text() if prompt_file.exists() else None
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    mocker.patch("helix.mutator.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.mutator._parse_backend_output", return_value={})
+    config = make_config(seedless=True)
+    config.agent.backend = backend
+
+    generate_seed(str(tmp_path), "Create rle.py", config)
+
+    assert seen["prompt"] == "Create rle.py"
+    assert MUTATION_PROMPT_ARTIFACT_NAME in str(seen["argv"])

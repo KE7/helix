@@ -45,10 +45,12 @@ Codex similarly uses `codex login --device-auth` so the callback does not depend
 on a localhost server inside the container. Antigravity CLI (`agy`) has no
 dedicated login subcommand, so HELIX starts its normal interactive CLI, same
 as OpenCode, which starts the normal TUI so you can choose the provider/model
-and complete provider login in one setup session.
+and complete provider login in one setup session. pi also signs in only from
+its TUI: `helix sandbox login pi` starts it, you run `/login`, pick a provider,
+and quit.
 
 The volume names are `helix-auth-agy`, `helix-auth-claude`, `helix-auth-codex`,
-`helix-auth-cursor`, and `helix-auth-opencode`.
+`helix-auth-cursor`, `helix-auth-opencode`, and `helix-auth-pi`.
 
 Backend state in the sandbox never survives a generation; the run's artifacts
 are the record. At the start of every generation HELIX wipes the backend
@@ -71,8 +73,9 @@ By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,
 `ghcr.io/ke7/helix-evo-runner-claude`,
 `ghcr.io/ke7/helix-evo-runner-codex`,
-`ghcr.io/ke7/helix-evo-runner-cursor`, or
-`ghcr.io/ke7/helix-evo-runner-opencode`. To build locally instead, build the
+`ghcr.io/ke7/helix-evo-runner-cursor`,
+`ghcr.io/ke7/helix-evo-runner-opencode`, or
+`ghcr.io/ke7/helix-evo-runner-pi`. To build locally instead, build the
 shared base first with
 `docker build -t helix-runner-base:latest -f docker/base.Dockerfile .`, then
 build the backend image you need, for example

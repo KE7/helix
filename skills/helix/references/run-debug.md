@@ -143,6 +143,7 @@ changes back, otherwise from the operator's `$HOME`:
 | cursor | `.cursor/projects/<cwd-slug>/agent-transcripts/<session_id>/<session_id>.jsonl` | `cursor/<session_id>.jsonl` |
 | agy | `.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript{,_full}.jsonl` | `agy/<id>.jsonl`, `agy/<id>.full.jsonl` |
 | opencode | this session's `session`/`message`/`part` rows of `.local/share/opencode/opencode.db` | `opencode/<sessionID>.jsonl` (one `{"table", "row"}` object per line) |
+| pi | `.pi/agent/sessions/--<cwd>--/<timestamp>_<session_id>.jsonl` | `pi/<session_id>.jsonl` |
 
 The structured stdout of the JSONL backends is still kept verbatim in
 `.helix_backend_stdout.txt`; the native transcript is preserved in addition
@@ -238,6 +239,7 @@ Backend login behavior:
 - Codex: `codex login --device-auth`
 - Cursor: `cursor-agent login`
 - OpenCode: full `opencode` TUI for provider/model/login setup
+- pi: full `pi` TUI; run `/login` there
 
 Network:
 

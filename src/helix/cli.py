@@ -436,6 +436,11 @@ def sandbox_login(
             "HELIX starts the interactive Antigravity CLI so you can "
             "complete its auth flow."
         )
+    elif backend == "pi":
+        print_info(
+            "pi signs in from inside its TUI: run [cyan]/login[/cyan], pick a "
+            "provider, then quit pi."
+        )
     extra_hosts = _parse_extra_hosts(extra_hosts_list)
     result = run_sandbox_auth_command(
         backend,
@@ -599,7 +604,7 @@ def sandbox_logout(
 @click.option(
     "--backend",
     default=None,
-    type=click.Choice(["agy", "claude", "codex", "cursor", "opencode"]),
+    type=click.Choice(BACKENDS),
     help="Override the mutation backend.",
 )
 @click.option("--model", default=None, help="Override the backend model.")
@@ -610,8 +615,10 @@ def sandbox_logout(
         "Override backend reasoning-effort level. Forwarded as --effort to "
         "the 'agy' (low|medium|high) and 'claude' (low|medium|high|xhigh|max) "
         "backends, as "
-        "model_reasoning_effort to the 'codex' backend, and as --variant to "
-        "the 'opencode' backend; ignored by cursor (a warning is emitted "
+        "model_reasoning_effort to the 'codex' backend, as --variant to "
+        "the 'opencode' backend, and as --thinking to the 'pi' backend "
+        "(off|minimal|low|medium|high|xhigh|max); ignored by cursor (a "
+        "warning is emitted "
         "when set on a backend that does not support it)."
     ),
 )
