@@ -179,8 +179,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CONTRIBUTING.md` now sets the rules for every PR, human or agent: each
   description shows the change working on the real system (**Evidence**:
   a real `helix evolve` run with a real backend and model, not mocks) and
-  gives **Try it by hand** steps from a clean checkout, and CI must pass
-  locally before the PR is opened. `.github/pull_request_template.md`
+  gives **Try it by hand** steps from a clean checkout. Before the PR is
+  opened, CI must pass locally and the author's coding agent must review the
+  diff (`/code-review`, `/review`, or a prompt any agent can run). `.github/pull_request_template.md`
   carries the same sections, and the rules are on the docs site.
   `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
   working on this repository to those rules.

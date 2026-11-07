@@ -33,7 +33,13 @@ When a design question comes up, check here first; when a review settles one, ad
    - **Try it by hand**: copy-pasteable steps from a clean checkout. Give the install command, the complete `helix.toml` and evaluator (not "an evaluator that scores X"), each command with its expected output, and one failure case where it matters (for example, a config the change now rejects).
 
    Also list **what you could not run, and why**, for example a sign-in that needs the maintainer's account or a paid model you have no credit for. A gap you name is fine; a gap you hide is not. Put screenshots and videos on an orphan `pr-assets/<branch>` branch and link them with `raw.githubusercontent.com`. Keep videos under two minutes; speed up waits and label them "(sped up)".
-10. **CI passes locally before you open the PR** (rule 14).
+10. **Before you open the PR, CI passes locally (rule 14) and you have reviewed your own diff.** Have your coding agent review it: `/code-review` in Claude Code, `/review` in Codex, or in any other agent this prompt:
+
+    ```text
+    Review `git diff main...HEAD` for bugs and for anything that leaks the protected evaluator to the mutation agent. Report only what is worth fixing: a real bug, a leak, or complexity the change adds without need. Skip style nits and speculative findings.
+    ```
+
+    Judge the findings by the smallest-design principle above: fix the ones that matter with the simplest change, and drop the rest. Say in the PR what the review found and what you did about it. Then re-run CI if you changed code.
 11. A PR that fixes an issue links it (`Fixes #N`), so merging closes it.
 12. Keep writing short and concrete: PR descriptions, docs, comments. Say what changed, why, and how you know it works.
 

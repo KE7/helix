@@ -31,6 +31,7 @@ each command with its expected output, and one failure case where it matters. --
 - [ ] `uv run --only-group docs mkdocs build --strict`
 - [ ] Runner image built and probed (only for `docker/` or `src/helix/backends.py` changes)
 - [ ] Docs page and `CHANGELOG.md` `[Unreleased]` updated (user-facing changes)
+- [ ] Coding-agent review of the diff (`/code-review`, `/review` or the prompt in rule 10); what it found and what I did:
 
 ## Not run, and why
 
