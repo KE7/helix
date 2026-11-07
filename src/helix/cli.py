@@ -562,7 +562,7 @@ def sandbox_logout(
         "any file in the project tree in each mutation. "
         "There is no target_file; the candidate is your entire working tree at HEAD.\n\n"
         "Requires a helix.toml file in the project directory. "
-        "Run `helix init` first to create one, or see README for the minimal schema."
+        "Run `helix init` first to create one, or see https://ke7.github.io/helix/getting-started/evaluator.html for a minimal config."
     ),
 )
 @click.option(

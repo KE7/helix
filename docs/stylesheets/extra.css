@@ -1,0 +1,63 @@
+/* HELIX palette, from the logo (docs/assets/logo): cyan and magenta strands,
+   purple rungs. The header stays neutral so the logo's colours carry it. */
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #f6f8fa;
+  --md-primary-fg-color--dark: #eaeef2;
+  --md-primary-bg-color: #1f2328;
+  --md-primary-bg-color--light: #59636e;
+  --md-accent-fg-color: #b8269f;
+  --md-accent-fg-color--transparent: rgba(184, 38, 159, 0.1);
+  --md-typeset-a-color: #0f7f99;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 215;
+  --md-default-bg-color: #0d1117;
+  --md-primary-fg-color: #0d1117;
+  --md-primary-fg-color--light: #161b22;
+  --md-primary-fg-color--dark: #010409;
+  --md-primary-bg-color: #e6edf3;
+  --md-primary-bg-color--light: #9198a1;
+  --md-accent-fg-color: #e25ad8;
+  --md-accent-fg-color--transparent: rgba(226, 90, 216, 0.12);
+  --md-typeset-a-color: #3fc1da;
+}
+
+/* A hairline under the neutral header and tabs, in place of the coloured bar. */
+.md-header,
+.md-tabs {
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+.md-header--shadow {
+  box-shadow: none;
+}
+
+/* Material draws outline buttons in the header colour, now neutral. */
+.md-typeset .md-button {
+  color: var(--md-typeset-a-color);
+  border-color: var(--md-typeset-a-color);
+}
+.md-typeset .md-button:hover,
+.md-typeset .md-button:focus {
+  background-color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+  color: #ffffff;
+}
+
+/* Primary buttons in the strand colours. */
+.md-typeset .md-button--primary {
+  background-color: #0f7f99;
+  border-color: #0f7f99;
+  color: #ffffff;
+}
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary {
+  background-color: #3fc1da;
+  border-color: #3fc1da;
+  color: #0d1117;
+}
+
+.md-header__button.md-logo img {
+  height: 1.8rem;
+}

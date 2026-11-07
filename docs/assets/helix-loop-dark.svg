@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1048 372" width="1048" height="372" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">The HELIX search loop</title>
+  <desc id="d">A parent repository is picked from the instance-level Pareto frontier. A coding agent edits a copy of it in its own git worktree over many turns. The child is scored against its parent on a training minibatch; a worse child is discarded, a better one is scored on the full validation set and joins the frontier. Both scoring steps use a protected evaluator the agent cannot modify.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#9198a1"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#4cc6dc"/>
+    </marker>
+  </defs>
+
+  <!-- Seed -->
+  <rect x="84" y="14" width="120" height="30" rx="15" fill="#161b22" stroke="#3d444d"/>
+  <text x="144" y="34" text-anchor="middle" font-size="13" fill="#e6edf3">your repo (seed)</text>
+  <line x1="144" y1="44" x2="144" y2="76" stroke="#9198a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Pareto frontier: candidates x instances, best per instance highlighted -->
+  <rect x="24" y="80" width="240" height="210" rx="10" fill="#161b22" stroke="#3d444d"/>
+  <text x="40" y="106" font-size="15" font-weight="600" fill="#e6edf3">Pareto frontier</text>
+  <text x="40" y="124" font-size="12" fill="#9198a1">each candidate is a git worktree</text>
+  <g font-size="11" fill="#9198a1">
+    <text x="40" y="160">seed</text>
+    <text x="40" y="190">g3-m1</text>
+    <text x="40" y="220">g7-m2</text>
+  </g>
+  <g>
+    <!-- columns: instances 1..6; rows: candidates -->
+    <rect x="96"  y="146" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="122" y="146" width="22" height="20" rx="3" fill="#4cc6dc"/>
+    <rect x="148" y="146" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="174" y="146" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="200" y="146" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="226" y="146" width="22" height="20" rx="3" fill="#2a313c"/>
+
+    <rect x="96"  y="176" width="22" height="20" rx="3" fill="#4cc6dc"/>
+    <rect x="122" y="176" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="148" y="176" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="174" y="176" width="22" height="20" rx="3" fill="#4cc6dc"/>
+    <rect x="200" y="176" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="226" y="176" width="22" height="20" rx="3" fill="#2a313c"/>
+
+    <rect x="96"  y="206" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="122" y="206" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="148" y="206" width="22" height="20" rx="3" fill="#4cc6dc"/>
+    <rect x="174" y="206" width="22" height="20" rx="3" fill="#2a313c"/>
+    <rect x="200" y="206" width="22" height="20" rx="3" fill="#4cc6dc"/>
+    <rect x="226" y="206" width="22" height="20" rx="3" fill="#4cc6dc"/>
+  </g>
+  <text x="172" y="246" text-anchor="middle" font-size="11" fill="#9198a1">validation instances</text>
+  <text x="40" y="272" font-size="12" fill="#e6edf3">A candidate stays if it is the best</text>
+  <text x="40" y="287" font-size="12" fill="#e6edf3">on at least one instance.</text>
+
+  <!-- Protected evaluator -->
+  <rect x="718" y="14" width="306" height="46" rx="10" fill="#241a33" stroke="#b48ae0" stroke-dasharray="5 4"/>
+  <text x="871" y="34" text-anchor="middle" font-size="13" font-weight="600" fill="#e6edf3">Protected evaluator</text>
+  <text x="871" y="51" text-anchor="middle" font-size="11.5" fill="#9198a1">your scoring code, hashed so an edited copy is caught</text>
+  <line x1="788" y1="60" x2="788" y2="96" stroke="#b48ae0" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="959" y1="60" x2="959" y2="96" stroke="#b48ae0" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+  <!-- 1 Select -->
+  <rect x="300" y="96" width="150" height="104" rx="10" fill="#161b22" stroke="#3d444d"/>
+  <text x="316" y="122" font-size="15" font-weight="600" fill="#e6edf3">1  Pick a parent</text>
+  <text x="316" y="146" font-size="12" fill="#9198a1">sampled from the</text>
+  <text x="316" y="162" font-size="12" fill="#9198a1">frontier, weighted by</text>
+  <text x="316" y="178" font-size="12" fill="#9198a1">instance wins</text>
+  <line x1="264" y1="148" x2="296" y2="148" stroke="#9198a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 2 Mutate (the coding agent) -->
+  <rect x="486" y="96" width="196" height="104" rx="10" fill="#371434" stroke="#e267df" stroke-width="2"/>
+  <text x="502" y="122" font-size="15" font-weight="600" fill="#e6edf3">2  A coding agent edits</text>
+  <text x="502" y="146" font-size="12" fill="#e6edf3">the whole repo, over many</text>
+  <text x="502" y="162" font-size="12" fill="#e6edf3">turns, in its own worktree:</text>
+  <text x="502" y="182" font-size="12" font-weight="600" fill="#e267df">read · edit · run · revise</text>
+  <line x1="450" y1="148" x2="482" y2="148" stroke="#9198a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="584" y="222" text-anchor="middle" font-size="11.5" fill="#9198a1">it sees the parent's per-instance</text>
+  <text x="584" y="237" text-anchor="middle" font-size="11.5" fill="#9198a1">scores and evaluator feedback</text>
+
+  <!-- 3 Gate -->
+  <rect x="718" y="96" width="140" height="104" rx="10" fill="#161b22" stroke="#3d444d"/>
+  <text x="734" y="122" font-size="15" font-weight="600" fill="#e6edf3">3  Gate</text>
+  <text x="734" y="146" font-size="12" fill="#9198a1">child vs parent on</text>
+  <text x="734" y="162" font-size="12" fill="#9198a1">a training</text>
+  <text x="734" y="178" font-size="12" fill="#9198a1">minibatch</text>
+  <line x1="682" y1="148" x2="714" y2="148" stroke="#9198a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="788" y1="200" x2="788" y2="232" stroke="#9198a1" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="788" y="250" text-anchor="middle" font-size="12" fill="#9198a1">not better: discarded</text>
+
+  <!-- 4 Validate -->
+  <rect x="894" y="96" width="130" height="104" rx="10" fill="#161b22" stroke="#3d444d"/>
+  <text x="910" y="122" font-size="15" font-weight="600" fill="#e6edf3">4  Validate</text>
+  <text x="910" y="146" font-size="12" fill="#9198a1">score every</text>
+  <text x="910" y="162" font-size="12" fill="#9198a1">validation</text>
+  <text x="910" y="178" font-size="12" fill="#9198a1">instance</text>
+  <line x1="858" y1="148" x2="890" y2="148" stroke="#4cc6dc" stroke-width="1.5" marker-end="url(#arrow-accent)"/>
+  <text x="876" y="140" text-anchor="middle" font-size="11" fill="#4cc6dc">better</text>
+
+  <!-- Return to the frontier -->
+  <path d="M959 200 V330 H144 V294" fill="none" stroke="#4cc6dc" stroke-width="1.5" marker-end="url(#arrow-accent)"/>
+  <text x="552" y="352" text-anchor="middle" font-size="12.5" fill="#e6edf3">the child joins the frontier if it is the best on some instance; repeat until the budget runs out</text>
+</svg>

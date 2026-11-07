@@ -1,0 +1,83 @@
+site_name: HELIX
+site_description: Evolve whole codebases with coding agents
+site_url: https://ke7.github.io/helix/
+repo_url: https://github.com/KE7/helix
+repo_name: KE7/helix
+edit_uri: edit/main/docs/
+strict: true
+# Pages keep their file layout (page.html), so relative links and images
+# work the same on the site and when the .md files are read on GitHub.
+use_directory_urls: false
+
+exclude_docs: |
+  plans/
+  assets/logo/make_logo.py
+  assets/logo/fonts/
+  omni-optimizer-composition-plan.md
+  capx-sandbox-notes.md
+
+theme:
+  name: material
+  logo: assets/logo/helix-icon-light.svg
+  favicon: assets/logo/helix-icon-light.svg
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - Showcase: showcase.md
+  - Getting started:
+      - Quickstart: getting-started/quickstart.md
+      - Writing an evaluator: getting-started/evaluator.md
+  - Concepts:
+      - How HELIX works: concepts/how-it-works.md
+  - Guides:
+      - Configuration: guides/configuration.md
+      - Docker sandboxing: guides/sandboxing.md
+      - Datasets and evaluator integrity: guides/datasets.md
+      - Parallelism and resume: guides/parallelism.md
+      - Timing trace: guides/timing.md
+  - Reference:
+      - CLI: reference/cli.md
+      - Architecture: reference/architecture.md
+  - Experiments:
+      - ManiSkill pick and place: experiments/maniskill-pick-place.md
+      - Circle packing: experiments/circle-packing.md
+  - Changelog: changelog.md

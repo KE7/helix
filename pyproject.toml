@@ -31,6 +31,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/KE7/helix"
+Documentation = "https://ke7.github.io/helix/"
 Repository = "https://github.com/KE7/helix"
 Issues = "https://github.com/KE7/helix/issues"
 Author = "https://github.com/KE7"
@@ -71,6 +72,12 @@ exclude = [
 dev = [
     "mypy>=1.20.0",
     "pytest-timeout>=2.4.0",
+]
+# Builds the docs site: uv run --group docs mkdocs serve
+docs = [
+    "mkdocs-material==9.7.6",
+    # MkDocs 2.0 drops the plugin and theme system Material is built on.
+    "mkdocs>=1.6,<2",
 ]
 
 [tool.pytest.ini_options]

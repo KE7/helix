@@ -16,9 +16,9 @@ implements it. Only the proposer is different: HELIX's mutation agent, Claude
 Haiku 4.5 in Claude Code, edits the candidate where GEPA's reflection LM, GPT-5,
 proposes new text (see [Comparison limits](#comparison-limits)).
 
-The experiment is [`examples/circle_packing/`](../../examples/circle_packing/).
+The experiment is [`examples/circle_packing/`](https://github.com/KE7/helix/tree/main/examples/circle_packing).
 Its mutation agent runs in HELIX's Docker sandbox with no web access, on the
-network that [`examples/circle_packing_sandbox/`](../../examples/circle_packing_sandbox/)
+network that [`examples/circle_packing_sandbox/`](https://github.com/KE7/helix/tree/main/examples/circle_packing_sandbox)
 provides (see [Agent sandbox](#agent-sandbox)). The evaluator runs on the host,
 as optimize_anything's did.
 
@@ -129,7 +129,7 @@ without overlaps the same centers give at most 2.6359828435 (see
 [paper](https://arxiv.org/abs/2605.19633) reports 2.63598+; its controlled
 comparison reaches 2.63598 in 63 evaluations for about $3.18.
 
-[`circle-packing/reference_known_best.py`](circle-packing/reference_known_best.py)
+[`circle-packing/reference_known_best.py`](https://github.com/KE7/helix/blob/main/docs/experiments/circle-packing/reference_known_best.py)
 is a supplied packing (radius sum 2.635982) with the experiment's interface. It
 checks an evaluator installation; it performs no search and is never a seed:
 
@@ -193,7 +193,7 @@ remaining overlap by shrinking each circle by half its largest one. No circle
 of either packing crosses the square's edge. The 2.8e-7 by which
 optimize_anything leads comes from overlaps the validator allows; without
 them, this run's packing is larger by 2.4e-7.
-[`circle-packing/tolerance_check.py`](circle-packing/tolerance_check.py)
+[`circle-packing/tolerance_check.py`](https://github.com/KE7/helix/blob/main/docs/experiments/circle-packing/tolerance_check.py)
 reproduces the table from two `state_tracker_logs.json` files:
 
 ```bash

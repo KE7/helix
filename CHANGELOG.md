@@ -67,8 +67,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tool-call counts for `agy` are now read from its native
   `transcript.jsonl` (`tool_calls[*].name` on planner steps); its JSON
   stdout envelope carries no per-tool events.
+- `examples/maniskill_pick_place/` (#77, by Mahanth Komuravelli): HELIX evolves a
+  multi-file `solver/` package that drives a Franka Panda through push, pick
+  and stack in ManiSkill 3, with the agent in HELIX's sandbox and every solver
+  in a throwaway container. In the recorded run one mutation took validation
+  from 0.064 to 1.0 and solved all 141 train, validation and held-out trials.
+  See `docs/experiments/maniskill-pick-place.md`.
+- A docs site (mkdocs-material, `mkdocs.yml`), deployed to GitHub Pages by
+  `.github/workflows/docs.yml`. A logo: the HELIX wordmark, whose X is a
+  cyan and magenta helix with `<>` and `{}` rungs, and a matching icon, built by
+  `docs/assets/logo/make_logo.py` from Archivo Black (SIL OFL 1.1). `docs/experiments/maniskill-pick-place/render_rollouts.py`
+  records the seed and evolved ManiSkill rollouts shown in the README and on
+  the site.
 
 ### Changed
+- The README is now a short overview: demo, results, papers built with HELIX,
+  a quickstart and the examples. The reference material it held
+  (configuration, sandboxing, dataset modes, evaluator integrity, parallelism,
+  the timing trace, the CLI and the architecture) moved verbatim to the docs
+  site. A new diagram replaces the mermaid flowchart.
 - A rate-limited backend call is now an ordinary failed mutation or merge,
   as in GEPA. `RateLimitError` and its keyword matching are gone: the matching
   also fired on transcripts that merely quoted "rate limit" or "529", and a
