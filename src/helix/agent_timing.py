@@ -120,10 +120,40 @@ def _opencode(path: Path) -> Parsed:
     return (min(times), max(times), tools) if times else None
 
 
+def _pi(path: Path) -> Parsed:
+    """Assistant ``toolCall`` blocks to their ``toolResult`` message, by id.
+
+    Every session-file entry carries an ISO ``timestamp`` (pi 1.5.0
+    docs/session-format.md); an entry is written when its message ends.
+    """
+    times: list[float] = []
+    open_calls: dict[str, tuple[str, float]] = {}
+    tools: dict[str, list[Interval]] = {}
+    for row in _lines(path):
+        if not isinstance(row.get("timestamp"), str):
+            continue
+        at = _iso(row["timestamp"])
+        times.append(at)
+        message = row.get("message")
+        if row.get("type") != "message" or not isinstance(message, dict):
+            continue
+        if message.get("role") == "toolResult":
+            call = open_calls.pop(str(message.get("toolCallId")), None)
+            if call is not None:
+                tools.setdefault(call[0], []).append((call[1], at))
+            continue
+        content = message.get("content")
+        for item in content if isinstance(content, list) else []:
+            if isinstance(item, dict) and item.get("type") == "toolCall":
+                open_calls[str(item.get("id"))] = (str(item.get("name")), at)
+    return (min(times), max(times), tools) if times else None
+
+
 _PARSERS: dict[str, Callable[[Path], Parsed]] = {
     "claude": _claude,
     "codex": _codex,
     "opencode": _opencode,
+    "pi": _pi,
 }
 
 

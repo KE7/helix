@@ -17,6 +17,7 @@ NO_WEB_ARGS = {
     "claude": ["--disallowedTools=WebSearch,WebFetch"],
     "codex": ["-c", 'web_search="disabled"', "-c", "features.apps=false"],
     "opencode": [],
+    "pi": [],
 }
 NO_WEB_FLAGS = {a for flags in NO_WEB_ARGS.values() for a in flags if a != "-c"}
 OPENCODE_PERMISSION = '{"webfetch": "deny", "websearch": "deny"}'
@@ -110,7 +111,7 @@ def test_evolve_override_error_uses_config_error_output(
     output = " ".join(result.output.split())
     assert "(with command-line overrides)" in output
     assert "Field: agent" in output
-    assert "(supported: claude, codex, opencode)" in output
+    assert "(supported: claude, codex, opencode, pi)" in output
 
 
 @pytest.mark.parametrize(

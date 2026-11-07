@@ -16,9 +16,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`true`) is unchanged. User MCP servers and plugins still load, and the
   shell can still reach the network; a strict no-web run needs the Docker
   sandbox. Resuming with `web_access` changed is rejected.
+- `pi` ([earendil-works/pi](https://github.com/earendil-works/pi), npm
+  `@earendil-works/pi-coding-agent`, verified against 1.5.0) is a mutation
+  backend: `pi --mode json --print`, `agent.model` as `--model`,
+  `agent.effort` as `--thinking` (off | minimal | low | medium | high |
+  xhigh | max). pi asks for no tool approval, so it runs fully autonomous.
+  Usage is summed over every model call in the stream, and a run whose last
+  model call failed (`stopReason` `error` or `aborted`, which pi exits 0 on)
+  is a `MutationError`. Its session transcript is preserved from
+  `~/.pi/agent/sessions`, feeds `helix timing`, and is reset per generation
+  in the sandbox. `web_access = false` needs no flag (pi ships no web tools).
+  `helix sandbox login pi` starts pi's TUI for `/login` into the
+  `helix-auth-pi` volume; the runner image is
+  `ghcr.io/ke7/helix-evo-runner-pi`. Host backend runs now get a closed
+  stdin, since pi reads piped stdin before it starts.
+  pi has no turn cap, so `max_turns` is only a prompt hint for it. On a
+  local engine that serves one request at a time, parallel proposals need
+  pi's `httpIdleTimeoutMs` raised (see the configuration guide).
+- The seedless "Generating seed candidate" message and the failed-merge
+  message name the configured backend instead of always saying Claude Code.
 - `helix timing` now splits each agent call into `model`, `tool:<name>` and
   `other` time, read from the backend's transcript (`claude`, `codex`,
-  `opencode`; `cursor` and `agy` are reported as `unavailable`).
+  `opencode`, `pi`; `cursor` and `agy` are reported as `unavailable`).
 - `from helix import timed`: time your own operations (`with timed("sam3",
   example=...)`, `@timed(...)`, `timed.record(...)`) in the evaluator, its
   sidecar and child processes, and scripts the agent runs. HELIX totals them per
@@ -276,8 +295,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Runner images are published for `linux/amd64` and `linux/arm64`, built on
   native runners, so Apple Silicon hosts no longer pull an emulated amd64
   image.
+- **BREAKING**: HELIX requires Python 3.12 or newer (`requires-python =
+  ">=3.12"`); 3.11 is no longer supported or tested. Python 3.13, 3.14 and
+  3.15 are now tested in CI and listed in the package classifiers. The
+  lockfile moves to pydantic 2.14.1 (pydantic-core 2.50.1), whose wheels
+  cover 3.15; the locked pydantic-core 2.41.5 had none. An evaluator can still
+  run on another Python through its own command, as `examples/circle_packing`
+  does with 3.11.
+- `CONTRIBUTING.md` now sets the rules for every PR, human or agent: each
+  description shows the change working on the real system (**Evidence**:
+  a real `helix evolve` run with a real backend and model, not mocks) and
+  gives **Try it by hand** steps from a clean checkout. Before the PR is
+  opened, CI must pass locally and the author's coding agent must review the
+  diff (`/code-review`, `/review`, or a prompt any agent can run). `.github/pull_request_template.md`
+  carries the same sections, and the rules are on the docs site.
+  `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
+  working on this repository to those rules.
+- The HELIX agent skill is registered for Claude Code as a project skill,
+  `.claude/skills/helix` (a symlink to `skills/helix/`), in place of the
+  `.claude/commands/helix.md` command. `/helix` still loads it; to use it in
+  other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Seedless mode now gives the agent its task. Every backend is told to read
+  `.agent_task_prompt.md`, but seed generation never wrote that file, so the
+  seed agent started in an empty worktree with no objective and had to guess
+  (with pi on a local model it searched the disk for the file and produced
+  nothing). `generate_seed` now writes the prompt file the same way a
+  mutation does.
+- Resuming after an interrupted generation no longer fails with "a branch
+  named 'helix/g1-s2' already exists". An interrupt can stop cleanup after
+  it removes a candidate's worktree but before it deletes the branch, and
+  the resumed generation then reuses that candidate id. Cloning a candidate
+  now resets a leftover branch (`git worktree add -B`); git still refuses a
+  branch that a live worktree has checked out.
 - A project with no `[dataset]` (single-task mode) can now be scored. The
   `helix_result` parser needs `helix_batch.json` to line up the evaluator's
   pairs with ids, but only the dataset paths wrote it, so every single-task

@@ -35,6 +35,7 @@ _BACKEND_EXECUTABLE = {
     "codex": "codex",
     "cursor": "cursor",
     "opencode": "opencode",
+    "pi": "pi",
 }
 
 
@@ -209,6 +210,21 @@ def test_charge_evaluation_updates_counter_and_emits_event() -> None:
             ),
             (15, 11, 0.35),
             id="opencode",
+        ),
+        pytest.param(
+            "pi",
+            "\n".join(
+                [
+                    '{"type":"session","version":3,"id":"pi-session"}',
+                    (
+                        '{"type":"message_end","message":{"role":"assistant",'
+                        '"usage":{"input":17,"output":12,"cacheRead":0,'
+                        '"cacheWrite":0,"cost":{"total":0.37}},"stopReason":"stop"}}'
+                    ),
+                ]
+            ),
+            (17, 12, 0.37),
+            id="pi",
         ),
         pytest.param(
             # Real ``agy --output-format json`` envelope (agy 1.1.27), parsed
@@ -795,6 +811,13 @@ _MALFORMED_STREAMS = {
             '"cost":0.35}}',
         ]
     ),
+    "pi": "\n".join(
+        [
+            "{truncated",
+            '{"type":"message_end","message":{"role":"assistant","usage":'
+            '{"input":17,"output":12,"cost":{"total":0.37}},"stopReason":"stop"}}',
+        ]
+    ),
 }
 
 
@@ -804,6 +827,7 @@ _MALFORMED_STREAMS = {
         pytest.param("codex", 2500000, 8000, id="codex"),
         pytest.param("cursor", 13, 9, id="cursor"),
         pytest.param("opencode", 15, 11, id="opencode"),
+        pytest.param("pi", 17, 12, id="pi"),
     ],
 )
 def test_malformed_backend_output_still_charges_llm_budget(

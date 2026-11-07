@@ -828,7 +828,8 @@ class SandboxConfig(BaseModel):
     # (``claude_transcript_root``), codex (``~/.codex/sessions`` rollout),
     # cursor (``~/.cursor/projects/*/agent-transcripts``), agy
     # (``brain/<id>/.../transcript.jsonl`` plus ``<id>.full.jsonl``) and
-    # opencode (this session's rows exported from ``opencode.db``); see
+    # opencode (this session's rows exported from ``opencode.db``) and pi
+    # (``~/.pi/agent/sessions/*/*_<id>.jsonl``); see
     # ``helix.backends.BACKEND_TRANSCRIPT_SOURCES``.  Sandboxed runs read the
     # ``helix-auth-<backend>`` volume, whose session state is reset at the
     # start of every generation (``helix.backends.BACKEND_STATE_PATHS``), so

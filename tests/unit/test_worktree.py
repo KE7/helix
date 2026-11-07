@@ -195,6 +195,38 @@ class TestCloneCandidate:
         child = clone_candidate(seed, "g1-s1", base_dir)
         assert (Path(child.worktree_path) / "README.md").exists()
 
+    def test_clone_reclaims_a_leftover_branch_without_a_worktree(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # An interrupted cleanup removed g1-s2's worktree but not its branch
+        # (seen when Ctrl-C hit a pi mutation's cleanup); resume reuses the id.
+        repo_root, base_dir, seed = self._seed(tmp_path, monkeypatch)
+        stale = clone_candidate(seed, "g1-s2", base_dir)
+        (Path(stale.worktree_path) / "README.md").write_text("stale edit\n")
+        _run(["git", "commit", "-qam", "stale"], cwd=Path(stale.worktree_path))
+        _run(["git", "worktree", "remove", "--force", stale.worktree_path], cwd=repo_root)
+        assert _run(["git", "branch", "--list", "helix/g1-s2"], cwd=repo_root).stdout.strip()
+
+        child = clone_candidate(seed, "g1-s2", base_dir)
+
+        seed_head = _run(["git", "rev-parse", "HEAD"], cwd=Path(seed.worktree_path)).stdout
+        child_head = _run(["git", "rev-parse", "HEAD"], cwd=Path(child.worktree_path)).stdout
+        assert child_head == seed_head
+        assert (Path(child.worktree_path) / "README.md").read_text() != "stale edit\n"
+
+    def test_clone_never_takes_a_branch_a_live_worktree_uses(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A retained candidate keeps its worktree; its branch must survive.
+        from helix.exceptions import GitError
+
+        _, base_dir, seed = self._seed(tmp_path, monkeypatch)
+        kept = clone_candidate(seed, "g1-s3", base_dir)
+
+        with pytest.raises(GitError):
+            clone_candidate(seed, "g1-s3", tmp_path / "elsewhere")
+        assert Path(kept.worktree_path).is_dir()
+
     def test_clone_has_correct_path(self, tmp_path: Path, monkeypatch) -> None:
         _, base_dir, seed = self._seed(tmp_path, monkeypatch)
         child = clone_candidate(seed, "g1-s2", base_dir)

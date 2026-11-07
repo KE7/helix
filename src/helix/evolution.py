@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 
+from helix.backends import backend_display_name
 from helix.batch_sampler import (
     BatchSampler,
     EpochShuffledBatchSampler,
@@ -2156,7 +2157,10 @@ def _run_evolution_impl(
             seed = create_empty_seed_worktree(project_root, worktrees_dir)
             candidates[seed.id] = seed
 
-            print_info("Generating seed candidate via Claude Code (single attempt)...")
+            print_info(
+                "Generating seed candidate via "
+                f"{backend_display_name(config.agent.backend)} (single attempt)..."
+            )
             # GEPA parity: if a training dataset is provided, read up to 3
             # representative examples and include them in the seed prompt
             # (multi-task / generalization mode).  No train_path → single-task
@@ -2550,7 +2554,8 @@ def _run_evolution_impl(
                         print_error(
                             f"Merge {merge_id} failed "
                             f"(candidates: {a.id} + {b.id}, gen {gen}). "
-                            f"Claude Code returned no output or the merge subprocess errored. "
+                            f"{backend_display_name(config.agent.backend)} returned no "
+                            "output or the merge subprocess errored. "
                             f"Check the HELIX ERROR panel above for full diagnostics."
                         )
                     else:

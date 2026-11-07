@@ -9,7 +9,7 @@
 
 ### 🧬 Evolve whole codebases with coding agents
 
-[![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://github.com/KE7/helix/blob/main/LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml)
+[![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://github.com/KE7/helix/blob/main/LICENSE) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml)
 
 [Docs](https://ke7.github.io/helix/) · [Quickstart](#quickstart) · [Results](#results) · [Built with HELIX](#built-with-helix) · [Examples](#examples)
 
@@ -120,7 +120,7 @@ More in [How HELIX works](https://ke7.github.io/helix/concepts/how-it-works.html
 
 ## Acknowledgments
 
-HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis and Zaharia ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633)). The mutation backends are [Antigravity CLI](https://antigravity.google/cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [Cursor CLI](https://cursor.com/cli/) and [OpenCode](https://opencode.ai/docs/cli/). HELIX was built with [OMAR](http://omar.tech/).
+HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis and Zaharia ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633)). The mutation backends are [Antigravity CLI](https://antigravity.google/cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [Cursor CLI](https://cursor.com/cli/), [OpenCode](https://opencode.ai/docs/cli/) and [pi](https://github.com/earendil-works/pi). HELIX was built with [OMAR](http://omar.tech/).
 
 <details>
 <summary>BibTeX for optimize_anything and Meta-Harness</summary>

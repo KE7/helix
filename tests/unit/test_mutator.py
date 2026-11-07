@@ -3051,7 +3051,7 @@ class TestBackendTranscriptCollection:
         out = worktree / ".helix_artifacts/backend_transcripts/opencode"
         assert not any(p.name.startswith(".") for p in out.iterdir())
 
-    @pytest.mark.parametrize("backend", ["codex", "cursor", "agy", "opencode"])
+    @pytest.mark.parametrize("backend", ["codex", "cursor", "agy", "opencode", "pi"])
     def test_missing_transcript_is_recorded_and_logged(
         self, home: Path, worktree: Path, backend: str, caplog
     ):
