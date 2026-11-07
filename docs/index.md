@@ -8,7 +8,7 @@ hide:
 
 # Evolve whole codebases with coding agents
 
-HELIX optimizes a whole repository against your evaluator. Each mutation is a multi-turn session of a coding agent (Claude Code, Codex, Cursor, OpenCode or Antigravity) that reads, edits, runs and tests code in its own git worktree before HELIX scores the result. Candidates are kept on an instance-level Pareto frontier, so a program that is best on any one case survives. The search loop comes from GEPA's [optimize_anything](https://doi.org/10.1145/3786335.3813167).
+HELIX optimizes a whole repository against your evaluator. Each mutation is a multi-turn session of a coding agent, such as Claude Code or Codex, that reads, edits, runs and tests code in its own git worktree before HELIX scores the result. Candidates are kept on an instance-level Pareto frontier, so a program that is best on any one case survives. The search loop comes from GEPA's [optimize_anything](https://doi.org/10.1145/3786335.3813167).
 
 [Get started](getting-started/quickstart.md){ .md-button .md-button--primary } [See the results](showcase.md){ .md-button }
 
