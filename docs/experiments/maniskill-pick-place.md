@@ -267,7 +267,7 @@ The 61 tests take about 2 minutes on CPU once ManiSkill's caches are built and t
 
 To run the evolution, copy the example out of the repository and run `./run.sh` there, as the example README's [How to run](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/README.md#how-to-run) shows. `run.sh` passes its arguments on to `helix evolve`.
 
-After the run, `helix best` prints the best candidate's id and scores, and `helix best --export <path>` copies its tree. `helix frontier` shows the Pareto frontier and `helix history` the lineage tree. `helix attempts` lists rejected attempts, if there were any, and `helix attempts --skips` lists the skipped generations.
+After the run, `helix best` prints the best candidate's id and scores, and `helix best --export <path>` copies its tree. `helix frontier` shows the Pareto frontier, `helix history` the lineage tree, and `helix log` every candidate in order with its outcome, score change and files changed. `helix attempts` lists rejected attempts, if there were any, and `helix attempts --skips` lists the skipped generations.
 
 ---
 

@@ -8,7 +8,7 @@
 ├── evaluator_manifest.json # Protected evaluator file hashes
 ├── state.json           # Generation, frontier, budget
 ├── timing.jsonl         # Timing spans, appended by every run
-├── lineage.json         # Full ancestry graph
+├── lineage.json         # Ancestry and files changed per candidate
 ├── worktrees/
 │   ├── g0-s0/           # Seed
 │   ├── g1-m1/           # Gen 1 Mutation 1
