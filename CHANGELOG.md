@@ -217,6 +217,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Unsandboxed opencode runs keep the operator's stored logins. Each
+  candidate's private opencode data directory now links the operator's
+  `auth.json`, so a run that authenticates through `opencode providers
+  login` rather than an API-key variable no longer finds no credentials.
+  The run's transcript is read from its own database; HELIX no longer reads
+  or copies the operator's `~/.local/share/opencode/opencode.db`, which
+  holds the opencode account's tokens and can be gigabytes.
+- Token and tool accounting:
+  - Claude cache reads were counted twice (once as cached input, once as
+    cache reads), inflating the "Cache" line and `state.json` budget totals.
+  - opencode usage counted only the first model call of a run; it is now
+    summed over every step, and a tool printing a number no longer sets the
+    output-token count.
+  - Tool counts read from the stdout stream or native transcript (claude,
+    codex, cursor, agy) reached `.helix_backend_result.json` but not the live
+    "Tools" line or the candidate's usage; both now match the artifact.
+  - A failed agy call now charges the tokens its JSON output reports.
+  - An agent call that runs out of `[sandbox].timeout_seconds` is now a
+    failed mutation that charges the tokens it reported and keeps its
+    transcript; before, both were lost and the worktree was left behind.
+- The change-summary call (`sibling_history`) no longer drops a successful
+  mutation when its prompt file cannot be written, and rolling back a
+  summary call that touched candidate files now restores a renamed file's
+  original, executable bits and symlinks, and never writes through a
+  symlink the summary call planted.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess

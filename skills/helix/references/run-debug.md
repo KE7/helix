@@ -134,7 +134,12 @@ The backend result JSON includes normalized usage metadata and
 for the invocation (`available: false` plus a `reason` when it could not be
 found).  HELIX always copies that native transcript for every backend, in
 Docker sandbox mode out of the `helix-auth-<backend>` volume before syncing
-changes back, otherwise from the operator's `$HOME`:
+changes back, otherwise from the operator's `$HOME`. The exception is an
+unsandboxed opencode run: it gets its own data directory,
+`<worktree>/.helix_opencode_state/.local/share/opencode`, holding a fresh
+`opencode.db` and a link to the operator's `auth.json` (so stored
+`opencode providers login` logins keep working), and its transcript is read
+from that database, never the operator's:
 
 | backend | native source (relative to `$HOME`) | artifact |
 | --- | --- | --- |
@@ -190,6 +195,9 @@ Symptoms and checks:
 - All zero minibatch scores: evaluator probably ignored `helix_batch.json` ids
   or keyed results by metric names instead of example ids.
 - Hangs: add evaluator-level timeouts or configure `[sandbox].timeout_seconds`.
+  An agent call that runs out of `timeout_seconds` is a failed mutation
+  ("timed out after Ns"): its edits are dropped, but the tokens it reported
+  are charged and its transcript is kept.
 - Missing dependencies in sandboxed evaluation: build private evaluator/simulator
   dependencies into `[evaluator.sidecar].image` and evaluator-client
   dependencies into `[evaluator.sidecar].runner_image`.

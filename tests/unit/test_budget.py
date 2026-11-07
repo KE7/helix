@@ -372,20 +372,23 @@ def test_backend_usage_parsing_charges_llm_budget(
             id="cursor",
         ),
         pytest.param(
+            # opencode 1.19 ``StepFinishPart``: ``tokens`` is
+            # ``{input, output, reasoning, cache: {read, write}}``.
             "opencode",
             "\n".join(
                 [
                     '{"type":"step_start","sessionID":"opencode-session"}',
                     (
                         '{"type":"step_finish","part":{"tokens":{"input":15,'
-                        '"output":11,"cached":24,"thoughts":9},"cost":0.35}}'
+                        '"output":11,"reasoning":9,"cache":{"read":24,"write":0}},'
+                        '"cost":0.35}}'
                     ),
                 ]
             ),
             {
                 "input_tokens": 15,
                 "output_tokens": 11,
-                "cached_input_tokens": 24,
+                "cache_read_input_tokens": 24,
                 "reasoning_tokens": 9,
             },
             id="opencode",
@@ -519,7 +522,7 @@ def test_backend_usage_parsing_under_sandbox_charges_llm_budget(
 def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
     tmp_path: Path, mocker
 ) -> None:
-    """Lock in parser support for cached_input_tokens and reasoning_tokens."""
+    """Lock in parser support for cache-read and reasoning tokens."""
     worktree = tmp_path / "claude"
     worktree.mkdir()
     stdout = json.dumps(
@@ -529,8 +532,8 @@ def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
             "usage": {
                 "input_tokens": 11,
                 "output_tokens": 7,
-                # ``cacheReadInputTokens`` is the alias the parser actually
-                # recognises (see ``_normalise_usage_stats`` aliases).
+                # Claude's camelCase cache-read spelling feeds the cache-read
+                # counter only, never ``cached_input_tokens`` as well.
                 "cacheReadInputTokens": 3,
             },
             "reasoning_tokens": 5,
@@ -550,12 +553,14 @@ def test_backend_usage_parsing_extracts_cached_and_reasoning_tokens(
 
     assert usage.input_tokens == 11
     assert usage.output_tokens == 7
-    assert usage.cached_input_tokens == 3
+    assert usage.cache_read_input_tokens == 3
+    assert usage.cached_input_tokens == 0
     assert usage.reasoning_tokens == 5
     assert usage.cost_usd == pytest.approx(0.31)
     state = make_state()
     budget.charge_llm_usage(state, usage, candidate_id="c", source="claude")
-    assert state.budget.cached_input_tokens == 3
+    assert state.budget.cache_read_input_tokens == 3
+    assert state.budget.cached_input_tokens == 0
     assert state.budget.reasoning_tokens == 5
 
 
