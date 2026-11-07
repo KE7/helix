@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.11 or newer, and git.
+- Python 3.12 or newer, and git.
 - A coding-agent CLI, installed and logged in, such as Claude Code (the default) or Codex. HELIX runs it as the mutation agent; [`[agent].backend`](../guides/configuration.md) lists the supported ones. Each mutation is one session of it, billed to your account.
 - Docker, optional but recommended, to run the agent in a sandbox.
 

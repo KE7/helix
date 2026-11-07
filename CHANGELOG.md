@@ -195,6 +195,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sum_scores` mapping in the result schema are unchanged and still
   reported; sums also still drive the acceptance gate, which does match
   upstream's `StrictImprovementAcceptance`.
+- **BREAKING**: HELIX requires Python 3.12 or newer (`requires-python =
+  ">=3.12"`); 3.11 is no longer supported or tested. Python 3.13, 3.14 and
+  3.15 are now tested in CI and listed in the package classifiers. The
+  lockfile moves to pydantic 2.14.1 (pydantic-core 2.50.1), whose wheels
+  cover 3.15; the locked pydantic-core 2.41.5 had none. An evaluator can still
+  run on another Python through its own command, as `examples/circle_packing`
+  does with 3.11.
 
 ### Fixed
 - Seedless mode now gives the agent its task. Every backend is told to read
