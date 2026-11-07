@@ -8,7 +8,7 @@
 
 HELIX evolves a `solver/` package that controls a Franka Panda on three ManiSkill 3 tasks. HELIX's coding-agent mutator rewrites the package, and the evaluator runs `solver.run(ctx)` once per trial and scores the rollout. Neither the evaluator nor the seed or evolved solver calls an LLM. HELIX is also the optimizer in [RHO](https://rho-robotics.github.io) (Robotics Harness Optimization, arXiv:2606.16458).
 
-The example is [`examples/maniskill_pick_place/`](../../examples/maniskill_pick_place/).
+The example is [`examples/maniskill_pick_place/`](https://github.com/KE7/helix/tree/main/examples/maniskill_pick_place).
 
 | | Value |
 |---|---|
@@ -26,7 +26,7 @@ In the recorded run, with the agent in HELIX's Docker sandbox and every solver i
 
 ## Configuration
 
-The settings in [`examples/maniskill_pick_place/helix.toml`](../../examples/maniskill_pick_place/helix.toml), without the `objective`, the `[agent].background` text and the comments:
+The settings in [`examples/maniskill_pick_place/helix.toml`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/helix.toml), without the `objective`, the `[agent].background` text and the comments:
 
 ```toml
 [evaluator]
@@ -70,17 +70,17 @@ The mutation agent runs in HELIX's Docker sandbox and the evaluator runs on the 
 
 ### The check service
 
-The sandboxed agent cannot run ManiSkill: its container has no Vulkan driver, and on Apple Silicon it is arm64 Linux, for which ManiSkill's mplib dependency has no wheels. So [`check.py`](../../examples/maniskill_pick_place/check.py) sends the candidate's `solver/` files and the ids to [`check_server.py`](../../examples/maniskill_pick_place/check_server.py) on the host, at `http://host.docker.internal:8765`. The service refuses any id outside `splits/train` and any file that is not a `.py` file under `solver/`. It writes the files into a private copy of the example, runs `evaluate.py` there, so the solver goes through the same container as in HELIX's own evaluations, and returns each trial's score and side_info. [`run.sh`](../../examples/maniskill_pick_place/run.sh) starts the service, runs `helix evolve` and stops the service when HELIX exits. On macOS the service listens on 127.0.0.1, which Docker Desktop's `host.docker.internal` reaches; on Linux, `run.sh` binds it to the Docker bridge gateway.
+The sandboxed agent cannot run ManiSkill: its container has no Vulkan driver, and on Apple Silicon it is arm64 Linux, for which ManiSkill's mplib dependency has no wheels. So [`check.py`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/check.py) sends the candidate's `solver/` files and the ids to [`check_server.py`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/check_server.py) on the host, at `http://host.docker.internal:8765`. The service refuses any id outside `splits/train` and any file that is not a `.py` file under `solver/`. It writes the files into a private copy of the example, runs `evaluate.py` there, so the solver goes through the same container as in HELIX's own evaluations, and returns each trial's score and side_info. [`run.sh`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/run.sh) starts the service, runs `helix evolve` and stops the service when HELIX exits. On macOS the service listens on 127.0.0.1, which Docker Desktop's `host.docker.internal` reaches; on Linux, `run.sh` binds it to the Docker bridge gateway.
 
 ### The splits
 
-The training set holds the first 11 trials of each family. That includes the four push trials among `pushcube__0` to `__25` whose goals lie farthest out (`__4`, `__7`, `__8` and `__10`, see [The far-goal pushes](#the-far-goal-pushes)), which runs 1 to 8 never trained on. Validation uses `*__26..31`, which no earlier run used. The held-out trial numbers were drawn once with `random.Random(20261027).sample(range(1_000_000, 10_000_000), 30)` and are listed only in [`test_benchmark.py`](maniskill-pick-place/test_benchmark.py). Any `<family>__<n>` is a valid trial, so an agent can evaluate arbitrary ids, but it cannot pick out the held-out ones.
+The training set holds the first 11 trials of each family. That includes the four push trials among `pushcube__0` to `__25` whose goals lie farthest out (`__4`, `__7`, `__8` and `__10`, see [The far-goal pushes](#the-far-goal-pushes)), which runs 1 to 8 never trained on. Validation uses `*__26..31`, which no earlier run used. The held-out trial numbers were drawn once with `random.Random(20261027).sample(range(1_000_000, 10_000_000), 30)` and are listed only in [`test_benchmark.py`](https://github.com/KE7/helix/blob/main/docs/experiments/maniskill-pick-place/test_benchmark.py). Any `<family>__<n>` is a valid trial, so an agent can evaluate arbitrary ids, but it cannot pick out the held-out ones.
 
 ---
 
 ## Seed Solution
 
-The seed [`solver/`](../../examples/maniskill_pick_place/solver/) is a task router (`main.py`), a shared `common.py`, and one routine per family:
+The seed [`solver/`](https://github.com/KE7/helix/tree/main/examples/maniskill_pick_place/solver) is a task router (`main.py`), a shared `common.py`, and one routine per family:
 
 - `pushcube` moves to z = 8 cm over the cube, then over the goal, and never touches the cube.
 - `pickcube` closes the gripper at z = 12 cm over the cube, about 10 cm above its center, then moves to the goal.
@@ -92,9 +92,9 @@ The seed scores 0.064 on validation and succeeds on 0 of 18 trials. Its family m
 
 ## Evaluation
 
-[`evaluate.py`](../../examples/maniskill_pick_place/evaluate.py) runs as `python3 -I evaluate.py`. Isolated mode leaves the working directory off `sys.path`, so a top-level file that a candidate adds, such as a `json.py`, cannot shadow a module the evaluator imports. Three kinds of process take part:
+[`evaluate.py`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/evaluate.py) runs as `python3 -I evaluate.py`. Isolated mode leaves the working directory off `sys.path`, so a top-level file that a candidate adds, such as a `json.py`, cannot shadow a module the evaluator imports. Three kinds of process take part:
 
-- **The parent** builds the solver image from [`solver.Dockerfile`](../../examples/maniskill_pick_place/solver.Dockerfile) if it does not exist yet (Python 3.12 with numpy, run as a non-root user), reads `helix_batch.json`, starts an env process for the batch and prints the one `HELIX_RESULT` line. It never imports `sim` or `solver`.
+- **The parent** builds the solver image from [`solver.Dockerfile`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/solver.Dockerfile) if it does not exist yet (Python 3.12 with numpy, run as a non-root user), reads `helix_batch.json`, starts an env process for the batch and prints the one `HELIX_RESULT` line. It never imports `sim` or `solver`.
 - **The env process** points file descriptors 1 and 2 at `/dev/null`, so nothing it or its children print can reach HELIX's pipes. It loads `sim` by file path, builds the ManiSkill environments the batch needs and tells the parent it is ready, so loading the simulator does not count against any trial's time limit. It copies `solver/` and `evaluate.py` into a private temporary directory, then builds each trial, serves the solver's requests and scores the trial.
 - **A solver container per trial** runs `python3 -I evaluate.py --solver-client`, which loads `solver` by file path and calls `solver.run(ctx)`. The container has no network, a read-only filesystem apart from a small `/tmp`, no capabilities, a pid and memory limit, and only the private copy mounted, read-only. The solver's `ctx` carries `task_family`, `instruction` and the four primitives, and each primitive is a JSON line to the env process over the container's stdin and stdout. The solver never has `sim` or the trial, and it cannot write to the example, the uv cache or anything else on the host, so a candidate can change its score only by moving the robot.
 
@@ -106,7 +106,7 @@ An instance id must be `<family>__<n>`, where the family is `pushcube`, `pickcub
 
 Each trial rebuilds the ManiSkill scene on reset (`reconfigure=True`), at about 0.05 s per trial. Without the rebuild, `pushcube__10` ended with a different cube position when it ran after `pushcube__4` in the same process. A test runs `pushcube__10` under the reference policy before and after `pushcube__4` and checks that the final cube position is the same. Runs 1 to 5 did not have the rebuild (see [Earlier Runs](#earlier-runs)).
 
-A trial has a budget of 400 control steps, spent by `move_to` and the gripper primitives. [`API_REFERENCE.md`](../../examples/maniskill_pick_place/API_REFERENCE.md) gives the cost of each call and what a call returns when the budget runs out. Once `steps_left` is 0, the next call to `move_to` or a gripper primitive raises `BudgetExhausted` in the solver process, which ends `solver.run`, and the trial is scored as it stands. `BudgetExhausted` derives from `BaseException`, so a solver's `except Exception` cannot swallow it, and a solver that swallows it anyway gets no further replies.
+A trial has a budget of 400 control steps, spent by `move_to` and the gripper primitives. [`API_REFERENCE.md`](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/API_REFERENCE.md) gives the cost of each call and what a call returns when the budget runs out. Once `steps_left` is 0, the next call to `move_to` or a gripper primitive raises `BudgetExhausted` in the solver process, which ends `solver.run`, and the trial is scored as it stands. `BudgetExhausted` derives from `BaseException`, so a solver's `except Exception` cannot swallow it, and a solver that swallows it anyway gets no further replies.
 
 `move_to` drives the TCP with ManiSkill's `pd_ee_delta_pose` controller, one control step at a time toward the target. Near the edge of the arm's reach the controller finds no IK solution for a long step and leaves the arm in place. So after a step that does not move the TCP, `move_to` halves the step length, and it doubles it again after each step that does, so one brief stall does not slow the rest of the move. It ends the move as `stalled` when 5 mm steps do not move the TCP. With the gripper pointing down, the TCP reaches about x = 0.18 at table height near y = 0, short of the x = 0.25 that requests are clamped to, and `API_REFERENCE.md` says so. Run 8 was the first run with the stall handling (see [The far-goal pushes](#the-far-goal-pushes)).
 
@@ -140,7 +140,7 @@ The recorded run is run 11, the last of eleven (see [Earlier Runs](#earlier-runs
 
 `helix timing` reports "2 accepted, 14 rejected" because it counts the 14 skipped generations as rejected; no mutation was rejected.
 
-[`recorded_run.json`](maniskill-pick-place/recorded_run.json) holds these figures except the mutation counts and the wall clock, trimmed from the run's `.helix/` directory and the agent's transcript. It also has the lineage, the per-trial validation scores, the skip records with their minibatches, the agent's tool calls, and the replay of `g1-s1` on every train, validation and held-out trial.
+[`recorded_run.json`](https://github.com/KE7/helix/blob/main/docs/experiments/maniskill-pick-place/recorded_run.json) holds these figures except the mutation counts and the wall clock, trimmed from the run's `.helix/` directory and the agent's transcript. It also has the lineage, the per-trial validation scores, the skip records with their minibatches, the agent's tool calls, and the replay of `g1-s1` on every train, validation and held-out trial.
 
 ### How the search went
 
@@ -152,7 +152,7 @@ This is the case the larger training set cannot prevent: a first mutation that s
 
 `g1-s1` succeeds on all 90 held-out trials, 30 in each family, and with the train and validation trials on 141 of 141. The benchmark test `test_recorded_evolved_solver_reproduces` replays this solver on all 141 trials and fails if any trial's outcome changes (see [Reproducing](#reproducing)).
 
-The scripted [reference policy](maniskill-pick-place/reference_policy.py) is outside the copied example. It solves all 33 training and 18 validation trials, and the tests use it to check that each training trial can be solved with the four primitives. On the held-out trials it scores 89 of 90, missing `pushcube__9141871`.
+The scripted [reference policy](https://github.com/KE7/helix/blob/main/docs/experiments/maniskill-pick-place/reference_policy.py) is outside the copied example. It solves all 33 training and 18 validation trials, and the tests use it to check that each training trial can be solved with the four primitives. On the held-out trials it scores 89 of 90, missing `pushcube__9141871`.
 
 ### Transcript audit
 
@@ -170,7 +170,7 @@ It never ran the evaluator or the simulator itself. It also could not have: neit
 
 ## What the Agent Wrote
 
-The evolved package is [`g1-s1`](maniskill-pick-place/evolved/solver/). Its `solver/` diff against the seed is 3 files, +55/-10 lines, all in the three task routines. `main.py`, `common.py` and the `__init__.py` files are unchanged.
+The evolved package is [`g1-s1`](https://github.com/KE7/helix/tree/main/docs/experiments/maniskill-pick-place/evolved/solver). Its `solver/` diff against the seed is 3 files, +55/-10 lines, all in the three task routines. `main.py`, `common.py` and the `__init__.py` files are unchanged.
 
 - `pushcube` closes the gripper to make a pusher, moves to z = 10 cm over a point 6 cm behind the cube on the side away from the goal, and descends to z = 2 cm. In up to 8 rounds it then reads the cube's position and stops once the cube is within 1 cm of the goal or fewer than 20 steps are left. Otherwise it moves the TCP from where it is toward the goal, along the line from the cube to the goal, by the remaining distance plus 2 cm, at most 8 cm.
 - `pickcube` opens, moves to z = 10 cm over the cube, descends to its center and closes. It rises to z = 12 cm, moves to the goal point, then reads where the cube actually is and moves once more by the cube's offset from the goal.
@@ -253,9 +253,9 @@ Before run 11 the agent could read `sim/` and `evaluate.py` and run the evaluato
 
 ## Reproducing
 
-The simulator was tested on macOS (Apple M3 Pro) and in Docker on Debian 13 (amd64). The Debian check ran on the example as it was before run 7; the changes made since were tested on macOS only. Both platforms need a Vulkan driver, and the example now needs Docker for the agent sandbox and the solver containers. The example README's [Requirements](../../examples/maniskill_pick_place/README.md#requirements) section lists the setup. Before the first run, log the sandbox in to Claude with `helix sandbox login claude`.
+The simulator was tested on macOS (Apple M3 Pro) and in Docker on Debian 13 (amd64). The Debian check ran on the example as it was before run 7; the changes made since were tested on macOS only. Both platforms need a Vulkan driver, and the example now needs Docker for the agent sandbox and the solver containers. The example README's [Requirements](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/README.md#requirements) section lists the setup. Before the first run, log the sandbox in to Claude with `helix sandbox login claude`.
 
-The benchmark tests are in [`maniskill-pick-place/test_benchmark.py`](maniskill-pick-place/test_benchmark.py). Run them from the repository root:
+The benchmark tests are in [`maniskill-pick-place/test_benchmark.py`](https://github.com/KE7/helix/blob/main/docs/experiments/maniskill-pick-place/test_benchmark.py). Run them from the repository root:
 
 ```bash
 uv run --no-project --python 3.12 \
@@ -265,7 +265,7 @@ uv run --no-project --python 3.12 \
 
 The 61 tests take about 2 minutes on CPU once ManiSkill's caches are built and the solver image exists; the Docker-based tests are skipped if Docker is not running. The first run takes longer while uv installs the pinned packages, ManiSkill builds its caches and Docker builds the solver image. The 141-trial replay takes about 70 s, so it raises the repository's 60 s per-test limit to 600 s. They cover the ids and splits, deterministic reset, independence from earlier trials, the primitives, reach, stall recovery and step budget, final-state scoring and `overshot_goal`, the `HELIX_RESULT` protocol, the reference policy on all 33 training trials, the seed, and a replay of the evolved solver on all 141 train, validation and held-out trials. They also cover the evaluator's defenses: a solver that prints a fake `HELIX_RESULT` line; one that reaches for `sim`, writes to its copy of the example or to the image, or opens a network connection from its container; a top-level `json.py`; a pickled request; a non-finite `move_to`; a solver that ignores SIGTERM and leaves detached processes running; a stuck or exiting solver; and a simulator that cannot start. `--unsafe-local` mode and the check service's refusal of non-training ids and non-solver files are tested as well. The tests sit outside pytest's `testpaths`, so a default `pytest` run skips them.
 
-To run the evolution, copy the example out of the repository and run `./run.sh` there, as the example README's [How to run](../../examples/maniskill_pick_place/README.md#how-to-run) shows. `run.sh` passes its arguments on to `helix evolve`.
+To run the evolution, copy the example out of the repository and run `./run.sh` there, as the example README's [How to run](https://github.com/KE7/helix/blob/main/examples/maniskill_pick_place/README.md#how-to-run) shows. `run.sh` passes its arguments on to `helix evolve`.
 
 After the run, `helix best` prints the best candidate's id and scores, and `helix best --export <path>` copies its tree. `helix frontier` shows the Pareto frontier and `helix history` the lineage tree. `helix attempts` lists rejected attempts, if there were any, and `helix attempts --skips` lists the skipped generations.
 

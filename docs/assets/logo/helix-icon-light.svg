@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" role="img" aria-label="HELIX">
+<title>HELIX</title>
+<path transform="translate(343.15 262.23) scale(0.2446 -0.2446)" d="M233 260 592 129V-13L67 189V332L592 535V392Z" fill="#6f3aa0"/>
+<path transform="translate(495.43 262.23) scale(0.2446 -0.2446)" d="M593 189 68 -13V129L427 260L68 392V535L593 332Z" fill="#6f3aa0"/>
+<path transform="translate(404.89 840.83) scale(0.2213 -0.2213)" d="M273 598 263 397Q258 294 162 294V285Q258 285 263 182L273 -20Q275 -62 349 -62V-160H258Q201 -160 159.0 -131.0Q117 -102 117 -48V195Q117 223 92.0 236.5Q67 250 30 250V329Q64 329 90.5 343.5Q117 358 117 386V625Q117 679 159.0 708.0Q201 737 258 737H349V639Q275 639 273 598Z" fill="#6f3aa0"/>
+<path transform="translate(509.01 840.83) scale(0.2213 -0.2213)" d="M272 625V386Q272 358 298.5 343.5Q325 329 359 329V250Q322 250 297.0 236.5Q272 223 272 195V-48Q272 -102 230.0 -131.0Q188 -160 131 -160H40V-62Q114 -62 116 -20L126 182Q131 285 227 285V294Q131 294 126 397L116 598Q114 639 40 639V737H131Q188 737 230.0 708.0Q272 679 272 625Z" fill="#6f3aa0"/>
+<mask id="milight" maskUnits="userSpaceOnUse"><rect x="12.099999999999966" y="-45.30000000000001" width="975.8000000000001" height="1090.6" fill="#fff"/><path d="M785.0 90.0 C785.0 541.0 215.0 459.0 215.0 910.0" stroke="#000" stroke-width="221.9" fill="none"/></mask>
+<path d="M215.0 90.0 C215.0 541.0 785.0 459.0 785.0 910.0" stroke="#1497b3" stroke-width="135.3" fill="none" mask="url(#milight)"/>
+<path d="M785.0 90.0 C785.0 541.0 215.0 459.0 215.0 910.0" stroke="#b8269f" stroke-width="135.3" fill="none"/>
+</svg>
