@@ -23,7 +23,7 @@ print("HELIX_RESULT=" + json.dumps([[score, {"feedback": feedback}]]))
 
 ## A dataset with train and validation splits
 
-Set the split sizes, and HELIX samples ids from `range(train_size)` and `range(val_size)`:
+Set the split sizes, and HELIX samples ids from them: `"0"` to `"199"` for training here, as strings. With `evolution.batch_sampler = "stratified"`, ids are opaque strings such as `"group_alpha__case_3"` instead, so key your examples by id rather than by position:
 
 ```toml
 [dataset]
@@ -36,12 +36,12 @@ val_size = 50
 import json, os
 
 split = os.environ["HELIX_SPLIT"]                  # "train" or "val"
-examples = load_examples(split)                    # your code; a stable order
+examples = load_examples(split)                    # your code: a dict from id to example
 ids = json.load(open("helix_batch.json"))          # e.g. ["3", "17", "42"]
 
 results = []
 for i in ids:
-    ok, why = run_one(examples[int(i)])           # your code
+    ok, why = run_one(examples[i])                # your code
     results.append([1.0 if ok else 0.0, {"feedback": why}])
 print("HELIX_RESULT=" + json.dumps(results))
 ```

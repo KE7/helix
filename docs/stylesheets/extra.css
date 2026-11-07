@@ -52,6 +52,12 @@
   border-color: #0f7f99;
   color: #ffffff;
 }
+/* Dark text on the light dark-mode magenta keeps hover text readable. */
+[data-md-color-scheme="slate"] .md-typeset .md-button:hover,
+[data-md-color-scheme="slate"] .md-typeset .md-button:focus {
+  color: #0d1117;
+}
+
 [data-md-color-scheme="slate"] .md-typeset .md-button--primary {
   background-color: #3fc1da;
   border-color: #3fc1da;

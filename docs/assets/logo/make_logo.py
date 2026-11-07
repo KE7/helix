@@ -45,12 +45,6 @@ def bez(p0, p1, p2, p3, t):
     return tuple(u**3 * a + 3 * u * u * t * b + 3 * u * t * t * c + t**3 * d for a, b, c, d in zip(p0, p1, p2, p3))
 
 
-def x_at(curve, y, n=400):
-    """x of a monotone-in-y cubic at height y (by sampling)."""
-    best = min((abs(bez(*curve, i / n)[1] - y), bez(*curve, i / n)[0]) for i in range(n + 1))
-    return best[1]
-
-
 def helix_x(x0, top, w, h, stroke, c, rungs, uid, margin=0.06):
     """Two crossing strands in a w x h box at (x0, top). Returns SVG markup."""
     inset = stroke / 2
@@ -111,6 +105,21 @@ def place_pair(pair, cyan, mag, x0, top, w, h, stroke, color, margin):
             d = np.hypot(xs_[:, None] - near[None, :, 0], y - near[None, :, 1]).min(1)
             free[r] = d > stroke / 2
 
+    # For every row and column: the nearest strand row at or below it
+    # (n_rows if none) and the nearest one above it (-1 if none), so each gap
+    # query below is a lookup instead of a scan.
+    n_rows = len(ys_)
+    blocked = ~free
+    next_blocked = np.full(blocked.shape, n_rows)
+    prev_blocked = np.full(blocked.shape, -1)
+    for r in range(n_rows - 1, -1, -1):
+        below = next_blocked[r + 1] if r + 1 < n_rows else np.full(len(xs_), n_rows)
+        next_blocked[r] = np.where(blocked[r], r, below)
+    for r in range(n_rows):
+        above = prev_blocked[r - 1] if r > 0 else np.full(len(xs_), -1)
+        prev_blocked[r] = np.where(blocked[r], r, above)
+    ys_ext = np.append(ys_, np.nan)  # index n_rows = no strand
+
     def strand_clearance(bh, yc):
         bw = aspect * bh
         bx0, bx1, by0, by1 = cx - bw / 2, cx + bw / 2, yc - bh / 2, yc + bh / 2
@@ -125,11 +134,13 @@ def place_pair(pair, cyan, mag, x0, top, w, h, stroke, color, margin):
         cols = np.where((xs_ >= cx - bw / 2) & (xs_ <= cx + bw / 2))[0]
         if which == "top":
             r0 = np.searchsorted(ys_, by1)
-            far = min((ys_[r0 + np.argmax(~free[r0:, c])] - by1) if (~free[r0:, c]).any() else h for c in cols)
-            return by0 - top, far
+            nb = next_blocked[r0, cols] if r0 < n_rows else np.full(len(cols), n_rows)
+            far = np.where(nb < n_rows, ys_ext[nb] - by1, h).min()
+            return by0 - top, float(far)
         r1 = np.searchsorted(ys_, by0)
-        far = min((by0 - ys_[np.where(~free[:r1, c])[0].max()]) if (~free[:r1, c]).any() else h for c in cols)
-        return bottom - by1, far
+        pb = prev_blocked[r1 - 1, cols] if r1 > 0 else np.full(len(cols), -1)
+        far = np.where(pb >= 0, by0 - ys_[np.maximum(pb, 0)], h).min()
+        return bottom - by1, float(far)
 
     best = None
     for bh in np.linspace(0.45 * h, 0.03 * h, 300):
@@ -149,6 +160,11 @@ def place_pair(pair, cyan, mag, x0, top, w, h, stroke, color, margin):
         if strand_clearance(bh, yc) >= margin and min(e, f) >= margin:
             best = (bh, yc)
             break
+    if best is None:
+        raise SystemExit(
+            f"the {chars!r} rung does not fit in the {which} opening of the X with a "
+            f"margin of {margin:.1f}: lower the margin, thin the strands or widen the X"
+        )
     bh, yc = best
     if DEBUG:
         e, f = gaps(bh, yc)

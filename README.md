@@ -2,14 +2,14 @@
 
 <h1>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/helix-wordmark-dark.svg">
-  <img src="docs/assets/logo/helix-wordmark-light.svg" alt="HELIX" width="360">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/logo/helix-wordmark-dark.svg">
+  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/logo/helix-wordmark-light.svg" alt="HELIX" width="360">
 </picture>
 </h1>
 
 ### 🧬 Evolve whole codebases with coding agents
 
-[![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml)
+[![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://github.com/KE7/helix/blob/main/LICENSE) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml)
 
 [Docs](https://ke7.github.io/helix/) · [Quickstart](#quickstart) · [Results](#results) · [Built with HELIX](#built-with-helix) · [Examples](#examples)
 
@@ -19,18 +19,18 @@
   <tr><th></th><th>Seed</th><th>Evolved by HELIX</th></tr>
   <tr>
     <td><b>Push</b></td>
-    <td><img src="docs/assets/maniskill/seed-pushcube.gif" width="320" alt="Seed solver on PushCube: the arm barely moves and the blue cube stays put"></td>
-    <td><img src="docs/assets/maniskill/evolved-pushcube.gif" width="320" alt="Evolved solver on PushCube: the gripper pushes the blue cube onto the red and white target"></td>
+    <td><img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/maniskill/seed-pushcube.gif" width="320" alt="Seed solver on PushCube: the arm barely moves and the blue cube stays put"></td>
+    <td><img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/maniskill/evolved-pushcube.gif" width="320" alt="Evolved solver on PushCube: the gripper pushes the blue cube onto the red and white target"></td>
   </tr>
   <tr>
     <td><b>Pick</b></td>
-    <td><img src="docs/assets/maniskill/seed-pickcube.gif" width="320" alt="Seed solver on PickCube: the red cube is not lifted"></td>
-    <td><img src="docs/assets/maniskill/evolved-pickcube.gif" width="320" alt="Evolved solver on PickCube: the red cube is lifted to the green goal marker"></td>
+    <td><img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/maniskill/seed-pickcube.gif" width="320" alt="Seed solver on PickCube: the red cube is not lifted"></td>
+    <td><img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/maniskill/evolved-pickcube.gif" width="320" alt="Evolved solver on PickCube: the red cube is lifted to the green goal marker"></td>
   </tr>
   <tr>
     <td><b>Stack</b></td>
-    <td><img src="docs/assets/maniskill/seed-stackcube.gif" width="320" alt="Seed solver on StackCube: the red cube is not stacked"></td>
-    <td><img src="docs/assets/maniskill/evolved-stackcube.gif" width="320" alt="Evolved solver on StackCube: the red cube is placed on the green cube"></td>
+    <td><img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/maniskill/seed-stackcube.gif" width="320" alt="Seed solver on StackCube: the red cube is not stacked"></td>
+    <td><img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/maniskill/evolved-stackcube.gif" width="320" alt="Evolved solver on StackCube: the red cube is placed on the green cube"></td>
   </tr>
 </table>
 
@@ -85,16 +85,16 @@ HELIX never touches your branch, HEAD or remote: every candidate lives in a deta
 
 | Example | What HELIX evolves | Result | Checked by |
 |---|---|---|---|
-| [`maniskill_pick_place`](examples/maniskill_pick_place/) | A multi-file `solver/` package that drives a Franka Panda through push, pick and stack in ManiSkill 3 | 0.064 → 1.0 validation in one mutation ([write-up](https://ke7.github.io/helix/experiments/maniskill-pick-place.html)) | 90 held-out trials the agent never sees |
-| [`circle_packing`](examples/circle_packing/) | optimize_anything's circle-packing seed code and refiner prompt: pack 26 circles in the unit square | [Write-up](https://ke7.github.io/helix/experiments/circle-packing.html) | GEPA's own fitness function |
-| [`web_researcher`](examples/web_researcher/) | A question-answering agent for software questions whose answers change over time | Run it to produce results | Versions fetched live from PyPI and endoflife.date at scoring time |
+| [`maniskill_pick_place`](https://github.com/KE7/helix/tree/main/examples/maniskill_pick_place) | A multi-file `solver/` package that drives a Franka Panda through push, pick and stack in ManiSkill 3 | 0.064 → 1.0 validation in one mutation ([write-up](https://ke7.github.io/helix/experiments/maniskill-pick-place.html)) | 90 held-out trials the agent never sees |
+| [`circle_packing`](https://github.com/KE7/helix/tree/main/examples/circle_packing) | optimize_anything's circle-packing seed code and refiner prompt: pack 26 circles in the unit square | [Write-up](https://ke7.github.io/helix/experiments/circle-packing.html) | GEPA's own fitness function |
+| [`web_researcher`](https://github.com/KE7/helix/tree/main/examples/web_researcher) | A question-answering agent for software questions whose answers change over time | Run it to produce results | Versions fetched live from PyPI and endoflife.date at scoring time |
 
 ## How it works
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/helix-loop-dark.svg">
-  <img src="docs/assets/helix-loop-light.svg" width="100%" alt="The HELIX search loop: pick a parent from the instance-level Pareto frontier, let a coding agent edit it over many turns in its own worktree, gate the child against its parent on a training minibatch, score it on the full validation set, and add it to the frontier if it is the best on some instance. Both scoring steps use a protected evaluator.">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/helix-loop-dark.svg">
+  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/helix-loop-light.svg" width="100%" alt="The HELIX search loop: pick a parent from the instance-level Pareto frontier, let a coding agent edit it over many turns in its own worktree, gate the child against its parent on a training minibatch, score it on the full validation set, and add it to the frontier if it is the best on some instance. Both scoring steps use a protected evaluator.">
 </picture>
 </p>
 
@@ -157,4 +157,4 @@ HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, 
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+BSD 3-Clause. See [LICENSE](https://github.com/KE7/helix/blob/main/LICENSE).
