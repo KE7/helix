@@ -43,8 +43,7 @@ When a design question comes up, check here first; when a review settles one, ad
 14. Before you push, run what CI runs:
 
     ```bash
-    uv run --all-extras --python 3.11 pytest tests/unit/ -q
-    uv run --all-extras --python 3.12 pytest tests/unit/ -q
+    for v in 3.11 3.12 3.13 3.14 3.15; do uv run --all-extras --python $v pytest tests/unit/ -q; done
     uv run --all-extras mypy --strict src/helix/
     uv run --all-extras ruff check src/
     uv run --only-group docs mkdocs build --strict
