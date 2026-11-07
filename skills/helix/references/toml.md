@@ -112,7 +112,10 @@ val_path = "data/val.jsonl"
 
 Seedless mode asks the backend to create the initial candidate from the
 objective instead of starting from the current working tree. `train_path` and
-`val_path` are prompt-grounding paths, not runtime dataset ownership.
+`val_path` are prompt-grounding paths, not runtime dataset ownership. The seed
+prompt does not include `[evaluator].command`, so put the file name, callable
+and input/output contract the evaluator expects in `objective` or
+`[agent].background`.
 
 ## Evolution
 

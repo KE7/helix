@@ -1530,29 +1530,63 @@ def test_backend_transcript_sync_refuses_a_symlinked_directory(
     assert not copied.exists() or not any(copied.rglob("reference.py"))
 
 
-def test_synthetic_repo_ignores_what_the_candidate_repo_excludes(tmp_path: Path):
-    """HELIX artifacts are ignored through the candidate repo's exclude file,
-    not its ``.gitignore``, so the synthetic repo must carry that file too or
-    the agent's ``git status`` would list them as its own changes."""
-    from helix.mutator import _ignore_helix_artifacts
-    from helix.sandbox import _copy_tree_contents, _init_synthetic_git_repo
+def test_synthetic_repo_ignores_helix_artifacts(tmp_path: Path):
+    """HELIX artifacts are not in the candidate's ``.gitignore``, so the
+    synthetic repo must ignore them itself, even under an allowlist
+    ``.gitignore`` that re-includes ``*.md``."""
+    from helix.sandbox import _init_synthetic_git_repo
 
-    source = tmp_path / "candidate"
-    source.mkdir()
-    subprocess.run(["git", "init", "-q", "."], cwd=source, check=True)
-    _ignore_helix_artifacts(source)
-    (source / "solver.py").write_text("x = 1\n")
-    (source / "helix_batch.json").write_text("[]\n")
-    (source / ".agent_task_prompt.md").write_text("prompt\n")
     workspace = tmp_path / "workspace"
-    _copy_tree_contents(source, workspace)
+    workspace.mkdir()
+    (workspace / ".gitignore").write_text("*\n!*.py\n!*.md\n!*.json\n")
+    (workspace / "solver.py").write_text("x = 1\n")
+    (workspace / "helix_batch.json").write_text("[]\n")
+    (workspace / ".agent_task_prompt.md").write_text("prompt\n")
 
-    _init_synthetic_git_repo(workspace, source)
+    _init_synthetic_git_repo(workspace)
 
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=workspace, capture_output=True, text=True, check=True
     ).stdout.split()
     assert tracked == ["solver.py"]
+
+
+def test_host_git_exclusions_never_reach_the_agent_workspace(tmp_path: Path, mocker):
+    """The host repo's ``info/exclude`` is the operator's and can name
+    held-out files; the agent's workspace metadata must not carry it."""
+    source = tmp_path / "candidate"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=source, check=True)
+    (source / ".git" / "info").mkdir(parents=True, exist_ok=True)
+    (source / ".git" / "info" / "exclude").write_text(
+        "data/val/heldout_problem_047.json\n"
+    )
+    (source / "solver.py").write_text("x = 1\n")
+    seen: list[str] = []
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            for path in (workspace / ".git").rglob("*"):
+                if path.is_file():
+                    seen.append(path.read_text(errors="replace"))
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+
+    run_sandboxed_command(
+        ["claude", "-p", "prompt"],
+        cwd=source,
+        env={},
+        sandbox=SandboxConfig(enabled=True, omit_from_agent=["data/val"]),
+        scope="agent",
+        sync_back=True,
+        image="helix-test:latest",
+        agent_backend="claude",
+    )
+
+    assert seen, "the workspace should carry HELIX's own exclude file"
+    assert not any("heldout_problem_047" in text for text in seen)
 
 
 @pytest.mark.parametrize("replacement", ["removed", "symlink", "file"])

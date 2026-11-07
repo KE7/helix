@@ -105,18 +105,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds them to the repository's git exclude file (`.git/info/exclude`) instead,
   so a first child no longer "changes" `.gitignore` and its commit holds only
   the agent's work, and a `.gitignore` symlinked to another file (say the
-  evaluator) is never written through. The sandbox's workspace repository
-  carries the same rules. Because the exclude file is shared, those names are
-  also ignored by `git status` in your project checkout.
+  evaluator) is never written through. Snapshots also leave these files out
+  explicitly, so a `.gitignore` that re-includes them (`*` then `!*.md`) can
+  no longer commit `.agent_task_prompt.md` into a candidate. The sandbox's
+  workspace repository ignores the same names and nothing else from your
+  repository's exclude file. Because the exclude file is shared, those names
+  are also ignored by `git status` in your project checkout.
 - With `sibling_history = true`, each earlier child's score is now its mean on
   the train minibatch it was gated on (the full train set without a
   minibatch), not its val score: the history goes into the mutation prompt,
-  which like GEPA's reflective proposer sees only training data. Scores from
-  earlier 0.3 development builds already in `state.json` are shown as stored.
+  which like GEPA's reflective proposer sees only training data.
 - The seedless seed prompt no longer shows `[evaluator].command`, which can
   carry an inline scorer or held-out ids; GEPA's seed prompt has no evaluator
-  either. Describe the expected interface in `objective` or
-  `[agent].background` instead.
+  either. State the file name, callable and input/output contract the
+  evaluator expects in `objective` or `[agent].background`.
 - `[sandbox].omit_from_agent` entries are normalised like
   `evaluator.protected_files`: `/abs/project/evaluate.py` and
   `data/../evaluate.py` now omit `evaluate.py` (they used to match nothing, so

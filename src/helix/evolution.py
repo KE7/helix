@@ -110,6 +110,7 @@ from helix.trace import TRACE, EventType
 from helix.worktree import (
     create_seed_worktree,
     create_empty_seed_worktree,
+    helix_artifact_pathspec,
     remove_worktree,
     snapshot_candidate,
 )
@@ -860,7 +861,7 @@ def _candidate_content_key(candidate: Candidate) -> str:
                 shutil.copyfile(real_index, temp_index)
             env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
             subprocess.run(
-                ["git", "add", "-A"],
+                ["git", "add", "-A", *helix_artifact_pathspec()],
                 cwd=worktree,
                 env=env,
                 check=True,

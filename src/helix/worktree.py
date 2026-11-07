@@ -50,6 +50,55 @@ def helix_git_env() -> dict[str, str]:
     }
 
 
+#: Files HELIX writes into a candidate worktree that are never part of the
+#: candidate, in gitignore syntax, all at the worktree root.  The names match
+#: the constants in ``helix.mutator`` and ``helix.sibling_history`` (a unit
+#: test keeps them in step).
+HELIX_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    # The rendered task prompt and its fallback location.
+    ".agent_task_prompt.md",
+    ".agent_internal/",
+    # Backend result/stdout/stderr, for the mutation and the summary call.
+    ".helix_backend_result.json",
+    ".helix_backend_stdout.txt",
+    ".helix_backend_stderr.txt",
+    ".helix_backend_summary_result.json",
+    ".helix_backend_summary_stdout.txt",
+    ".helix_backend_summary_stderr.txt",
+    ".helix_artifacts/",
+    "helix_batch.json",
+    # ``helix.timed`` logs from scripts the agent runs; read and removed
+    # after each call, ignored in case a crash leaves one behind.
+    ".helix_timing_*.jsonl",
+    # The change summary and its prompt are notes about the diff, not part
+    # of it, whichever way ``sibling_history`` is toggled.
+    ".agent_change_summary.md",
+    ".agent_summary_prompt.md",
+    # Per-candidate OpenCode state (XDG_DATA_HOME isolation).
+    ".helix_opencode_state/",
+)
+
+
+def helix_artifact_pathspec() -> list[str]:
+    """Pathspec for ``git add``/``ls-files`` that leaves HELIX artifacts out.
+
+    Ignore rules alone are not enough: a candidate ``.gitignore`` that
+    re-includes files (``*`` then ``!*.md``) overrides ``info/exclude``, and
+    a committed ``.agent_task_prompt.md`` collides with the next child's.
+    Every command that stages or lists candidate content passes this.
+
+    Each entry is a ``**/`` glob, matching at any depth as the ignore
+    pattern does.  The wildcard also matters on its own: ``git add`` fails
+    ("paths are ignored") when an exclude pathspec without one names a file
+    that is also ignored.
+    """
+    excludes = [
+        f":(exclude,glob)**/{p}**" if p.endswith("/") else f":(exclude,glob)**/{p}"
+        for p in HELIX_ARTIFACT_PATTERNS
+    ]
+    return ["--", ".", *excludes]
+
+
 def git_exclude_path(worktree: Path) -> Path | None:
     """Return the ``info/exclude`` file git reads for *worktree*.
 
@@ -662,7 +711,7 @@ def snapshot_candidate(candidate: Candidate, message: str) -> str:
     """
     wt = Path(candidate.worktree_path)
     _run(
-        ["git", "add", "-A"],
+        ["git", "add", "-A", *helix_artifact_pathspec()],
         cwd=wt,
         operation=f"snapshot {candidate.id}: git add",
     )

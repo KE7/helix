@@ -55,7 +55,12 @@ protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutab
 # val_size  = 200
 
 [seedless]
-# Seedless mode: generate initial candidate from objective via LLM
+# Seedless mode: generate initial candidate from objective via LLM.
+# The seed prompt does not show [evaluator].command (it can carry a scorer
+# or held-out ids), so `objective` or [agent].background must state what the
+# evaluator expects: the file name, the callable, and its input/output
+# contract (for example "write solve_puzzle.py with solve(grid: list[list[int]])
+# -> list[list[int]]").
 enabled = false
 # Optional prompt-grounding training dataset (used only in seedless
 # seed generation).  Accepts a JSON array file, a JSONL file, or a

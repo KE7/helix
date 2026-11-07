@@ -34,7 +34,6 @@ from helix.executor import _scrub_environment
 from helix.lines import split_lf_lines
 from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
 from helix.sibling_history import (
-    SUMMARY_ARTIFACT_NAME,
     capture_summary,
     history_instruction,
     summary_prompt,
@@ -50,7 +49,9 @@ from helix.timing import (
 )
 from helix.worktree import (  # noqa: F401
     clone_candidate,
+    HELIX_ARTIFACT_PATTERNS,
     git_exclude_path,
+    helix_artifact_pathspec,
     remove_worktree,
     snapshot_candidate,
 )
@@ -705,8 +706,9 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     in ``.gitignore``: the candidate tree is the agent's, so editing it would
     make every first child "change" ``.gitignore``, and writing through a
     ``.gitignore`` the agent linked to another file would edit that file.
-    The sandbox's synthetic repository copies this file (see
-    ``helix.sandbox._init_synthetic_git_repo``).
+    This keeps them out of ``git status``; staging does not rely on it, since
+    a candidate ``.gitignore`` can re-include them (see
+    ``helix.worktree.helix_artifact_pathspec``).
 
     Idempotent: only appends patterns that aren't already present.  Does
     nothing outside a git work tree root.
@@ -716,28 +718,7 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         return
     patterns = [
         "# HELIX per-invocation artifacts (never commit to candidate tree)",
-        MUTATION_PROMPT_ARTIFACT_NAME,
-        ".agent_internal/",
-        BACKEND_RESULT_ARTIFACT_NAME,
-        BACKEND_STDOUT_ARTIFACT_NAME,
-        BACKEND_STDERR_ARTIFACT_NAME,
-        # The change-summary call's own copies of the three above.
-        *_backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX),
-        ".helix_artifacts/",
-        "helix_batch.json",
-        # ``helix.timed`` logs from scripts the agent runs; read and removed
-        # after each call, ignored in case a crash leaves one behind.
-        ".helix_timing_*.jsonl",
-        # The change summary and its prompt are notes about the diff, not part
-        # of it.  Ignored unconditionally: HELIX reads them straight out of the
-        # worktree and never wants them committed, whichever way the feature is
-        # toggled.
-        SUMMARY_ARTIFACT_NAME,
-        SUMMARY_PROMPT_ARTIFACT_NAME,
-        # Per-candidate OpenCode SQLite state (XDG_DATA_HOME isolation).
-        # Each parallel opencode worker gets a fresh database here; keeps
-        # the candidate git tree free of opencode's session/session files.
-        ".helix_opencode_state/",
+        *HELIX_ARTIFACT_PATTERNS,
     ]
     with _EXCLUDE_LOCK:
         if exclude.is_symlink():
@@ -2442,7 +2423,8 @@ def _untracked_files(worktree_path: str) -> list[str]:
     ``-z`` keeps unusual filenames intact; without it git C-quotes them.
     """
     listing = _git_stdout(
-        worktree_path, "ls-files", "-z", "--others", "--exclude-standard"
+        worktree_path, "ls-files", "-z", "--others", "--exclude-standard",
+        *helix_artifact_pathspec(),
     )
     return sorted(name for name in listing.split("\0") if name)
 
@@ -2583,7 +2565,7 @@ def _content_tree_hash(worktree_path: str) -> str | None:
     env = {**os.environ, "GIT_INDEX_FILE": tmp_index}
     try:
         add = subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "-A", *helix_artifact_pathspec()],
             cwd=worktree_path, capture_output=True, text=True, env=env, check=False,
         )
         if add.returncode != 0:

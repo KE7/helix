@@ -3385,6 +3385,94 @@ def test_helix_artifacts_never_write_through_a_gitignore_symlink(
     assert ".agent_task_prompt.md" not in status
 
 
+def test_artifacts_stay_out_of_commits_under_an_allowlist_gitignore(
+    tmp_path: Path,
+) -> None:
+    """A ``.gitignore`` that re-includes ``*.md`` beats ``info/exclude``; the
+    prompt file must still stay out of every snapshot, or the next child
+    inherits it and its own prompt collides (PromptArtifactCollisionError)."""
+    import subprocess as sp
+
+    from helix.evolution import _candidate_content_key
+    from helix.mutator import _untracked_files, _write_mutation_prompt_artifact
+    from helix.population import Candidate
+    from helix.worktree import clone_candidate, snapshot_candidate
+
+    project = tmp_path / "project"
+    project.mkdir()
+    sp.run(["git", "init", "-q", "."], cwd=project, check=True)
+    (project / ".gitignore").write_text("*\n!*/\n!*.py\n!*.md\n!.gitignore\n")
+    (project / "solver.py").write_text("x = 0\n")
+    sp.run(["git", "add", "-A"], cwd=project, check=True)
+    sp.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
+        cwd=project, check=True,
+    )
+    worktrees = tmp_path / "worktrees"
+    parent = Candidate(
+        id="g0-s0", worktree_path=str(project), branch_name="main",
+        generation=0, parent_id=None, parent_ids=[], operation="seed",
+    )
+    for gen in (1, 2, 3):
+        child = clone_candidate(parent, f"g{gen}-s1", worktrees)
+        wt = Path(child.worktree_path)
+        assert _write_mutation_prompt_artifact(str(wt), f"prompt {gen}") == (
+            ".agent_task_prompt.md"
+        )
+        key_before = _candidate_content_key(child)
+        (wt / ".agent_internal").mkdir(exist_ok=True)
+        (wt / ".agent_internal" / "task_prompt.md").write_text("fallback\n")
+        (wt / ".agent_summary_prompt.md").write_text("summary prompt\n")
+        assert _candidate_content_key(child) == key_before
+        assert _untracked_files(str(wt)) == []
+        (wt / "solver.py").write_text(f"x = {gen}\n")
+        snapshot_candidate(child, f"gen {gen}")
+        committed = sp.run(
+            ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+            cwd=wt, capture_output=True, text=True, check=True,
+        ).stdout.split()
+        assert committed == [".gitignore", "solver.py"]
+        parent = child
+
+
+def test_artifact_patterns_cover_every_artifact_name() -> None:
+    """``helix.worktree.HELIX_ARTIFACT_PATTERNS`` is the one list that keeps
+    artifacts out of commits; every name HELIX writes must be in it."""
+    import fnmatch
+
+    from helix.mutator import (
+        BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+        MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
+        MUTATION_PROMPT_ARTIFACT_NAME,
+        SUMMARY_BACKEND_ARTIFACT_INFIX,
+        SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
+        SUMMARY_PROMPT_ARTIFACT_NAME,
+        _backend_artifact_names,
+    )
+    from helix.worktree import HELIX_ARTIFACT_PATTERNS
+
+    def covered(name: str) -> bool:
+        return any(
+            name.startswith(p) if p.endswith("/") else fnmatch.fnmatch(name, p)
+            for p in HELIX_ARTIFACT_PATTERNS
+        )
+
+    names = [
+        MUTATION_PROMPT_ARTIFACT_NAME,
+        MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
+        SUMMARY_PROMPT_ARTIFACT_NAME,
+        SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
+        SUMMARY_ARTIFACT_NAME,
+        *_backend_artifact_names(),
+        *_backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX),
+        BACKEND_TRANSCRIPT_ARTIFACT_DIR + "/x.jsonl",
+        "helix_batch.json",
+        ".helix_timing_abc.jsonl",
+        ".helix_opencode_state/opencode.db",
+    ]
+    assert [n for n in names if not covered(n)] == []
+
+
 def test_git_exclude_path_is_the_file_git_reads(tmp_path: Path) -> None:
     """Same answer as ``git rev-parse --git-path info/exclude`` for the main
     checkout and for a linked worktree (which shares the common one)."""
