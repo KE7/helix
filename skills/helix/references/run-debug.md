@@ -122,11 +122,24 @@ Useful files:
 For backend diagnostics in a candidate worktree, inspect:
 
 ```text
-.helix_mutation_prompt.md
+.agent_task_prompt.md          (the prompt; .agent_internal/task_prompt.md if
+                                the first name was taken by a different file)
 .helix_backend_result.json
 .helix_backend_stdout.txt
 .helix_backend_stderr.txt
 .helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl
+```
+
+With `evolution.sibling_history = true`, each mutation is followed by a
+second backend call that summarises its diff, and that call has its own files
+so the mutation's are not overwritten:
+
+```text
+.agent_summary_prompt.md       (its prompt; fallback .agent_internal/summary_prompt.md)
+.agent_change_summary.md       (the summary the call wrote; HELIX reads it once)
+.helix_backend_summary_result.json
+.helix_backend_summary_stdout.txt
+.helix_backend_summary_stderr.txt
 ```
 
 The backend result JSON includes normalized usage metadata and
@@ -155,7 +168,18 @@ is wiped at the start of every generation (see `helix.backends.
 BACKEND_STATE_PATHS`; one `reset <backend> agent state in ...` INFO line per
 generation, a WARNING if the wipe fails), so a transcript that could not be
 copied is logged at WARNING with the candidate id and the path looked for,
-and cannot be recovered from the volume afterwards.
+and cannot be recovered from the volume afterwards. If two runs share one
+volume (the default `helix-auth-<backend>`), one run's reset can delete the
+other's live session and its transcript before it is copied; give each
+concurrent run its own `[sandbox].auth_volume`. The reset removes only those
+listed paths, so an instruction file such as `~/.codex/AGENTS.md` or
+`~/.claude/CLAUDE.md` that an agent wrote on the volume is still there for
+later candidates and runs.
+
+A WARNING `dropping symlink <path> -> <target> from the sandbox workspace: it
+points outside the workspace` means sync-back removed a new symlink the agent
+made that is absolute or leaves the candidate worktree; the rest of the
+agent's changes are kept.
 
 ## Resuming
 
@@ -189,7 +213,9 @@ Symptoms and checks:
 - Length mismatch: `len(HELIX_RESULT payload) == len(helix_batch.json)`.
 - All zero minibatch scores: evaluator probably ignored `helix_batch.json` ids
   or keyed results by metric names instead of example ids.
-- Hangs: add evaluator-level timeouts or configure `[sandbox].timeout_seconds`.
+- Hangs: add evaluator-level timeouts. `[sandbox].timeout_seconds` limits
+  only commands run in Docker (agent calls, and evaluator-runner commands
+  with `[sandbox].evaluator = true`), not a host-run evaluator.
 - Missing dependencies in sandboxed evaluation: build private evaluator/simulator
   dependencies into `[evaluator.sidecar].image` and evaluator-client
   dependencies into `[evaluator.sidecar].runner_image`.
@@ -215,7 +241,8 @@ Checks:
 - Auth: `helix sandbox status <backend>` or run backend CLI status outside
   sandbox for local mode.
 - Backend command output: inspect `.helix_backend_stderr.txt`.
-- Prompt quality: inspect `.helix_mutation_prompt.md`.
+- Prompt quality: inspect `.agent_task_prompt.md` (or
+  `.agent_internal/task_prompt.md`).
 - Protected file rejection: check `.helix/helix.log` for manifest errors.
 - Rate limits: a rate-limited backend call fails like any other; the slot is
   skipped. Check `.helix_backend_stderr.txt`, then `helix resume` later.

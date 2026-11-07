@@ -149,18 +149,20 @@ class DatasetConfig(BaseModel):
     not per-example function calls like GEPA.  This section therefore
     only carries the *cardinality* of the train and val splits; the
     evaluator owns the actual dataset.  Architecture A (example-id
-    handoff): HELIX samples example ids — stringified indices into
-    ``range(train_size)`` by default, or opaque structured ids like
-    ``"group_alpha__case_3"`` when ``evolution.batch_sampler = "stratified"``
-    — and writes them to ``{worktree}/helix_batch.json``; the evaluator
-    reads that file (from its cwd) and filters its own loaded dataset
-    by those ids.  Ids are opaque at the HELIX/evaluator boundary:
-    evaluators are responsible for any interpretation (e.g. casting
-    ``"7"`` back to ``int`` for positional indexing).
+    handoff): HELIX samples example ids — the stringified indices
+    ``range(train_size)`` — and writes them to
+    ``{worktree}/helix_batch.json``; the evaluator reads that file (from
+    its cwd) and filters its own loaded dataset by those ids.  Ids are
+    opaque at the HELIX/evaluator boundary: evaluators are responsible for
+    any interpretation (e.g. casting ``"7"`` back to ``int`` for
+    positional indexing).
 
-    Legacy prompt-grounding paths (``train_path`` / ``val_path``) now
-    live on :class:`SeedlessConfig` — they only affect the seed-
-    generation prompt and are unrelated to runtime minibatch sampling.
+    Named ids such as ``"group_alpha__case_3"``, which the stratified
+    sampler groups on ``evolution.group_key_separator``, come only from
+    :class:`SeedlessConfig` ``train_path`` / ``val_path`` directories (file
+    stems), which HELIX reads for ids even with seedless mode off.  A
+    configured ``train_path`` wins over ``train_size``; ``val_size`` wins
+    over ``val_path`` (see ``helix.evolution._full_val_example_ids``).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -196,9 +198,12 @@ class SeedlessConfig(BaseModel):
     Seedless mode generates the initial candidate from the objective via
     a single LLM call instead of starting from the current working tree.
 
-    ``train_path`` / ``val_path`` here are the GEPA-parity prompt-grounding
-    paths used *only* during seed generation (and, historically, the
-    legacy payload-based minibatch path):
+    ``train_path`` / ``val_path`` do two jobs.  Whatever ``enabled`` is,
+    ``run_evolution`` reads the train and val instance ids from them
+    (``helix.evolution.HelixDataLoader``: sorted file stems for a directory
+    of ``*.json`` files, stringified indices for a JSON array or JSONL
+    file; ``val_path`` unset reuses the train ids).  With seedless mode on,
+    they are also GEPA-parity prompt grounding for seed generation:
 
     - **single-task / no-example mode** (default): ``train_path`` absent /
       ``None`` — no ``## Sample Inputs`` section is added to the seed prompt.
@@ -223,18 +228,22 @@ class SeedlessConfig(BaseModel):
     train_path: Path | None = Field(
         default=None,
         description=(
-            "Optional prompt-grounding training dataset for seedless seed "
-            "generation.  Accepts a JSON array file, a JSONL file, or a "
-            "directory of JSON files.  None → single-task/no-example mode (no Sample "
-            "Inputs section)."
+            "Optional training dataset: a JSON array file, a JSONL file, or "
+            "a directory of JSON files.  HELIX reads the train instance ids "
+            "from it even with seedless mode off (file stems for a directory, "
+            "indices otherwise); in seedless mode its first 3 items also "
+            "ground the seed prompt.  None → no Sample Inputs section, and "
+            "train ids come from dataset.train_size if set."
         ),
     )
     val_path: Path | None = Field(
         default=None,
         description=(
-            "Optional validation dataset path — retained for GEPA-parity "
-            "payload-based minibatch paths.  Falls back to ``train_path`` "
-            "via :attr:`effective_val_path` when None."
+            "Optional validation dataset path, same layouts as train_path. "
+            "HELIX reads the val instance ids from it even with seedless "
+            "mode off, unless dataset.val_size is set.  When None, "
+            "validation reuses the train_path ids (see also "
+            ":attr:`effective_val_path`)."
         ),
     )
 

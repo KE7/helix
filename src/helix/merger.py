@@ -133,7 +133,7 @@ def build_merge_prompt(
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    in ``gepa_launcher.py``.
+    in ``gepa/optimize_anything.py``.
 
     **Diff section format** — two-diff (ancestor-relative) vs single (A↔B):
 

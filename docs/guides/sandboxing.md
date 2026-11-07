@@ -52,15 +52,7 @@ and quit.
 The volume names are `helix-auth-agy`, `helix-auth-claude`, `helix-auth-codex`,
 `helix-auth-cursor`, `helix-auth-opencode`, and `helix-auth-pi`.
 
-Backend state in the sandbox never survives a generation; the run's artifacts
-are the record. At the start of every generation HELIX wipes the backend
-CLI's session state in its auth volume (transcripts, memories, shell
-snapshots, session indexes; never credentials or operator configuration) so
-no candidate sees another candidate's history. Each invocation's native
-transcript (every backend) is copied out of the volume first and kept at
-`.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl` in the
-candidate worktree, where tool-call accounting also reads it.
-This avoids copying host credential stores into Docker. On macOS, Claude/Cursor
+Logging in inside the container avoids copying host credential stores into Docker. On macOS, Claude/Cursor
 browser-login tokens may live in Keychain; on Linux they may live in
 Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
 Those stores are session- and OS-specific, so copying their databases into a
@@ -68,6 +60,71 @@ Linux Docker image is not a reliable authentication mechanism. If your
 evaluator uses a local proxy, keep that endpoint in your evaluator code as
 usual. Docker Desktop supports `host.docker.internal`; Linux users can set
 `add_host_gateway = true`.
+
+## What persists on the auth volume
+
+At the start of every generation HELIX deletes the backend CLI's session state
+from the auth volume: the paths listed for that backend in
+`helix.backends.BACKEND_STATE_PATHS` (transcripts, memories, shell snapshots,
+session indexes, prompt history; for OpenCode, only the session rows of
+`opencode.db`, which also holds the account's tokens). Credentials and
+operator configuration are never touched. Each invocation's native transcript
+(every backend) is copied out of the volume when the call ends and kept at
+`.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl` in the
+candidate worktree, where tool-call accounting also reads it.
+
+The reset is a list of paths, not a fresh home directory, so it does not keep
+candidates apart completely:
+
+- Anything an agent writes under `/home/node` outside those paths stays on the
+  volume and reaches later candidates, later generations and later runs that
+  mount the same volume. Examples: `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`,
+  skills, plugins, or hook settings in `~/.claude/settings.json`.
+- Within one generation, the candidates running at the same time
+  (`num_parallel_proposals` x `mutations_per_parent` above 1) mount the same
+  volume read-write and can see each other's files there.
+- Two HELIX runs at the same time on the same volume, such as the default
+  `helix-auth-<backend>`, can delete each other's live sessions, and with them
+  transcripts not yet copied: each run's per-generation reset clears the
+  session state of the whole volume.
+
+For concurrent runs, or when no instruction file may carry over between runs,
+set a separate `[sandbox].auth_volume` for each run. It is a Docker volume
+name (letters, digits, `_`, `.`, `-`, starting with a letter or digit) mounted
+at `/home/node` in agent containers in place of `helix-auth-<backend>`, and the
+transcript copy and the reset use it too. `helix sandbox login` never writes
+it, so the credential has to reach the agent another way: for example
+copying a logged-in volume into it with Docker before the run, or a gateway
+that holds the key, as in `examples/circle_packing_sandbox`.
+
+## Sync-back and symlinks
+
+The agent's workspace is writable by the agent, so sync-back treats its
+symlinks with suspicion. Symlinks are copied back as symlinks and never
+followed, but after the copy HELIX removes every symlink that is new or
+changed and is absolute or resolves outside the candidate worktree, and logs a
+warning naming it (`dropping symlink ... it points outside the workspace`).
+Symlinks the candidate already had, pointing to the same place, are kept.
+Transcript artifacts are copied only from real directories and regular files,
+and a `.gitignore` symlink that leaves the worktree is replaced by a regular
+file instead of written through.
+
+## Resource limits and host names
+
+These `[sandbox]` keys apply to agent and evaluator-runner containers:
+
+| Key | Default | Effect |
+|---|---|---|
+| `cpus` | unset | `docker run --cpus` |
+| `memory` | unset | `docker run --memory`, e.g. `"16g"` |
+| `pids_limit` | `512` | `docker run --pids-limit` |
+| `timeout_seconds` | unset | Wall-clock limit on each sandboxed command (one agent call, or one evaluator-runner command). When it expires the container is removed and that call fails. A host-run evaluator is not limited. |
+| `add_host_gateway` | `false` | Adds `--add-host host.docker.internal:host-gateway` (needed on Linux; Docker Desktop has the name already). |
+| `extra_hosts` | `{}` | A table of `name = "address"` pairs, each passed as `--add-host name:address`. Also applied to the evaluator sidecar. |
+
+The evaluator sidecar gets only `extra_hosts` from this list.
+
+## Images
 
 By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,

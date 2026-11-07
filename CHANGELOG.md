@@ -78,11 +78,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `helix-auth-<backend>` volume at the start of every generation
   (`helix.sandbox.reset_sandbox_agent_state`, driven by
   `helix.backends.BACKEND_STATE_PATHS`): transcripts, memories, shell
-  snapshots and session indexes are removed so no candidate sees another's
-  history. Credentials and operator configuration are never touched; for
+  snapshots and session indexes are removed. Credentials and operator
+  configuration are never touched; for
   OpenCode only the `session`/`message`/`part` rows are deleted from
   `opencode.db` because the same file holds the account's tokens. A failed
   wipe is a warning, never fatal. Unsandboxed runs are not affected.
+  Only the listed paths are deleted, so files an agent writes elsewhere on
+  the volume (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, skills, hook
+  settings) persist to later candidates and later runs, and two runs at once
+  on the same volume can delete each other's live sessions. Give each
+  concurrent run its own `[sandbox].auth_volume`; see the sandboxing guide.
+- With `evolution.sibling_history = true`, every mutation whose backend call
+  succeeds is followed by a second backend call (with `max_turns = 5`) that
+  summarises its diff. Its tokens and cost
+  are charged to the run like the mutation's, and its prompt and output are
+  kept in `.agent_summary_prompt.md`, `.agent_change_summary.md` and
+  `.helix_backend_summary_{result.json,stdout.txt,stderr.txt}`. The default
+  (`false`) makes no extra call.
 - Tool-call counts for `agy` are now read from its native
   `transcript.jsonl` (`tool_calls[*].name` on planner steps); its JSON
   stdout envelope carries no per-tool events.
@@ -130,6 +142,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `val/` are protected files, and mutation agents run in the Docker sandbox
   with those paths omitted from their workspace.
 - README: design section and concurrent work.
+- Prompts no longer ask the agent to print `[MUTATION COMPLETE]`,
+  `[MERGE COMPLETE]` or `[SEED GENERATION COMPLETE]`; HELIX never read them,
+  and the backend process exiting is the stop signal. **BREAKING** (Python
+  API): `helix.mutator.parse_mutation_summary`, which parsed
+  `[SUMMARY]...[END SUMMARY]` blocks no prompt asked for, is removed.
 - **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
   configuration field. Every backend's native transcript is now always
   copied out of the auth volume (or `$HOME` when unsandboxed) at the end of
@@ -217,6 +234,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Sandbox sync-back no longer brings back symlinks that leave the candidate
+  worktree. The agent's workspace is writable by the agent, and a link to a
+  host path would let later host-side reads and writes in the worktree reach
+  that path. After each sync, every new or changed symlink that is absolute
+  or resolves outside the worktree is removed with a warning (`dropping
+  symlink ... it points outside the workspace`); links the candidate already
+  had are kept. Transcript artifacts are copied only from real directories
+  and regular files, and a `.gitignore` symlink that leaves the worktree is
+  replaced by a regular file instead of written through.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess

@@ -155,18 +155,28 @@ untrusted mutation agents.
 
 ## Dataset Handoff
 
-`[dataset]` holds cardinalities, not file paths. If `dataset.train_size` or
-`dataset.val_size` is set, HELIX writes `helix_batch.json` in the candidate
-workspace before each evaluator run:
+`[dataset]` holds cardinalities, not file paths. Before each evaluator run,
+HELIX writes the requested ids to `helix_batch.json` in the candidate
+workspace:
 
 ```json
 ["0", "1", "2"]
 ```
 
+The ids come from one of two places:
+
+- `dataset.train_size` / `dataset.val_size`: the index ids `"0"` to `"n-1"`.
+- `[seedless].train_path` / `val_path`, read even with `seedless.enabled =
+  false`: the sorted file stems of a directory of `*.json` files (for
+  example `"pushcube__0"`), or index ids for a JSON array or JSONL file.
+  With `val_path` unset, validation reuses the train ids.
+
 The ids are opaque strings. The evaluator client or sidecar must map each id to
-its private data store. With `evolution.batch_sampler = "stratified"`, ids may
-look like `"group__case_7"`; do not cast ids to integers unless your evaluator
-intentionally uses range-index ids.
+its private data store. `evolution.batch_sampler = "stratified"` groups ids by
+the text before `evolution.group_key_separator` (default `"__"`), so it needs
+named ids such as `"pushcube__0"` from a `[seedless]` directory; index ids from
+`train_size` are each their own group. Do not cast ids to integers unless your
+evaluator intentionally uses range-index ids.
 
 HELIX also sets:
 
@@ -305,7 +315,7 @@ Map source concepts to HELIX this way:
 | `seed_candidate={"program": "..."}` | One file per mutable component, or a JSON file plus wrappers |
 | `seed_candidate=None` | `[seedless] enabled = true` with `objective` and optional `seedless.train_path` |
 | `evaluator(candidate, example)` | A private evaluator service plus runner client that prints `HELIX_RESULT=...` |
-| `dataset`, `valset` | Evaluator-owned data plus `[dataset].train_size` and `[dataset].val_size` |
+| `dataset`, `valset` | Evaluator-owned data plus `[dataset].train_size` and `[dataset].val_size`, or `[seedless].train_path` / `val_path` directories for named ids |
 | `objective=...` | top-level `objective = "..."` |
 | `background=...` | `[agent].background = """..."""` |
 | `EngineConfig(seed=N)` | top-level `rng_seed = N` |
@@ -315,6 +325,7 @@ Map source concepts to HELIX this way:
 | `EngineConfig(cache_evaluation=True)` | `[evolution].cache_evaluation = true` |
 | `EngineConfig(acceptance_criterion=...)` | `[evolution].acceptance_criterion = "..."` |
 | `EngineConfig(frontier_type=...)` | `[evolution].frontier_type = "..."` |
+| `EngineConfig(candidate_selection_strategy=...)` | `[evolution].candidate_selection_strategy = "..."` (plus `candidate_selection_epsilon` / `candidate_selection_top_k`, which HELIX requires; GEPA uses 0.1 / 5) |
 | `EngineConfig(run_dir=...)` outputs | `helix best --export` plus a post-run artifact writer |
 
 HELIX does not directly implement every GEPA Optimize Anything feature. When
@@ -329,8 +340,9 @@ behavioral gap in the migration.
   runs.
 - Do not key `HELIX_RESULT` by ids. It is positional to `helix_batch.json`.
 - Do not print more than one `HELIX_RESULT=` line.
-- Do not put dataset file paths under `[dataset]`; use evaluator-owned paths or
-  `[seedless].train_path` only for seed prompt grounding.
+- Do not put dataset file paths under `[dataset]`. `[seedless].train_path` /
+  `val_path` are read for instance ids even with seedless off, so set them
+  only when you want HELIX's ids to come from those files.
 - Do not assume `HELIX_INSTANCE_IDS` is enough for `helix_result`; the parser
   reads `helix_batch.json`.
 - Do not rely on source `run_dir` state files being interchangeable with
