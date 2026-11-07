@@ -173,7 +173,7 @@ Important choices:
 
 ```toml
 [agent]
-backend = "claude"  # agy | claude | codex | cursor | opencode
+backend = "claude"  # agy | claude | codex | cursor | opencode | pi
 model = "sonnet"
 effort = "medium"
 max_turns = 20
@@ -191,6 +191,13 @@ Backend notes:
 - Claude: usually `claude`, `max_turns`, optional model/effort.
 - Codex: usually `codex`, model optional.
 - Cursor/OpenCode: check CLI support and model naming before pinning.
+- pi: `pi`; `model` takes `provider/id` (see `pi --list-models`), `effort`
+  maps to `--thinking` (off | minimal | low | medium | high | xhigh | max).
+  pi runs a model without thinking support at `off`, without a warning.
+  pi has no turn cap, so `max_turns` is only a request in the prompt.
+  On a local engine that serves one request at a time, parallel proposals can
+  outlive pi's `httpIdleTimeoutMs` (300 s); set it to `"disabled"` in
+  `~/.pi/agent/settings.json`.
 
 No web access:
 
@@ -208,6 +215,7 @@ No web access:
     so this also turns off your ChatGPT app connectors for the run.
   - opencode: `OPENCODE_PERMISSION` denying `webfetch`/`websearch`, which
     overrides every config file.
+  - pi ships no web tools, so it needs no flag.
   - agy and cursor have no such switch, so `web_access = false` is a
     configuration error for them, including through `helix evolve --backend`.
 - `web_access = false` is pinned for resume: resuming with it changed in
@@ -260,7 +268,8 @@ Sandbox behavior:
   session (claude `projects/-workspace/<id>.jsonl`, codex `sessions/.../
   rollout-*-<thread_id>.jsonl`, cursor `projects/*/agent-transcripts/<id>/`,
   agy `brain/<id>/.system_generated/logs/transcript*.jsonl`, opencode this
-  session's rows exported from `opencode.db`) out of the auth volume into
+  session's rows exported from `opencode.db`, pi
+  `.pi/agent/sessions/*/*_<id>.jsonl`) out of the auth volume into
   `.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl`. This
   always happens for every backend; override `transcript_artifact_dir` /
   `claude_transcript_root` under `[sandbox]` for custom layouts. See

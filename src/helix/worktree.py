@@ -74,12 +74,12 @@ def _git_suggestion(args: list[str], cwd: Path | None, stderr: str) -> str:
             )
 
     # Branch-related suggestions
-    if "branch" in cmd_str or "-b" in args:
+    if "branch" in cmd_str or "-b" in args or "-B" in args:
         if "already exists" in stderr.lower():
             # Extract branch name from args if possible
             branch_name = ""
             for i, a in enumerate(args):
-                if a == "-b" and i + 1 < len(args):
+                if a in ("-b", "-B") and i + 1 < len(args):
                     branch_name = args[i + 1]
                     break
             if branch_name:
@@ -558,7 +558,12 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
 
     # Prune stale worktree registrations (safe — only removes metadata for
     # missing paths); prune and add are one common-metadata transaction (see
-    # ``_worktree_metadata_lock``).
+    # ``_worktree_metadata_lock``).  ``-B`` rather than ``-b``: ``new_id`` is
+    # never a completed candidate's id, so an existing ``helix/<new_id>``
+    # branch is a leftover from an interrupted attempt -- Ctrl-C reaches the
+    # cleanup's ``git branch -D`` too, after its ``git worktree remove`` --
+    # and resume reuses that id.  git still refuses a branch that a live
+    # worktree has checked out, so no kept candidate can be overwritten.
     with _worktree_metadata_lock:
         subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=False)
         try:
@@ -566,7 +571,7 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
                 [
                     "git", "worktree", "add",
                     str(new_worktree_path),
-                    "-b", new_branch,
+                    "-B", new_branch,
                     commit_sha,
                 ],
                 cwd=repo_root,

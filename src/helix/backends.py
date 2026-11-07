@@ -7,9 +7,16 @@ import re
 from typing import Literal, TypeAlias
 
 
-BackendName: TypeAlias = Literal["agy", "claude", "codex", "cursor", "opencode"]
+BackendName: TypeAlias = Literal["agy", "claude", "codex", "cursor", "opencode", "pi"]
 
-BACKENDS: tuple[BackendName, ...] = ("agy", "claude", "codex", "cursor", "opencode")
+BACKENDS: tuple[BackendName, ...] = (
+    "agy",
+    "claude",
+    "codex",
+    "cursor",
+    "opencode",
+    "pi",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -24,13 +31,14 @@ BACKENDS: tuple[BackendName, ...] = ("agy", "claude", "codex", "cursor", "openco
 #   - ``claude``:    ``--effort <value>``   (Claude Code thinking budget)
 #   - ``codex``:     ``-c model_reasoning_effort=<value>`` (Codex CLI config)
 #   - ``opencode``:  ``--variant <value>``  (model variant selector)
+#   - ``pi``:        ``--thinking <value>`` (pi thinking level)
 #   - others:        silently ignored (no equivalent CLI surface)
 #
 # The two registries below let the config layer fail fast on bad combinations
 # without hard-coding backend knowledge into ``HelixConfig``.
 
 EFFORT_AWARE_BACKENDS: frozenset[BackendName] = frozenset(
-    {"agy", "claude", "codex", "opencode"}
+    {"agy", "claude", "codex", "opencode", "pi"}
 )
 """Backends that propagate ``agent.effort`` to their underlying CLI."""
 
@@ -50,11 +58,18 @@ EFFORT_VALID_VALUES: dict[BackendName, frozenset[str] | None] = {
     "claude": frozenset({"low", "medium", "high", "xhigh", "max"}),
     "codex": frozenset({"minimal", "low", "medium", "high", "xhigh"}),
     "opencode": None,  # variant strings are model-specific; opencode validates them.
+    # pi 1.5.0 ``pi --help``: ``--thinking <level>  Set thinking level: off,
+    # minimal, low, medium, high, xhigh, max``.
+    "pi": frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max"}),
 }
 
 # Backends that can honor ``agent.web_access = false`` (agy 1.4 and
-# cursor-agent 2026.09 have no per-run switch for it).
-NO_WEB_BACKENDS: frozenset[BackendName] = frozenset({"claude", "codex", "opencode"})
+# cursor-agent 2026.09 have no per-run switch for it).  pi 1.5 ships no web
+# tools at all (built-ins: read, bash, edit, write, grep, find, ls), so it
+# honors the setting with no flag, as claude/codex/opencode do for theirs.
+NO_WEB_BACKENDS: frozenset[BackendName] = frozenset(
+    {"claude", "codex", "opencode", "pi"}
+)
 
 BACKEND_DISPLAY_NAMES: dict[str, str] = {
     "agy": "Antigravity CLI",
@@ -62,6 +77,7 @@ BACKEND_DISPLAY_NAMES: dict[str, str] = {
     "codex": "Codex CLI",
     "cursor": "Cursor Agent",
     "opencode": "OpenCode",
+    "pi": "pi",
 }
 
 DEFAULT_BACKEND_IMAGES: dict[str, str] = {
@@ -70,6 +86,7 @@ DEFAULT_BACKEND_IMAGES: dict[str, str] = {
     "codex": "ghcr.io/ke7/helix-evo-runner-codex:latest",
     "cursor": "ghcr.io/ke7/helix-evo-runner-cursor:latest",
     "opencode": "ghcr.io/ke7/helix-evo-runner-opencode:latest",
+    "pi": "ghcr.io/ke7/helix-evo-runner-pi:latest",
 }
 
 # Ambient credential variable names forwarded to a backend when the operator
@@ -80,6 +97,15 @@ BACKEND_AUTH_ENV: dict[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
     "cursor": ("CURSOR_API_KEY",),
     "opencode": ("OPENCODE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+    # The provider keys pi 1.5 ``pi --help`` lists for the most common
+    # providers; others can be forwarded with ``[agent].passthrough_env``.
+    "pi": (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+    ),
 }
 
 BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
@@ -137,6 +163,25 @@ BACKEND_AUTH_COMMANDS: dict[str, dict[str, list[str]]] = {
         "status": ["opencode", "providers", "list"],
         "logout": ["opencode", "providers", "logout"],
     },
+    "pi": {
+        # pi 1.5 signs in only through ``/login`` inside its TUI, so the bare
+        # interactive launch is the login flow, as for ``agy``/``opencode``.
+        "login": ["pi"],
+        # ``/login`` writes ``~/.pi/agent/auth.json``, which pi creates as
+        # ``{}`` before any sign-in, so require at least one provider key.
+        "status": [
+            "sh",
+            "-lc",
+            "set -eu; grep -q '\"[^\"]*\"[[:space:]]*:' "
+            '"${HOME:-/home/node}/.pi/agent/auth.json" 2>/dev/null',
+        ],
+        # pi has no non-interactive logout; remove only its credential file.
+        "logout": [
+            "sh",
+            "-lc",
+            'set -eu; rm -f "${HOME:-/home/node}/.pi/agent/auth.json"',
+        ],
+    },
 }
 
 
@@ -154,8 +199,8 @@ def backend_display_name(backend: str) -> str:
 # ``helix.sandbox`` (copy out of the ``helix-auth-<backend>`` volume) and
 # ``helix.mutator`` (copy from the operator's ``$HOME`` when unsandboxed,
 # then record the artifact) can share one locator.  Paths were established
-# against codex 0.154, opencode 1.18, agy 1.1 and cursor-agent 2026.08; they
-# are best-effort and a miss is recorded, never raised.
+# against codex 0.154, opencode 1.18, agy 1.1, cursor-agent 2026.08 and pi
+# 1.5; they are best-effort and a miss is recorded, never raised.
 #
 # ``claude`` is listed for completeness of ``id_keys`` only: its source path is
 # ``SandboxConfig.claude_transcript_root`` (or ``HELIX_CLAUDE_TRANSCRIPT_ROOT``)
@@ -248,6 +293,14 @@ BACKEND_TRANSCRIPT_SOURCES: dict[str, BackendTranscriptSource] = {
             (("session", "id"), ("message", "session_id"), ("part", "session_id")),
         ),
     ),
+    # ``pi --mode json`` opens with the session header ``{"type": "session",
+    # "id": ...}``, the only top-level ``id`` in the stream; the session file
+    # is ``~/.pi/agent/sessions/--<cwd>--/<timestamp>_<id>.jsonl`` (pi 1.5.0
+    # docs/session-format.md).
+    "pi": BackendTranscriptSource(
+        id_keys=("id",),
+        files=((".pi/agent/sessions/*/*_{session_id}.jsonl", "{session_id}.jsonl"),),
+    ),
 }
 
 
@@ -273,8 +326,8 @@ def transcript_session_id_keys(backend: str) -> tuple[str, ...]:
 # operator configuration are deliberately absent from this table; the unit
 # test ``test_sandbox_state_paths_never_match_credentials`` guards that.  The
 # entries were verified against local installs of codex 0.154, opencode 1.18,
-# agy 1.1, cursor-agent 2026.08 and claude code; unknown directories were left
-# alone rather than guessed at.
+# agy 1.1, cursor-agent 2026.08, pi 1.5 and claude code; unknown directories
+# were left alone rather than guessed at.
 BACKEND_STATE_PATHS: dict[str, tuple[str, ...]] = {
     "claude": (
         ".claude/projects",  # per-project transcripts, memory/, todo state
@@ -340,6 +393,11 @@ BACKEND_STATE_PATHS: dict[str, tuple[str, ...]] = {
         # opencode account's access/refresh tokens, so the file is kept and
         # only session rows are deleted (``OPENCODE_STATE_TABLES``).
         # kept: auth.json, account.json, bin, ~/.local/state/opencode/locks
+    ),
+    "pi": (
+        ".pi/agent/sessions",  # per-cwd session JSONL transcripts
+        # kept: auth.json, settings.json, models.json, models-store.json,
+        #       trust.json, mcp.json, extensions, skills, bin
     ),
 }
 

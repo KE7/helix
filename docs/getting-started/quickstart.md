@@ -47,7 +47,7 @@ omit_from_agent = ["evaluate.py"]   # the agent never sees it
 Log in to your backend once inside its sandbox volume:
 
 ```bash
-helix sandbox login claude      # or agy, codex, cursor, opencode
+helix sandbox login claude      # or agy, codex, cursor, opencode, pi
 helix sandbox status claude
 ```
 
