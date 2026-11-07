@@ -19,7 +19,13 @@ short-lived client image used for `[evaluator].command`. Keep private benchmark
 data in the service image, not in the runner image.
 
 Agent changes are synced back to the real candidate worktree after the backend
-exits; evaluator-runner file changes are discarded. HELIX never mounts the host
+exits; evaluator-runner file changes are discarded.
+`[sandbox].timeout_seconds` (unset by default: no limit) caps each agent
+container's wall-clock time. An agent call that runs out of it is a failed
+mutation ("timed out after Ns (sandbox.timeout_seconds)"), whatever the
+backend printed before the kill, even a claude max-turns result: the
+container's edits are discarded, the candidate is dropped, and the tokens
+the backend reported before the kill are still charged to the budget. HELIX never mounts the host
 project root, parent directories, or home directory by default.
 `helix.toml`, `.env`, `.env.*`, `.git`, and HELIX runtime artifacts are also
 excluded from sandbox workspace copies/sync-back so agents cannot read sidecar

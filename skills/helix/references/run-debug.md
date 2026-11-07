@@ -196,8 +196,8 @@ Symptoms and checks:
   or keyed results by metric names instead of example ids.
 - Hangs: add evaluator-level timeouts or configure `[sandbox].timeout_seconds`.
   An agent call that runs out of `timeout_seconds` is a failed mutation
-  ("timed out after Ns"): its edits are dropped, but the tokens it reported
-  are charged and its transcript is kept.
+  ("timed out after Ns"), whatever the backend printed before the kill: its
+  edits are dropped, but the tokens it reported are charged.
 - Missing dependencies in sandboxed evaluation: build private evaluator/simulator
   dependencies into `[evaluator.sidecar].image` and evaluator-client
   dependencies into `[evaluator.sidecar].runner_image`.

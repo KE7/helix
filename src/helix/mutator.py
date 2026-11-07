@@ -2323,6 +2323,24 @@ def invoke_claude_code(
 
     parsed: dict[str, Any] | None = None
     try:
+        # Decided before any output is interpreted: the sandbox dropped the
+        # edits, so no partial-success reading (claude's error_max_turns)
+        # may return a candidate, and a stream cut off mid-object must not
+        # surface as a parse error instead of the timeout.
+        if timed_out_after is not None:
+            raise MutationError(
+                f"{backend_name} timed out after {timed_out_after:g}s "
+                "(sandbox.timeout_seconds)",
+                operation=f"{backend_name} invocation",
+                phase="subprocess timeout",
+                command=cmd_str,
+                cwd=str(worktree_path),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                suggestion="Raise [sandbox].timeout_seconds, or lower agent.max_turns.",
+            )
+
         if result.returncode == 0:
             parsed = _parse_backend_output(
                 backend,
@@ -2361,19 +2379,6 @@ def invoke_claude_code(
         )
         usage = _normalise_usage_stats(parsed)
 
-        if timed_out_after is not None:
-            raise MutationError(
-                f"{backend_name} timed out after {timed_out_after:g}s "
-                "(sandbox.timeout_seconds)",
-                operation=f"{backend_name} invocation",
-                phase="subprocess timeout",
-                command=cmd_str,
-                cwd=str(worktree_path),
-                stdout=result.stdout,
-                stderr=result.stderr,
-                exit_code=result.returncode,
-                suggestion="Raise [sandbox].timeout_seconds, or lower agent.max_turns.",
-            )
         raise MutationError(
             f"{backend_name} exited with code {result.returncode}",
             operation=f"{backend_name} invocation",

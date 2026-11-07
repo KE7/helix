@@ -235,8 +235,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     "Tools" line or the candidate's usage; both now match the artifact.
   - A failed agy call now charges the tokens its JSON output reports.
   - An agent call that runs out of `[sandbox].timeout_seconds` is now a
-    failed mutation that charges the tokens it reported and keeps its
-    transcript; before, both were lost and the worktree was left behind.
+    failed mutation that charges the tokens it reported, whatever the
+    backend printed before the kill (a claude max-turns result is no longer
+    taken as success once its edits are gone); before, the tokens were lost
+    and the worktree was left behind.
 - The change-summary call (`sibling_history`) no longer drops a successful
   mutation when its prompt file cannot be written, and rolling back a
   summary call that touched candidate files now restores a renamed file's

@@ -3713,6 +3713,51 @@ class TestSandboxTimeoutKeepsUsage:
         stdout_artifact = (tmp_path / BACKEND_STDOUT_ARTIFACT_NAME).read_text()
         assert stdout_artifact == _CODEX_TOOL_STDOUT
 
+    @pytest.mark.parametrize(
+        ("backend", "stdout"),
+        [
+            # claude printed its max-turns result, then hung until the timeout:
+            # without the edits, that is no partial success.
+            (
+                "claude",
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "error_max_turns",
+                        "session_id": "s1",
+                        "num_turns": 5,
+                        "usage": {"input_tokens": 9, "output_tokens": 2},
+                    }
+                ),
+            ),
+            # A single JSON object cut off mid-stream by the kill.
+            ("claude", '{"type": "result", "usage": {"input_tokens": 9'),
+            ("agy", '{"conversation_id": "c1", "usage": {"input_tokens": 9'),
+        ],
+        ids=["claude-max-turns", "claude-truncated", "agy-truncated"],
+    )
+    def test_timeout_wins_over_backend_output(
+        self, tmp_path: Path, mocker, backend: str, stdout: str
+    ):
+        mocker.patch(
+            "helix.mutator.run_sandboxed_command",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["docker"], timeout=30, output=stdout.encode(), stderr=b""
+            ),
+        )
+        mocker.patch("helix.mutator.resolve_sandbox_image", return_value="img")
+
+        with pytest.raises(MutationError) as excinfo:
+            invoke_claude_code(
+                str(tmp_path),
+                "x",
+                AgentConfig(backend=backend),
+                sandbox=SandboxConfig(enabled=True, timeout_seconds=30),
+            )
+
+        assert "timed out after 30s" in str(excinfo.value)
+        assert excinfo.value.phase == "subprocess timeout"
+
 
 class TestChangeSummaryNeverDropsTheMutation:
     def test_prompt_collision_returns_no_summary(self, tmp_path: Path):
