@@ -74,7 +74,7 @@ class TamperedProposal:
 
 @dataclass
 class ChildEvalFailedProposal:
-    """The mutation produced a child, but the child's minibatch eval raised.
+    """The mutation produced a child, but the child's gate evaluation raised.
 
     ``child_n_uncached`` counts the ids the evaluator was sent, so the failed
     run is charged like any other evaluator run.
@@ -91,12 +91,16 @@ class ChildEvalFailedProposal:
 
 @dataclass
 class EvaluatedProposal:
-    """Every step completed; ``child_eval_result`` is None on the no-minibatch path."""
+    """Every step completed, including the child's gate evaluation.
+
+    ``child_eval_result`` covers the same examples as ``parent_eval_result``:
+    the minibatch, or the one train instance in single-task mode.
+    """
 
     presample_ctx: ProposalContext
     parent_eval_result: EvalResult
     child: Candidate
-    child_eval_result: EvalResult | None = None
+    child_eval_result: EvalResult
     parent_n_uncached: int = 0
     child_n_uncached: int = 0
     child_usage: UsageStats | None = None
@@ -155,45 +159,21 @@ class AcceptanceJudgement:
         return sum(self.after) - sum(self.before)
 
 
-class AcceptanceMemo:
-    """Memoises one acceptance judgement per proposal slot.
+def judge_acceptance(
+    criterion: AcceptanceCriterion, before: list[float], after: list[float]
+) -> AcceptanceJudgement:
+    """Run *criterion* once on a proposal's score vectors and keep the margin.
 
-    ``best_improvement`` and ``top_k`` have to know the gate outcome for
-    every proposal in a batch before they can promote any of it, so the
-    criterion gets consulted in one place and the selected proposals get
-    re-examined in another.  Routing every consultation through this memo
-    makes the number of underlying ``should_accept`` calls a function of the
-    batch size alone — a selection strategy cannot change what the criterion
-    decided about a proposal by asking about it more or less often.
+    Every proposal is judged exactly once, at its gate; selection then ranks
+    the accepted ones on the stored margin and never asks the criterion again.
     """
-
-    def __init__(self, criterion: AcceptanceCriterion) -> None:
-        self._criterion = criterion
-        self._judgements: dict[int, AcceptanceJudgement] = {}
-        # Number of times the underlying criterion actually ran.  Asserted on
-        # by the tests that pin the one-judgement-per-proposal property.
-        self.criterion_calls = 0
-
-    def judge(
-        self, order: int, before: list[float], after: list[float]
-    ) -> AcceptanceJudgement:
-        """Return the judgement for slot ``order``, computing it at most once."""
-        cached = self._judgements.get(order)
-        if cached is not None:
-            return cached
-        self.criterion_calls += 1
-        judgement = AcceptanceJudgement(
-            accepted=self._criterion.should_accept(
-                ScoreVectors(
-                    subsample_scores_before=before,
-                    subsample_scores_after=after,
-                )
-            ),
-            before=before,
-            after=after,
-        )
-        self._judgements[order] = judgement
-        return judgement
+    return AcceptanceJudgement(
+        accepted=criterion.should_accept(
+            ScoreVectors(subsample_scores_before=before, subsample_scores_after=after)
+        ),
+        before=before,
+        after=after,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -276,9 +256,9 @@ def select_proposals(
 
 
 def dedupe_children(
-    selected: list[GatedProposal], content_key: Callable[[Candidate], str]
+    gated: list[GatedProposal], content_key: Callable[[Candidate], str]
 ) -> tuple[list[GatedProposal], list[GatedProposal]]:
-    """Split ``selected`` into first-seen children and byte-identical repeats.
+    """Split ``gated`` into first-seen children and byte-identical repeats.
 
     Two proposals in a batch can produce identical children — most easily
     multiple siblings of one parent, which start from the same worktree and
@@ -286,13 +266,14 @@ def dedupe_children(
     on one point, double-charge a full validation for a score already known,
     and skew parent selection toward whatever that point happens to be.
 
-    Sampled order decides which copy survives, so the survivor does not
-    depend on completion timing.
+    The first copy in the given order survives.  The ranking strategies pass
+    the batch best-ranked first, so each content competes for selection at
+    its best copy; the order never depends on completion timing.
     """
     seen: dict[str, GatedProposal] = {}
     unique: list[GatedProposal] = []
     duplicates: list[GatedProposal] = []
-    for candidate_proposal in selected:
+    for candidate_proposal in gated:
         key = content_key(candidate_proposal.child)
         if key in seen:
             duplicates.append(candidate_proposal)

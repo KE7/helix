@@ -82,7 +82,9 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         asi={},
     )
 
-    boom_error = RuntimeError("simulated crash mid-generation")
+    # An interrupt: a failed evaluator run is a failed proposal slot, so the
+    # run keeps going; Ctrl-C is what ends it mid-generation.
+    boom_error = KeyboardInterrupt("simulated crash mid-generation")
 
     # Patch create_seed_worktree and run_evaluator so we control when to crash.
     call_count = [0]
@@ -106,7 +108,7 @@ def test_state_saved_before_crash(tmp_path: Path) -> None:
         patch("helix.evolution.HelixLiveDisplay", return_value=mock_ctx),
     ):
 
-        with pytest.raises(RuntimeError, match="simulated crash"):
+        with pytest.raises(KeyboardInterrupt, match="simulated crash"):
             run_evolution(config, project_root, base_dir)
 
     # State file must have been written even though an exception propagated

@@ -2374,6 +2374,168 @@ class TestResumeAttemptReconciliation:
         remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
         assert remaining_ids == {"g0-s0", "g2-s2"}
 
+    @pytest.mark.parametrize(
+        ("candidate_id", "operation"),
+        [
+            # A child validated and written to evaluations/ just before the
+            # interrupt, before state.json recorded it in the frontier (the
+            # real Ctrl-C run: g2-s5, and the first top_k winner).
+            ("g2-s5", "mutate"),
+            # A merge interrupted in its full validation: its subsample
+            # result is all that reached disk.
+            ("g2-m1", "merge"),
+        ],
+    )
+    def test_evaluation_without_frontier_membership_is_incomplete(
+        self, tmp_path: Path, mocker: Any, candidate_id: str, operation: str
+    ) -> None:
+        """Only state.json (or attempts/) marks an attempt complete.
+
+        ``evaluations/<id>.json`` is written before the state save that
+        records the acceptance, so on its own it proves nothing: a resume
+        that trusted it kept the worktree and the evaluation but never put
+        the candidate in the frontier.
+        """
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        evaluations_dir = base_dir / "evaluations"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        evaluations_dir.mkdir(parents=True)
+        (worktrees_dir / "g0-s0").mkdir()
+        (worktrees_dir / candidate_id).mkdir()
+        (evaluations_dir / "g0-s0.json").write_text("{}")
+        (evaluations_dir / f"{candidate_id}.json").write_text("{}")
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g0-s0",
+                        "parent": None,
+                        "parents": [],
+                        "operation": "seed",
+                        "generation": 0,
+                        "files_changed": [],
+                    },
+                    {
+                        "id": candidate_id,
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": operation,
+                        "generation": 2,
+                        "files_changed": [],
+                    },
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=2,
+            frontier=["g0-s0"],
+            instance_scores={"g0-s0": {"x": 0.1}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=5,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 1
+        remove_mock.assert_called_once()
+        assert remove_mock.call_args.args[0].id == candidate_id
+        remaining_ids = {record["id"] for record in json.loads(lineage_path.read_text())}
+        assert remaining_ids == {"g0-s0"}
+        # The orphaned evaluation goes too, so nothing reports the
+        # discarded candidate as evaluated.
+        assert not (evaluations_dir / f"{candidate_id}.json").exists()
+        assert (evaluations_dir / "g0-s0.json").exists()
+
+    def test_interrupted_merge_worktree_without_lineage_is_removed(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """A merge interrupted before its lineage entry leaves a g*-m* worktree."""
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        (worktrees_dir / "g0-s0").mkdir()
+        (worktrees_dir / "g3-m1").mkdir()
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "g0-s0",
+                        "parent": None,
+                        "parents": [],
+                        "operation": "seed",
+                        "generation": 0,
+                        "files_changed": [],
+                    }
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=3,
+            frontier=["g0-s0", "g2-s2"],
+            instance_scores={"g0-s0": {"x": 0.1}, "g2-s2": {"x": 0.2}},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=2,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 2
+        assert state.mutation_counter == 2
+        remove_mock.assert_called_once()
+        assert remove_mock.call_args.args[0].id == "g3-m1"
+
+    def test_leftover_from_an_earlier_generation_does_not_rewind_the_run(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """A worktree whose removal failed generations ago is not an
+        interrupted attempt: remove it, but resume where the run stopped."""
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        (worktrees_dir / "g2-m1").mkdir()
+        lineage_path.write_text("[]")
+        state = EvolutionState(
+            generation=7,
+            frontier=["g0-s0", "g6-s9"],
+            instance_scores={},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=9,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is True
+        assert state.generation == 7
+        assert state.mutation_counter == 9
+        assert remove_mock.call_args.args[0].id == "g2-m1"
+
 
 # ---------------------------------------------------------------------------
 # NB-2 regression: always-perfect data must terminate (GEPA parity)
@@ -2997,3 +3159,60 @@ def test_merge_partitioned_evaluations_preserves_id_alignment() -> None:
     assert merged.per_example_side_info == [
         {"judge": "tail-2"}, {"judge": "stage-0"}, {"judge": "stage-1"}
     ]
+
+
+class TestFailedChildEvalCharge:
+    def test_partial_cache_hit_charges_only_the_ids_sent(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """A child eval that raises is charged for the ids the evaluator was
+        sent, not for ids the cache already answered."""
+        from helix.eval_cache import EvaluationCache
+        from helix.evolution import _run_proposal_worker
+        from helix.exceptions import EvaluatorError
+        from helix.proposals import ChildEvalFailedProposal
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        config = _make_minibatch_config(train_path, minibatch_size=3)
+        parent = _make_candidate("g0-s0")
+        child = _make_candidate("g1-s1")
+        mocker.patch("helix.evolution.mutate", return_value=child)
+        mocker.patch("helix.evolution._detect_evaluator_tamper", return_value=[])
+        mocker.patch("helix.evolution._refresh_protected_evaluator_files")
+        mocker.patch("helix.evolution._write_helix_batch")
+        mocker.patch(
+            "helix.evolution._candidate_content_key", side_effect=lambda c: c.id
+        )
+        sent: list[list[str]] = []
+
+        def run_eval(candidate: Candidate, config: HelixConfig, **kw: Any) -> EvalResult:
+            ids = kw["instance_ids"]
+            if candidate.id == child.id:
+                sent.append(list(ids))
+                raise EvaluatorError("no HELIX_RESULT line")
+            return _make_result(candidate.id, {i: 0.3 for i in ids})
+
+        mocker.patch("helix.evolution.run_evaluator", side_effect=run_eval)
+        cache: EvaluationCache[object, str] = EvaluationCache()
+        cache.put_batch(
+            {"content_key": child.id, "split": "train"},
+            ["0", "1"],
+            [None, None],
+            [0.9, 0.9],
+        )
+
+        result = _run_proposal_worker(
+            (parent, None, ["0", "1", "2"], child.id),
+            config=config,
+            project_root=tmp_path,
+            worktrees_dir=tmp_path / "worktrees",
+            minibatch_cache=cache,
+            eval_cache=None,
+            evaluator_manifest={},
+            use_minibatch_gate=True,
+            gen=1,
+        )
+
+        assert sent == [["2"]]
+        assert isinstance(result, ChildEvalFailedProposal)
+        assert result.child_n_uncached == 1

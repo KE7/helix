@@ -41,27 +41,24 @@ class BatchBudgetGuard:
     crossed a dispatch boundary. It is deliberately a unit bound, not a
     worker count: one evaluator invocation can account for several minibatch
     examples.
-
     """
 
     evaluations_before: int
-    max_evaluations: int
     max_in_flight_evaluations: int
-    maximum_overshoot: int
 
 
 def begin_batch_budget_guard(
     state: EvolutionState,
     *,
-    max_evaluations: int,
     max_in_flight_evaluations: int,
 ) -> BatchBudgetGuard:
-    """Record the admissible in-flight work and overshoot for a batch.
+    """Record the admissible in-flight work for a batch.
 
     With a positive cap, a batch starts only below that cap. Once admitted,
     its in-flight work is allowed to drain. Thus a batch with ``U`` units can
     overshoot by at most ``max(0, U - 1)`` in the worst case (it starts one
-    unit below the cap). A non-positive cap is unlimited.
+    unit below the cap), which :func:`enforce_batch_budget_guard`'s check on
+    ``U`` alone guarantees.
 
     Raises:
         ValueError: if the caller supplies a negative in-flight unit bound.
@@ -71,48 +68,24 @@ def begin_batch_budget_guard(
             "Batch in-flight evaluation bound must be non-negative "
             f"(actual {max_in_flight_evaluations}, permitted >= 0)"
         )
-
-    evaluations_before = state.budget.evaluations
-    maximum_overshoot = (
-        0
-        if max_evaluations <= 0
-        else max(0, evaluations_before + max_in_flight_evaluations - max_evaluations)
-    )
     return BatchBudgetGuard(
-        evaluations_before=evaluations_before,
-        max_evaluations=max_evaluations,
+        evaluations_before=state.budget.evaluations,
         max_in_flight_evaluations=max_in_flight_evaluations,
-        maximum_overshoot=maximum_overshoot,
     )
 
 
-def enforce_batch_budget_guard(
-    state: EvolutionState,
-    guard: BatchBudgetGuard,
-    *,
-    actual_in_flight_evaluations: int,
-) -> None:
-    """Reject a batch whose observed work exceeds its declared budget bounds.
+def enforce_batch_budget_guard(state: EvolutionState, guard: BatchBudgetGuard) -> None:
+    """Reject a batch whose charged evaluations exceed its declared bound.
 
-    Both failures name the observed and allowed values so an accounting
+    The failure names the observed and allowed values so an accounting
     regression cannot silently turn a documented bound into best-effort
     behaviour.
     """
-    if actual_in_flight_evaluations > guard.max_in_flight_evaluations:
+    actual = state.budget.evaluations - guard.evaluations_before
+    if actual > guard.max_in_flight_evaluations:
         raise ValueError(
             "Batch in-flight evaluation units exceeded their bound: "
-            f"actual {actual_in_flight_evaluations}, permitted "
-            f"{guard.max_in_flight_evaluations}"
-        )
-
-    if guard.max_evaluations <= 0:
-        return
-
-    actual_overshoot = max(0, state.budget.evaluations - guard.max_evaluations)
-    if actual_overshoot > guard.maximum_overshoot:
-        raise ValueError(
-            "Batch evaluation-budget overshoot exceeded its bound: "
-            f"actual {actual_overshoot}, permitted {guard.maximum_overshoot}"
+            f"actual {actual}, permitted {guard.max_in_flight_evaluations}"
         )
 
 
