@@ -217,6 +217,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- The scrubbed environment of the agent and evaluator keeps `USER` on the
+  host (the Docker sandbox still doesn't get it). Claude Code on macOS finds
+  its Keychain login by it, so an unsandboxed run on a Claude subscription
+  failed every mutation with "Not logged in" unless `passthrough_env` listed
+  `USER`.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
