@@ -3549,30 +3549,25 @@ def _run_evolution_impl(
             if _gen_skip_records:
                 _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
 
-            # With no generation cap only the budget ends the run, and a
-            # generation in which every slot skipped a perfect parent without
-            # charging an evaluation leaves the budget where it was.  That
-            # needs a cached parent score, which only the single-task path
-            # uses (the minibatch path re-evaluates, as GEPA does).  With one
-            # score per candidate the pareto, current_best and top_k_pareto
-            # selectors only ever sample the best scorers, which are perfect,
-            # so every later generation skips the same way (epsilon_greedy's
-            # random draw is the exception and may stop early here).  GEPA
-            # cannot stall: it never caches the parent minibatch eval.
+            # With no generation cap only the budget ends the run, so a
+            # generation that charged no evaluation leaves it where it was.
+            # That needs a cached parent score, which only the single-task
+            # path uses (the minibatch path re-evaluates, as GEPA does): every
+            # slot skipped a perfect parent, or its mutation failed or changed
+            # nothing, so the child was not evaluated either.  The next
+            # generation can do the same, and each one may still pay for its
+            # mutations, so stop rather than risk an unbounded run.  GEPA cannot stall: it evaluates the
+            # parent minibatch uncached every iteration and counts it
+            # (``ReflectiveMutationProposer.propose``, ``eval_curr``).
             if (
                 config.evolution.max_generations <= 0
                 and state.budget.evaluations == _batch_budget_guard.evaluations_before
-                and any(isinstance(wr, SkippedProposal) for wr in worker_results)
-                and all(
-                    wr is None or isinstance(wr, SkippedProposal)
-                    for wr in worker_results
-                )
             ):
                 print_warning(
-                    f"Generation {gen}: every parent was skipped as perfect on "
-                    "a cached score, so later generations can change nothing "
-                    "and the budget will never run out (max_generations sets "
-                    "no cap) -- stopping."
+                    f"Generation {gen} charged no evaluation (every parent was "
+                    "skipped as perfect on a cached score, or no mutation "
+                    "produced a new candidate), so with no max_generations cap "
+                    "the budget would never run out -- stopping."
                 )
                 _save_state(state)
                 break

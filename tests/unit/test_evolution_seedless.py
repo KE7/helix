@@ -380,7 +380,6 @@ def test_child_of_generated_seed_contains_the_seeds_files(tmp_path, seedless_moc
 
     project = tmp_path / "project"
     project.mkdir()
-    worktrees = project / ".helix" / "worktrees"
     seedless_mocks["create_empty_seed_worktree"].side_effect = create_empty_seed_worktree
     seedless_mocks["snapshot_candidate"].side_effect = snapshot_candidate
 

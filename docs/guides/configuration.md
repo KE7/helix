@@ -66,7 +66,8 @@ enabled = false
 
 [evolution]
 max_generations = 20             # generation cap (default: 10; ≤ 0 = no cap, as in GEPA,
-                                 # so the run ends on max_evaluations)
+                                 # so the run ends on max_evaluations, or after a generation
+                                 # that charged no evaluation)
 perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this (default: unset)
 max_evaluations = -1             # evaluation budget cap (-1 = no cap)
                                  # NOTE: at least one stopping condition is required —

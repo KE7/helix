@@ -2344,7 +2344,36 @@ class TestGenerationsFlagOverridesConfig:
 
         all_mocks["mutate"].assert_not_called()
         warnings = " ".join(str(c.args[0]) for c in all_mocks["print_warning"].call_args_list)
-        assert "can change nothing" in warnings
+        assert "charged no evaluation" in warnings
+
+    def test_uncapped_run_stops_when_no_mutation_produces_a_candidate(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """Single-task + cache_evaluation: the parent score is cached, so a
+        generation whose mutations all fail charges nothing.  Without a
+        generation cap it must stop instead of paying for mutations forever."""
+        seed = make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = None
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, config, **kwargs: make_eval_result(candidate.id, {"i1": 0.5})
+        )
+
+        def guard(*args, **kwargs):
+            if all_mocks["mutate"].call_count > 50:
+                raise AssertionError("uncapped run never stopped")
+
+        all_mocks["save_state"].side_effect = guard
+        config = make_config(max_generations=0, max_evaluations=10)
+        config.evolution.cache_evaluation = True
+
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        # Generation 1 evaluates the parent's minibatch; generation 2 reuses
+        # the cached score, charges nothing, and stops.
+        assert all_mocks["mutate"].call_count == 2
+        warnings = " ".join(str(c.args[0]) for c in all_mocks["print_warning"].call_args_list)
+        assert "charged no evaluation" in warnings
 
     def test_zero_generations_runs_until_the_budget(self, mocker, tmp_path, all_mocks):
         """max_generations=0 disables the generation cap (GEPA has none; its

@@ -221,9 +221,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_evaluations` set now runs until the budget is spent, as the
   configuration guide documents and as GEPA does (it has no generation
   cap). It used to run no generations at all. Such a run also stops, with a
-  warning, after a generation in which every parent was skipped as perfect
-  on a cached score (single-task mode with `cache_evaluation`), since no
-  later generation could change anything or spend the budget. A config with
+  warning, after a generation that charged no evaluation, since the budget
+  would then never run out. Only single-task mode with `cache_evaluation`
+  can do that, by reusing the parent's cached score: every parent was
+  skipped as perfect, or every mutation failed or changed nothing. A config with
   neither cap
   (`max_generations <= 0` and `max_evaluations <= 0`) is now a config error
   that exits 2, instead of a `ValueError` traceback from inside the run.
