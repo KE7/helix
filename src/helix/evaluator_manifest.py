@@ -154,6 +154,22 @@ def _collect_protected_evaluator_paths(
     return sorted(protected)
 
 
+def agent_hidden_paths(config: HelixConfig, project_root: Path) -> list[str]:
+    """Repo-relative paths whose contents must never reach an agent prompt.
+
+    The protected evaluator files plus ``sandbox.omit_from_agent``.  A
+    candidate's history can still contain them (a protected-file refresh
+    commits them), so anything rendering candidate diffs into a prompt has to
+    leave these out.
+    """
+    hidden = set(_collect_protected_evaluator_paths(config, project_root))
+    for path_str in config.sandbox.omit_from_agent:
+        rel = _to_repo_relative(path_str, project_root)
+        if rel is not None:
+            hidden.add(rel)
+    return sorted(hidden)
+
+
 def _copy_protected_path(source: Path, destination: Path) -> None:
     """Refresh one protected file/directory in a candidate worktree."""
     if source.resolve(strict=False) == destination.resolve(strict=False):
