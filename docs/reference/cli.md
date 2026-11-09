@@ -9,7 +9,7 @@
 | `helix sandbox logout BACKEND` | Log out a backend from its persistent Docker auth volume |
 | `helix evolve` | Run the evolutionary loop |
 | `helix frontier` | Display the current Pareto frontier as a table |
-| `helix best` | Show the best candidate; `--export PATH` to copy it out |
+| `helix best` | Show the best candidate; `--export PATH` copies its files (what HELIX committed for it, without HELIX's prompt, logs and batch files) |
 | `helix history` | Show the candidate lineage as a tree |
 | `helix resume` | Resume a previously interrupted evolution run |
 | `helix clean` | Remove all worktrees and `.helix/` state (with confirmation) |
@@ -24,7 +24,7 @@
 --config PATH       Path to config file (default: helix.toml)
 --objective TEXT     Override the objective string
 --evaluator TEXT     Override the evaluator command
---generations INT   Override max_generations
+--generations INT   Override max_generations (at least 1)
 --stop-at-score X   Override stop_at_score: end the run once the best val score reaches X
 --no-merge          Disable merge operations
 --backend BACKEND   Override the mutation backend [agy|claude|codex|cursor|opencode|pi]
@@ -32,4 +32,8 @@
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
 ```
 
-Every command takes `--help` for its full options, for example `helix best --help`.
+Every command that reads or writes a run (`evolve`, `resume`, `frontier`,
+`best`, `history`, `log`, `attempts`, `timing`, `clean`) takes `--dir` for
+the project directory; a relative path is resolved against the current
+directory. Every command takes `--help` for its full options, for example
+`helix best --help`.

@@ -180,6 +180,19 @@ class TestAttemptsTableDefault:
         assert "g12-s4" not in result.output
         assert "g14-s6" not in result.output
 
+    def test_attempts_reads_the_project_given_by_dir(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """Like every other command, --dir names the project root."""
+        _make_helix_dir(tmp_path)
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        monkeypatch.chdir(other)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["attempts", "--dir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "g12-s4" in result.output
+
     def test_attempts_table_filters_by_reason_substring(self, tmp_path: Path) -> None:
         helix_dir = _make_helix_dir(tmp_path)
         runner = CliRunner()
@@ -390,7 +403,7 @@ class TestAttemptsHelp:
         assert "--reason" in result.output
         assert "--cid" in result.output
         assert "--json" in result.output
-        assert "--path" in result.output
+        assert "--dir" in result.output
 
     def test_attempts_appears_in_top_level_help(self) -> None:
         runner = CliRunner()
