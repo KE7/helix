@@ -32,6 +32,8 @@ Each candidate is a git worktree of your repo at `HEAD`, plus your uncommitted a
 
 ## Recommended: sandbox the agent
 
+Without the sandbox (the default), the agent runs as you and can read anything you can: your evaluator, your data, and the scores HELIX keeps under `.helix/`. `protected_files` stops a candidate from changing the evaluator, not from reading it.
+
 The simplest safe setup runs the mutation agent in a Docker copy of the candidate that leaves out your evaluator, while the evaluator itself runs on your machine:
 
 ```toml
