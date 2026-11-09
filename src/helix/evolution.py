@@ -115,7 +115,7 @@ from helix.worktree import (
 )
 from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatibility symbols)
     # 14 moved symbols — re-exported for backward compatibility and internal use
-    _collect_protected_evaluator_paths,  # noqa: F401
+    _collect_protected_evaluator_paths,
     _copy_protected_path,  # noqa: F401
     _detect_evaluator_tamper,
     _evaluator_manifest_path,  # noqa: F401
@@ -1632,6 +1632,10 @@ def _run_proposal_worker(
             ),
             record_usage=_spent_usage.append,
             sibling_history=sibling_history,
+            hidden_paths=[
+                *_collect_protected_evaluator_paths(config, project_root),
+                *config.sandbox.omit_from_agent,
+            ],
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)
@@ -2171,7 +2175,6 @@ def _run_evolution_impl(
             seed_prompt = build_seed_generation_prompt(
                 objective=config.objective,
                 background=config.agent.background,
-                evaluator_cmd=config.evaluator.command,
                 dataset_examples=_dataset_examples,
             )
             # Single attempt, fail-fast — matches GEPA's _generate_seed_candidate.
@@ -3004,6 +3007,11 @@ def _run_evolution_impl(
                 ``child.summary`` was read back in ``mutate`` while the
                 worktree still existed, so this works even for a child whose
                 worktree has since been removed.
+
+                ``result`` is always the child's train gate result, never a
+                val result: the history reaches the mutation prompt, and
+                GEPA's ``ReflectiveMutationProposer.propose`` shows the
+                reflection step only the train minibatch.
                 """
                 if not config.evolution.sibling_history:
                     return
@@ -3280,7 +3288,7 @@ def _run_evolution_impl(
                             stage="val_stage", example_ids=list(stage_val_example_ids),
                         )
                         _record_sibling(
-                            _parent.id, child, stage_result, accepted=False
+                            _parent.id, child, gated.gating_result, accepted=False
                         )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -3356,7 +3364,7 @@ def _run_evolution_impl(
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
                 _save_evaluation(base_dir, val_result)
-                _record_sibling(_parent.id, child, val_result, accepted=True)
+                _record_sibling(_parent.id, child, gated.gating_result, accepted=True)
                 frontier.add(child, val_result)
                 decision(child.id, accepted=True, reason="mutation")
                 _sync_frontier_state()

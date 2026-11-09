@@ -961,6 +961,37 @@ class TestSiblingHistory:
 
         assert handed == [""]
 
+    def test_summary_is_told_to_hide_evaluator_and_omitted_paths(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """The evaluator script found from ``evaluator.command`` is hidden too,
+        not only the paths listed in ``protected_files``."""
+        from helix.config import SandboxConfig
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        (tmp_path / "evaluate.py").write_text("print('HELIX_RESULT=1')\n")
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _wire_siblings(all_mocks, seed.id)
+        hidden: list[list[str]] = []
+
+        def fake_mutate(**kwargs: Any) -> Candidate:
+            hidden.append(list(kwargs["hidden_paths"]))
+            return _make_candidate(kwargs["new_id"])
+
+        all_mocks["mutate"].side_effect = fake_mutate
+        config = _make_config(
+            train_path, num_parallel_proposals=1, sibling_history=True
+        ).model_copy(
+            update={
+                "evaluator": EvaluatorConfig(command="python evaluate.py"),
+                "sandbox": SandboxConfig(omit_from_agent=["data/val"]),
+            }
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert hidden and {"evaluate.py", "data/val"} <= set(hidden[0])
+
     def test_kept_and_rejected_children_are_both_recorded(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
@@ -993,6 +1024,8 @@ class TestSiblingHistory:
             if instance_ids is None:
                 return _make_result(candidate.id, {"v1": 0.5})
             score = 0.3 if candidate.id == seed.id else scores[candidate.id]
+            if split == "val" and candidate.id == "g1-s2":
+                score = 0.95
             return _make_result(candidate.id, {i: score for i in instance_ids})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -1014,6 +1047,9 @@ class TestSiblingHistory:
             "approach taken by g1-s1",
             "approach taken by g1-s2",
         }
+        # The kept child's validation scored 0.95, its train gate 0.9:
+        # only the train score may reach the next mutation prompt.
+        assert {e["child_id"]: e["score"] for e in entries}["g1-s2"] == 0.9
 
     def test_a_resampled_parent_sees_its_earlier_child(
         self, tmp_path: Path, all_mocks: dict[str, Any]

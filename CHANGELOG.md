@@ -217,6 +217,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Sibling history (`sibling_history = true`) records each child's
+  training-gate score. Accepted children were recorded with their full
+  validation mean and val-stage rejects with their val-subset mean, and those
+  scores reached later mutation prompts. GEPA's
+  `ReflectiveMutationProposer.propose` reflects on the train minibatch only.
+- The change-summary prompt leaves out the protected evaluator files (the
+  script `evaluator.command` runs and `evaluator.protected_files`) and
+  `sandbox.omit_from_agent` paths, from both its diff and its new-file
+  listing.
+- The seedless seed prompt no longer shows `evaluator.command`, matching
+  GEPA's `_build_seed_generation_prompt`. State the file and interface the
+  evaluator expects in the objective or `agent.background`.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
