@@ -10,598 +10,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-11-06
 
 ### Added
-- `[agent].web_access = false` turns off the mutation agent's built-in web
-  tools through each CLI's own flags (claude, codex, opencode; agy and cursor
-  reject it, as do `helix evolve --backend` overrides onto them). The default
-  (`true`) is unchanged. User MCP servers and plugins still load, and the
-  shell can still reach the network; a strict no-web run needs the Docker
-  sandbox. Resuming with `web_access` changed is rejected.
-- `pi` ([earendil-works/pi](https://github.com/earendil-works/pi), npm
-  `@earendil-works/pi-coding-agent`, verified against 1.5.0) is a mutation
-  backend: `pi --mode json --print`, `agent.model` as `--model`,
-  `agent.effort` as `--thinking` (off | minimal | low | medium | high |
-  xhigh | max). pi asks for no tool approval, so it runs fully autonomous.
-  Usage is summed over every model call in the stream, and a run whose last
-  model call failed (`stopReason` `error` or `aborted`, which pi exits 0 on)
-  is a `MutationError`. Its session transcript is preserved from
-  `~/.pi/agent/sessions`, feeds `helix timing`, and is reset per generation
-  in the sandbox. `web_access = false` needs no flag (pi ships no web tools).
-  `helix sandbox login pi` starts pi's TUI for `/login` into the
-  `helix-auth-pi` volume; the runner image is
-  `ghcr.io/ke7/helix-evo-runner-pi`. Host backend runs now get a closed
-  stdin, since pi reads piped stdin before it starts.
-  pi has no turn cap, so `max_turns` is only a prompt hint for it. On a
-  local engine that serves one request at a time, parallel proposals need
-  pi's `httpIdleTimeoutMs` raised (see the configuration guide).
-- The seedless "Generating seed candidate" message and the failed-merge
-  message name the configured backend instead of always saying Claude Code.
-- `helix timing` now splits each agent call into `model`, `tool:<name>` and
-  `other` time, read from the backend's transcript (`claude`, `codex`,
-  `opencode`, `pi`; `cursor` and `agy` are reported as `unavailable`).
-- `from helix import timed`: time your own operations (`with timed("sam3",
-  example=...)`, `@timed(...)`, `timed.record(...)`) in the evaluator, its
-  sidecar and child processes, and scripts the agent runs. HELIX totals them per
-  name and example into `detail` records in `.helix/timing.jsonl`.
-- Every run now appends a timing trace to `.helix/timing.jsonl`
-  (`helix.timing`), always on like budget accounting. `start`/`end` records
-  cover the run, each generation, proposal slots, mutation, merge, seed
-  generation, sibling summaries, every backend call, cached and raw
-  evaluations, full validation, worktree clone/snapshot/remove, state saves,
-  and the sandbox reset. Each record carries `duration_seconds`, `outcome`, identity `attrs`,
-  a `parent_span_id` linking it into a tree, and a `run_id` separating
-  `evolve` from later `resume`s in the same file. Rejected candidates are
-  timed like accepted ones, and a `decision` record per candidate (`accepted`,
-  `reason`) splits the time spent by fate. Every record is stamped with the
-  `generation` and `candidate` its work was for. `helix timing` prints work by
-  kind and candidate fate plus wall time per generation, and `--perfetto FILE`
-  exports a Chrome-trace timeline for ui.perfetto.dev (no extra dependency). A trace that cannot be
-  written is a logged warning, never a failed run.
-- `examples/circle_packing/` is optimize_anything's circle-packing experiment
-  (gepa-ai/gepa@133d185a): GEPA's two-component candidate (`solve.py`,
-  `refiner_prompt.txt`), its fitness function with the GPT-5.1 refiner,
-  warm start and StateTracker (`gepa_fitness.py`), its objective, background
-  and budget, and the Python environment of its published run.
-  Its mutation agent (Claude Haiku 4.5 in Claude Code) runs sandboxed without
-  web access: `[agent].web_access = false` turns off its built-in web tools,
-  and `examples/circle_packing_sandbox/` provides an `--internal`
-  Docker network whose only route out is a gateway for the Anthropic Messages
-  API. See `docs/experiments/circle-packing.md`.
-- `[sandbox].network` accepts the name of an existing Docker network (for
-  example an `--internal` network whose only route out is an egress proxy),
-  besides `bridge`, `none` and `host`.
-- `[sandbox].auth_volume`: a dedicated Docker volume mounted at `/home/node` in
-  agent containers (and used by the transcript copy and the per-generation
-  state reset) instead of the shared `helix-auth-<backend>` volume.
-  `helix sandbox login` does not write it: it is for runs whose credential
-  reaches the agent another way.
-- `xhigh` and `max` are recognized `effort` values for the `claude` backend
-  (Claude Code 2.1.274 `--effort`); HELIX previously warned on them.
-- Sandboxed runs now reset the backend CLI's session state in its
-  `helix-auth-<backend>` volume at the start of every generation
-  (`helix.sandbox.reset_sandbox_agent_state`, driven by
-  `helix.backends.BACKEND_STATE_PATHS`): transcripts, memories, shell
-  snapshots and session indexes are removed. Credentials and operator
-  configuration are never touched; for
-  OpenCode only the `session`/`message`/`part` rows are deleted from
-  `opencode.db` because the same file holds the account's tokens. A failed
-  wipe is a warning, never fatal. Unsandboxed runs are not affected.
-  Only the listed paths are deleted, so files an agent writes elsewhere on
-  the volume (`~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, skills, hook
-  settings) persist to later candidates and later runs, and two runs at once
-  on the same volume can delete each other's live sessions. Give each
-  concurrent run its own `[sandbox].auth_volume`; see the sandboxing guide.
-- With `evolution.sibling_history = true`, every mutation whose backend call
-  succeeds is followed by a second backend call (with `max_turns = 5`) that
-  summarises its diff. Its tokens and cost
-  are charged to the run like the mutation's, and its prompt and output are
-  kept in `.agent_summary_prompt.md`, `.agent_change_summary.md` and
-  `.helix_backend_summary_{result.json,stdout.txt,stderr.txt}`. The default
-  (`false`) makes no extra call.
-- Tool-call counts for `agy` are now read from its native
-  `transcript.jsonl` (`tool_calls[*].name` on planner steps); its JSON
-  stdout envelope carries no per-tool events.
-- `examples/maniskill_pick_place/` (#77, by Mahanth Komuravelli): HELIX evolves a
-  multi-file `solver/` package that drives a Franka Panda through push, pick
-  and stack in ManiSkill 3, with the agent in HELIX's sandbox and every solver
-  in a throwaway container. In the recorded run one mutation took validation
-  from 0.064 to 1.0 and solved all 141 train, validation and held-out trials.
-  See `docs/experiments/maniskill-pick-place.md`.
-- A docs site (mkdocs-material, `mkdocs.yml`), deployed to GitHub Pages by
-  `.github/workflows/docs.yml`. A logo: the HELIX wordmark, whose X is a
-  cyan and magenta helix with `<>` and `{}` rungs, and a matching icon, built by
-  `docs/assets/logo/make_logo.py` from Archivo Black (SIL OFL 1.1). `docs/experiments/maniskill-pick-place/render_rollouts.py`
-  records the seed and evolved ManiSkill rollouts shown in the README and on
-  the site.
-- New CLI subcommand `helix attempts` — surfaces rejected attempt records and
-  perfect-skip events; supports filtering by `--generation`, `--stage`,
-  `--reason`, `--cid`; `--skips` flag to show only perfect-skip entries;
-  `--json` for machine-readable output. (PR #30)
-- New artifact directories `.helix/attempts/` and `.helix/skips/` — per-rejected-candidate
-  JSON files and per-generation perfect-skip event lists persisted alongside
-  `.helix/evaluations/` and `.helix/worktrees/`. (PR #30)
-- 5-backend `tool_event_count` / `tool_names` tracking in `UsageStats` —
-  normalised tool-use metrics for claude, codex, cursor, gemini, and opencode
-  backends extracted from transcript artifacts. (PR #32)
-- `session_id`, `to_dict`, `from_dict` helpers on `UsageStats`. (PR #32)
-- New module `src/helix/evaluator_manifest.py` — SHA-256 manifest for
-  protected evaluator files; refresh helpers for mutation and merge candidates.
-  (PR #30 refactor)
-- `evolution.mutations_per_parent` (N, default 1) proposes N children from
-  each sampled parent, so one iteration proposes
-  `num_parallel_proposals` (P) x N children. Each slot draws its own
-  minibatch. `evolution.proposal_selection` chooses which proposals that
-  pass the acceptance gate go to full validation: `all_improvements`
-  (default), `best_improvement`, or `top_k` (needs `evolution.proposal_top_k`,
-  between 1 and P x N; rejected for the other two). Ties go to the earlier
-  sampled slot. `max_evaluations` is checked between iterations, so a wider
-  batch can overshoot it by more.
-- `evolution.candidate_selection_strategy` picks the parent: `pareto`
-  (default, unchanged), `current_best`, `epsilon_greedy` (needs
-  `candidate_selection_epsilon` in [0, 1]) or `top_k_pareto` (needs
-  `candidate_selection_top_k` >= 1). These are the strategies in
-  `gepa.strategies.candidate_selector`. The new strategies rank by mean
-  validation score and place unscored candidates last. A setting that
-  belongs to a different strategy is rejected.
-- `evolution.batch_sampler = "stratified"` accepts `num_sampled_groups` and
-  `num_examples_per_group` (set together): each minibatch takes that many
-  groups and that many examples from each. Unset keeps one example from each
-  of `minibatch_size` groups.
-- `evolution.sibling_history` (default `false`): the mutation prompt lists
-  the children already proposed from the same parent, with each score,
-  whether it was kept, and a short description of what it changed. The
-  description comes from a separate call that reads the mutation's diff.
-  `sibling_summary_max_words` (default 150) bounds each description and
-  `sibling_history_max_entries` shows only the most recent N. With the
-  default, prompts and state are unchanged. State `schema_version` is now 3;
-  older state files load with defaults.
-- `evolution.stop_at_score` and `helix evolve --stop-at-score X` end the run
-  once the best mean validation score of an accepted candidate is `>=` the
-  target (checked at the start of each generation, as GEPA's
-  `ScoreThresholdStopper`). Unlike `perfect_score_threshold`, which only
-  skips mutating a perfect parent, this stops the run. NaN and infinite
-  values are rejected. A resumed run that already meets the target stops
-  immediately. A hard bound (`max_generations` or `max_evaluations` > 0) is
-  still required.
-- `evolution.retain_rejected_worktrees` (default `false`) keeps the worktree
-  of a candidate rejected by the validation-stage gate. Identity, lineage and
-  scores are recorded in `.helix/lineage.json` and `.helix/attempts/` either
-  way. Each retained worktree is a full repository; `helix clean` reclaims
-  them.
-- The `publish-runners` workflow also runs weekly (Mondays 12:00 UTC), so
-  `latest` follows the agent CLIs' releases instead of only `v*` tags, and a
-  pull-request check builds and probes every runner image.
+- `pi` backend (`agent.backend = "pi"`, verified with pi 1.5.0), on the host
+  and in the Docker sandbox (`helix sandbox login pi`). pi has no turn cap, so
+  `max_turns` is only a hint; for a local engine, see the configuration guide.
+- `examples/maniskill_pick_place/` (#77, by Mahanth Komuravelli) evolves a
+  multi-file solver for a Franka Panda on ManiSkill 3 push, pick and stack. In
+  the recorded run one mutation took validation from 0.064 to 1.0.
+- A docs site, https://ke7.github.io/helix/, and a HELIX logo.
+- Every run writes a timing trace to `.helix/timing.jsonl`. `helix timing`
+  shows where time went, including model and tool time inside agent calls
+  (claude, codex, opencode, pi), and `--perfetto FILE` exports a timeline.
+- `from helix import timed` times your own steps in the evaluator, its sidecar
+  or scripts the agent runs; `helix timing` totals them.
+- `helix attempts` lists rejected candidates and perfect-score skips, with
+  filters and `--json`.
+- `evolution.mutations_per_parent` (N) proposes N children per sampled parent,
+  P × N per iteration; `evolution.proposal_selection` (`all_improvements`,
+  `best_improvement`, `top_k` with `proposal_top_k`) picks which passing ones
+  get full validation.
+- `evolution.candidate_selection_strategy`: `pareto` (default), `current_best`,
+  `epsilon_greedy` (`candidate_selection_epsilon`) or `top_k_pareto`
+  (`candidate_selection_top_k`), GEPA's parent-selection strategies.
+- `evolution.batch_sampler = "stratified"` takes `num_sampled_groups` and
+  `num_examples_per_group`.
+- `evolution.sibling_history` (default off) shows the mutation agent the
+  children already proposed from the same parent, with their training scores
+  and a summary of each change. Each summary is one more, charged backend call;
+  `sibling_summary_max_words` and `sibling_history_max_entries` bound them.
+- `evolution.stop_at_score` / `--stop-at-score` ends the run once an accepted
+  candidate reaches the target score.
+- `evolution.retain_rejected_worktrees` keeps the worktrees of children
+  rejected at validation; `helix clean` removes them.
+- `[agent].web_access = false` turns off the agent's built-in web tools. The
+  shell can still reach the network; for a strict no-web run, use the sandbox.
+- `[sandbox].network` accepts an existing Docker network, and
+  `[sandbox].auth_volume` gives a run its own credentials volume.
+- Sandboxed agents start each generation from a clean session; credentials and
+  config are kept. Give concurrent runs separate `auth_volume`s.
+- `xhigh` and `max` are accepted `effort` values for claude.
+- Runner images are rebuilt weekly, and a PR check builds and probes them.
 
 ### Changed
-- The README is now a short overview: demo, results, papers built with HELIX,
-  a quickstart and the examples. The reference material it held
-  (configuration, sandboxing, dataset modes, evaluator integrity, parallelism,
-  the timing trace, the CLI and the architecture) moved verbatim to the docs
-  site. A new diagram replaces the mermaid flowchart.
-- A rate-limited backend call is now an ordinary failed mutation or merge,
-  as in GEPA. `RateLimitError` and its keyword matching are gone: the matching
-  also fired on transcripts that merely quoted "rate limit" or "529", and a
-  rate-limited merge stopped the whole run while a rate-limited mutation only
-  skipped its slot. The agent CLIs retry their own API calls.
-- **BREAKING** (`examples/circle_packing`): the example was a different
-  experiment from optimize_anything's, and one that leaked its answer: the
-  agent background stated the record score and a solution recipe, the record
-  coordinates sat in the candidate tree (`solve_optimized.py`), and invalid
-  packings scored their radius sum. It is now GEPA's experiment (see Added);
-  the candidate interface is `main(timeout, current_best_solution)` instead of
-  `pack_circles(n)`, an invalid packing scores 0, and the example's README
-  states no result. The reference packing moved to
-  `docs/experiments/circle-packing/reference_known_best.py`.
-- `examples/web_researcher`: the seed agent asks Claude Haiku directly, and a
-  web-fetching reference agent is in
-  `docs/experiments/web-researcher/reference_agent.py`. The example sets
-  `[dataset]` sizes; `evaluate.py` accepts HELIX's positional ids, resolves
-  `FETCH:pypi:<package>` and `FETCH:cpython` expected values itself, and
-  matches version answers on dot-separated components (at least
-  major.minor). The evaluator command pins Python 3.12 with the anthropic SDK,
-  `ANTHROPIC_API_KEY` is in `passthrough_env`, `evaluate.py`, `train/`, and
-  `val/` are protected files, and mutation agents run in the Docker sandbox
-  with those paths omitted from their workspace.
-- README: design section and concurrent work.
-- Prompts no longer ask the agent to print `[MUTATION COMPLETE]`,
-  `[MERGE COMPLETE]` or `[SEED GENERATION COMPLETE]`; HELIX never read them,
-  and the backend process exiting is the stop signal. **BREAKING** (Python
-  API): `helix.mutator.parse_mutation_summary`, which parsed
-  `[SUMMARY]...[END SUMMARY]` blocks no prompt asked for, is removed.
-- **BREAKING**: Removed the `sandbox.preserve_backend_transcripts`
-  configuration field. Every backend's native transcript is now always
-  copied out of the auth volume (or `$HOME` when unsandboxed) at the end of
-  each invocation, always kept under
-  `.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl`, and
-  always used for tool-call accounting; there is no way to opt out because
-  the sandbox resets the backend's state every generation and the copy is
-  the only record. Configurations that still set the field are rejected by
-  Pydantic's `extra="forbid"` validation. Previously turning the option off
-  also lost Claude's tool-call counts, which only the transcript carries.
-- **BREAKING**: Removed the `gemini` mutation backend and replaced it with
-  `agy` (Google's Antigravity CLI). Configs with `agent.backend = "gemini"`
-  are rejected; migrate to `"agy"`. `helix-auth-gemini` sandbox volumes are
-  no longer read; run `helix sandbox login agy` to create `helix-auth-agy`.
-  Unlike `gemini`, `agy` propagates `agent.effort` to its CLI (`--effort`,
-  same `low`/`medium`/`high` values as `claude`) instead of silently
-  ignoring it.
-- **BREAKING**: Removed the `evaluator.score_parser` configuration field. The built-in
-  `helix_result` parser is now implicit; configurations that still provide the
-  removed field are rejected by Pydantic's `extra="forbid"` validation.
-  Persisted resume records created before 0.3.0 retain the old field in their
-  semantic snapshot and must be restarted rather than resumed.
-- **BREAKING**: Removed the `pytest`, `exitcode`, `json_accuracy`, and
-  `json_score` score parsers. `helix_result` is now the only supported parser
-  and the default. Migration: emit one `HELIX_RESULT=` line containing a
-  positional `[score, side_info]` pair for every id in `helix_batch.json`.
-- **BREAKING**: `evolution.frontier_type` now defaults to `"instance"`
-  instead of `"hybrid"`.  The multi-axis frontiers require per-example
-  objective scores, which only the built-in result parser can supply
-  and only when the evaluator emits a `"scores"` sub-dict per example.
-  Legacy scalar parser configurations left `objective_scores` empty, so the old default
-  aborted the run with `MissingObjectiveScoresError` during the *seed*
-  evaluation — before generation 1.  Migration: projects that were
-  relying on the implicit `"hybrid"` default **and** do emit objective
-  scores must now set `frontier_type = "hybrid"` explicitly, otherwise
-  they silently get the single-axis instance frontier. Runs recorded under
-  the old `"hybrid"` default also cannot be resumed after upgrading:
-  resume validation rejects a saved `frontier_type` that differs from the
-  new `"instance"` default before it compares parser-key snapshots.
-  Explicitly requesting `"objective"` or `"cartesian"` without objective
-  scores warns during frontier updates and raises
-  `MissingObjectiveScoresError` when selection needs that axis; explicitly
-  requesting `"hybrid"` warns and no-ops its objective axis, continuing on
-  the instance axis.
-- **BEHAVIOUR**: `ParetoFrontier.get_non_dominated()` and
-  `ParetoFrontier.select_parent()` now rank candidates by
-  `EvalResult.aggregate_score()` (the mean instance score) instead of
-  `EvalResult.sum_score()`. This is the default parent-selection path, so
-  every run is affected. The aggregate score does not define dominance —
-  `ParetoFrontier._is_dominated` decides that from per-key frontier
-  membership, unchanged — it *orders* the dominance-elimination scan, which
-  stops at the first dominated candidate it finds. The change therefore
-  affects which candidate survives when several are mutually eliminable,
-  not what "dominated" means. Sum and mean rank a pool identically whenever
-  all candidates carry the same instance count, so runs where every
-  candidate was evaluated on the full valset see no difference. The
-  previous behaviour was justified in-code as GEPA parity; that
-  justification was incorrect. Upstream feeds
-  `gepa.strategies.candidate_selector.ParetoCandidateSelector` from
-  `gepa.core.state.GEPAState.per_program_tracked_scores`, which returns
-  `GEPAState.get_program_average_val_subset(program_idx)[0]` — an average.
-  `EvalResult.sum_score()`, `CandidateSummary.sum_score`, and the
-  `sum_scores` mapping in the result schema are unchanged and still
-  reported; sums also still drive the acceptance gate, which does match
-  upstream's `StrictImprovementAcceptance`.
-- **GEPA structural alignment**: generation counter advances unconditionally per
-  GEPA spec — a perfect-subsample no longer rewinds the counter. Cache is also
-  bypassed when re-evaluating the parent's minibatch, ensuring consistent
-  parent-comparison semantics across resume scenarios. (PR #32)
-- Scalar evaluator results now populate every requested instance ID in multi-example runs. (PR #32)
-- **BREAKING**: Removed `agent.allowed_tools`. HELIX no longer filters the
-  backend's tool list; containerized runs expose each CLI's native tools.
-  Configs that still set the field are rejected. Delete it.
-- **BREAKING**: `evolution.num_parallel_proposals` no longer accepts `"auto"`
-  (it resolved to `max_workers // minibatch_size`); set an integer. It and
-  `evolution.max_workers` must be >= 1 (a zero was previously accepted).
-  `max_workers` now caps how many proposal slots run concurrently and does
-  not bound full validation.
-- **BREAKING**: Every configuration error (TOML syntax or validation, from
-  the file or a flag) exits with status 2 instead of 1. A missing
-  `helix.toml` still exits 1.
-- `helix evolve` applies `--objective`, `--evaluator`, `--generations`,
-  `--no-merge`, `--backend`, `--model`, `--effort` and `--stop-at-score` by
-  merging them into the parsed config before one validation
-  (`load_config(path, overrides)`), so flags get the cross-field checks and
-  warnings a `helix.toml` value gets. An empty `evaluator.command`
-  (including `--evaluator ""`) is rejected at load time.
-- Byte-identical children proposed in one batch (for example two siblings of
-  one parent) collapse to one frontier entry instead of two.
-- `evolution.val_stage_size`: a validation stage that passes is kept for
-  final validation, which evaluates only the remaining ids and merges the
-  two results in id order. The stage call sets `HELIX_EVALUATION_PHASE=val_stage`
-  in the evaluator's environment. The evaluator must give the same per-id
-  results on a subset; do not combine this with batch-relative scores or
-  cross-example normalization.
-- The mutation prompt no longer carries the synthetic
-  `top_k_best_example_history` rows. Reflection sees only the current
-  minibatch's feedback; `evolution.minibatch_size` is the single minibatch
-  knob.
-- The flat Diagnostics renderer (one `side_info` for the whole batch) labels
-  the reserved `scores` key `Scores (Higher is Better)`, as the per-example
-  renderer already did. Only the prompt text changes.
-- Runner images are published for `linux/amd64` and `linux/arm64`, built on
-  native runners, so Apple Silicon hosts no longer pull an emulated amd64
-  image.
-- **BREAKING**: HELIX requires Python 3.12 or newer (`requires-python =
-  ">=3.12"`); 3.11 is no longer supported or tested. Python 3.13, 3.14 and
-  3.15 are now tested in CI and listed in the package classifiers. The
-  lockfile moves to pydantic 2.14.1 (pydantic-core 2.50.1), whose wheels
-  cover 3.15; the locked pydantic-core 2.41.5 had none. An evaluator can still
-  run on another Python through its own command, as `examples/circle_packing`
-  does with 3.11.
-- `CONTRIBUTING.md` now sets the rules for every PR, human or agent: each
-  description shows the change working on the real system (**Evidence**:
-  a real `helix evolve` run with a real backend and model, not mocks) and
-  gives **Try it by hand** steps from a clean checkout. Before the PR is
-  opened, CI must pass locally and the author's coding agent must review the
-  diff (`/code-review`, `/review`, or a prompt any agent can run), including
-  docs, tests and changelog entries the change should have touched but didn't. `.github/pull_request_template.md`
-  carries the same sections, and the rules are on the docs site.
-  `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
-  working on this repository to those rules.
-- The HELIX agent skill is registered for Claude Code as a project skill,
-  `.claude/skills/helix` (a symlink to `skills/helix/`), in place of the
-  `.claude/commands/helix.md` command. `/helix` still loads it; to use it in
-  other projects, link `skills/helix` into `~/.claude/skills/`.
+- **BREAKING**: HELIX requires Python 3.12 or newer; 3.12 to 3.15 are tested.
+- **BREAKING**: the `gemini` backend is replaced by `agy` (Google's
+  Antigravity CLI). Run `helix sandbox login agy`.
+- **BREAKING**: `evaluator.score_parser` and the `pytest`, `exitcode`,
+  `json_accuracy` and `json_score` parsers are removed. Print one
+  `HELIX_RESULT=` line with a `[score, side_info]` pair per id in
+  `helix_batch.json`. Runs saved by 0.2.x cannot be resumed.
+- **BREAKING**: `evolution.frontier_type` defaults to `"instance"` (was
+  `"hybrid"`). Set `"hybrid"` yourself if your evaluator emits per-example
+  objective scores.
+- **BREAKING**: `agent.allowed_tools` and
+  `sandbox.preserve_backend_transcripts` are removed (transcripts are always
+  kept); configs that set them are rejected.
+- **BREAKING**: `evolution.num_parallel_proposals` no longer accepts `"auto"`.
+  It and `max_workers` must be at least 1, and `max_workers` now limits only
+  concurrent proposal slots.
+- **BREAKING**: configuration errors exit with status 2 (was 1).
+- **BREAKING** (`examples/circle_packing`): the example is now
+  optimize_anything's circle-packing experiment, with GEPA's fitness function;
+  the old one leaked its answer to the agent.
+- **BREAKING** (Python API): `helix.mutator.parse_mutation_summary` is
+  removed, and prompts no longer ask for `[MUTATION COMPLETE]` markers.
+- **BEHAVIOUR**: parent selection ranks candidates by mean instance score
+  instead of the sum, as GEPA does.
+- A rate-limited backend call is an ordinary failed mutation or merge, as in
+  GEPA, instead of ending the run.
+- The generation counter advances every iteration, as in GEPA.
+- `helix evolve` flags are validated together with `helix.toml`.
+- `evolution.val_stage_size`: a passing validation stage is reused, so final
+  validation runs only the remaining ids. The evaluator must score each id the
+  same way on any subset.
+- The mutation prompt shows only the current minibatch's feedback.
+- Identical children proposed in one batch become one frontier entry.
+- A scalar evaluator result applies to every requested id.
+- Runner images are published for amd64 and arm64.
+- `examples/web_researcher` asks Claude Haiku directly and runs in the
+  sandbox with its evaluator files protected.
+- The README is a short overview; the reference material moved to the docs.
+- `CONTRIBUTING.md` sets the rules for every PR, human or agent. The HELIX
+  agent skill is a Claude Code project skill (`.claude/skills/helix`).
 
 ### Fixed
-- Sandbox sync-back no longer brings back symlinks that leave the candidate
-  worktree. The agent's workspace is writable by the agent, and a link to a
-  host path would let later host-side reads and writes in the worktree reach
-  that path. After each sync, every new or changed symlink that is absolute
-  or resolves outside the worktree is removed with a warning (`dropping
-  symlink ... it points outside the workspace`); links the candidate already
-  had are kept. Transcript artifacts are copied only from real directories
-  and regular files, and a `.gitignore` symlink that leaves the worktree is
-  replaced by a regular file instead of written through.
-- `helix log` shows the run. It had never printed anything: it read
-  `.helix/log/`, which nothing wrote. It now joins the records a run already
-  keeps into one row per candidate: generation, parent, outcome (on the
-  frontier and on how many ids, dominated, or rejected and why), score and its
-  change against the parent, files changed, and the first sentence of the
-  agent's change summary when `evolution.sibling_history` is on.
-- `lineage.json` records each mutation's and merge's `files_changed`, which
-  was always empty. It lists every path the child changed against its parent,
-  whether the agent committed it or not, and is written before the minibatch
-  gate, so rejected children keep their list after their worktree is removed.
-  Runs made before this have empty lists.
-- HELIX error panels print every field literally. Backend or evaluator output containing brackets (`[/INST]`) made the panel itself raise instead of showing the error, and suggestions lost TOML table names: "Raise [sandbox].timeout_seconds" printed as "Raise .timeout_seconds".
-- Unsandboxed opencode runs keep the operator's stored logins. Each
-  candidate's private opencode data directory now links the operator's
-  `auth.json`, so a run that authenticates through `opencode providers
-  login` rather than an API-key variable no longer finds no credentials.
-  The run's transcript is read from its own database; HELIX no longer reads
-  or copies the operator's `~/.local/share/opencode/opencode.db`, which
-  holds the opencode account's tokens and can be gigabytes.
-- Token and tool accounting:
-  - Claude cache reads were counted twice (once as cached input, once as
-    cache reads), inflating the "Cache" line and `state.json` budget totals.
-  - opencode usage counted only the first model call of a run; it is now
-    summed over every step, and a tool printing a number no longer sets the
-    output-token count.
-  - Tool counts read from the stdout stream or native transcript (claude,
-    codex, cursor, agy) reached `.helix_backend_result.json` but not the live
-    "Tools" line or the candidate's usage; both now match the artifact.
-  - Unsandboxed Claude runs never found the agent's transcript: HELIX looked
-    at the sandbox's container path, while Claude writes it under
-    `~/.claude/projects/<working-directory>/`. Tools were counted as 0 and
-    `helix timing` reported Claude's time as unavailable. HELIX now searches
-    there; `[sandbox].claude_transcript_root` applies to sandboxed runs only.
-  - A failed agy call now charges the tokens its JSON output reports.
-  - An agent call that runs out of `[sandbox].timeout_seconds` is now a
-    failed mutation that charges the tokens it reported, whatever the
-    backend printed before the kill (a claude max-turns result is no longer
-    taken as success once its edits are gone); before, the tokens were lost
-    and the worktree was left behind.
-- The change-summary call (`sibling_history`) no longer drops a successful
-  mutation when its prompt file cannot be written. A child that changed no
-  files gets the fixed summary "No change: the agent left the parent's files
-  as they were." without a paid summary call.
-- The seed now commits HELIX's `.gitignore` entries for its per-call
-  artifacts. Before, every child of the seed added them itself, so its diff
-  and its change summary (which later mutations of the seed read) described
-  that `.gitignore` edit as part of the agent's work, and a child of the seed
-  that changed nothing still paid for a summary.
-- `max_generations` must be at least 1. `max_generations = 0` (or
-  `helix evolve --generations 0`) is now a config error that exits 2. It used
-  to run no generations with `max_evaluations` set, and end in a `ValueError`
-  traceback from inside the run without it. GEPA has no generation cap (its
-  stop is `max_metric_calls`); HELIX keeps a required one for simplicity.
-- `helix best --export PATH` copies only the candidate's files, the ones
-  HELIX committed for it. It used to copy the whole worktree, including the
-  agent's `.agent_task_prompt.md`, `.helix_backend_*` logs,
-  `helix_batch.json`, `.helix_artifacts/` and caches.
-- Resuming a run saved by HELIX 0.2.x now says it cannot be resumed
-  by 0.3.0 (its state pins the removed `evaluator.score_parser`) and to
-  finish it with 0.2.x or start fresh, instead of telling you to restore a
-  config 0.3.0 cannot load.
-- `--dir` with a relative path now works. `helix evolve --dir proj` created
-  the seed worktree at `proj/proj/.helix/worktrees/g0-s0` and then evaluated
-  `proj/.helix/worktrees/g0-s0`, which failed with "no HELIX_RESULT". Every
-  command now resolves `--dir` to an absolute path.
-- `helix attempts` takes `--dir` (the project directory) like every other
-  command, so `helix attempts --dir .` as the HELIX skill documents works.
-  The old `--path <.helix dir>` still works.
-- Seedless search now builds on its seed. The seed agent's files were never
-  committed, so every child was cloned from an empty tree and had to rewrite
-  the solver from scratch while being scored against the seed. HELIX now
-  commits the generated seed before evaluating it, as it does a mutation.
-- Sibling history (`sibling_history = true`) records each child's
-  training-gate score. Accepted children were recorded with their full
-  validation mean and val-stage rejects with their val-subset mean, and those
-  scores reached later mutation prompts. GEPA's
-  `ReflectiveMutationProposer.propose` reflects on the train minibatch only.
-- The seedless seed prompt no longer shows `evaluator.command`, matching
-  GEPA's `_build_seed_generation_prompt`. State the file and interface the
-  evaluator expects in the objective or `agent.background`.
-- The scrubbed environment of the agent and evaluator keeps `USER` on the
-  host (the Docker sandbox still doesn't get it). Claude Code on macOS finds
-  its Keychain login by it, so an unsandboxed run on a Claude subscription
-  failed every mutation with "Not logged in" unless `passthrough_env` listed
-  `USER`.
-- `examples/web_researcher`: the evaluator command now installs HELIX
-  from PyPI (`--with 'helix-evo>=0.3.0'`, the first release with
-  `helix.timed`), so `from helix import timed` in `evaluate.py` no longer
-  fails with `ModuleNotFoundError`, in `helix evolve` or when run by hand
-  from the example README.
-- Seedless mode now gives the agent its task. Every backend is told to read
-  `.agent_task_prompt.md`, but seed generation never wrote that file, so the
-  seed agent started in an empty worktree with no objective and had to guess
-  (with pi on a local model it searched the disk for the file and produced
-  nothing). Seed generation now gets its prompt file the same way a
-  mutation does.
-- Merge agents now get their task. Merges had the same missing
-  `.agent_task_prompt.md` as seed generation, on every backend since 0.2.x:
-  the agent was told to read a file that did not exist, so it could not see
-  the objective or either parent's diff, and usually changed nothing. The
-  prompt file is now written by the backend call itself, for mutations,
-  merges, seeds and change summaries alike.
-- A merge that leaves the code identical to one of its parents is rejected
-  before it is evaluated, recorded under `.helix/attempts/` with reason
-  `merge_no_change`, and the generation goes on to mutation. It used to be
-  scored, tie its parent at the subsample gate, and enter the frontier as a
-  duplicate of that parent. The comparison leaves out protected and omitted
-  paths, so HELIX's own refresh of the protected files does not count as a
-  change.
-- The merge prompt no longer shows the parents' validation ids or scores
-  (the "Candidate A/B Strengths" sections). Nothing from validation reaches
-  an agent now; GEPA's merge shows no scores either.
-- Diffs in the merge prompt leave out protected evaluator files and
-  `[sandbox].omit_from_agent` paths, which a candidate's history can hold
-  (for example after a protected-file refresh on resume).
-- Merges of two children of the seed now show the agent both parents' diffs.
-  The seed's worktree is detached, so diffs against its branch name failed
-  and came back empty; diffs now use each candidate's commit, and a diff
-  that fails fails the merge (before any tokens are spent) instead of
-  prompting with an empty diff.
-- A merge that passes its subsample gate is no longer thrown away when its
-  evaluations reach `max_evaluations`: it gets its full validation and joins
-  the frontier, as in GEPA, and the run stops at the next iteration. The
-  subsample evaluation it had already paid for used to be wasted.
-- Resuming after an interrupted generation no longer fails with "a branch
-  named 'helix/g1-s2' already exists". An interrupt can stop cleanup after
-  it removes a candidate's worktree but before it deletes the branch, and
-  the resumed generation then reuses that candidate id. Cloning a candidate
-  now resets a leftover branch (`git worktree add -B`); git still refuses a
-  branch that a live worktree has checked out.
-- A project with no `[dataset]` (single-task mode) can now be scored. The
-  `helix_result` parser needs `helix_batch.json` to line up the evaluator's
-  pairs with ids, but only the dataset paths wrote it, so every single-task
-  evaluation failed with "helix_result parser requires helix_batch.json".
-  HELIX now writes `["0"]` before each single-task evaluation, so an
-  evaluator that prints one `[score, side_info]` pair works as the README
-  shows. This mirrors GEPA's `optimize_anything`, which runs
-  `dataset=None, valset=None` on a one-element sentinel dataset.
-- Every proposal slot's spend is now charged, whatever happens to the
-  candidate. All slots in a batch run in parallel before the sequential apply
-  phase, but their parent evaluations, child minibatch evaluations and
-  backend tokens were charged inside that phase, branch by branch, so a slot
-  the phase did not reach (every slot after a mid-batch budget stop, and the
-  slot that hit the cap) lost its tokens, dollars and evaluations. The apply
-  phase now charges each slot's spend once, as soon as the batch returns,
-  and afterwards charges only the evaluations it runs itself. Rejected
-  worktrees are still removed by default; usage never depended on them.
-- `max_evaluations` is checked between iterations only, as in GEPA: a batch
-  admitted below the cap drains, so every child it selects is validated and
-  can join the frontier, even when the batch's own evaluations reach the cap.
-  The mutations are already paid for; HELIX used to stop mid-batch and throw
-  away an accepted child's validation. The overshoot stays within the
-  documented `U - 1` bound, which already included that validation.
-- A child whose minibatch evaluation raises is rejected as its own outcome
-  (`ChildEvalFailedProposal`) instead of ending a single-slot run or dropping
-  a parallel slot with its tokens. Its tokens and the failed evaluator run
-  are charged, it is recorded in sibling history, and its worktree is
-  removed. A parent minibatch evaluation that raises is charged for the
-  evaluator run as well.
-- Resume no longer loses a candidate that was validated just before an
-  interrupt. Its evaluation reached `.helix/evaluations/` before
-  `state.json` recorded the acceptance, and resume took the evaluation as
-  proof the attempt had finished, so the candidate never re-entered the
-  frontier while its worktree and evaluation stayed behind. HELIX now saves
-  the state as soon as a candidate joins the frontier, and resume counts an
-  attempt as finished only when the saved frontier or `.helix/attempts/`
-  lists it; anything else, including a merge interrupted in its full
-  validation and an interrupted merge's worktree, is removed with its
-  evaluation and the generation runs again (a leftover worktree from an
-  earlier generation is removed without rewinding the run, and so is the
-  worktree of a rejected attempt whose removal the interrupt cut short,
-  unless `retain_rejected_worktrees` kept it). A merge that
-  fails its subsample gate is now recorded under `.helix/attempts/` (reason
-  `merge_below_parents`, stage `merge_subsample`) instead of
-  `.helix/evaluations/`, so `helix attempts` lists it and `helix log` shows
-  it as rejected.
-- `helix init`: the next-steps message escapes bracketed table names such as
-  `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
-- Backend transcript preservation now covers every backend. It was only ever
-  implemented for `claude`; `codex`, `opencode`, `agy`, and `cursor` runs
-  silently kept no native transcript. Each backend's own
-  session record is now located by a single per-backend table
-  (`helix.backends.BACKEND_TRANSCRIPT_SOURCES`), copied out of the
-  `helix-auth-<backend>` volume (or the operator's `$HOME` when unsandboxed)
-  into `.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl`,
-  and reported in `.helix_backend_result.json` with an explicit reason when
-  it cannot be found. OpenCode keeps sessions only in a shared sqlite
-  database, so just that session's `session`/`message`/`part` rows are
-  exported as JSONL rather than copying the whole file.
-- Backend token usage is no longer discarded when the backend's output fails
-  to parse. `budget.charge_llm_usage` was reachable only from the success
-  paths of `mutate` / `merge`, so a `MutationError` raised while parsing
-  threw away the attempt's accounting along with its candidate. Usage is now
-  recovered from raw stdout by a parse that cannot raise, carried out on
-  `HelixError.usage`, and charged in the apply phase with
-  `source="mutation_failed"` / `"merge_failed"`. Measured on one 20-generation
-  run, a single parse failure left the budget 7.2% low on input tokens and
-  5.0% low on output tokens, silently. Failed invocations also now record the
-  recovered usage in `.helix_backend_result.json` instead of zeros, and the
-  error report prints it.
-- Newline-delimited backend and evaluator output is now split on U+000A only.
-  `str.splitlines()` also breaks on U+0085, U+2028 and U+2029, which JSON
-  leaves unescaped inside string literals and which agent backends therefore
-  emit verbatim, fragmenting one valid JSONL record into two invalid ones.
-  This was the root cause of the parse failure above. Applied via the new
-  `helix.lines.split_lf_lines` to the JSONL parsers, the per-backend
-  transcript tool-event counters, the `HELIX_RESULT=` scans, and the JSONL
-  dataset readers; human-authored and git-generated text still uses
-  `splitlines()`.
-- `ParetoFrontier.select_parent()` and `ParetoFrontier.get_non_dominated()`
-  are now reproducible across processes for a given seed. Candidate ids are
-  `str` and the per-key fronts are `set` objects, so set iteration order —
-  which varies with the per-process string-hash salt — reached both the
-  dominance-elimination scan order and the order of the selection sampling
-  list. Two orderings are now imposed: the elimination scan sorts by
-  `(score, candidate_id)`, and the sampling list is built in sorted
-  candidate-id order. Previously, a run pinned to `random.Random(7)` over
-  four identically-scored candidates returned a different parent under
-  different `PYTHONHASHSEED` values. Upstream GEPA indexes programs by
-  integer, so it was never exposed to this; HELIX's port changed the
-  identifier type.
-- Mandatory stop-condition enforcement: `run_evolution` now raises `ValueError`
-  at startup if both `max_generations ≤ 0` and `max_evaluations ≤ 0`. Previously
-  a config with both set to negative values would loop indefinitely. (PR #32)
-- Resume reconciliation: incomplete attempts and orphaned worktrees from a
-  crashed run are cleaned up at resume time before the first new generation
-  starts. (PR #30)
-- `opencode` runs with several parallel proposals no longer fail with
-  `PRAGMA journal_mode = WAL`: unsandboxed runs give each candidate its own
-  `XDG_DATA_HOME` (`<worktree>/.helix_opencode_state/`) and so its own
-  database.
-- `opencode` mutations now pass `--auto` in place of the permission-skip flag
-  the current CLI rejects, so sandboxed `opencode` mutations run again.
-- Cached evaluations keep per-example `side_info`; a cache hit or partial
-  hit used to return scores without the feedback for the selected examples.
-- The evaluation cache rejects a batch whose `outputs`, `scores`,
-  `objective_scores` or `side_info` do not match the number of example ids,
-  with "Evaluator batch cardinality mismatch", before writing. A short batch
-  used to leave a partial write that later lookups served as hits; a long one
-  was truncated silently.
-- Concurrent `git worktree add`, `remove`, `prune` and `branch -D` are
-  serialised in-process. With enough candidates in flight, an `add` could
-  fail with `failed to read .git/worktrees/<id>/commondir` and drop a
-  proposal slot.
-- Docker startup errors no longer print `passthrough_env` values: tracebacks
-  and logs show `-e KEY=<redacted>` for `-e`, `--env`, `-eKEY=VALUE` and
-  `--env=KEY=VALUE`, for `CalledProcessError`, `TimeoutExpired` and
-  `CompletedProcess.args`.
-- Backend usage normalization reads fields that fell through to zero: Codex
-  `reasoning_output_tokens` and `cache_write_input_tokens`, Cursor
-  `cacheReadTokens` and `cacheWriteTokens`, OpenCode `reasoning` and
-  `tokens.cache.read`/`tokens.cache.write`. Existing aliases and field names
-  are unchanged.
-- A child that has not been committed yet is cached and de-duplicated by the
-  tree it would commit, not by candidate id. This removes the per-proposal
-  "worktree is not clean; falling back to id cache key" warning, and
-  identical child content now hits the cache. Non-ignored files an evaluator
-  writes into the worktree are part of that key.
+- Unsandboxed Claude Code on a Mac subscription works: the agent's
+  environment keeps `USER`, so Claude finds its login.
+- Merges work: the merge agent gets its task, a merge that changes nothing
+  is rejected before evaluation, and the merge prompt no longer shows
+  validation scores or protected files.
+- Seedless mode works: the seed agent gets its task, the seed is committed so
+  its children build on it, and the seed prompt no longer shows the evaluator
+  command.
+- Projects without a `[dataset]` (single task) can be scored.
+- Sibling history shows each child's training score, never a validation score.
+- `helix resume` keeps a candidate validated just before an interrupt, cleans
+  up interrupted attempts, and no longer fails on a leftover branch.
+- `helix log` shows the run, one row per candidate, and `lineage.json`
+  records each child's `files_changed`.
+- Token and cost accounting: Claude cache reads are counted once, opencode
+  counts every model call, and failed calls, sandbox timeouts and every
+  proposal slot are charged.
+- Every backend's transcript is kept (it was claude only), and the live
+  "Tools" count and `helix timing` read it, including unsandboxed Claude
+  (`[sandbox].claude_transcript_root` now applies to sandboxed runs only).
+- An agent call that hits `[sandbox].timeout_seconds` is a failed mutation.
+- `max_evaluations` is checked between iterations, as in GEPA, so validations
+  already paid for are not thrown away.
+- A child whose evaluation raises is rejected instead of ending the run.
+- `max_generations` must be at least 1; 0 used to run nothing or crash.
+- `--dir` accepts relative paths, and `helix attempts` takes `--dir`.
+- `helix best --export` copies only the candidate's files, not HELIX's logs.
+- Change summaries no longer drop a successful mutation, cost nothing when
+  the child changed nothing, and no longer describe HELIX's `.gitignore` edit.
+- opencode: unsandboxed runs keep your stored logins and run parallel
+  proposals without database errors; sandboxed runs work again.
+- Sandbox sync-back drops symlinks that point outside the candidate.
+- Backend output with U+2028 or U+2029 inside JSON strings parses.
+- Parent selection is reproducible for a given random seed.
+- Cached evaluations keep per-example feedback, and an evaluator that returns
+  the wrong number of results no longer corrupts the cache.
+- Concurrent worktree operations no longer drop proposal slots.
+- Docker errors no longer print `passthrough_env` values.
+- Error panels and `helix init` print bracketed text and TOML table names
+  as written.
+- `examples/web_researcher` installs HELIX in its evaluator's environment.
+- Messages name the configured backend instead of always saying Claude Code.
 
 ## [0.2.1] - 2026-05-10
 
