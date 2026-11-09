@@ -1056,6 +1056,19 @@ def _run_docker_process(
     return result
 
 
+def subprocess_output_text(output: str | bytes | None) -> str:
+    """Text of a captured stream, as ``TimeoutExpired`` carries it.
+
+    ``subprocess.run`` hands partial output to ``TimeoutExpired`` as bytes
+    even with ``text=True``.
+    """
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", "replace")
+    return output
+
+
 def _run_docker(
     args: list[str],
     *,
@@ -1386,6 +1399,10 @@ def run_sandboxed_commands(
         if sidecar_runtime is not None:
             command_env["HELIX_EVALUATOR_ENDPOINT"] = sidecar_runtime.endpoint
         results = []
+        # An agent run that outlives ``sandbox.timeout_seconds`` keeps its
+        # transcript: it is copied out and synced back like any other run's,
+        # while the workspace edits are dropped, then the timeout re-raised.
+        timed_out: subprocess.TimeoutExpired | None = None
         try:
             for command in commands:
                 container_name = f"helix-cmd-{uuid.uuid4().hex[:12]}"
@@ -1409,6 +1426,10 @@ def run_sandboxed_commands(
                             timeout=sandbox.timeout_seconds,
                         )
                     )
+                except subprocess.TimeoutExpired as exc:
+                    if scope != "agent":
+                        raise
+                    timed_out = exc
                 finally:
                     _run_docker(["docker", "rm", "-f", container_name], check=False)
                 if scope == "agent":
@@ -1417,13 +1438,23 @@ def run_sandboxed_commands(
                         image=docker_image,
                         agent_backend=agent_backend,
                         sandbox=sandbox,
-                        stdout=results[-1].stdout or "",
+                        stdout=(
+                            subprocess_output_text(timed_out.stdout)
+                            if timed_out is not None
+                            else results[-1].stdout or ""
+                        ),
                     )
+                if timed_out is not None:
+                    break
         finally:
             if host_owner := _host_owner():
                 _docker_chown_workspace(workspace, docker_image, host_owner)
             else:
                 _docker_relax_workspace_permissions(workspace, docker_image)
+        if timed_out is not None:
+            if sync_back:
+                _sync_back_backend_transcripts(workspace, source)
+            raise timed_out
         if sync_back:
             _sync_back_workspace(
                 workspace,

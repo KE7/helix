@@ -132,6 +132,12 @@ base_dir = ".helix/worktrees"
 
 ## Backend notes
 
+**opencode** (`backend = "opencode"`), without the Docker sandbox:
+
+- Each candidate runs opencode with its own data directory, `<worktree>/.helix_opencode_state/.local/share/opencode` (via `XDG_DATA_HOME`), so parallel proposals never share one `opencode.db`.
+- Your stored logins still apply: HELIX links your `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`, by default `~/.local/share/opencode/auth.json`, where `opencode providers login` writes) into that directory. It is a link, so a token opencode refreshes is saved to your own file. API-key variables (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) work as before.
+- HELIX never reads or copies your own `opencode.db`; the run's transcript comes from the candidate's database.
+
 **pi** (`backend = "pi"`):
 
 - `model` takes pi's `provider/id` form, for example `"anthropic/claude-sonnet-4-5"` or a custom provider from `~/.pi/agent/models.json` such as `"jitengine/flint-int4"`. `pi --list-models` lists them.

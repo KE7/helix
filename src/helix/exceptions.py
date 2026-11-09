@@ -9,6 +9,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
 if TYPE_CHECKING:
@@ -151,26 +152,30 @@ def print_helix_error(exc: HelixError) -> None:
     Never truncates any field — stdout, stderr, and all diagnostics are
     printed in their entirety.
     """
+    # Every field is literal text: backend and evaluator output, commands and
+    # suggestions naming TOML tables (``[sandbox].timeout_seconds``) would
+    # otherwise be read as Rich markup, dropping text or raising MarkupError
+    # while reporting the real error.
     lines: list[str] = []
-    lines.append(f"[bold red]{exc}[/bold red]")
+    lines.append(f"[bold red]{escape(str(exc))}[/bold red]")
     if exc.operation:
-        lines.append(f"[red]Operation:[/red] {exc.operation}")
+        lines.append(f"[red]Operation:[/red] {escape(exc.operation)}")
     if exc.phase:
-        lines.append(f"[red]Phase:[/red] {exc.phase}")
+        lines.append(f"[red]Phase:[/red] {escape(exc.phase)}")
     if exc.command:
-        lines.append(f"[red]Command:[/red] {exc.command}")
+        lines.append(f"[red]Command:[/red] {escape(str(exc.command))}")
     if exc.exit_code is not None:
         lines.append(f"[red]Exit code:[/red] {exc.exit_code}")
     if exc.cwd:
-        lines.append(f"[red]Working dir:[/red] {exc.cwd}")
+        lines.append(f"[red]Working dir:[/red] {escape(str(exc.cwd))}")
     if exc.usage is not None:
-        lines.append(f"[red]Backend usage:[/red] {exc._usage_summary()}")
+        lines.append(f"[red]Backend usage:[/red] {escape(exc._usage_summary())}")
     if exc.stdout:
-        lines.append(f"[red]Stdout (full):[/red]\n{exc.stdout}")
+        lines.append(f"[red]Stdout (full):[/red]\n{escape(exc.stdout)}")
     if exc.stderr:
-        lines.append(f"[red]Stderr (full):[/red]\n{exc.stderr}")
+        lines.append(f"[red]Stderr (full):[/red]\n{escape(exc.stderr)}")
     if exc.suggestion:
-        lines.append(f"[yellow]Suggestion:[/yellow] {exc.suggestion}")
+        lines.append(f"[yellow]Suggestion:[/yellow] {escape(exc.suggestion)}")
 
     panel = Panel(
         "\n".join(lines),

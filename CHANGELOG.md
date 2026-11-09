@@ -217,6 +217,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+
+- HELIX error panels print every field literally. Backend or evaluator output containing brackets (`[/INST]`) made the panel itself raise instead of showing the error, and suggestions lost TOML table names: "Raise [sandbox].timeout_seconds" printed as "Raise .timeout_seconds".
+- Unsandboxed opencode runs keep the operator's stored logins. Each
+  candidate's private opencode data directory now links the operator's
+  `auth.json`, so a run that authenticates through `opencode providers
+  login` rather than an API-key variable no longer finds no credentials.
+  The run's transcript is read from its own database; HELIX no longer reads
+  or copies the operator's `~/.local/share/opencode/opencode.db`, which
+  holds the opencode account's tokens and can be gigabytes.
+- Token and tool accounting:
+  - Claude cache reads were counted twice (once as cached input, once as
+    cache reads), inflating the "Cache" line and `state.json` budget totals.
+  - opencode usage counted only the first model call of a run; it is now
+    summed over every step, and a tool printing a number no longer sets the
+    output-token count.
+  - Tool counts read from the stdout stream or native transcript (claude,
+    codex, cursor, agy) reached `.helix_backend_result.json` but not the live
+    "Tools" line or the candidate's usage; both now match the artifact.
+  - Unsandboxed Claude runs never found the agent's transcript: HELIX looked
+    at the sandbox's container path, while Claude writes it under
+    `~/.claude/projects/<working-directory>/`. Tools were counted as 0 and
+    `helix timing` reported Claude's time as unavailable. HELIX now searches
+    there; `[sandbox].claude_transcript_root` applies to sandboxed runs only.
+  - A failed agy call now charges the tokens its JSON output reports.
+  - An agent call that runs out of `[sandbox].timeout_seconds` is now a
+    failed mutation that charges the tokens it reported, whatever the
+    backend printed before the kill (a claude max-turns result is no longer
+    taken as success once its edits are gone); before, the tokens were lost
+    and the worktree was left behind.
+- The change-summary call (`sibling_history`) no longer drops a successful
+  mutation when its prompt file cannot be written. A child that changed no
+  files gets the fixed summary "No change: the agent left the parent's files
+  as they were." without a paid summary call.
+- The seed now commits HELIX's `.gitignore` entries for its per-call
+  artifacts. Before, every child of the seed added them itself, so its diff
+  and its change summary (which later mutations of the seed read) described
+  that `.gitignore` edit as part of the agent's work, and a child of the seed
+  that changed nothing still paid for a summary.
 - `max_generations` must be at least 1. `max_generations = 0` (or
   `helix evolve --generations 0`) is now a config error that exits 2. It used
   to run no generations with `max_evaluations` set, and end in a `ValueError`

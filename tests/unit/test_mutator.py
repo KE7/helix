@@ -1909,7 +1909,54 @@ class TestMutateGeneratesChangeSummary:
         mocker.patch("helix.mutator.clone_candidate", return_value=child)
         mocker.patch("helix.mutator.snapshot_candidate", return_value="sha")
         mocker.patch("helix.mutator.remove_worktree")
+        # The mutation changed something; an unchanged child needs no call
+        # (``test_unchanged_child_skips_the_summary_call``).
+        mocker.patch(
+            "helix.mutator._child_diff", return_value="diff --git a/solver.py b/solver.py"
+        )
         return child
+
+    def test_unchanged_child_skips_the_summary_call(self, tmp_path: Path, mocker):
+        """No diff and no new files: a fixed note, no backend call, no usage."""
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "solver.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+        base = capture_base_commit(str(tmp_path))
+        invoke = mocker.patch("helix.mutator.invoke_claude_code")
+
+        summary, usage = generate_change_summary(str(tmp_path), make_config(), base)
+
+        invoke.assert_not_called()
+        assert summary == "No change: the agent left the parent's files as they were."
+        assert usage is None
+
+    @pytest.mark.parametrize("change", ["edit", "new_file"])
+    def test_changed_child_still_gets_the_summary_call(
+        self, tmp_path: Path, mocker, change: str
+    ):
+        from helix.mutator import capture_base_commit, generate_change_summary
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "solver.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+        base = capture_base_commit(str(tmp_path))
+        if change == "edit":
+            (tmp_path / "solver.py").write_text("x = 2\n")
+        else:
+            (tmp_path / "helper.py").write_text("y = 1\n")
+        invoke = mocker.patch(
+            "helix.mutator.invoke_claude_code",
+            return_value=({}, UsageStats(output_tokens=3)),
+        )
+
+        _summary, usage = generate_change_summary(str(tmp_path), make_config(), base)
+
+        invoke.assert_called_once()
+        assert usage is not None and usage.output_tokens == 3
 
     def _invocations(self, mocker, *, summary_text: str | None = None) -> list:
         """Patch the backend, recording the artifact each call was handed.
@@ -2884,6 +2931,11 @@ def _collect(
     )
 
 
+#: Where an unsandboxed opencode run keeps its own database, relative to the
+#: candidate worktree (``_prepare_opencode_state``).
+OPENCODE_HOST_DB = ".helix_opencode_state/.local/share/opencode/opencode.db"
+
+
 def _make_opencode_db(path: Path, session_ids: list[str]) -> None:
     import sqlite3
 
@@ -2993,7 +3045,7 @@ class TestBackendTranscriptCollection:
         export, not only the sqlite errors the export itself catches.
         """
         sid = "ses_000000000000TestSession01"
-        _make_opencode_db(home / ".local/share/opencode/opencode.db", [sid])
+        _make_opencode_db(worktree / OPENCODE_HOST_DB, [sid])
         mocker.patch(
             "helix.mutator._export_sqlite_session_rows",
             side_effect=KeyboardInterrupt,
@@ -3007,7 +3059,7 @@ class TestBackendTranscriptCollection:
 
     def test_opencode_exports_only_this_sessions_rows(self, home: Path, worktree: Path):
         sid = "ses_000000000000TestSession01"
-        db = home / ".local/share/opencode/opencode.db"
+        db = worktree / OPENCODE_HOST_DB
         _make_opencode_db(db, [sid, "ses_other"])
 
         artifacts = _collect(worktree, "opencode", sid)
@@ -3027,7 +3079,7 @@ class TestBackendTranscriptCollection:
         assert sorted(p.name for p in out.iterdir()) == [f"{sid}.jsonl"]
 
     def test_opencode_session_missing_from_db(self, home: Path, worktree: Path):
-        _make_opencode_db(home / ".local/share/opencode/opencode.db", ["ses_other"])
+        _make_opencode_db(worktree / OPENCODE_HOST_DB, ["ses_other"])
 
         artifacts = _collect(worktree, "opencode", "ses_missing")
 
@@ -3047,7 +3099,9 @@ class TestBackendTranscriptCollection:
         assert artifacts, backend
         assert all(a["available"] is False for a in artifacts)
         assert all(a["reason"] == "transcript_not_found" for a in artifacts)
-        assert all(a["source"].startswith(str(home)) for a in artifacts)
+        # opencode reads the run's own database, never the operator's.
+        root = worktree if backend == "opencode" else home
+        assert all(a["source"].startswith(str(root)) for a in artifacts)
         assert any(
             f"{backend} transcript" in rec.message and "not preserved" in rec.message
             for rec in caplog.records
@@ -3147,9 +3201,15 @@ _CLAUDE_TOOL_TRANSCRIPT = "".join(
 
 
 class TestToolCountsFromNativeTranscript:
-    def test_claude_counts_come_from_kept_transcript(self, tmp_path: Path, mocker):
-        root = tmp_path / "claude-root"
-        root.mkdir()
+    def test_claude_counts_come_from_kept_transcript(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        # Unsandboxed, claude writes the session under a folder named after
+        # its working directory, not under the container's ``-workspace``.
+        monkeypatch.delenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        root = tmp_path / "home" / ".claude" / "projects" / "-tmp-run-g1-s1"
+        root.mkdir(parents=True)
         (root / "sess_tool.jsonl").write_text(_CLAUDE_TOOL_TRANSCRIPT)
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
@@ -3164,7 +3224,7 @@ class TestToolCountsFromNativeTranscript:
             str(wt),
             "prompt",
             AgentConfig(backend="claude"),
-            sandbox=SandboxConfig(claude_transcript_root=str(root)),
+            sandbox=SandboxConfig(),
         )
 
         payload = json.loads((wt / BACKEND_RESULT_ARTIFACT_NAME).read_text())
@@ -3320,6 +3380,437 @@ def test_ignore_helix_artifacts_writes_through_an_in_tree_link(tmp_path: Path) -
     assert (worktree / ".gitignore").is_symlink()
     rules = (worktree / "ignore_rules").read_text()
     assert rules.startswith("__pycache__/\n") and "helix_batch.json" in rules
+
+
+# ---------------------------------------------------------------------------
+# Backends and usage accounting
+# ---------------------------------------------------------------------------
+
+
+def _opencode_db_title(db: Path, sid: str) -> str:
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        row = conn.execute("SELECT title FROM session WHERE id = ?", (sid,)).fetchone()
+    return str(row[0])
+
+
+class TestOpenCodeHostState:
+    """Unsandboxed opencode: isolated database, operator's stored logins."""
+
+    @pytest.fixture
+    def home(self, tmp_path: Path, monkeypatch) -> Path:
+        home = tmp_path / "home"
+        (home / ".local/share/opencode").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        return home
+
+    def _run(self, wt: Path, mocker, on_run=None) -> dict[str, str]:
+        seen: dict[str, str] = {}
+
+        def fake_run(args, **kwargs):
+            seen.update(kwargs["env"])
+            if on_run is not None:
+                on_run(Path(kwargs["env"]["XDG_DATA_HOME"]))
+            return MagicMock(
+                stdout='{"type":"step_start","sessionID":"ses_host1"}\n',
+                stderr="",
+                returncode=0,
+            )
+
+        mocker.patch("helix.mutator.subprocess.run", side_effect=fake_run)
+        invoke_claude_code(str(wt), "prompt", AgentConfig(backend="opencode"))
+        return seen
+
+    def test_stored_logins_stay_visible(self, home: Path, tmp_path: Path, mocker):
+        auth = home / ".local/share/opencode/auth.json"
+        auth.write_text('{"openrouter": {"type": "api", "key": "k"}}')
+        wt = tmp_path / "g1-s1"
+        wt.mkdir()
+
+        env = self._run(wt, mocker)
+
+        seen_auth = Path(env["XDG_DATA_HOME"]) / "opencode" / "auth.json"
+        assert seen_auth.read_text() == auth.read_text()
+        # A link, not a copy: a token refresh opencode writes lands in the
+        # operator's own file instead of a stale per-candidate copy.
+        assert seen_auth.is_symlink()
+        assert Path(env["XDG_DATA_HOME"]).is_relative_to(wt)
+
+    def test_operator_xdg_data_home_is_honoured(
+        self, home: Path, tmp_path: Path, mocker, monkeypatch
+    ):
+        data = tmp_path / "xdg-data"
+        (data / "opencode").mkdir(parents=True)
+        (data / "opencode/auth.json").write_text('{"x": 1}')
+        monkeypatch.setenv("XDG_DATA_HOME", str(data))
+        wt = tmp_path / "g1-s1"
+        wt.mkdir()
+
+        env = self._run(wt, mocker)
+
+        seen_auth = Path(env["XDG_DATA_HOME"]) / "opencode/auth.json"
+        assert seen_auth.read_text() == '{"x": 1}'
+
+    def test_no_login_means_no_link(self, home: Path, tmp_path: Path, mocker):
+        wt = tmp_path / "g1-s1"
+        wt.mkdir()
+
+        env = self._run(wt, mocker)
+
+        assert not (Path(env["XDG_DATA_HOME"]) / "opencode/auth.json").exists()
+
+    def test_transcript_comes_from_the_candidate_database(
+        self, home: Path, tmp_path: Path, mocker
+    ):
+        """The run's own database is exported; the operator's is never read."""
+        import shutil
+        import sqlite3
+
+        sid = "ses_host1"
+        operator_db = home / ".local/share/opencode/opencode.db"
+        _make_opencode_db(operator_db, [sid])
+        wt = tmp_path / "g1-s1"
+        wt.mkdir()
+
+        def opencode_writes_its_db(xdg: Path) -> None:
+            db = xdg / "opencode" / "opencode.db"
+            _make_opencode_db(db, [sid])
+            with sqlite3.connect(db) as conn:
+                conn.execute(
+                    "UPDATE session SET title = 'candidate' WHERE id = ?", (sid,)
+                )
+
+        copied: list[str] = []
+        real_copy2 = shutil.copy2
+
+        def recording_copy2(src, dst, **kwargs):
+            copied.append(str(src))
+            return real_copy2(src, dst, **kwargs)
+
+        mocker.patch("shutil.copy2", side_effect=recording_copy2)
+        self._run(wt, mocker, on_run=opencode_writes_its_db)
+
+        payload = json.loads((wt / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        [artifact] = payload["transcript_artifacts"]
+        assert artifact["available"] is True
+        assert Path(artifact["source"]).is_relative_to(wt)
+        rows = [
+            json.loads(line)
+            for line in (wt / artifact["path"]).read_text().splitlines()
+        ]
+        assert rows[0]["row"]["title"] == "candidate"
+        assert not any(src.startswith(str(home)) for src in copied)
+        assert _opencode_db_title(operator_db, sid) == f"title {sid}"
+
+
+class TestUsageAliasesCountOnce:
+    def test_claude_cache_reads_are_not_double_counted(self):
+        from helix.mutator import _normalise_usage_stats
+
+        usage = _normalise_usage_stats(
+            {
+                "type": "result",
+                "session_id": "s1",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 1000,
+                    "cache_read_input_tokens": 5000,
+                    "output_tokens": 300,
+                },
+                "modelUsage": {
+                    "claude-x": {
+                        "inputTokens": 10,
+                        "outputTokens": 300,
+                        "cacheReadInputTokens": 5000,
+                        "cacheCreationInputTokens": 1000,
+                    }
+                },
+            }
+        )
+
+        assert usage.cache_read_input_tokens == 5000
+        assert usage.cached_input_tokens == 0
+        assert usage.cache_creation_input_tokens == 1000
+
+    @pytest.mark.parametrize(
+        "alias",
+        [
+            "cacheReadInputTokens",
+            "cacheRead",
+            "cache_read_input_tokens",
+            "cached_input_tokens",
+            "cachedTokens",
+            "cacheReadTokens",
+            "cache_read_tokens",
+            "cache_creation_input_tokens",
+            "cacheCreationInputTokens",
+            "cacheWriteTokens",
+        ],
+    )
+    def test_no_source_field_feeds_two_counters(self, alias: str):
+        from helix.mutator import _normalise_usage_stats
+
+        usage = _normalise_usage_stats({alias: 7})
+
+        counted = [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_input_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.reasoning_tokens,
+        ]
+        assert sorted(counted) == [0, 0, 0, 0, 0, 7]
+
+    def test_opencode_usage_sums_every_step(self):
+        from helix.mutator import _normalise_usage_stats, _parse_jsonl_output
+
+        def step(tokens: dict[str, Any], cost: float) -> dict[str, Any]:
+            return {
+                "type": "step_finish",
+                "sessionID": "ses_1",
+                "part": {"type": "step-finish", "tokens": tokens, "cost": cost},
+            }
+
+        lines = [
+            {"type": "step_start", "sessionID": "ses_1", "part": {}},
+            {
+                "type": "tool_use",
+                "sessionID": "ses_1",
+                "part": {
+                    "tool": "bash",
+                    "state": {"input": {"command": "echo 7"}, "output": "7\n"},
+                },
+            },
+            step(
+                {"input": 100, "output": 10, "reasoning": 1,
+                 "cache": {"read": 50, "write": 5}},
+                0.01,
+            ),
+            {"type": "step_start", "sessionID": "ses_1", "part": {}},
+            step(
+                {"input": 200, "output": 20, "reasoning": 2,
+                 "cache": {"read": 150, "write": 0}},
+                0.02,
+            ),
+        ]
+        parsed = _parse_jsonl_output(
+            "\n".join(json.dumps(line) for line in lines) + "\n",
+            backend="opencode",
+            cmd_str="",
+            worktree_path="",
+            stderr="",
+            exit_code=0,
+            strict=True,
+        )
+
+        usage = _normalise_usage_stats(parsed)
+
+        assert (usage.input_tokens, usage.output_tokens) == (300, 30)
+        assert usage.cache_read_input_tokens == 200
+        assert usage.cache_creation_input_tokens == 5
+        assert usage.reasoning_tokens == 3
+        assert usage.cost_usd == pytest.approx(0.03)
+        assert usage.num_turns == 2
+        assert usage.session_id == "ses_1"
+
+    def test_tool_output_is_not_a_token_count(self):
+        """A tool that prints a number must not set the output-token counter."""
+        from helix.mutator import _normalise_usage_stats
+
+        usage = _normalise_usage_stats(
+            {"events": [{"type": "tool_use", "part": {"state": {"output": "7\n"}}}]}
+        )
+
+        assert usage.output_tokens == 0
+
+
+_CODEX_TOOL_STDOUT = "\n".join(
+    json.dumps(line)
+    for line in (
+        {"type": "thread.started", "thread_id": "thr_abc"},
+        {"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}},
+        {"type": "item.completed", "item": {"type": "file_change"}},
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3},
+        },
+    )
+) + "\n"
+
+
+class TestReturnedUsageMatchesArtifact:
+    def test_codex_stdout_tool_counts_reach_the_caller(self, tmp_path: Path, mocker):
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=MagicMock(stdout=_CODEX_TOOL_STDOUT, stderr="", returncode=0),
+        )
+
+        _, usage = invoke_claude_code(str(tmp_path), "x", AgentConfig(backend="codex"))
+
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["usage"]["tool_event_count"] == 2
+        assert usage.to_dict() == payload["usage"]
+
+    def test_claude_transcript_tool_counts_reach_the_caller(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        root = tmp_path / "claude-root"
+        root.mkdir()
+        (root / "sess_tool.jsonl").write_text(_CLAUDE_TOOL_TRANSCRIPT)
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(root))
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=MagicMock(
+                stdout='{"type":"result","session_id":"sess_tool","num_turns":2}\n',
+                stderr="",
+                returncode=0,
+            ),
+        )
+        wt = tmp_path / "g1-s1"
+        wt.mkdir()
+
+        _, usage = invoke_claude_code(
+            str(wt),
+            "prompt",
+            AgentConfig(backend="claude"),
+        )
+
+        assert usage.tool_event_count == 3
+        assert usage.tool_names == ["Read", "Edit", "Bash"]
+
+    def test_failed_call_carries_corrected_counts(self, tmp_path: Path, mocker):
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=MagicMock(
+                stdout=_CODEX_TOOL_STDOUT, stderr="boom", returncode=1
+            ),
+        )
+
+        with pytest.raises(MutationError) as excinfo:
+            invoke_claude_code(str(tmp_path), "x", AgentConfig(backend="codex"))
+
+        assert excinfo.value.usage is not None
+        assert excinfo.value.usage.tool_event_count == 2
+        assert excinfo.value.usage.input_tokens == 10
+
+
+class TestFailedAgyKeepsUsage:
+    def test_multiline_object_usage_is_salvaged(self, tmp_path: Path, mocker):
+        stdout = json.dumps(
+            {
+                "conversation_id": "agy-1",
+                "status": "ERROR",
+                "usage": {"input_tokens": 123, "output_tokens": 4},
+            },
+            indent=2,
+        )
+        mocker.patch(
+            "helix.mutator.subprocess.run",
+            return_value=MagicMock(stdout=stdout, stderr="", returncode=1),
+        )
+
+        with pytest.raises(MutationError) as excinfo:
+            invoke_claude_code(str(tmp_path), "x", AgentConfig(backend="agy"))
+
+        assert excinfo.value.usage is not None
+        assert excinfo.value.usage.input_tokens == 123
+        assert excinfo.value.usage.output_tokens == 4
+
+
+class TestSandboxTimeoutKeepsUsage:
+    def test_timed_out_agent_call_is_a_mutation_error_with_usage(
+        self, tmp_path: Path, mocker
+    ):
+        mocker.patch(
+            "helix.mutator.run_sandboxed_command",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["docker"],
+                timeout=30,
+                output=_CODEX_TOOL_STDOUT.encode(),
+                stderr=b"late",
+            ),
+        )
+        mocker.patch("helix.mutator.resolve_sandbox_image", return_value="img")
+
+        with pytest.raises(MutationError) as excinfo:
+            invoke_claude_code(
+                str(tmp_path),
+                "x",
+                AgentConfig(backend="codex"),
+                sandbox=SandboxConfig(enabled=True, timeout_seconds=30),
+            )
+
+        exc = excinfo.value
+        assert "timed out after 30s" in str(exc)
+        assert exc.usage is not None and exc.usage.input_tokens == 10
+        payload = json.loads((tmp_path / BACKEND_RESULT_ARTIFACT_NAME).read_text())
+        assert payload["usage"]["input_tokens"] == 10
+        stdout_artifact = (tmp_path / BACKEND_STDOUT_ARTIFACT_NAME).read_text()
+        assert stdout_artifact == _CODEX_TOOL_STDOUT
+
+    @pytest.mark.parametrize(
+        ("backend", "stdout"),
+        [
+            # claude printed its max-turns result, then hung until the timeout:
+            # without the edits, that is no partial success.
+            (
+                "claude",
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "error_max_turns",
+                        "session_id": "s1",
+                        "num_turns": 5,
+                        "usage": {"input_tokens": 9, "output_tokens": 2},
+                    }
+                ),
+            ),
+            # A single JSON object cut off mid-stream by the kill.
+            ("claude", '{"type": "result", "usage": {"input_tokens": 9'),
+            ("agy", '{"conversation_id": "c1", "usage": {"input_tokens": 9'),
+        ],
+        ids=["claude-max-turns", "claude-truncated", "agy-truncated"],
+    )
+    def test_timeout_wins_over_backend_output(
+        self, tmp_path: Path, mocker, backend: str, stdout: str
+    ):
+        mocker.patch(
+            "helix.mutator.run_sandboxed_command",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["docker"], timeout=30, output=stdout.encode(), stderr=b""
+            ),
+        )
+        mocker.patch("helix.mutator.resolve_sandbox_image", return_value="img")
+
+        with pytest.raises(MutationError) as excinfo:
+            invoke_claude_code(
+                str(tmp_path),
+                "x",
+                AgentConfig(backend=backend),
+                sandbox=SandboxConfig(enabled=True, timeout_seconds=30),
+            )
+
+        assert "timed out after 30s" in str(excinfo.value)
+        assert excinfo.value.phase == "subprocess timeout"
+
+
+class TestChangeSummaryNeverDropsTheMutation:
+    def test_prompt_collision_returns_no_summary(self, tmp_path: Path):
+        from helix.mutator import generate_change_summary
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "solver.py").write_text("x = 1\n")  # a change to summarise
+        (tmp_path / ".agent_summary_prompt.md").write_text("other")
+        (tmp_path / ".agent_internal").mkdir()
+        (tmp_path / ".agent_internal/summary_prompt.md").write_text("other")
+        cfg = HelixConfig.model_validate(
+            {"objective": "o", "evaluator": {"command": "true"}}
+        )
+
+        assert generate_change_summary(str(tmp_path), cfg, None) == (None, None)
 
 
 # ---------------------------------------------------------------------------
