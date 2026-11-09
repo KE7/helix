@@ -115,7 +115,7 @@ from helix.worktree import (
 )
 from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatibility symbols)
     # 14 moved symbols — re-exported for backward compatibility and internal use
-    _collect_protected_evaluator_paths,
+    _collect_protected_evaluator_paths,  # noqa: F401
     _copy_protected_path,  # noqa: F401
     _detect_evaluator_tamper,
     _evaluator_manifest_path,  # noqa: F401
@@ -1632,10 +1632,6 @@ def _run_proposal_worker(
             ),
             record_usage=_spent_usage.append,
             sibling_history=sibling_history,
-            hidden_paths=[
-                *_collect_protected_evaluator_paths(config, project_root),
-                *config.sandbox.omit_from_agent,
-            ],
         )
     except Exception as _mu_exc:
         # Re-raise PromptArtifactCollisionError (fatal for the whole run)

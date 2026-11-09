@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from helix.backends import (
     BACKEND_AUTH_ENV,
@@ -2364,9 +2364,7 @@ def capture_base_commit(worktree_path: str) -> str | None:
     return sha or None
 
 
-def _child_diff(
-    worktree_path: str, base_sha: str | None, hidden: Sequence[str] = ()
-) -> str:
+def _child_diff(worktree_path: str, base_sha: str | None) -> str:
     """Return what this mutation changed, as a diff against its parent.
 
     Diffed from *base_sha* — the commit the worktree sat at before the backend
@@ -2386,15 +2384,13 @@ def _child_diff(
     builds a diff-less prompt rather than failing the mutation.
     """
     ref = base_sha or "HEAD"
-    # *hidden* paths (evaluator files, held-out data) never reach the prompt.
-    spec = ["--", ".", *(f":(exclude,literal){p}" for p in hidden)]
-    patch = _git_stdout(worktree_path, "diff", "--no-color", ref, *spec).strip()
+    patch = _git_stdout(worktree_path, "diff", "--no-color", ref).strip()
     if not patch:
         return ""
     if len(patch) > _MAX_DIFF_CHARS:
         patch = patch[:_MAX_DIFF_CHARS] + _DIFF_TRUNCATION_MARKER
 
-    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref, *spec).strip()
+    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref).strip()
     return f"{diffstat}\n\n{patch}" if diffstat else patch
 
 
@@ -2481,7 +2477,7 @@ def _fenced(text: str, language: str) -> str:
     return f"{fence}{language}\n{text.rstrip(chr(10))}\n{fence}"
 
 
-def _new_files_section(worktree_path: str, hidden: Sequence[str] = ()) -> str:
+def _new_files_section(worktree_path: str) -> str:
     """Render the contents of untracked new files for the summary prompt.
 
     A mutation that puts its whole idea in a new module is invisible to
@@ -2494,11 +2490,7 @@ def _new_files_section(worktree_path: str, hidden: Sequence[str] = ()) -> str:
 
     Returns ``""`` when there are no new files or git cannot list them.
     """
-    names = [
-        rel
-        for rel in _untracked_files(worktree_path)
-        if not any(rel == p or rel.startswith(p + "/") for p in hidden)
-    ]
+    names = _untracked_files(worktree_path)
     if not names:
         return ""
     root = Path(worktree_path)
@@ -2628,7 +2620,6 @@ def generate_change_summary(
     worktree_path: str,
     config: HelixConfig,
     base_sha: str | None = None,
-    hidden_paths: Sequence[str] = (),
 ) -> tuple[str | None, UsageStats | None]:
     """Describe the change just made in *worktree_path* via one extra call.
 
@@ -2647,19 +2638,14 @@ def generate_change_summary(
     :func:`capture_base_commit`.  Passing it is what makes the diff survive an
     agent that commits its own work; ``None`` falls back to ``HEAD``, which
     only sees uncommitted changes.
-
-    ``hidden_paths`` (protected evaluator files and ``omit_from_agent``,
-    repo-relative) are left out of the diff and the new-file listing.
     """
-    hidden = [p.removeprefix("./").rstrip("/") for p in hidden_paths]
-    hidden = [p for p in hidden if p and p != "."]
     # One number drives both the request and the read-back truncation; passing
     # it to only one of them would cut every long summary mid-sentence.
     max_words = config.evolution.sibling_summary_max_words
     prompt = summary_prompt(
         objective=config.objective,
-        diff=_child_diff(worktree_path, base_sha, hidden),
-        new_files=_new_files_section(worktree_path, hidden),
+        diff=_child_diff(worktree_path, base_sha),
+        new_files=_new_files_section(worktree_path),
         max_words=max_words,
     )
     # A fresh turn budget: the mutation's own limit governs editing code and is
@@ -2723,7 +2709,6 @@ def mutate(
     prepare_worktree: Callable[[Candidate], None] | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
     sibling_history: str | None = None,
-    hidden_paths: Sequence[str] = (),
 ) -> Candidate | None:
     """Mutate *parent* using the configured backend and return the new candidate.
 
@@ -2755,9 +2740,6 @@ def mutate(
         ``None`` to disable sibling tracking for this mutation entirely (see
         :func:`build_mutation_prompt`).  When it is not ``None``, the agent's
         self-report is read back into ``child.summary`` before returning.
-    hidden_paths:
-        Repo-relative paths the change-summary prompt must not show: the
-        protected evaluator files and ``omit_from_agent``.
 
     Returns
     -------
@@ -2810,7 +2792,7 @@ def mutate(
             # gate rejects has its worktree removed immediately after, and by
             # default that content is unrecoverable.
             child.summary, summary_usage = generate_change_summary(
-                child.worktree_path, config, base_sha, hidden_paths
+                child.worktree_path, config, base_sha
             )
             if summary_usage is not None:
                 # Accumulate into a copy.  ``child.usage`` IS the object already

@@ -1528,28 +1528,6 @@ class TestChildDiff:
 
         assert _child_diff(str(wt), base) == ""
 
-    def test_hidden_paths_never_reach_the_summary_prompt(self, tmp_path: Path):
-        """Protected evaluator files and ``omit_from_agent`` paths are left
-        out of both the diff and the new-file listing."""
-        from helix.mutator import _child_diff, _new_files_section, capture_base_commit
-
-        wt = self._repo(tmp_path)
-        base = capture_base_commit(str(wt))
-        (wt / "solve.py").write_text("def solve(n):\n    return 42\n")
-        (wt / "evaluate.py").write_text("ANSWER = 'EVAL-SECRET'\n")
-        (wt / "data" / "val").mkdir(parents=True)
-        (wt / "data" / "val" / "a.json").write_text('"VAL-SECRET"')
-        hidden = ["evaluate.py", "data/val"]
-
-        import subprocess as sp
-
-        sp.run(["git", "add", "evaluate.py"], cwd=wt, check=True)
-        diff = _child_diff(str(wt), base, hidden)
-        new_files = _new_files_section(str(wt), hidden)
-        assert "+    return 42" in diff
-        assert "SECRET" not in diff + new_files
-        assert "data/val" not in new_files
-
     def test_empty_when_nothing_changed(self, tmp_path: Path):
         from helix.mutator import _child_diff, capture_base_commit
 

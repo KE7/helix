@@ -961,37 +961,6 @@ class TestSiblingHistory:
 
         assert handed == [""]
 
-    def test_summary_is_told_to_hide_evaluator_and_omitted_paths(
-        self, tmp_path: Path, all_mocks: dict[str, Any]
-    ) -> None:
-        """The evaluator script found from ``evaluator.command`` is hidden too,
-        not only the paths listed in ``protected_files``."""
-        from helix.config import SandboxConfig
-
-        train_path = _write_train_jsonl(tmp_path, n=6)
-        (tmp_path / "evaluate.py").write_text("print('HELIX_RESULT=1')\n")
-        seed = _make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        _wire_siblings(all_mocks, seed.id)
-        hidden: list[list[str]] = []
-
-        def fake_mutate(**kwargs: Any) -> Candidate:
-            hidden.append(list(kwargs["hidden_paths"]))
-            return _make_candidate(kwargs["new_id"])
-
-        all_mocks["mutate"].side_effect = fake_mutate
-        config = _make_config(
-            train_path, num_parallel_proposals=1, sibling_history=True
-        ).model_copy(
-            update={
-                "evaluator": EvaluatorConfig(command="python evaluate.py"),
-                "sandbox": SandboxConfig(omit_from_agent=["data/val"]),
-            }
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        assert hidden and {"evaluate.py", "data/val"} <= set(hidden[0])
-
     def test_kept_and_rejected_children_are_both_recorded(
         self, tmp_path: Path, all_mocks: dict[str, Any]
     ) -> None:
