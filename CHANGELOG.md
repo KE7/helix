@@ -355,7 +355,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whether the agent committed it or not, and is written before the minibatch
   gate, so rejected children keep their list after their worktree is removed.
   Runs made before this have empty lists.
-
 - HELIX error panels print every field literally. Backend or evaluator output containing brackets (`[/INST]`) made the panel itself raise instead of showing the error, and suggestions lost TOML table names: "Raise [sandbox].timeout_seconds" printed as "Raise .timeout_seconds".
 - Unsandboxed opencode runs keep the operator's stored logins. Each
   candidate's private opencode data directory now links the operator's
