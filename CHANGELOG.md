@@ -328,6 +328,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are charged, it is recorded in sibling history, and its worktree is
   removed. A parent minibatch evaluation that raises is charged for the
   evaluator run as well.
+- Resume no longer loses a candidate that was validated just before an
+  interrupt. Its evaluation reached `.helix/evaluations/` before
+  `state.json` recorded the acceptance, and resume took the evaluation as
+  proof the attempt had finished, so the candidate never re-entered the
+  frontier while its worktree and evaluation stayed behind. HELIX now saves
+  the state as soon as a candidate joins the frontier, and resume counts an
+  attempt as finished only when the saved frontier or `.helix/attempts/`
+  lists it; anything else, including a merge interrupted in its full
+  validation and an interrupted merge's worktree, is removed with its
+  evaluation and the generation runs again (a leftover worktree from an
+  earlier generation is removed without rewinding the run, and so is the
+  worktree of a rejected attempt whose removal the interrupt cut short,
+  unless `retain_rejected_worktrees` kept it). A merge that
+  fails its subsample gate is now recorded under `.helix/attempts/` (reason
+  `merge_subsample`) instead of `.helix/evaluations/`.
 - `helix init`: the next-steps message escapes bracketed table names such as
   `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
 - Backend transcript preservation now covers every backend. It was only ever

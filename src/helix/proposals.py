@@ -155,45 +155,21 @@ class AcceptanceJudgement:
         return sum(self.after) - sum(self.before)
 
 
-class AcceptanceMemo:
-    """Memoises one acceptance judgement per proposal slot.
+def judge_acceptance(
+    criterion: AcceptanceCriterion, before: list[float], after: list[float]
+) -> AcceptanceJudgement:
+    """Run *criterion* once on a proposal's score vectors and keep the margin.
 
-    ``best_improvement`` and ``top_k`` have to know the gate outcome for
-    every proposal in a batch before they can promote any of it, so the
-    criterion gets consulted in one place and the selected proposals get
-    re-examined in another.  Routing every consultation through this memo
-    makes the number of underlying ``should_accept`` calls a function of the
-    batch size alone — a selection strategy cannot change what the criterion
-    decided about a proposal by asking about it more or less often.
+    Every proposal is judged exactly once, at its gate; selection then ranks
+    the accepted ones on the stored margin and never asks the criterion again.
     """
-
-    def __init__(self, criterion: AcceptanceCriterion) -> None:
-        self._criterion = criterion
-        self._judgements: dict[int, AcceptanceJudgement] = {}
-        # Number of times the underlying criterion actually ran.  Asserted on
-        # by the tests that pin the one-judgement-per-proposal property.
-        self.criterion_calls = 0
-
-    def judge(
-        self, order: int, before: list[float], after: list[float]
-    ) -> AcceptanceJudgement:
-        """Return the judgement for slot ``order``, computing it at most once."""
-        cached = self._judgements.get(order)
-        if cached is not None:
-            return cached
-        self.criterion_calls += 1
-        judgement = AcceptanceJudgement(
-            accepted=self._criterion.should_accept(
-                ScoreVectors(
-                    subsample_scores_before=before,
-                    subsample_scores_after=after,
-                )
-            ),
-            before=before,
-            after=after,
-        )
-        self._judgements[order] = judgement
-        return judgement
+    return AcceptanceJudgement(
+        accepted=criterion.should_accept(
+            ScoreVectors(subsample_scores_before=before, subsample_scores_after=after)
+        ),
+        before=before,
+        after=after,
+    )
 
 
 # ---------------------------------------------------------------------------

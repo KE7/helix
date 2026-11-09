@@ -2195,10 +2195,9 @@ class TestMergeBehavior:
         GEPA ``merges_performed[1].append((id1, id2, new_prog_desc))`` at
         merge.py::sample_and_attempt_merge_programs_by_common_predictors.
 
-        The reverse direction (dedup SKIPS when the triplet is already
-        recorded) is covered structurally by the identical ``in``-list
-        check the propose loop runs on state at runtime; the unit tests
-        in test_lineage.py exercise the within-retry filter equivalents.
+        HELIX needs no repeat check on the triplet: the pair is recorded in
+        ``merge_attempted_pairs`` first and never sampled again (the
+        within-retry filter tested in test_lineage.py).
         """
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
