@@ -3417,6 +3417,8 @@ def test_backend_argv_names_a_prompt_file_that_exists(
     elif call_site == "seed":
         mutator.generate_seed(str(worktree), "seed task OBJECTIVE-MARKER", config)
     else:
+        # A change to describe: a summary of an unchanged child skips the call.
+        (worktree / "solve.py").write_text("x = 1\n")
         mutator.generate_change_summary(str(worktree), config)
 
     assert len(seen) == 1
