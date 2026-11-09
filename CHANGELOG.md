@@ -263,8 +263,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
   (with pi on a local model it searched the disk for the file and produced
-  nothing). `generate_seed` now writes the prompt file the same way a
+  nothing). Seed generation now gets its prompt file the same way a
   mutation does.
+- Merge agents now get their task. Merges had the same missing
+  `.agent_task_prompt.md` as seed generation, on every backend since 0.2.x:
+  the agent was told to read a file that did not exist, so it could not see
+  the objective or either parent's diff, and usually changed nothing. The
+  prompt file is now written by the backend call itself, for mutations,
+  merges, seeds and change summaries alike.
+- A merge that leaves the code identical to one of its parents is rejected
+  before it is evaluated, recorded under `.helix/attempts/` with reason
+  `merge_no_change`, and the generation goes on to mutation. It used to be
+  scored, tie its parent at the subsample gate, and enter the frontier as a
+  duplicate of that parent. The comparison leaves out protected and omitted
+  paths, so HELIX's own refresh of the protected files does not count as a
+  change.
+- The merge prompt no longer shows the parents' validation ids or scores
+  (the "Candidate A/B Strengths" sections). Nothing from validation reaches
+  an agent now; GEPA's merge shows no scores either.
+- Diffs in the merge prompt leave out protected evaluator files and
+  `[sandbox].omit_from_agent` paths, which a candidate's history can hold
+  (for example after a protected-file refresh on resume).
+- Merges of two children of the seed now show the agent both parents' diffs.
+  The seed's worktree is detached, so diffs against its branch name failed
+  and came back empty; diffs now use each candidate's commit, and a diff
+  that fails fails the merge (before any tokens are spent) instead of
+  prompting with an empty diff.
+- A merge that passes its subsample gate is no longer thrown away when its
+  evaluations reach `max_evaluations`: it gets its full validation and joins
+  the frontier, as in GEPA, and the run stops at the next iteration. The
+  subsample evaluation it had already paid for used to be wasted.
 - Resuming after an interrupted generation no longer fails with "a branch
   named 'helix/g1-s2' already exists". An interrupt can stop cleanup after
   it removes a candidate's worktree but before it deletes the branch, and
