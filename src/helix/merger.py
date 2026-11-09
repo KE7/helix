@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from helix.display import UsageStats
-from helix.population import Candidate, EvalResult
+from helix.population import Candidate
 from helix.config import HelixConfig
+from helix.evaluator_manifest import agent_hidden_paths
 from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree, get_diff  # noqa: F401
-from helix.exceptions import MutationError, print_helix_error
+from helix.exceptions import GitError, MutationError, print_helix_error
 from helix.mutator import invoke_claude_code, AUTONOMOUS_SYSTEM_PROMPT, _turn_budget_section
 from helix.timing import traced
 
@@ -96,31 +97,8 @@ You may read, edit, create, or delete files as needed."""
 # ---------------------------------------------------------------------------
 
 
-def _format_eval_strengths(eval_result: EvalResult) -> str:
-    """Return a human-readable summary of a candidate's eval result.
-
-    Returns the section body only (no header); the caller is responsible
-    for the ``## Candidate {A,B} Strengths`` heading.  Empty input is
-    handled by skipping the section entirely in :func:`build_merge_prompt`
-    rather than emitting a ``"(no evaluation data)"`` placeholder.
-    """
-    lines = [f"  Aggregate score: {eval_result.aggregate_score():.4f}"]
-    for k, v in sorted(eval_result.scores.items()):
-        lines.append(f"  {k}: {v}")
-    if eval_result.instance_scores:
-        top = sorted(
-            eval_result.instance_scores.items(), key=lambda x: x[1], reverse=True
-        )[:5]
-        lines.append("  Top instances:")
-        for inst, score in top:
-            lines.append(f"    {inst}: {score:.4f}")
-    return "\n".join(lines)
-
-
 def build_merge_prompt(
     objective: str,
-    eval_result_a: EvalResult | None,
-    eval_result_b: EvalResult | None,
     diff: str,
     background: str | None = None,
     max_turns: int | None = None,
@@ -133,7 +111,7 @@ def build_merge_prompt(
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    in ``gepa_launcher.py``.
+    in ``gepa/optimize_anything.py``.
 
     **Diff section format** — two-diff (ancestor-relative) vs single (A↔B):
 
@@ -153,24 +131,19 @@ def build_merge_prompt(
     tests that don't have an ancestor handy), the prompt falls back to
     the single ``## Diff (B relative to A)`` section driven by ``diff``.
 
-    Absent eval results, absent diff(s), and absent ``background`` all
-    skip their respective sections entirely instead of emitting
-    placeholder strings.
+    Absent diff(s) and absent ``background`` skip their sections entirely
+    instead of emitting placeholder strings.
+
+    No scores: the parents' results are validation results, and nothing
+    from validation (ids, per-id scores or aggregates) may reach an agent.
+    GEPA's merge is no departure here -- it never shows an LM any score;
+    it reads validation aggregates only in code, to break ties
+    (``gepa/proposer/merge.py::sample_and_attempt_merge_programs_by_common_predictors``).
     """
     sections: list[str] = [AUTONOMOUS_SYSTEM_PROMPT.rstrip()]
 
     if objective:
         sections.append(f"## Objective\n{objective}")
-
-    if eval_result_a is not None:
-        sections.append(
-            "## Candidate A Strengths\n" + _format_eval_strengths(eval_result_a)
-        )
-
-    if eval_result_b is not None:
-        sections.append(
-            "## Candidate B Strengths\n" + _format_eval_strengths(eval_result_b)
-        )
 
     # Diff section — prefer the two-diff (ancestor-relative) form when
     # both diffs are available, fall back to single A↔B otherwise.  Each
@@ -238,11 +211,11 @@ def merge(
     config: HelixConfig,
     base_dir: Path,
     background: str | None = None,
-    eval_result_a: EvalResult | None = None,
-    eval_result_b: EvalResult | None = None,
     prepare_worktree: Callable[[Candidate], None] | None = None,
     ancestor: Candidate | None = None,
     record_usage: Callable[[UsageStats], None] | None = None,
+    *,
+    project_root: Path,
 ) -> Candidate | None:
     """Merge *candidate_a* and *candidate_b* using Claude Code.
 
@@ -294,10 +267,6 @@ def merge(
         Base directory for worktrees.
     background:
         Optional background/context text.
-    eval_result_a:
-        Evaluation result for candidate A (optional, for richer prompt).
-    eval_result_b:
-        Evaluation result for candidate B (optional, for richer prompt).
     prepare_worktree:
         Optional callback to refresh protected files in the new worktree
         before the agent runs.
@@ -311,6 +280,9 @@ def merge(
         Optional sink called exactly once with the backend's token usage,
         whether or not the merge produced a usable candidate — the same
         contract as :func:`helix.mutator.mutate`'s parameter of that name.
+    project_root:
+        The project root, to resolve the protected evaluator files and
+        ``sandbox.omit_from_agent`` paths that every diff leaves out.
 
     Returns
     -------
@@ -326,22 +298,36 @@ def merge(
     # Diff-rendering mode selection.  ``ancestor`` available → compute
     # the two ancestor-relative diffs that drive the GEPA-style
     # attribution prompt.  Otherwise compute the single A↔B fallback.
-    if ancestor is not None:
-        diff_a_from_ancestor: str | None = get_diff(ancestor, candidate_a)
-        diff_b_from_ancestor: str | None = get_diff(ancestor, candidate_b)
-        # ``diff`` (single A↔B) is computed lazily only for the fallback
-        # path; with both ancestor-relative diffs in hand, the prompt
-        # builder ignores the legacy parameter, so pass an empty string.
-        legacy_diff = ""
-    else:
-        diff_a_from_ancestor = None
-        diff_b_from_ancestor = None
-        legacy_diff = get_diff(candidate_a, candidate_b)
+    #
+    # Every diff leaves out the protected evaluator files and the paths
+    # omitted from the agent: a candidate's history can hold their contents
+    # (a protected-file refresh commits them), and the prompt must not.
+    hidden = agent_hidden_paths(config, project_root)
+    try:
+        if ancestor is not None:
+            diff_a_from_ancestor: str | None = get_diff(ancestor, candidate_a, hidden)
+            diff_b_from_ancestor: str | None = get_diff(ancestor, candidate_b, hidden)
+            # ``diff`` (single A↔B) is computed lazily only for the fallback
+            # path; with both ancestor-relative diffs in hand, the prompt
+            # builder ignores the legacy parameter, so pass an empty string.
+            legacy_diff = ""
+        else:
+            diff_a_from_ancestor = None
+            diff_b_from_ancestor = None
+            legacy_diff = get_diff(candidate_a, candidate_b, hidden)
+    except GitError as exc:
+        # Without its diffs the agent would merge blind; fail the merge
+        # (no tokens spent yet) rather than prompt with an empty diff.
+        exc.operation = f"merge {new_id} ({candidate_a.id} + {candidate_b.id}): diff"
+        print_helix_error(exc)
+        try:
+            remove_worktree(child)
+        except Exception:
+            pass
+        return None
 
     prompt = build_merge_prompt(
         config.objective,
-        eval_result_a,
-        eval_result_b,
         legacy_diff,
         background,
         config.agent.max_turns,

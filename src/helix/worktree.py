@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
 from helix.exceptions import GitError, HelixError, print_helix_error
@@ -500,8 +501,18 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
         parent_ids=[],
         operation="seed",
     )
-    if _snapshot_dirty_working_tree(repo_root, worktree_path):
-        snapshot_candidate(candidate, "helix: snapshot dirty seed")
+    dirty = _snapshot_dirty_working_tree(repo_root, worktree_path)
+    # Every mutation appends HELIX's artifact names to the worktree's
+    # .gitignore.  Committing them into the seed keeps that edit out of its
+    # children's diffs, so their change summaries describe only the agent's
+    # work.  Imported here because helix.mutator imports this module.
+    from helix.mutator import _ignore_helix_artifacts
+
+    _ignore_helix_artifacts(worktree_path)
+    snapshot_candidate(
+        candidate,
+        "helix: snapshot dirty seed" if dirty else "helix: ignore HELIX artifacts",
+    )
     return candidate
 
 
@@ -607,6 +618,37 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
     )
 
 
+def changed_files(candidate: Candidate, parent: Candidate) -> list[str]:
+    """Paths *candidate* changed relative to *parent*'s commit, sorted.
+
+    Covers what the agent committed itself and what is still staged,
+    unstaged or untracked, so it matches what :func:`snapshot_candidate`
+    will commit (``git add -A`` honours ``.gitignore`` the same way
+    ``ls-files --exclude-standard`` does).  Returns ``[]`` when git cannot
+    say; this only feeds ``lineage.json`` and ``helix log``.
+    """
+    wt = Path(candidate.worktree_path)
+    try:
+        base = _run(["git", "rev-parse", "HEAD"], cwd=Path(parent.worktree_path), check=False)
+        if base.returncode != 0:
+            return []
+        # --no-renames lists both sides of a rename; -z keeps non-ASCII
+        # names verbatim instead of C-quoting them.
+        tracked = _run(
+            ["git", "diff", "--name-only", "--no-renames", "-z", base.stdout.strip(), "--"],
+            cwd=wt,
+            check=False,
+        )
+        untracked = _run(
+            ["git", "ls-files", "-z", "--others", "--exclude-standard"], cwd=wt, check=False
+        )
+    except OSError:  # a missing worktree directory
+        return []
+    if tracked.returncode != 0 or untracked.returncode != 0:
+        return []
+    return sorted({p for p in (tracked.stdout + untracked.stdout).split("\0") if p})
+
+
 @traced("snapshot", lambda a: {"candidate_id": a["candidate"].id})
 def snapshot_candidate(candidate: Candidate, message: str) -> str:
     """Stage all changes in the candidate's worktree and create a commit.
@@ -706,8 +748,16 @@ def remove_worktree(candidate: Candidate) -> None:
         )
 
 
-def get_diff(candidate_a: Candidate, candidate_b: Candidate) -> str:
-    """Return the unified diff between two candidates' branch tips.
+def get_diff(
+    candidate_a: Candidate,
+    candidate_b: Candidate,
+    exclude: Iterable[str] = (),
+) -> str:
+    """Return the unified diff between two candidates' committed states.
+
+    Each side is the ``HEAD`` commit of that candidate's worktree, the same
+    commit :func:`clone_candidate` branches from.  Not ``branch_name``: the
+    seed's worktree is detached, so its ``helix/g0-s0`` branch never exists.
 
     Parameters
     ----------
@@ -715,17 +765,58 @@ def get_diff(candidate_a: Candidate, candidate_b: Candidate) -> str:
         Base candidate (left side of diff).
     candidate_b:
         Target candidate (right side of diff).
+    exclude:
+        Repo-relative files or directories left out of the diff.
 
     Returns
     -------
     str
-        Output of ``git diff <branch_a> <branch_b>``.
+        Output of ``git diff <commit_a> <commit_b>``.
+
+    Raises
+    ------
+    GitError
+        When either commit can't be resolved or the diff fails, rather than
+        passing an empty diff off as "no changes".
     """
-    wt_a = Path(candidate_a.worktree_path)
+    commits = [
+        _run(
+            # ``-C`` rather than ``cwd``: a missing worktree is then a git
+            # failure (GitError), not an OSError from spawning the process.
+            ["git", "-C", c.worktree_path, "rev-parse", "HEAD"],
+            operation=f"diff: resolve HEAD of {c.id}",
+        ).stdout.strip()
+        for c in (candidate_a, candidate_b)
+    ]
+    pathspec = [f":(exclude,literal){os.path.normpath(p)}" for p in exclude]
     result = _run(
-        ["git", "diff", candidate_a.branch_name, candidate_b.branch_name],
-        cwd=wt_a,
-        check=False,
+        ["git", "diff", *commits, "--", ".", *pathspec],
+        cwd=Path(candidate_a.worktree_path),
         operation=f"diff {candidate_a.id} vs {candidate_b.id}",
     )
     return result.stdout
+
+
+def export_candidate(candidate: Candidate, dest: Path) -> None:
+    """Copy *candidate*'s files to *dest*, which must not exist yet.
+
+    The candidate is what HELIX committed for it, so only git-tracked files
+    are copied: the prompt, backend logs, ``helix_batch.json``, transcripts
+    and caches HELIX and the evaluator leave in the worktree are not.
+    """
+    wt = Path(candidate.worktree_path)
+    listed = _run(
+        ["git", "ls-files", "-z"],
+        cwd=wt,
+        operation=f"export {candidate.id}: list tracked files",
+    )
+    dest.mkdir(parents=True)
+    for raw_path in listed.stdout.split("\x00"):
+        if not raw_path:
+            continue
+        src = wt / raw_path
+        if src.is_dir() and not src.is_symlink():
+            # A submodule checkout.
+            shutil.copytree(src, dest / raw_path, symlinks=True)
+        elif src.exists() or src.is_symlink():
+            _copy_path(src, dest / raw_path)

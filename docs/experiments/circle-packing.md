@@ -284,7 +284,7 @@ helix evolve
 
 `helix evolve` initializes the copy as a git repository and commits it as the
 seed. After the run, `helix frontier`, `helix best` and `helix log` show the
-frontier, the best candidate and the mutation log.
+frontier, the best candidate and every candidate in order.
 `.helix/gepa_state_tracker/state_tracker_logs.json` is GEPA's own log of the
 run: every metric call, the best score after each, and the code behind the
 best packing, the record to compare with optimize_anything's at metric calls

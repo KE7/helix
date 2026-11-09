@@ -1,7 +1,7 @@
 """Parse ``HELIX_RESULT=<per-example [score, side_info] pairs>``.
 
 GEPA ``optimize_anything`` evaluator-contract parity.  GEPA's
-``EvaluatorWrapper`` (``gepa.gepa_launcher``) normalises each
+``EvaluatorWrapper`` (``gepa.optimize_anything``) normalises each
 per-example evaluator return to ``(score, output, side_info)``, and
 ``OptimizeAnythingAdapter.evaluate`` packages the resulting per-example
 stream into an ``EvaluationBatch(scores=list[float],
@@ -31,7 +31,7 @@ Element ``i`` corresponds to the id at position ``i`` in the
 ``helix_batch.json`` HELIX wrote pre-invocation (see
 :func:`helix.evolution._write_helix_batch`).  A bare ``float`` is
 normalised to ``(score, {})`` — matching GEPA's ``EvaluatorWrapper``
-(``gepa.gepa_launcher``), which auto-wraps a bare evaluator return
+(``gepa.optimize_anything``), which auto-wraps a bare evaluator return
 into ``(score, None, side_info)``.  Rich entries are a 2-element
 ``[score: float, side_info: dict]`` list.
 
@@ -47,7 +47,9 @@ the mutation prompt's ``## Diagnostics`` section (GEPA
 
 Reserved key: ``side_info_i["scores"]``
 ---------------------------------------
-Mirrors GEPA's ``OptimizeAnythingAdapter._extract_objective_scores``,
+Mirrors the objective-score loop inline in GEPA's
+``OptimizeAnythingAdapter.evaluate``
+(``gepa/adapters/optimize_anything_adapter/optimize_anything_adapter.py``),
 which pulls the same ``side_info["scores"]`` dict out per example and
 folds it into the batch's ``objective_scores``.  When a per-example
 ``side_info_i["scores"]`` is a dict of ``{objective_name: float}``,
@@ -140,7 +142,8 @@ def _extract_helix_result_line(stdout: str) -> str | None:
 def _harvest_objective_scores(side_info: dict[str, Any]) -> dict[str, float]:
     """Extract ``side_info["scores"]`` into a ``dict[str, float]``.
 
-    Mirrors GEPA's ``OptimizeAnythingAdapter._extract_objective_scores``:
+    Mirrors the objective-score loop inline in GEPA's
+    ``OptimizeAnythingAdapter.evaluate``:
     the reserved ``"scores"`` key carries a dict of
     ``{objective_name: float}`` that becomes the per-example
     ``objective_scores`` slot feeding the multi-axis Pareto frontier.
@@ -162,7 +165,7 @@ def _harvest_objective_scores(side_info: dict[str, Any]) -> dict[str, float]:
     rejected here earlier.
 
     Per-predictor namespacing (``param_name + "_specific_info"``, also
-    handled by ``_extract_objective_scores``) is intentionally not
+    handled by that loop in ``OptimizeAnythingAdapter.evaluate``) is intentionally not
     replicated: HELIX evolves whole git worktrees rather than
     multi-component named-predictor programs.  See the tracking issue
     on ``KE7/helix`` for the architectural gap.
@@ -388,7 +391,7 @@ def parse(
     for eid, entry in zip(ids, payload):
         # GEPA optimize_anything union parity: per-example entry is
         # either a bare score or a ``[score, side_info]`` pair.  GEPA's
-        # ``EvaluatorWrapper`` (``gepa.gepa_launcher``) auto-normalizes
+        # ``EvaluatorWrapper`` (``gepa.optimize_anything``) auto-normalizes
         # a bare evaluator return to ``(score, None, side_info)`` —
         # HELIX does the same here,
         # materialising ``side_info = {}`` for bare entries so the

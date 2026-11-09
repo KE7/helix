@@ -645,7 +645,7 @@ class ParetoFrontier:
         if self._frontier_type == "cartesian":
             return self._cartesian_best
         # "hybrid": union of instance ∪ objective keyspaces — GEPA's
-        # default (``EngineConfig.frontier_type`` in ``gepa_launcher.py``).
+        # default (``EngineConfig.frontier_type`` in ``gepa/optimize_anything.py``).
         merged: dict[str, set[str]] = {}
         for k, v in self._per_key_best.items():
             merged[f"inst::{k}"] = v

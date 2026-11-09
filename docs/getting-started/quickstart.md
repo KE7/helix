@@ -134,6 +134,6 @@ helix best
 # Export best candidate to a directory
 helix best --export ./best-solution
 
-# View full mutation log
+# Every candidate in order: parent, outcome, score, files and what changed
 helix log
 ```

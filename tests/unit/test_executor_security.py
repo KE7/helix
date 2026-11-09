@@ -109,6 +109,12 @@ class TestEnvironmentScrubbing:
         env = _scrub_environment("val")
         assert env["HOME"] == "/home/testuser"
 
+    def test_scrubbed_env_includes_user(self, monkeypatch):
+        """USER is preserved: Claude Code on macOS finds its Keychain login by it."""
+        monkeypatch.setenv("USER", "testuser")
+        env = _scrub_environment()
+        assert env["USER"] == "testuser"
+
     def test_scrubbed_env_includes_helix_split(self):
         """HELIX_SPLIT is set from the split parameter."""
         env = _scrub_environment("test")
@@ -141,21 +147,22 @@ class TestEnvironmentScrubbing:
         assert "RANDOM_ENV" not in env
 
     def test_scrubbed_env_only_allowed_keys(self, monkeypatch):
-        """Only PATH, HOME, HELIX_SPLIT, and HELIX_* are in scrubbed env."""
+        """Only PATH, HOME, USER, HELIX_SPLIT, and HELIX_* are in scrubbed env."""
         # Clear and set specific environment
         for key in list(os.environ.keys()):
-            if key not in ["PATH", "HOME"]:
+            if key not in ["PATH", "HOME", "USER"]:
                 monkeypatch.delenv(key, raising=False)
 
         monkeypatch.setenv("PATH", "/usr/bin")
         monkeypatch.setenv("HOME", "/home/user")
+        monkeypatch.setenv("USER", "user")
         monkeypatch.setenv("HELIX_VAR", "value")
         monkeypatch.setenv("FORBIDDEN", "bad")
 
         env = _scrub_environment("val")
 
-        # Should have exactly: PATH, HOME, HELIX_SPLIT, HELIX_VAR
-        allowed_keys = {"PATH", "HOME", "HELIX_SPLIT", "HELIX_VAR"}
+        # Should have exactly: PATH, HOME, USER, HELIX_SPLIT, HELIX_VAR
+        allowed_keys = {"PATH", "HOME", "USER", "HELIX_SPLIT", "HELIX_VAR"}
         assert set(env.keys()) == allowed_keys
 
     def test_passthrough_env_preserves_listed_vars(self, monkeypatch):

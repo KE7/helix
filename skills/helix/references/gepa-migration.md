@@ -48,7 +48,7 @@ Migration usually means:
 |---|---|
 | `candidate` initial value | initial repo contents, or `[seedless]` |
 | `evaluate(candidate)` | evaluator-runner command calling the sidecar |
-| `dataset` | `[dataset].train_size`, `[dataset].val_size`; evaluator owns actual data |
+| `dataset` | `[dataset].train_size`, `[dataset].val_size` (index ids), or `[seedless].train_path` / `val_path` directories (file-stem ids); evaluator owns actual data |
 | per-example score | `HELIX_RESULT` entry score |
 | `side_info` / trajectory | per-example `side_info` in `HELIX_RESULT` |
 | `side_info["scores"]` objective metrics | reserved `side_info["scores"]` dict |
@@ -56,6 +56,7 @@ Migration usually means:
 | `num_parallel_proposals` | `[evolution].num_parallel_proposals` |
 | `max_metric_calls` | `[evolution].max_evaluations` |
 | `frontier_type` | `[evolution].frontier_type` |
+| `candidate_selection_strategy` (`"pareto"`, `"current_best"`, `"epsilon_greedy"`, `"top_k_pareto"`) | `[evolution].candidate_selection_strategy`, same four names; set `candidate_selection_epsilon = 0.1` or `candidate_selection_top_k = 5` to match GEPA's built-in strategy defaults (HELIX requires them) |
 | `cache_evaluation` | `[evolution].cache_evaluation` |
 | `merge=MergeConfig(...)` | `[evolution].merge_enabled = true` plus merge fields |
 | GEPA proposer model | `[agent]` coding backend/model/effort |
@@ -241,13 +242,32 @@ For task/trial datasets:
 task, trial = eid.split("__", 1)
 ```
 
-Then:
+HELIX only produces such ids from file names: write one `<task>__<trial>.json`
+file per instance into a train and a val directory, and point `[seedless]` at
+them (read for ids even with seedless off). `[dataset].train_size` gives bare
+index ids, which stratification cannot group. Then:
 
 ```toml
+[seedless]
+enabled = false
+train_path = "splits/train"   # splits/train/pushcube__0.json -> id "pushcube__0"
+val_path = "splits/val"
+
 [evolution]
 batch_sampler = "stratified"
 group_key_separator = "__"
+
+[evaluator]
+protected_files = ["evaluate.py", "splits"]
+
+[sandbox]
+enabled = true
+omit_from_agent = ["evaluate.py", "splits/val"]   # held-out files never reach the agent
 ```
+
+`splits/val` lives in the project, so without `omit_from_agent` the sandboxed
+agent's copy would hold the held-out files. Keep them omitted (and protected),
+or keep held-out data outside the project and behind `[evaluator.sidecar]`.
 
 Use stratified sampling when each minibatch should cover multiple tasks.
 

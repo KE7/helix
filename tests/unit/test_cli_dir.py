@@ -74,22 +74,21 @@ class TestDirResolvesRoot:
     """Commands should use the --dir path, not cwd, to locate .helix/."""
 
     def test_log_uses_dir_not_cwd(self, tmp_path, monkeypatch):
-        """log --dir <empty_dir> should NOT look in cwd for .helix/log."""
+        """log --dir <empty_dir> should NOT read the run in cwd."""
         other = tmp_path / "other"
         other.mkdir()
-        # Put a .helix/log in cwd but NOT in other/
-        helix_log = tmp_path / ".helix" / "log"
-        helix_log.mkdir(parents=True)
-        (helix_log / "g0.json").write_text(
-            '{"generation": 0, "candidate_id": "g0-s0", "operation": "seed", '
-            '"timestamp": "2024-01-01", "summary": {}}'
+        # Put a run's lineage in cwd but NOT in other/
+        helix_dir = tmp_path / ".helix"
+        helix_dir.mkdir()
+        (helix_dir / "lineage.json").write_text(
+            '[{"id": "g0-s0", "parent": null, "parents": [], '
+            '"operation": "seed", "generation": 0, "files_changed": []}]'
         )
-        monkeypatch.chdir(tmp_path)  # cwd has .helix/log entries
+        monkeypatch.chdir(tmp_path)
 
         runner = CliRunner()
         result = runner.invoke(cli, ["log", "--dir", str(other)])
-        # Pointing at `other/` which has no .helix/log → should warn "No log entries"
-        assert "no log entries" in result.output.lower(), result.output
+        assert "no candidates found" in result.output.lower(), result.output
 
     def test_best_uses_dir_not_cwd(self, tmp_path, monkeypatch):
         """best --dir <empty_dir> should not find evolution state."""
@@ -118,6 +117,36 @@ class TestDirResolvesRoot:
         runner = CliRunner()
         result = runner.invoke(cli, ["history", "--dir", str(other)])
         assert "no lineage data" in result.output.lower(), result.output
+
+
+def test_evolve_with_relative_dir_puts_the_seed_worktree_in_that_project(
+    tmp_path, monkeypatch, mocker
+):
+    """``--dir proj`` from the parent directory.  The worktree path is handed
+    to a subprocess running in the project, so a relative root would put the
+    seed at proj/proj/.helix/... while HELIX evaluates proj/.helix/...."""
+    from helix.worktree import create_seed_worktree
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    _make_project(project)
+    seen = {}
+
+    def fake_run_evolution(config, project_root, base_dir):
+        seen["root"] = project_root
+        seed = create_seed_worktree(project_root, base_dir / "worktrees")
+        seen["seed"] = Path(seed.worktree_path)
+
+    mocker.patch("helix.evolution.run_evolution", side_effect=fake_run_evolution)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["evolve", "--dir", "proj"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["root"].is_absolute()
+    assert seen["seed"].is_absolute()
+    expected = project.resolve() / ".helix" / "worktrees" / "g0-s0"
+    assert (expected / "helix.toml").exists()
+    assert not (project / "proj").exists()
 
 
 # ---------------------------------------------------------------------------

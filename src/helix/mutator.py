@@ -31,7 +31,11 @@ from helix.exceptions import (
 )
 from helix.executor import _scrub_environment
 from helix.lines import split_lf_lines
-from helix.sandbox import resolve_sandbox_image, run_sandboxed_command
+from helix.sandbox import (
+    resolve_sandbox_image,
+    run_sandboxed_command,
+    subprocess_output_text,
+)
 from helix.sibling_history import (
     SUMMARY_ARTIFACT_NAME,
     capture_summary,
@@ -190,7 +194,7 @@ def _evaluator_failed(eval_result: EvalResult) -> bool:
 # section is suppressed) or a fully-formed Markdown section.  Empty
 # returns let ``build_mutation_prompt`` skip the section entirely —
 # mirrors GEPA's ``_build_reflection_prompt_template`` accumulator
-# pattern in ``gepa_launcher.py``.  Non-empty returns
+# pattern in ``gepa/optimize_anything.py``.  Non-empty returns
 # may carry trailing whitespace; ``build_mutation_prompt`` rstrips
 # before joining sections with a uniform blank-line separator.
 
@@ -255,7 +259,6 @@ def _render_evaluator_output_fallback(eval_result: EvalResult) -> str:
 def build_seed_generation_prompt(
     objective: str,
     background: str | None = None,
-    evaluator_cmd: str | None = None,
     dataset_examples: list[str] | None = None,
 ) -> str:
     """Construct the seed generation prompt for the configured backend.
@@ -270,8 +273,6 @@ def build_seed_generation_prompt(
         Natural-language description of what to optimise.
     background:
         Optional domain context / constraints.
-    evaluator_cmd:
-        Optional evaluator command shown to the LLM for context.
     dataset_examples:
         Optional list of representative dataset inputs used to ground the LLM,
         matching GEPA's ``_build_seed_generation_prompt`` ``dataset`` argument.
@@ -285,12 +286,6 @@ def build_seed_generation_prompt(
     background_lines: list[str] = []
     if background:
         background_lines.append(f"\n## Domain Context & Constraints\n\n{background}")
-    if evaluator_cmd:
-        background_lines.append(
-            f"\n## Evaluator\n\nYour candidate will be evaluated by running:\n\n"
-            f"    {evaluator_cmd}\n\n"
-            f"Make sure your implementation is compatible with this command."
-        )
     background_section = "\n".join(background_lines) + (
         "\n" if background_lines else ""
     )
@@ -348,11 +343,6 @@ def generate_seed(
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
-    # Every backend's argv tells the agent to read the prompt file rather
-    # than carrying the prompt itself, so the file must exist here just as
-    # it does for a mutation.  GEPA passes the seed prompt to the LM
-    # directly; this file is HELIX's way of doing the same.
-    prompt_artifact_name = _write_mutation_prompt_artifact(worktree_path, prompt)
     _, usage = invoke_claude_code(
         worktree_path,
         prompt,
@@ -360,7 +350,6 @@ def generate_seed(
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
         sandbox=config.sandbox,
-        prompt_artifact_name=prompt_artifact_name,
     )
     return usage
 
@@ -486,7 +475,7 @@ def _render_scores_section(eval_result: EvalResult) -> str:
     """Render ``## Current Evaluation Scores`` or ``""`` when no scores exist.
 
     Mirrors GEPA O.A.'s "only emit a section when there is content for it"
-    pattern in ``_build_reflection_prompt_template`` (``gepa_launcher.py``).
+    pattern in ``_build_reflection_prompt_template`` (``gepa/optimize_anything.py``).
     Previously HELIX emitted the section with a ``"(no scores recorded)"``
     placeholder; now the section header is omitted entirely so the agent
     never sees a stub.
@@ -563,7 +552,7 @@ def build_mutation_prompt(
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    in ``gepa_launcher.py``.  Empty ``objective``, empty
+    in ``gepa/optimize_anything.py``.  Empty ``objective``, empty
     ``eval_result.scores``, absent diagnostics, absent evaluator notes,
     absent stdout/stderr fallback, absent extra ASI, and absent
     ``background`` all skip their respective sections entirely instead of
@@ -724,9 +713,8 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         # toggled.
         SUMMARY_ARTIFACT_NAME,
         SUMMARY_PROMPT_ARTIFACT_NAME,
-        # Per-candidate OpenCode SQLite state (XDG_DATA_HOME isolation).
-        # Each parallel opencode worker gets a fresh database here; keeps
-        # the candidate git tree free of opencode's session/session files.
+        # Per-candidate OpenCode data directory (``_prepare_opencode_state``):
+        # its database and a link to the operator's ``auth.json``.
         ".helix_opencode_state/",
     ]
     if gitignore.is_symlink():
@@ -968,6 +956,47 @@ def _build_backend_args(
     raise ValueError(f"Unsupported backend: {backend}")
 
 
+#: Per-candidate stand-in for ``$HOME`` that holds opencode's data directory
+#: on an unsandboxed run (``<worktree>/.helix_opencode_state/.local/share``).
+#: Laid out like a home so ``BACKEND_TRANSCRIPT_SOURCES["opencode"]`` finds
+#: the run's own database under it, as it does under ``/home/node`` in the
+#: sandbox auth volume.
+OPENCODE_STATE_HOME = ".helix_opencode_state"
+
+
+def _prepare_opencode_state(worktree_path: str) -> Path:
+    """Give an unsandboxed opencode run its own data directory; return it.
+
+    opencode keeps every session in one ``opencode.db`` under
+    ``$XDG_DATA_HOME/opencode`` (``~/.local/share/opencode`` on macOS and
+    Linux alike), and parallel proposals sharing that file fail with
+    "Failed to run the query 'PRAGMA journal_mode = WAL'" (seen in PR #34).
+    Each candidate therefore gets a fresh database in its worktree.
+
+    The same directory holds ``auth.json``, the logins ``opencode providers
+    login`` stores, so the operator's file is linked in: without it a run
+    with no API-key variable cannot authenticate.  A link rather than a copy,
+    so a provider token opencode refreshes is written back to the operator's
+    file instead of a stale copy whose spent refresh token would then sign
+    the operator out.  The operator's ``opencode.db`` is never read or
+    copied: its ``account`` table holds the opencode account's tokens.
+    """
+    data_home = Path(worktree_path) / OPENCODE_STATE_HOME / ".local" / "share"
+    state = data_home / "opencode"
+    state.mkdir(parents=True, exist_ok=True)
+    operator_data = Path(
+        os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    )
+    auth = operator_data / "opencode" / "auth.json"
+    link = state / "auth.json"
+    if auth.is_file() and not os.path.lexists(link):
+        try:
+            link.symlink_to(auth)
+        except OSError as exc:
+            logger.warning("could not link opencode logins %s: %s", auth, exc)
+    return data_home
+
+
 def _no_web_env(config: AgentConfig) -> dict[str, str]:
     """opencode's no-web setting, which is env-only."""
     if config.web_access or config.backend != "opencode":
@@ -1067,6 +1096,8 @@ def _parse_jsonl_output(
     }
     if backend == "pi":
         result.update(_pi_run_summary(events))
+    elif backend == "opencode":
+        result.update(_opencode_run_summary(events))
     return result
 
 
@@ -1125,6 +1156,51 @@ def _pi_run_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {**totals, **summary}
 
 
+def _opencode_run_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Token totals for one ``opencode run --format json`` stream.
+
+    opencode reports usage per model call, on each ``step_finish`` event
+    (``part.tokens = {input, output, reasoning, cache: {read, write}}`` and
+    ``part.cost``, the ``StepFinishPart`` schema of opencode 1.19), so the
+    steps are summed here as :func:`_pi_run_summary` does for pi.  Every key
+    is set, even at zero, so the generic walk never reads a token count from
+    elsewhere in the stream, such as a tool part's ``state.output``.
+    """
+    totals = {
+        "input_tokens": 0.0,
+        "output_tokens": 0.0,
+        "cached_input_tokens": 0.0,
+        "cache_read_input_tokens": 0.0,
+        "cache_creation_input_tokens": 0.0,
+        "reasoning_tokens": 0.0,
+        "cost_usd": 0.0,
+    }
+    for event in events:
+        part = event.get("part")
+        if event.get("type") != "step_finish" or not isinstance(part, dict):
+            continue
+        tokens = part.get("tokens")
+        tokens = tokens if isinstance(tokens, dict) else {}
+        cache = tokens.get("cache")
+        cache = cache if isinstance(cache, dict) else {}
+        for key, value in (
+            ("input_tokens", tokens.get("input")),
+            ("output_tokens", tokens.get("output")),
+            ("reasoning_tokens", tokens.get("reasoning")),
+            ("cache_read_input_tokens", cache.get("read")),
+            ("cache_creation_input_tokens", cache.get("write")),
+            ("cost_usd", part.get("cost")),
+        ):
+            number = _coerce_number(value)
+            if number is not None:
+                totals[key] += number
+    return totals
+
+
+#: Backends whose structured output is one JSON object rather than JSONL.
+_JSON_OBJECT_BACKENDS = frozenset({"agy", "claude"})
+
+
 def _parse_backend_output(
     backend: str,
     result: subprocess.CompletedProcess[str],
@@ -1132,7 +1208,7 @@ def _parse_backend_output(
     cmd_str: str,
     worktree_path: str,
 ) -> dict[str, Any]:
-    if backend in {"agy", "claude"}:
+    if backend in _JSON_OBJECT_BACKENDS:
         return _parse_json_object_output(
             result.stdout,
             backend=backend,
@@ -1209,8 +1285,9 @@ def _salvage_backend_usage(
       which collects the records that *did* decode and sets the rest aside.
       The usage record is one line of its own, so a malformed line elsewhere
       in the stream does not hide it.
-    * Claude's single-object mode tries the object first, then falls back to
-      the same lenient line scan for a stream that was truncated mid-object.
+    * The single-object backends (claude, agy) try the object first, then
+      fall back to the same lenient line scan for a stream that was
+      truncated mid-object.
 
     Returns a zero-token :class:`UsageStats` when nothing is recoverable,
     which is the honest reading of "the backend reported no usage".
@@ -1220,7 +1297,7 @@ def _salvage_backend_usage(
         return _normalise_usage_stats({})
 
     parsed: dict[str, Any] | None = None
-    if backend == "claude":
+    if backend in _JSON_OBJECT_BACKENDS:
         try:
             loaded = json.loads(stdout)
         except (json.JSONDecodeError, ValueError, RecursionError):
@@ -1324,7 +1401,6 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "inputTokens",
                     "prompt_tokens",
                     "promptTokens",
-                    "input",
                 ),
             ),
             (
@@ -1334,18 +1410,16 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "outputTokens",
                     "completion_tokens",
                     "completionTokens",
-                    "output",
                 ),
             ),
             (
                 "cached_input_tokens",
-                (
-                    "cached_input_tokens",
-                    "cachedTokens",
-                    "cacheReadInputTokens",
-                    "cacheRead",
-                    "cached",
-                ),
+                # OpenAI-style cached prompt tokens (codex).  Anthropic-style
+                # cache reads (``cacheReadInputTokens``/``cacheRead``) belong
+                # to ``cache_read_input_tokens`` alone: Claude reports the
+                # same reads under both spellings, and both counters are
+                # summed for display and budget.
+                ("cached_input_tokens", "cachedTokens"),
             ),
             (
                 "cache_creation_input_tokens",
@@ -1374,15 +1448,13 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
                     "reasoning_tokens",
                     "reasoningTokens",
                     "reasoning_output_tokens",
-                    "thoughts",
-                    "reasoning",
                     # agy: ``usage.thinking_tokens``
                     "thinking_tokens",
                 ),
             ),
             (
                 "cost_usd",
-                ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd", "total"),
+                ("cost_usd", "costUsd", "total_cost_usd", "totalCostUsd"),
             ),
         ):
             if key in _d:
@@ -1417,21 +1489,6 @@ def _normalise_usage_stats(parsed: dict[str, Any]) -> UsageStats:
             coerced = _coerce_number(value)
             if coerced is not None:
                 _d["cost_usd"] = coerced
-
-        # OpenCode emits cache accounting as ``tokens.cache.{read,write}``.
-        # Keep this contextual rather than treating generic ``read``/``write``
-        # fields elsewhere in a transcript as token counts.
-        cache = node.get("cache")
-        if isinstance(cache, dict):
-            for key, field in (
-                ("cache_creation_input_tokens", "write"),
-                ("cache_read_input_tokens", "read"),
-            ):
-                if key in _d:
-                    continue
-                value = _coerce_number(cache.get(field))
-                if value is not None:
-                    _d[key] = value
 
     if tool_event_count and "tool_event_count" not in _d:
         _d["tool_event_count"] = tool_event_count
@@ -1748,17 +1805,20 @@ def _copy_local_claude_transcript(
             "available": False,
             "reason": "transcript_not_found",
         }
-    root = (
-        Path(transcript_root)
-        if transcript_root is not None
-        else Path(
-            os.environ.get(
-                "HELIX_CLAUDE_TRANSCRIPT_ROOT",
-                Path.home() / ".claude/projects/-workspace",
-            )
+    root = transcript_root or os.environ.get("HELIX_CLAUDE_TRANSCRIPT_ROOT")
+    if root is not None:
+        src = Path(root) / f"{session_id}.jsonl"
+    else:
+        # Unsandboxed, claude keeps each session under a folder named after
+        # its working directory (``~/.claude/projects/<cwd with / as ->/``).
+        # Session ids are unique, so search every project folder.
+        projects = Path.home() / ".claude" / "projects"
+        matches = (
+            sorted(projects.glob(f"*/{session_id}.jsonl"))
+            if TRANSCRIPT_SESSION_ID_RE.match(session_id)
+            else []
         )
-    )
-    src = root / f"{session_id}.jsonl"
+        src = matches[0] if matches else projects / "*" / f"{session_id}.jsonl"
     if not src.is_file():
         return {
             "backend": "claude",
@@ -1965,11 +2025,12 @@ def _collect_backend_transcript_artifacts(
 ) -> list[dict[str, Any]]:
     """Copy the backend's native transcript for this invocation into the worktree.
 
-    Claude keeps its pre-existing path (``claude_transcript_root`` /
-    ``HELIX_CLAUDE_TRANSCRIPT_ROOT``); every other backend is located through
-    ``BACKEND_TRANSCRIPT_SOURCES``.  In sandbox mode the files were copied out
+    Claude keeps its own path (staged from ``claude_transcript_root`` when
+    sandboxed, else found under ``~/.claude/projects``); every other backend is
+    located through ``BACKEND_TRANSCRIPT_SOURCES``.  In sandbox mode the files were copied out
     of the auth volume by ``helix.sandbox`` before sync-back; unsandboxed they
-    are read from the operator's ``$HOME``.
+    are read from the operator's ``$HOME``, except opencode's, which come from
+    the run's own database (``_prepare_opencode_state``).
 
     The copy is always made and kept: it is the run's only durable record
     once the sandbox resets the backend's state at the next generation, and
@@ -1998,17 +2059,18 @@ def _collect_backend_transcript_artifacts(
             backend=backend,
             session_id=session_id,
             artifact_dir=artifact_dir,
-            home=None if sandboxed else Path.home(),
+            home=None
+            if sandboxed
+            else Path(worktree_path) / OPENCODE_STATE_HOME
+            if backend == "opencode"
+            else Path.home(),
             miss_level=miss_level,
         )
     else:
-        transcript_root = (
-            "sandbox_auth_volume"
-            if sandboxed
-            else sandbox.claude_transcript_root
-            if sandbox is not None
-            else None
-        )
+        # ``claude_transcript_root`` is the path inside the container; the
+        # sandbox has already staged that file.  Unsandboxed, it is searched
+        # for under the operator's ``$HOME``.
+        transcript_root = "sandbox_auth_volume" if sandboxed else None
         artifact = _copy_local_claude_transcript(
             worktree_path,
             session_id=session_id,
@@ -2050,25 +2112,25 @@ def _write_backend_artifacts(
     result: subprocess.CompletedProcess[str],
     parsed: dict[str, Any] | None,
     sandbox: SandboxConfig | None = None,
-    fallback_usage: UsageStats | None = None,
+    usage: UsageStats | None = None,
     artifact_infix: str = "",
     agent_seconds: float | None = None,
 ) -> None:
+    """Write the invocation's stdout, stderr and result artifacts.
+
+    ``usage`` is the record the caller hands back for this invocation; the
+    tool counts found in the stdout stream or the native transcript are
+    patched into that same object, so the caller, the live display and the
+    artifact all see one set of numbers.  ``None`` derives it from *parsed*.
+    """
     result_name, stdout_name, stderr_name = _backend_artifact_names(artifact_infix)
+    if usage is None:
+        usage = _normalise_usage_stats(parsed if parsed is not None else {})
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
         (wt / stdout_name).write_text(result.stdout or "")
         (wt / stderr_name).write_text(result.stderr or "")
-        # ``parsed is None`` means the strict parse failed.  Record the
-        # leniently recovered usage rather than zeros, so the on-disk
-        # artifact stays a faithful account of what the invocation spent.
-        if parsed is not None:
-            usage = _normalise_usage_stats(parsed)
-        elif fallback_usage is not None:
-            usage = fallback_usage
-        else:
-            usage = _normalise_usage_stats({})
         # For the JSONL backends the stdout stream IS the transcript; patch
         # ``usage`` with backend-specific tool-event counts now that the
         # stdout artifact is on disk.  Claude and agy are handled inside
@@ -2128,6 +2190,7 @@ def invoke_claude_code(
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
     artifact_infix: str = "",
+    prompt_artifact_fallback_name: str = MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
 ) -> tuple[dict[str, Any], UsageStats]:
     """Invoke the configured backend CLI in *worktree_path*.
 
@@ -2136,7 +2199,10 @@ def invoke_claude_code(
     worktree_path:
         Working directory for the backend subprocess.
     prompt:
-        Prompt / task instructions for the backend.
+        Prompt / task instructions for the backend.  Written here to the
+        prompt file the backend's argv names (*prompt_artifact_name*, or
+        *prompt_artifact_fallback_name* when a different file already sits
+        there), so no caller can start a backend without its task.
     config:
         Backend configuration (backend selector, model, effort, tool policy).
     passthrough_env:
@@ -2165,6 +2231,16 @@ def invoke_claude_code(
     backend_worktree_path = (
         "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
     )
+    # Every backend's argv says "Read <file>" rather than carrying the prompt,
+    # so the file is written here, the one place every backend call passes
+    # through (merge once started without it).  GEPA hands its prompt to the
+    # LM directly; this file is HELIX's way of doing the same.
+    prompt_artifact_name = _write_mutation_prompt_artifact(
+        worktree_path,
+        prompt,
+        primary_name=prompt_artifact_name,
+        fallback_name=prompt_artifact_fallback_name,
+    )
     args = _build_backend_args(
         backend_worktree_path,
         config,
@@ -2186,42 +2262,38 @@ def invoke_claude_code(
         else str(Path(worktree_path) / timing_log_name)
     )
     if backend == "opencode" and not sandboxed:
-        # Per-candidate SQLite isolation for concurrent opencode subprocesses.
-        #
-        # OpenCode stores its session database at:
-        #   macOS: ~/Library/Application Support/opencode/opencode.db
-        #   Linux: $XDG_DATA_HOME/opencode/opencode.db  (default ~/.local/share/opencode/)
-        #
-        # When multiple proposals run in parallel (num_parallel_proposals > 1),
-        # every worker spawns a fresh `opencode run` subprocess that issues
-        # `PRAGMA journal_mode = WAL` against this shared database at startup.
-        # Concurrent WAL-mode requests on the same file produce:
-        #   "Failed to run the query 'PRAGMA journal_mode = WAL'"
-        # (observed in PR #34 E2E re-verify: g1-s1 lost to this error while g1-s2 succeeded).
-        #
-        # Fix: set XDG_DATA_HOME to a per-candidate directory.  OpenCode respects
-        # XDG_DATA_HOME and will create an isolated database at:
-        #   <worktree>/.helix_opencode_state/opencode/opencode.db
-        # Each parallel worker gets its own fresh database; no contention.
-        #
-        # The sandbox branch is excluded: container isolation already provides
-        # per-candidate filesystem separation, so XDG_DATA_HOME would be redundant.
-        opencode_state_dir = Path(worktree_path) / ".helix_opencode_state"
-        opencode_state_dir.mkdir(parents=True, exist_ok=True)
-        backend_env["XDG_DATA_HOME"] = str(opencode_state_dir)
+        # Per-candidate database isolation; see ``_prepare_opencode_state``.
+        # The sandbox branch is excluded: each container already has its own
+        # filesystem.
+        backend_env["XDG_DATA_HOME"] = str(_prepare_opencode_state(worktree_path))
     started = time.monotonic()
+    timed_out_after: float | None = None
     if sandbox is not None and sandbox.enabled:
         sandbox_image = resolve_sandbox_image(sandbox, backend)
-        result = run_sandboxed_command(
-            args,
-            cwd=worktree_path,
-            env=backend_env,
-            sandbox=sandbox,
-            scope="agent",
-            sync_back=True,
-            image=sandbox_image,
-            agent_backend=backend,
-        )
+        try:
+            result = run_sandboxed_command(
+                args,
+                cwd=worktree_path,
+                env=backend_env,
+                sandbox=sandbox,
+                scope="agent",
+                sync_back=True,
+                image=sandbox_image,
+                agent_backend=backend,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # ``sandbox.timeout_seconds`` ran out.  The container's edits are
+            # gone, but the tokens it used are spent and its transcript was
+            # copied out, so carry the partial output through the same path
+            # as a failed exit: usage salvaged, artifacts written, a
+            # MutationError (with that usage) raised.
+            timed_out_after = exc.timeout
+            result = subprocess.CompletedProcess(
+                args,
+                124,  # timeout(1)'s exit status
+                stdout=subprocess_output_text(exc.stdout),
+                stderr=subprocess_output_text(exc.stderr),
+            )
     else:
         result = subprocess.run(
             args,
@@ -2244,10 +2316,30 @@ def invoke_claude_code(
     # the tokens have still been spent.  Charging must not be conditional on
     # the candidate being usable, so every error raised from here carries
     # this on ``HelixError.usage`` for the caller to charge.
-    spent_usage = _salvage_backend_usage(backend, result)
+    # ``usage`` is the one record of this invocation: returned, attached to
+    # any error, and patched with tool counts by the artifact writer below.
+    usage = _salvage_backend_usage(backend, result)
 
     parsed: dict[str, Any] | None = None
     try:
+        # Decided before any output is interpreted: the sandbox dropped the
+        # edits, so no partial-success reading (claude's error_max_turns)
+        # may return a candidate, and a stream cut off mid-object must not
+        # surface as a parse error instead of the timeout.
+        if timed_out_after is not None:
+            raise MutationError(
+                f"{backend_name} timed out after {timed_out_after:g}s "
+                "(sandbox.timeout_seconds)",
+                operation=f"{backend_name} invocation",
+                phase="subprocess timeout",
+                command=cmd_str,
+                cwd=str(worktree_path),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.returncode,
+                suggestion="Raise [sandbox].timeout_seconds, or lower agent.max_turns.",
+            )
+
         if result.returncode == 0:
             parsed = _parse_backend_output(
                 backend,
@@ -2301,7 +2393,7 @@ def invoke_claude_code(
         # Attach only when the raiser did not already supply a more precise
         # record; never overwrite one.
         if exc.usage is None:
-            exc.usage = spent_usage
+            exc.usage = usage
         raise
     finally:
         _write_backend_artifacts(
@@ -2311,7 +2403,7 @@ def invoke_claude_code(
             result=result,
             parsed=parsed,
             sandbox=sandbox,
-            fallback_usage=spent_usage,
+            usage=usage,
             artifact_infix=artifact_infix,
             agent_seconds=agent_seconds,
         )
@@ -2651,25 +2743,29 @@ def generate_change_summary(
     # One number drives both the request and the read-back truncation; passing
     # it to only one of them would cut every long summary mid-sentence.
     max_words = config.evolution.sibling_summary_max_words
+    diff = _child_diff(worktree_path, base_sha)
+    new_files = _new_files_section(worktree_path)
+    if not diff and not new_files:
+        # Nothing to describe: a paid call would only answer that no diff
+        # was available.  No backend runs, so there is no usage to charge.
+        return "No change: the agent left the parent's files as they were.", None
     prompt = summary_prompt(
         objective=config.objective,
-        diff=_child_diff(worktree_path, base_sha),
-        new_files=_new_files_section(worktree_path),
+        diff=diff,
+        new_files=new_files,
         max_words=max_words,
     )
     # A fresh turn budget: the mutation's own limit governs editing code and is
     # routinely exhausted, which is the very failure this call exists to route
     # around.
     agent_config = config.agent.model_copy(update={"max_turns": SUMMARY_MAX_TURNS})
+    before_tree: str | None = None  # the handlers below revert with it
     try:
-        artifact_name = _write_mutation_prompt_artifact(
-            worktree_path,
-            prompt,
-            primary_name=SUMMARY_PROMPT_ARTIFACT_NAME,
-            fallback_name=SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
-        )
-        # Taken after the prompt artifact and .gitignore are settled, so only
-        # the summary call's own doing can move this hash.
+        # Settle the ignore rules first (the mutation's call already did,
+        # unless this runs on its own), so only the summary call's own doing
+        # can move this hash; the prompt file invoke_claude_code writes is
+        # ignored by it.
+        _ignore_helix_artifacts(Path(worktree_path))
         before_tree = _content_tree_hash(worktree_path)
         _, usage = invoke_claude_code(
             worktree_path,
@@ -2678,7 +2774,8 @@ def generate_change_summary(
             passthrough_env=config.passthrough_env,
             fixed_env=config.env,
             sandbox=config.sandbox,
-            prompt_artifact_name=artifact_name,
+            prompt_artifact_name=SUMMARY_PROMPT_ARTIFACT_NAME,
+            prompt_artifact_fallback_name=SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
             # Own set of backend artifacts: this is the worktree's second
             # invocation, and the mutation's record must survive it.
             artifact_infix=SUMMARY_BACKEND_ARTIFACT_INFIX,
@@ -2768,15 +2865,6 @@ def mutate(
         sibling_history,
     )
 
-    # Persist the rendered prompt to the worktree for post-hoc inspection:
-    # what did the mutator actually see on this generation?  Sits next to
-    # ``helix_batch.json`` in the worktree root.  The leading dot and the
-    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
-    # keep it out of the candidate git tree — otherwise it'd leak into
-    # every subsequent mutation's diff and the mutator would see its own
-    # prior prompt file as part of the codebase.
-    prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
-
     # Fixed point for the change summary's diff, taken before the backend can
     # move HEAD by committing its own work.  See ``_child_diff``.
     base_sha = (
@@ -2791,7 +2879,6 @@ def mutate(
             passthrough_env=config.passthrough_env,
             fixed_env=config.env,
             sandbox=config.sandbox,
-            prompt_artifact_name=prompt_artifact_name,
         )
         child.usage = usage
         if record_usage is not None:

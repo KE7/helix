@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 
 import pytest
 
@@ -367,3 +368,40 @@ def test_generate_seed_writes_the_prompt_file_the_agent_is_told_to_read(
 
     assert seen["prompt"] == "Create rle.py"
     assert MUTATION_PROMPT_ARTIFACT_NAME in str(seen["argv"])
+
+
+def test_child_of_generated_seed_contains_the_seeds_files(tmp_path, seedless_mocks):
+    """The seed agent writes files without committing them.  HELIX must commit
+    the generated seed, or every child (cloned from the seed's HEAD) starts
+    without the code whose scores it was handed.  Real git worktrees."""
+    import subprocess
+
+    from helix.worktree import clone_candidate, create_empty_seed_worktree, snapshot_candidate
+
+    project = tmp_path / "project"
+    project.mkdir()
+    seedless_mocks["create_empty_seed_worktree"].side_effect = create_empty_seed_worktree
+    seedless_mocks["snapshot_candidate"].side_effect = snapshot_candidate
+
+    def write_solver(worktree_path, prompt, config):
+        (Path(worktree_path) / "solve.py").write_text("print('seed')\n")
+        return UsageStats()
+
+    seedless_mocks["generate_seed"].side_effect = write_solver
+    child_files: list[str] = []
+
+    def clone_and_list(parent, eval_result, new_id, config, base_dir, **kwargs):
+        child = clone_candidate(parent, new_id, base_dir)
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=child.worktree_path,
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        child_files.extend(tracked)
+        assert (Path(child.worktree_path) / "solve.py").exists()
+        return None
+
+    seedless_mocks["mutate"].side_effect = clone_and_list
+
+    run_evolution(make_config(seedless=True), project, project / ".helix")
+
+    assert "solve.py" in child_files
