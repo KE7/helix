@@ -1820,17 +1820,20 @@ def _copy_local_claude_transcript(
             "available": False,
             "reason": "transcript_not_found",
         }
-    root = (
-        Path(transcript_root)
-        if transcript_root is not None
-        else Path(
-            os.environ.get(
-                "HELIX_CLAUDE_TRANSCRIPT_ROOT",
-                Path.home() / ".claude/projects/-workspace",
-            )
+    root = transcript_root or os.environ.get("HELIX_CLAUDE_TRANSCRIPT_ROOT")
+    if root is not None:
+        src = Path(root) / f"{session_id}.jsonl"
+    else:
+        # Unsandboxed, claude keeps each session under a folder named after
+        # its working directory (``~/.claude/projects/<cwd with / as ->/``).
+        # Session ids are unique, so search every project folder.
+        projects = Path.home() / ".claude" / "projects"
+        matches = (
+            sorted(projects.glob(f"*/{session_id}.jsonl"))
+            if TRANSCRIPT_SESSION_ID_RE.match(session_id)
+            else []
         )
-    )
-    src = root / f"{session_id}.jsonl"
+        src = matches[0] if matches else projects / "*" / f"{session_id}.jsonl"
     if not src.is_file():
         return {
             "backend": "claude",
@@ -2037,9 +2040,9 @@ def _collect_backend_transcript_artifacts(
 ) -> list[dict[str, Any]]:
     """Copy the backend's native transcript for this invocation into the worktree.
 
-    Claude keeps its pre-existing path (``claude_transcript_root`` /
-    ``HELIX_CLAUDE_TRANSCRIPT_ROOT``); every other backend is located through
-    ``BACKEND_TRANSCRIPT_SOURCES``.  In sandbox mode the files were copied out
+    Claude keeps its own path (staged from ``claude_transcript_root`` when
+    sandboxed, else found under ``~/.claude/projects``); every other backend is
+    located through ``BACKEND_TRANSCRIPT_SOURCES``.  In sandbox mode the files were copied out
     of the auth volume by ``helix.sandbox`` before sync-back; unsandboxed they
     are read from the operator's ``$HOME``, except opencode's, which come from
     the run's own database (``_prepare_opencode_state``).
@@ -2079,13 +2082,10 @@ def _collect_backend_transcript_artifacts(
             miss_level=miss_level,
         )
     else:
-        transcript_root = (
-            "sandbox_auth_volume"
-            if sandboxed
-            else sandbox.claude_transcript_root
-            if sandbox is not None
-            else None
-        )
+        # ``claude_transcript_root`` is the path inside the container; the
+        # sandbox has already staged that file.  Unsandboxed, it is searched
+        # for under the operator's ``$HOME``.
+        transcript_root = "sandbox_auth_volume" if sandboxed else None
         artifact = _copy_local_claude_transcript(
             worktree_path,
             session_id=session_id,

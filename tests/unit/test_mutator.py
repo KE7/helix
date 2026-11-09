@@ -3216,9 +3216,15 @@ _CLAUDE_TOOL_TRANSCRIPT = "".join(
 
 
 class TestToolCountsFromNativeTranscript:
-    def test_claude_counts_come_from_kept_transcript(self, tmp_path: Path, mocker):
-        root = tmp_path / "claude-root"
-        root.mkdir()
+    def test_claude_counts_come_from_kept_transcript(
+        self, tmp_path: Path, mocker, monkeypatch
+    ):
+        # Unsandboxed, claude writes the session under a folder named after
+        # its working directory, not under the container's ``-workspace``.
+        monkeypatch.delenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        root = tmp_path / "home" / ".claude" / "projects" / "-tmp-run-g1-s1"
+        root.mkdir(parents=True)
         (root / "sess_tool.jsonl").write_text(_CLAUDE_TOOL_TRANSCRIPT)
         mock_run = mocker.patch("helix.mutator.subprocess.run")
         mock_run.return_value = MagicMock(
@@ -3233,7 +3239,7 @@ class TestToolCountsFromNativeTranscript:
             str(wt),
             "prompt",
             AgentConfig(backend="claude"),
-            sandbox=SandboxConfig(claude_transcript_root=str(root)),
+            sandbox=SandboxConfig(),
         )
 
         payload = json.loads((wt / BACKEND_RESULT_ARTIFACT_NAME).read_text())

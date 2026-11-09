@@ -143,7 +143,7 @@ from that database, never the operator's:
 
 | backend | native source (relative to `$HOME`) | artifact |
 | --- | --- | --- |
-| claude | `.claude/projects/-workspace/<session_id>.jsonl` (`claude_transcript_root`) | `claude/<session_id>.jsonl` |
+| claude | `.claude/projects/<cwd-slug>/<session_id>.jsonl` (sandboxed: `claude_transcript_root`, default `-workspace`) | `claude/<session_id>.jsonl` |
 | codex | `.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl` | `codex/<thread_id>.jsonl` |
 | cursor | `.cursor/projects/<cwd-slug>/agent-transcripts/<session_id>/<session_id>.jsonl` | `cursor/<session_id>.jsonl` |
 | agy | `.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript{,_full}.jsonl` | `agy/<id>.jsonl`, `agy/<id>.full.jsonl` |

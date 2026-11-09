@@ -235,6 +235,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tool counts read from the stdout stream or native transcript (claude,
     codex, cursor, agy) reached `.helix_backend_result.json` but not the live
     "Tools" line or the candidate's usage; both now match the artifact.
+  - Unsandboxed Claude runs never found the agent's transcript: HELIX looked
+    at the sandbox's container path, while Claude writes it under
+    `~/.claude/projects/<working-directory>/`. Tools were counted as 0 and
+    `helix timing` reported Claude's time as unavailable. HELIX now searches
+    there; `[sandbox].claude_transcript_root` applies to sandboxed runs only.
   - A failed agy call now charges the tokens its JSON output reports.
   - An agent call that runs out of `[sandbox].timeout_seconds` is now a
     failed mutation that charges the tokens it reported, whatever the
