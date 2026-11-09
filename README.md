@@ -109,6 +109,8 @@ More in [How HELIX works](https://ke7.github.io/helix/concepts/how-it-works.html
 
 ## Citation
 
+If you use HELIX, please cite it and optimize_anything, whose search loop it uses.
+
 ```bibtex
 @software{helix2026,
   title  = {HELIX: Hierarchical Evolution via LLM-Informed eXploration},
@@ -116,16 +118,7 @@ More in [How HELIX works](https://ke7.github.io/helix/concepts/how-it-works.html
   year   = {2026},
   url    = {https://github.com/KE7/helix}
 }
-```
 
-## Acknowledgments
-
-HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis and Zaharia ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633)). The mutation backends are [Antigravity CLI](https://antigravity.google/cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [Cursor CLI](https://cursor.com/cli/), [OpenCode](https://opencode.ai/docs/cli/) and [pi](https://github.com/earendil-works/pi). HELIX was built with [OMAR](http://omar.tech/).
-
-<details>
-<summary>BibTeX for optimize_anything</summary>
-
-```bibtex
 @inproceedings{agrawal2026optimizeanything,
   title         = {optimize\_anything: Unified Text Optimization can Outperform Specialized Systems},
   author        = {Agrawal, Lakshya A and Lee, Donghyun and Tan, Shangyin and Ma, Wenjie and Elmaaroufi, Karim and Sandadi, Rohit and Seshia, Sanjit A. and Sen, Koushik and Klein, Dan and Stoica, Ion and Gonzalez, Joseph E. and Khattab, Omar and Dimakis, Alexandros G. and Zaharia, Matei},
@@ -143,7 +136,9 @@ HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, 
 }
 ```
 
-</details>
+## Acknowledgments
+
+HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis and Zaharia ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633)). The mutation backends are [Antigravity CLI](https://antigravity.google/cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [Cursor CLI](https://cursor.com/cli/), [OpenCode](https://opencode.ai/docs/cli/) and [pi](https://github.com/earendil-works/pi). HELIX was built with [OMAR](http://omar.tech/).
 
 ## License
 
