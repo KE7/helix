@@ -123,7 +123,7 @@ More in [How HELIX works](https://ke7.github.io/helix/concepts/how-it-works.html
 HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, Elmaaroufi, Sandadi, Seshia, Sen, Klein, Stoica, Gonzalez, Khattab, Dimakis and Zaharia ([paper](https://doi.org/10.1145/3786335.3813167), [arXiv](https://arxiv.org/abs/2605.19633)). The mutation backends are [Antigravity CLI](https://antigravity.google/cli), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://developers.openai.com/codex/cli), [Cursor CLI](https://cursor.com/cli/), [OpenCode](https://opencode.ai/docs/cli/) and [pi](https://github.com/earendil-works/pi). HELIX was built with [OMAR](http://omar.tech/).
 
 <details>
-<summary>BibTeX for optimize_anything and Meta-Harness</summary>
+<summary>BibTeX for optimize_anything</summary>
 
 ```bibtex
 @inproceedings{agrawal2026optimizeanything,
@@ -140,16 +140,6 @@ HELIX's search algorithm is GEPA optimize_anything's, by Agrawal, Lee, Tan, Ma, 
   archiveprefix = {arXiv},
   primaryclass  = {cs.CL},
   note          = {arXiv version titled ``optimize\_anything: A Universal API for Optimizing any Text Parameter''}
-}
-
-@article{lee2026metaharness,
-  title         = {Meta-Harness: End-to-End Optimization of Model Harnesses},
-  author        = {Lee, Yoonho and Nair, Roshen and Zhang, Qizheng and Lee, Kangwook and Khattab, Omar and Finn, Chelsea},
-  journal       = {arXiv preprint arXiv:2603.28052},
-  year          = {2026},
-  eprint        = {2603.28052},
-  archiveprefix = {arXiv},
-  primaryclass  = {cs.AI}
 }
 ```
 
