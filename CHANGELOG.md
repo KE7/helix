@@ -242,12 +242,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     taken as success once its edits are gone); before, the tokens were lost
     and the worktree was left behind.
 - The change-summary call (`sibling_history`) no longer drops a successful
-  mutation when its prompt file cannot be written, and rolling back a
-  summary call that touched candidate files now restores a renamed file's
-  original, executable bits and symlinks, and never writes through a
-  symlink the summary call planted. A child that changed no files gets the
-  fixed summary "No change: the agent left the parent's files as they were."
-  without a paid summary call.
+  mutation when its prompt file cannot be written. A child that changed no
+  files gets the fixed summary "No change: the agent left the parent's files
+  as they were." without a paid summary call.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess

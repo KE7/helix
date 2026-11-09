@@ -2660,50 +2660,26 @@ def _content_tree_hash(worktree_path: str) -> str | None:
 
 
 def _restore_paths_from_tree(worktree_path: str, tree: str, paths: list[str]) -> None:
-    """Put *paths* back as they are in *tree*, deleting ones absent there.
+    """Put *paths* back to their content in *tree*, deleting ones absent there.
 
     Writes the working-tree files directly from git objects rather than using
-    ``git checkout``, which would also rewrite the index.  Everything now at
-    the paths is removed first, in sorted order so a parent replaced by a link
-    goes before its children, so nothing is ever written through a link the
-    summary call planted.  Each path then comes back with its recorded type:
-    a symlink as a symlink, an executable with its exec bits.
+    ``git checkout``, which would also rewrite the index.
     """
-    import shutil
-
-    root = Path(worktree_path)
-    for rel in sorted(paths):
-        target = root / rel
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-    for rel in sorted(paths):
-        listing = subprocess.run(
-            ["git", "ls-tree", "-z", tree, "--", rel],
-            cwd=worktree_path, capture_output=True, check=False,
+    for rel in paths:
+        blob = subprocess.run(
+            ["git", "cat-file", "-p", f"{tree}:{rel}"],
+            cwd=worktree_path, capture_output=True, env=None, check=False,
         )
-        entry = listing.stdout.split(b"\0", 1)[0]
-        if not entry:
-            continue  # absent from the pre-call tree: the summary call created it
-        mode, _kind, sha = entry.split(b"\t", 1)[0].decode().split()
-        if mode == "160000":
-            continue  # a submodule: nothing in this worktree to restore
-        blob_run = subprocess.run(
-            ["git", "cat-file", "blob", sha],
-            cwd=worktree_path, capture_output=True, check=False,
-        )
-        if blob_run.returncode != 0:
-            continue
-        blob = blob_run.stdout
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if mode == "120000":
-            os.symlink(os.fsdecode(blob), target)
-            continue
-        target.write_bytes(blob)
-        if mode == "100755":
-            target.chmod(target.stat().st_mode | 0o111)
+        target = Path(worktree_path) / rel
+        if blob.returncode == 0:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob.stdout)
+        else:
+            # Absent from the pre-call tree: the summary call created it.
+            try:
+                target.unlink()
+            except OSError:
+                pass
 
 
 def _revert_summary_side_effects(worktree_path: str, before_tree: str | None) -> list[str]:
@@ -2724,13 +2700,11 @@ def _revert_summary_side_effects(worktree_path: str, before_tree: str | None) ->
     after_tree = _content_tree_hash(worktree_path)
     if after_tree is None or after_tree == before_tree:
         return []
-    # ``--no-renames`` lists both ends of a rename, so the source comes back
-    # as well as the destination going; ``-z`` keeps odd names unquoted.
     listing = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", "-z", before_tree, after_tree],
+        ["git", "diff", "--name-only", before_tree, after_tree],
         cwd=worktree_path, capture_output=True, text=True, check=False,
     )
-    changed = [p for p in listing.stdout.split("\0") if p]
+    changed = [p for p in listing.stdout.splitlines() if p.strip()]
     if not changed:
         return []
     _restore_paths_from_tree(worktree_path, before_tree, changed)
@@ -2786,10 +2760,7 @@ def generate_change_summary(
     # routinely exhausted, which is the very failure this call exists to route
     # around.
     agent_config = config.agent.model_copy(update={"max_turns": SUMMARY_MAX_TURNS})
-    # Bound before anything can raise: the handlers below revert with it, and
-    # an unbound name there would turn a failed summary into a dropped
-    # mutation.  ``None`` makes the revert a no-op.
-    before_tree: str | None = None
+    before_tree: str | None = None  # the handlers below revert with it
     try:
         artifact_name = _write_mutation_prompt_artifact(
             worktree_path,
