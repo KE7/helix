@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
-from helix.population import Candidate, EvalResult
+from helix.population import Candidate
 from helix.config import HelixConfig, EvaluatorConfig
 from helix.mutator import MutationError
 from helix.merger import (
@@ -18,19 +18,6 @@ from helix.merger import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def make_eval_result(
-    candidate_id: str = "g0-s0",
-    scores: dict | None = None,
-    instance_scores: dict | None = None,
-) -> EvalResult:
-    return EvalResult(
-        candidate_id=candidate_id,
-        scores=scores or {"pass_rate": 0.6},
-        asi={"stdout": "some output", "stderr": ""},
-        instance_scores=instance_scores or {"test_a": 1.0, "test_b": 0.0},
-    )
 
 
 def make_candidate(cid: str = "g0-s0", worktree_path: str = "/tmp/wt") -> Candidate:
@@ -59,16 +46,16 @@ def make_config(objective: str = "Pass all tests") -> HelixConfig:
 
 class TestBuildMergePrompt:
     def test_contains_objective(self):
-        prompt = build_merge_prompt("Improve sort speed", None, None, "")
+        prompt = build_merge_prompt("Improve sort speed", "")
         assert "Improve sort speed" in prompt
 
     def test_contains_diff(self):
         diff = "+added_line = True"
-        prompt = build_merge_prompt("goal", None, None, diff)
+        prompt = build_merge_prompt("goal", diff)
         assert "+added_line = True" in prompt
 
     def test_contains_background(self):
-        prompt = build_merge_prompt("goal", None, None, "", background="special bg")
+        prompt = build_merge_prompt("goal", "", background="special bg")
         assert "special bg" in prompt
 
     def test_background_section_omitted_when_none(self):
@@ -77,30 +64,21 @@ class TestBuildMergePrompt:
         ``_build_reflection_prompt_template`` in ``gepa_launcher.py``,
         which only appends a section when its content is non-empty.
         """
-        prompt = build_merge_prompt("goal", None, None, "")
+        prompt = build_merge_prompt("goal", "")
         assert "## Background / Context" not in prompt
         assert "no additional background" not in prompt
 
     def test_contains_execution_instructions(self):
-        prompt = build_merge_prompt("goal", None, None, "")
+        prompt = build_merge_prompt("goal", "")
         assert "Task instructions:" in prompt
 
-    def test_includes_eval_scores_when_provided(self):
-        er_a = make_eval_result("g0-s0", scores={"pass_rate": 0.8})
-        er_b = make_eval_result("g0-s1", scores={"pass_rate": 0.9})
-        prompt = build_merge_prompt("goal", er_a, er_b, "diff text")
-        assert "0.8" in prompt
-        assert "0.9" in prompt
-
-    def test_strengths_sections_omitted_when_eval_results_none(self):
-        """``eval_result_a`` / ``eval_result_b`` of ``None`` → the
-        corresponding ``## Candidate {A,B} Strengths`` section is skipped
-        entirely (no ``"(no evaluation data)"`` placeholder).
-        """
-        prompt = build_merge_prompt("goal", None, None, "some diff")
-        assert "## Candidate A Strengths" not in prompt
-        assert "## Candidate B Strengths" not in prompt
-        assert "no evaluation data" not in prompt
+    def test_no_score_sections(self):
+        """The parents' results are validation results, so the prompt
+        carries no scores at all (see
+        ``test_merge_prompt_carries_no_validation_ids_or_scores``)."""
+        prompt = build_merge_prompt("goal", "some diff")
+        assert "Strengths" not in prompt
+        assert "score" not in prompt.lower().split("## your task")[0]
 
     def test_diff_section_omitted_when_empty(self):
         """An empty diff → ``## Diff (B relative to A)`` section is
@@ -108,7 +86,7 @@ class TestBuildMergePrompt:
         placeholder).  Upstream callers should not invoke merge on
         identical candidates; this test pins the prompt-level fallback.
         """
-        prompt = build_merge_prompt("goal", None, None, "")
+        prompt = build_merge_prompt("goal", "")
         assert "## Diff" not in prompt
         assert "identical" not in prompt
         assert "no diff" not in prompt
@@ -127,7 +105,7 @@ class TestBuildMergePromptTwoDiff:
 
     def test_emits_two_ancestor_relative_sections(self):
         prompt = build_merge_prompt(
-            "goal", None, None, "",
+            "goal", "",
             ancestor_id="g0-s0",
             diff_a_from_ancestor="+self.bn = nn.BatchNorm1d(...)\n",
             diff_b_from_ancestor="+if epoch < 10: lr = 0.001\n",
@@ -150,7 +128,7 @@ class TestBuildMergePromptTwoDiff:
         agent about whether A's diff needs to be re-applied.
         """
         prompt = build_merge_prompt(
-            "goal", None, None, "",
+            "goal", "",
             ancestor_id="g0-s0",
             diff_a_from_ancestor="+a contribution\n",
             diff_b_from_ancestor="+b contribution\n",
@@ -164,7 +142,7 @@ class TestBuildMergePromptTwoDiff:
         """Companion to the two-diff task-block test: the single-diff
         fallback must keep the legacy task framing intact.
         """
-        prompt = build_merge_prompt("goal", None, None, "+some diff")
+        prompt = build_merge_prompt("goal", "+some diff")
         assert "Apply the changes from\nCandidate B" in prompt
         # The two-diff task block's phrasing must NOT appear in the
         # single-diff form.
@@ -174,7 +152,7 @@ class TestBuildMergePromptTwoDiff:
         """No ancestor + no ancestor diffs → single A↔B diff form
         (backward-compatible default).
         """
-        prompt = build_merge_prompt("goal", None, None, "+some diff content")
+        prompt = build_merge_prompt("goal", "+some diff content")
         assert "## Diff (B relative to A)" in prompt
         assert "+some diff content" in prompt
         # Two-diff section headers must NOT appear in the fallback path.
@@ -186,7 +164,7 @@ class TestBuildMergePromptTwoDiff:
         emitting an "ancestor header pointing to nothing" prompt.
         """
         prompt = build_merge_prompt(
-            "goal", None, None, "+legacy diff",
+            "goal", "+legacy diff",
             ancestor_id="g0-s0",
             diff_a_from_ancestor=None,
             diff_b_from_ancestor=None,
@@ -202,7 +180,7 @@ class TestBuildMergePromptTwoDiff:
         metadata changes that ``git diff`` doesn't see.
         """
         prompt = build_merge_prompt(
-            "goal", None, None, "",
+            "goal", "",
             ancestor_id="g0-s0",
             diff_a_from_ancestor="+self.bn = nn.BatchNorm1d(...)\n",
             diff_b_from_ancestor="",
@@ -229,7 +207,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="abc123")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         assert result is child
 
@@ -245,7 +223,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         assert result.operation == "merge"
 
@@ -261,7 +239,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         assert "g0-s0" in result.parent_ids
         assert "g0-s1" in result.parent_ids
@@ -281,7 +259,7 @@ class TestMerge:
         mock_remove = mocker.patch("helix.merger.remove_worktree")
         mocker.patch("helix.merger.snapshot_candidate")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         assert result is None
         mock_remove.assert_called_once_with(child)
@@ -301,7 +279,7 @@ class TestMerge:
         mock_remove = mocker.patch("helix.merger.remove_worktree")
         mocker.patch("helix.merger.snapshot_candidate")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         mock_remove.assert_called_once_with(child)
 
@@ -322,7 +300,7 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        result = merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        result = merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         # merge() returns the child but does NOT snapshot internally
         assert result is child
@@ -343,7 +321,7 @@ class TestMerge:
         mock_snapshot = mocker.patch("helix.merger.snapshot_candidate")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"))
+        merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"))
 
         mock_snapshot.assert_not_called()
 
@@ -359,7 +337,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g1-m0", config, Path("/tmp"), background="unique_context_xyz")
+        merge(ca, cb, "g1-m0", config, Path("/tmp"), project_root=Path("/tmp"), background="unique_context_xyz")
 
         prompt_arg = mock_invoke.call_args[0][1]
         assert "unique_context_xyz" in prompt_arg
@@ -383,7 +361,7 @@ class TestMerge:
         # was passed (ancestor→A and ancestor→B, NOT A↔B).
         diff_calls: list[tuple[str, str]] = []
 
-        def fake_get_diff(x, y):
+        def fake_get_diff(x, y, exclude=()):
             diff_calls.append((x.id, y.id))
             return f"+contribution from {y.id}"
 
@@ -394,7 +372,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g2-m0", config, Path("/tmp"), ancestor=ancestor)
+        merge(ca, cb, "g2-m0", config, Path("/tmp"), project_root=Path("/tmp"), ancestor=ancestor)
 
         # Two get_diff calls, both anchored on the ancestor.
         assert diff_calls == [("g0-s0", "g1-s0"), ("g0-s0", "g1-s1")], (
@@ -423,7 +401,7 @@ class TestMerge:
 
         diff_calls: list[tuple[str, str]] = []
 
-        def fake_get_diff(x, y):
+        def fake_get_diff(x, y, exclude=()):
             diff_calls.append((x.id, y.id))
             return "+A-to-B contribution"
 
@@ -434,7 +412,7 @@ class TestMerge:
         mocker.patch("helix.merger.snapshot_candidate", return_value="sha")
         mocker.patch("helix.merger.remove_worktree")
 
-        merge(ca, cb, "g2-m0", config, Path("/tmp"))  # no ancestor
+        merge(ca, cb, "g2-m0", config, Path("/tmp"), project_root=Path("/tmp"))  # no ancestor
 
         # Single get_diff call with A↔B arguments.
         assert diff_calls == [("g1-s0", "g1-s1")], (
@@ -534,3 +512,62 @@ class TestSelectEvalSubsample:
             {"a": 1.0}, {"b": 1.0}, rng, num_subsample_ids=5
         )
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: merge diffs against real git worktrees
+# ---------------------------------------------------------------------------
+
+
+def test_merge_prompt_diffs_a_seed_ancestor_without_protected_files(
+    tmp_path: Path, mocker, monkeypatch
+):
+    """Two children of the seed: the seed's worktree is detached (no
+    ``helix/g0-s0`` branch), and A's history holds a refreshed protected
+    evaluator.  Both contributions must reach the prompt; the evaluator's
+    contents must not."""
+    import subprocess
+
+    from helix.worktree import clone_candidate, create_seed_worktree, snapshot_candidate
+
+    for key in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+        monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "solve.py").write_text("ANSWER = 0\n")
+    (project / "evaluate.py").write_text("print('score')\n")
+    (project / "data").mkdir()
+    (project / "data" / "hidden.txt").write_text("old\n")
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+    worktrees = tmp_path / "worktrees"
+    seed = create_seed_worktree(project, worktrees)
+    a = clone_candidate(seed, "g1-s1", worktrees)
+    (Path(a.worktree_path) / "solve.py").write_text("ANSWER = 41\n")
+    (Path(a.worktree_path) / "evaluate.py").write_text("SECRET_SCORER = 1\n")
+    (Path(a.worktree_path) / "data" / "hidden.txt").write_text("SECRET_ANSWER\n")
+    snapshot_candidate(a, "A")
+    b = clone_candidate(seed, "g1-s2", worktrees)
+    (Path(b.worktree_path) / "helper.py").write_text("HELPER = 2\n")
+    snapshot_candidate(b, "B")
+
+    config = HelixConfig(
+        objective="goal",
+        evaluator=EvaluatorConfig(command="python evaluate.py"),
+    )
+    config.sandbox.omit_from_agent = ["data/hidden.txt"]
+    invoke = mocker.patch(
+        "helix.merger.invoke_claude_code", return_value=({}, {})
+    )
+
+    merged = merge(
+        a, b, "g2-m1", config, worktrees, ancestor=seed, project_root=project
+    )
+
+    assert merged is not None
+    prompt = invoke.call_args[0][1]
+    assert "+ANSWER = 41" in prompt
+    assert "+HELPER = 2" in prompt
+    assert "SECRET" not in prompt

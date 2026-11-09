@@ -400,7 +400,8 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["save_state"].side_effect = capture
 
-        config = make_config(max_generations=0, max_evaluations=10000)
+        # Seed only: the seed's one evaluation spends the budget.
+        config = make_config(max_generations=1, max_evaluations=1)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # After single-task/no-example seed with no dataset ids: evaluations == 1.
@@ -1451,6 +1452,194 @@ class TestMergeBehavior:
 
         assert merged_eval_count[0] >= 1
 
+    def _merge_scenario(self, all_mocks, merged_scores=None):
+        """Gen 1 accepts g1-s1; gen 2 merges g0-s0 + g1-s1 into g2-m1.
+
+        Returns the list of ids the merged candidate was evaluated on (one
+        entry per evaluator call)."""
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+        merged_evals: list[object] = []
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            if candidate.id == "g2-m1":
+                merged_evals.append(instance_ids)
+                scores = merged_scores or {"1": 0.9, "2": 0.6}
+            elif candidate.id == "g1-s1":
+                scores = {"1": 0.9, "2": 0.5}
+            else:
+                scores = {"1": 0.5, "2": 0.8}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        return merged_evals
+
+    def test_merge_that_changes_nothing_is_rejected_unevaluated(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """A merge whose tree equals a parent's (the agent changed nothing)
+        is no merge: it is rejected before any eval, recorded as an attempt,
+        and the iteration falls through to reflective mutation."""
+        from helix import evolution
+
+        merged_evals = self._merge_scenario(all_mocks)
+        real_key = evolution._candidate_content_key
+        mocker.patch(
+            "helix.evolution._candidate_content_key",
+            side_effect=lambda c, exclude=(): "tree-g1-s1"
+            if c.id in {"g1-s1", "g2-m1"}
+            else real_key(c, exclude),
+        )
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            max_evaluations=10000,
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert merged_evals == []
+        assert "g2-m1" not in result.frontier_ids
+        attempt = json.loads(
+            (tmp_path / ".helix" / "attempts" / "g2-m1.json").read_text()
+        )["attempt"]
+        assert attempt["reason"] == "merge_no_change"
+        # Fell through to mutation in gen 2, as after any pre-eval reject.
+        assert all_mocks["mutate"].call_count == 2
+
+    def test_no_change_check_ignores_a_protected_file_refresh(
+        self, tmp_path, monkeypatch
+    ):
+        """``prepare_worktree`` refreshes protected files in the merge, not in
+        an older parent.  A merge whose only difference from its parent is
+        that refresh is still no change, so the key the no-change check
+        compares leaves those paths out (real git worktrees)."""
+        from helix.evolution import _candidate_content_key
+        from helix.worktree import (
+            clone_candidate,
+            create_seed_worktree,
+            snapshot_candidate,
+        )
+
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "solve.py").write_text("ANSWER = 0\n")
+        (project / "evaluate.py").write_text("print('v1')\n")
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=project, check=True)
+        worktrees = tmp_path / "worktrees"
+        seed = create_seed_worktree(project, worktrees)
+        parent = clone_candidate(seed, "g1-s1", worktrees)
+        (Path(parent.worktree_path) / "solve.py").write_text("ANSWER = 41\n")
+        snapshot_candidate(parent, "parent")
+        merged = clone_candidate(parent, "g2-m1", worktrees)
+        # The refresh after an evaluator update on resume; the agent then
+        # changes nothing.
+        (Path(merged.worktree_path) / "evaluate.py").write_text("print('v2')\n")
+        snapshot_candidate(merged, "refresh protected files")
+
+        assert _candidate_content_key(merged) != _candidate_content_key(parent)
+        hidden = ["evaluate.py"]
+        assert _candidate_content_key(merged, hidden) == _candidate_content_key(
+            parent, hidden
+        )
+        # A real edit still counts.
+        (Path(merged.worktree_path) / "solve.py").write_text("ANSWER = 42\n")
+        assert _candidate_content_key(merged, hidden) != _candidate_content_key(
+            parent, hidden
+        )
+
+    def test_merge_past_its_gate_is_kept_when_budget_runs_out(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """GEPA's ``GEPAEngine.run`` checks its stoppers only between
+        iterations and always runs ``_run_full_eval_and_add`` on a merge that
+        passes its subsample gate, so a merge whose eval crosses
+        max_evaluations still enters the frontier."""
+        from helix import budget
+
+        merged_evals = self._merge_scenario(all_mocks)
+        real_exhausted = budget.budget_exhausted
+        mocker.patch(
+            "helix.budget.budget_exhausted",
+            side_effect=lambda state, config: bool(merged_evals)
+            or real_exhausted(state, config),
+        )
+        config = make_config(
+            max_generations=3,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            max_evaluations=10000,
+        )
+        result = run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(merged_evals) == 2  # subsample, then full val
+        assert "g2-m1" in result.frontier_ids
+
+    def test_merge_prompt_carries_no_validation_ids_or_scores(
+        self, mocker, tmp_path, all_mocks
+    ):
+        """The parents' results handed to the merge are validation results;
+        neither their ids nor their scores may reach the merge agent."""
+        from helix import merger
+
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = child
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+        all_mocks["merge"].side_effect = merger.merge
+        mocker.patch(
+            "helix.merger.clone_candidate",
+            return_value=make_candidate("g2-m1", generation=2),
+        )
+        mocker.patch("helix.merger.get_diff", return_value="+x = 1")
+        mocker.patch("helix.evolution._refresh_and_snapshot_protected_evaluator_files")
+        prompts: list[str] = []
+
+        def fake_invoke(worktree_path, prompt, *a, **kw):
+            prompts.append(prompt)
+            raise merger.MutationError("stop here")
+
+        mocker.patch("helix.merger.invoke_claude_code", side_effect=fake_invoke)
+        mocker.patch("helix.merger.remove_worktree")
+        val = {"VAL-CASE-ALPHA": 0.8125, "VAL-CASE-BETA": 0.4375}
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            scores = dict(val)
+            if candidate.id == "g1-s1":
+                scores = {"VAL-CASE-ALPHA": 0.4375, "VAL-CASE-BETA": 0.9375}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            max_evaluations=10000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert len(prompts) == 1
+        for leaked in ("VAL-CASE", "0.8125", "0.4375", "0.9375"):
+            assert leaked not in prompts[0], f"merge prompt contains {leaked!r}"
+
     def test_merge_acceptance_uses_val_subsample_not_full_val(
         self, mocker, tmp_path, all_mocks
     ):
@@ -2006,10 +2195,9 @@ class TestMergeBehavior:
         GEPA ``merges_performed[1].append((id1, id2, new_prog_desc))`` at
         merge.py::sample_and_attempt_merge_programs_by_common_predictors.
 
-        The reverse direction (dedup SKIPS when the triplet is already
-        recorded) is covered structurally by the identical ``in``-list
-        check the propose loop runs on state at runtime; the unit tests
-        in test_lineage.py exercise the within-retry filter equivalents.
+        HELIX needs no repeat check on the triplet: the pair is recorded in
+        ``merge_attempted_pairs`` first and never sampled again (the
+        within-retry filter tested in test_lineage.py).
         """
         seed = make_candidate("g0-s0")
         child = make_candidate("g1-s1", generation=1)
@@ -2311,25 +2499,6 @@ class TestGenerationsFlagOverridesConfig:
         # so we count via mutate calls instead.)
         assert all_mocks["mutate"].call_count == 2
 
-    def test_zero_generations_skips_loop(self, mocker, tmp_path, all_mocks):
-        """max_generations=0 means the generation loop body never executes."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            return make_eval_result(candidate.id, {"i1": 0.5})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-
-        config = make_config(
-            max_generations=0,
-            max_evaluations=10000,
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        # No generations → mutate never called
-        all_mocks["mutate"].assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # run_evolution — mutation counter tracking
@@ -2440,13 +2609,9 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        # max_evaluations=1: Change 3 guard requires at least one effective
-        # stopping condition.  max_generations=0 means the loop runs 0
-        # iterations (while gen < 0 is immediately False), but the guard
-        # requires max_evaluations > 0 when max_generations <= 0.
-        # max_evaluations=1 satisfies the guard; budget exhausts immediately
-        # at the first budget check if any iteration were to start.
-        evolution=EvolutionConfig(max_generations=0, max_evaluations=1),
+        # Seed only: the seed's one evaluation spends max_evaluations=1, so
+        # no generation starts.
+        evolution=EvolutionConfig(max_generations=1, max_evaluations=1),
     )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -2510,8 +2675,9 @@ class TestActiveFrontierSyncOnObjectiveMode:
             evaluator=EvaluatorConfig(command="pytest -q"),
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
-                max_generations=0,
-                max_evaluations=10,
+                # Seed only: the seed's one evaluation spends the budget.
+                max_generations=1,
+                max_evaluations=1,
                 perfect_score_threshold=None,
                 frontier_type="objective",
             ),
@@ -2597,7 +2763,7 @@ class TestActiveFrontierSyncOnObjectiveMode:
         Spying on ``active_frontier_snapshot`` is the most direct
         observation: it isolates the init touch point from save-state
         plumbing (``save_state`` only fires later in the loop, which
-        does not run when ``max_generations=0``).
+        does not run once the budget is spent).
         """
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
@@ -2652,8 +2818,9 @@ class TestActiveFrontierSyncOnObjectiveMode:
             evaluator=EvaluatorConfig(command="pytest -q"),
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
-                max_generations=0,
-                max_evaluations=10,
+                # Seed only: the seed's one evaluation spends the budget.
+                max_generations=1,
+                max_evaluations=1,
                 perfect_score_threshold=None,
                 frontier_type="objective",
             ),

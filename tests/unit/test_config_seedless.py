@@ -336,7 +336,6 @@ class TestBuildSeedGenerationPromptDatasetExamples:
         prompt = build_seed_generation_prompt(
             objective=config.objective,
             background=config.agent.background,
-            evaluator_cmd=config.evaluator.command,
             dataset_examples=_dataset_examples,
         )
         assert "Sample Inputs" in prompt
@@ -355,7 +354,6 @@ class TestBuildSeedGenerationPromptDatasetExamples:
         prompt = build_seed_generation_prompt(
             objective=config.objective,
             background=config.agent.background,
-            evaluator_cmd=config.evaluator.command,
             dataset_examples=_dataset_examples,
         )
         assert "Sample Inputs" not in prompt

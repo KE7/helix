@@ -56,7 +56,10 @@ protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutab
 # val_size  = 200
 
 [seedless]
-# Seedless mode: generate initial candidate from objective via LLM
+# Seedless mode: generate initial candidate from objective via LLM.
+# The seed prompt does not show evaluator.command (as in GEPA), so the
+# objective or agent.background must name the file and interface the
+# evaluator expects.
 enabled = false
 # Optional train / val datasets: a JSON array file, a JSONL file, or a
 # directory of *.json files.  HELIX reads its train and val instance ids
@@ -69,12 +72,9 @@ enabled = false
 # val_path   = "puzzles/val"
 
 [evolution]
-max_generations = 20             # default: 10
+max_generations = 20             # generation cap, at least 1 (default: 10; 0 is a config error)
 perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this (default: unset)
 max_evaluations = -1             # evaluation budget cap (-1 = no cap)
-                                 # NOTE: at least one stopping condition is required —
-                                 # max_generations must be > 0 or max_evaluations must be > 0;
-                                 # setting both to ≤ 0 raises ValueError at evolution start.
 # stop_at_score = 0.95           # end the run once the best val score is >= this (unset = off);
                                  # unlike perfect_score_threshold, this stops the run
 merge_enabled = false            # enable merge/crossover operations
@@ -112,8 +112,9 @@ val_stage_size = 0               # optional first-N val gate; passing results ca
 retain_rejected_worktrees = false  # keep the worktree of a child the val stage rejects, for
                                  # inspection (default: false; `helix clean` removes them)
 sibling_history = false          # show the mutator every child already proposed from the same
-                                 # parent: each one's score, whether it was kept, and a note on
-                                 # what it changed. Every child is kept in state.
+                                 # parent: each one's training-gate score, whether it was kept, and a note on
+                                 # what it changed. Every child is kept in state, and
+                                 # `helix log` shows each note's first sentence.
                                  # Advisory only — HELIX never filters a proposal on it.
 sibling_summary_max_words = 150  # budget for each of those notes; quoted to the summarising
                                  # call and enforced when its answer is read back
@@ -171,6 +172,12 @@ base_dir = ".helix/worktrees"
 ```
 
 ## Backend notes
+
+**opencode** (`backend = "opencode"`), without the Docker sandbox:
+
+- Each candidate runs opencode with its own data directory, `<worktree>/.helix_opencode_state/.local/share/opencode` (via `XDG_DATA_HOME`), so parallel proposals never share one `opencode.db`.
+- Your stored logins still apply: HELIX links your `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`, by default `~/.local/share/opencode/auth.json`, where `opencode providers login` writes) into that directory. It is a link, so a token opencode refreshes is saved to your own file. API-key variables (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) work as before.
+- HELIX never reads or copies your own `opencode.db`; the run's transcript comes from the candidate's database.
 
 **pi** (`backend = "pi"`):
 

@@ -2,13 +2,17 @@
 
 ## Resume and parallel-batch boundaries
 
-Resume is generation-granular. If a run is interrupted, HELIX preserves the
-last completed generation and reconciles incomplete children: it avoids
-corruption, duplicate budget charges, duplicate frontier entries, and orphaned
-worktrees, but discards the interrupted generation's in-flight mutations.
-It does not resume a partially completed proposal batch slot-by-slot. The random
-number generator is seeded again for each invocation, so a resumed search need
-not take the same path as an uninterrupted run.
+Resume is generation-granular. HELIX saves `.helix/state.json` as soon as a
+candidate joins the frontier, so an accepted candidate survives an interrupt
+even when its generation does not finish. On resume, a candidate counts as
+finished only when the saved frontier lists it (accepted) or it has a record
+under `.helix/attempts/` (rejected). Every other mutation or merge left by the
+interrupt, including one whose evaluation reached `.helix/evaluations/` before
+the state save, is removed with its worktree, lineage entry and evaluation,
+and its generation runs again. HELIX does not resume a partially completed
+proposal batch slot-by-slot. The random number generator is seeded again for
+each invocation, so a resumed search need not take the same path as an
+uninterrupted run.
 
 `tests/unit/test_resume.py` covers saving state when a run is interrupted,
 resuming when candidate worktrees are missing, and the configuration checks a
@@ -18,7 +22,10 @@ Evaluation caps are dispatch boundaries rather than cancellation points. For
 an admitted evaluation phase, `U` is the bound on uncached evaluation units
 that the phase may still consume (`max_in_flight_evaluations`); HELIX records
 and checks the in-flight bound, and the maximum permitted overshoot is
-`max(0, U - 1)`.
+`max(0, U - 1)`. A merge is not cancelled either: one that passes its
+validation-subsample gate also gets its full validation and joins the
+frontier, as in GEPA, even when those evaluations cross the cap, which is
+checked again at the start of the next iteration.
 
 For this bound, `P` = `evolution.num_parallel_proposals` is the number of parents
 sampled per iteration from HELIX's frequency-weighted Pareto list; HELIX samples
@@ -53,13 +60,12 @@ U = 2 * sum(|m_i| for i in 1..C) + s * (V_stage + V_full)
 slots, while `U` counts example-evaluation units. For the sharper comparison,
 the tempting closed form `2*(P*N)*m + s*(V_stage + V_full)`, where `m` is a common
 minibatch size, is looser than summing admitted slots: budget exhaustion can make
-`C < P*N`, and a slot's minibatch can be short. Since
-`maximum_overshoot = max(0, evaluations_before + U - max_evaluations)`, inflating
-`U` directly inflates the overshoot tolerated by the guard. `enforce_batch_budget_guard`
-raises when actual in-flight evaluations exceed `max_in_flight_evaluations` and
-again when actual overshoot exceeds `maximum_overshoot`, so substituting `P*N`
-would break runs rather than merely record a rough estimate. Computing `U` from
-admitted work keeps both assertions strict. In short, `P` and `N` are configured
+`C < P*N`, and a slot's minibatch can be short. A batch admitted below the cap
+finishes at most `U` units later, so inflating `U` directly inflates the
+overshoot tolerated by the guard. `enforce_batch_budget_guard` raises when the
+batch's charged evaluations exceed `max_in_flight_evaluations`, so substituting
+`P*N` would break runs rather than merely record a rough estimate. Computing `U`
+from admitted work keeps the assertion strict. In short, `P` and `N` are configured
 widths; `U` is what was actually admitted at this dispatch boundary. Cache hits,
 failed mutations, short final minibatches, and `best_improvement` narrowing `s`
 to `1` all pull real consumption below a `P*N`-derived estimate, while the guard

@@ -16,6 +16,7 @@ import pytest
 from helix.population import Candidate
 from helix.worktree import (
     _ensure_git_repo,
+    changed_files,
     clone_candidate,
     create_seed_worktree,
     get_diff,
@@ -122,6 +123,27 @@ class TestCreateSeedWorktree:
 
         wt_path = Path(candidate.worktree_path)
         assert (wt_path / "README.md").exists()
+
+    def test_seed_children_start_with_helix_artifacts_ignored(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A child's diff shows only the agent's work, not HELIX's .gitignore."""
+        from helix.mutator import _ignore_helix_artifacts
+
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "HELIX Test")
+        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+
+        child = clone_candidate(seed, "g1-s0", base_dir)
+        _ignore_helix_artifacts(Path(child.worktree_path))
+
+        status = _run(["git", "status", "--porcelain"], Path(child.worktree_path))
+        assert status.stdout == ""
 
     def test_seed_worktree_snapshots_dirty_tree_and_clones_from_snapshot(
         self, tmp_path: Path, monkeypatch
@@ -399,6 +421,59 @@ class TestGetDiff:
         diff = get_diff(child_a, child_b)
         assert "+ANSWER = 42" in diff
 
+    def test_diff_against_the_detached_seed(self, tmp_path: Path, monkeypatch) -> None:
+        """The seed worktree is detached, so its ``helix/g0-s0`` branch never
+        exists; a merge whose common ancestor is the seed diffs against it."""
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        (Path(child.worktree_path) / "delta.py").write_text("ANSWER = 42\n")
+        snapshot_candidate(child, "add delta.py")
+
+        assert "+ANSWER = 42" in get_diff(seed, child)
+
+    def test_diff_leaves_out_excluded_paths(self, tmp_path: Path, monkeypatch) -> None:
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+        (wt / "solve.py").write_text("ANSWER = 42\n")
+        (wt / "evaluate.py").write_text("SECRET_SCORER = 1\n")
+        (wt / "data" / "val").mkdir(parents=True)
+        (wt / "data" / "val" / "case.json").write_text('"SECRET_ANSWER"\n')
+        snapshot_candidate(child, "add files")
+
+        diff = get_diff(seed, child, exclude=["evaluate.py", "data/val"])
+
+        assert "+ANSWER = 42" in diff
+        assert "SECRET" not in diff
+
+    def test_diff_failure_raises(self, tmp_path: Path, monkeypatch) -> None:
+        from helix.exceptions import GitError
+
+        for key in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{key}_NAME", "HELIX Test")
+            monkeypatch.setenv(f"GIT_{key}_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        gone = clone_candidate(seed, "g1-s1", base_dir)
+        remove_worktree(gone)
+
+        with pytest.raises(GitError):
+            get_diff(seed, gone)
+
 
 # ---------------------------------------------------------------------------
 # HELIX identity tests
@@ -646,3 +721,122 @@ class TestConcurrentWorktreeMetadata:
             "git worktree common-metadata commands ran concurrently "
             f"(peak={max_active}); they must be serialised"
         )
+
+
+class TestChangedFiles:
+    def test_lists_everything_the_snapshot_will_commit(self, tmp_path: Path) -> None:
+        """Committed, unstaged, untracked and deleted paths; ignored ones are not."""
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        (repo_root / "solve.py").write_text("x = 1\n")
+        (repo_root / "old.py").write_text("y = 1\n")
+        (repo_root / ".gitignore").write_text("*.log\n")
+        _run(["git", "add", "-A"], repo_root)
+        _run(["git", "commit", "-m", "files"], repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+
+        # The agent commits one change itself, then leaves others uncommitted.
+        (wt / "solve.py").write_text("x = 2\n")
+        _run(["git", "commit", "-am", "agent commit"], wt)
+        (wt / "README.md").write_text("# changed\n")
+        (wt / "old.py").unlink()
+        (wt / "new.py").write_text("z = 1\n")
+        (wt / "run.log").write_text("ignored\n")
+
+        assert changed_files(child, seed) == ["README.md", "new.py", "old.py", "solve.py"]
+
+    def test_lists_both_sides_of_a_rename_and_non_ascii_names(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        (repo_root / "a.py").write_text("x = 1\n" * 20)
+        _run(["git", "add", "-A"], repo_root)
+        _run(["git", "commit", "-m", "a"], repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+
+        _run(["git", "mv", "a.py", "b.py"], wt)
+        _run(["git", "commit", "-m", "rename"], wt)
+        (wt / "é.py").write_text("y = 1\n")
+
+        assert changed_files(child, seed) == ["a.py", "b.py", "é.py"]
+
+    def test_unchanged_child_has_no_files(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        assert changed_files(child, seed) == []
+
+    def test_missing_worktree_gives_no_files_instead_of_raising(self, tmp_path: Path) -> None:
+        gone = Candidate(
+            id="g1-s1", worktree_path=str(tmp_path / "gone"), branch_name="helix/g1-s1",
+            generation=1, parent_id="g0-s0", parent_ids=["g0-s0"], operation="mutate",
+        )
+        assert changed_files(gone, gone) == []
+
+
+def test_snapshot_is_traced_and_changed_files_is_not() -> None:
+    """The ``snapshot`` timing span belongs to snapshot_candidate alone."""
+    import helix.worktree as worktree
+
+    assert hasattr(worktree.snapshot_candidate, "__wrapped__")
+    assert not hasattr(worktree.changed_files, "__wrapped__")
+
+
+def test_export_copies_the_candidate_without_helix_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``helix best --export`` writes the candidate's committed tree, not the
+    prompt, backend logs, batch file and caches HELIX left in its worktree."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+
+    from helix.cli import cli
+
+    for key in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(key, "HELIX Test")
+    for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(key, "helix@test.local")
+    repo_root = tmp_path / "project"
+    _make_repo(repo_root)
+    base_dir = tmp_path / "worktrees"
+    child = clone_candidate(create_seed_worktree(repo_root, base_dir), "g1-s0", base_dir)
+    wt = Path(child.worktree_path)
+    (wt / "pkg").mkdir()
+    (wt / "pkg" / "solve.py").write_text("x = 1\n")
+    os.symlink("pkg/solve.py", wt / "link.py")
+    snapshot_candidate(child, "helix: mutate g1-s0")
+    # What HELIX and the evaluator leave behind after the snapshot.
+    (wt / ".agent_task_prompt.md").write_text("prompt")
+    (wt / ".helix_backend_stdout.txt").write_text("log")
+    (wt / "helix_batch.json").write_text("[]")
+    (wt / ".helix_artifacts" / "backend_transcripts").mkdir(parents=True)
+    (wt / "pkg" / "__pycache__").mkdir()
+    (wt / "pkg" / "__pycache__" / "solve.pyc").write_bytes(b"\0")
+
+    frontier = SimpleNamespace(
+        _candidates={child.id: child}, _results={}, best=lambda: child
+    )
+    monkeypatch.setattr("helix.cli.load_state", lambda root: object())
+    monkeypatch.setattr(
+        "helix.cli._reconstruct_frontier", lambda base, state: (frontier, {}, [])
+    )
+    dest = tmp_path / "export"
+    result = CliRunner().invoke(
+        cli, ["best", "--dir", str(repo_root), "--export", str(dest)]
+    )
+    assert result.exit_code == 0, result.output
+
+    exported = sorted(
+        str(p.relative_to(dest)) for p in dest.rglob("*") if not p.is_dir()
+    )
+    # .gitignore holds the HELIX artifact names the seed commits.
+    assert exported == [".gitignore", "README.md", "link.py", "pkg/solve.py"]
+    assert os.readlink(dest / "link.py") == "pkg/solve.py"

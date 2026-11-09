@@ -64,4 +64,7 @@ protected_files = [
 At run start, HELIX hashes the evaluator command target plus any
 `evaluator.protected_files` entries and writes the manifest to
 `.helix/evaluator_manifest.json`. Candidates that modify any protected file are
-rejected before evaluation.
+rejected before evaluation. The diffs in a merge prompt leave out protected
+files and `[sandbox].omit_from_agent` paths, so a protected file that a
+candidate's history holds (for example after HELIX refreshed it) never reaches
+the merge agent.

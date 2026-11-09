@@ -5,7 +5,8 @@ children tried, each mutation starts blind and the agent re-proposes ideas that
 have already been evaluated -- including ones that were already rejected.
 
 After every child is evaluated, one entry is appended under its parent: the
-child's score, whether it was kept, and a short description of what it changed.
+child's train-gate score (never a val score: this reaches the mutation
+prompt), whether it was kept, and a short description of what it changed.
 When that parent is sampled again, those entries are rendered into the next
 mutation prompt.
 
@@ -296,9 +297,9 @@ def render_history(
     max_entries:
         Show only the most recent this-many children (FIFO); ``None`` shows
         all of them.  Recency rather than score decides what stays, because
-        the recorded scores come from different evaluation stages (minibatch,
-        full train, val) and do not rank against each other.  The heading
-        discloses the window so the agent knows earlier attempts exist.
+        each child was scored on its own training minibatch, so the scores do
+        not rank against each other exactly.  The heading discloses the
+        window so the agent knows earlier attempts exist.
     """
     entries = history.get(parent_id) or []
     if not entries:
@@ -318,7 +319,8 @@ def render_history(
         "## Previous Attempts From This Parent",
         # Descriptive only: what to *do* with this is stated once, up in the
         # task instructions (see ``history_instruction``).
-        f"{scope} They were scored by the same evaluator you are being judged by.",
+        f"{scope} Each score is that child's mean score on the training examples "
+        "it was gated on, by the same evaluator you are being judged by.",
         "",
     ]
     for entry in entries:

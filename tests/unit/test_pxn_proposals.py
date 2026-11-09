@@ -31,7 +31,6 @@ from helix.evolution import run_evolution
 from helix.population import Candidate, EvalResult, ParetoFrontier
 from helix.proposals import (
     AcceptanceJudgement,
-    AcceptanceMemo,
     EvaluatedProposal,
     GatedProposal,
     ScoreVectors,
@@ -39,6 +38,7 @@ from helix.proposals import (
     select_best_improvement,
     select_proposals,
     select_top_k,
+    judge_acceptance,
 )
 
 
@@ -237,11 +237,15 @@ class TestDefaultPathUnchanged:
             "snapshot g1-s1",
             "eval g1-s1 val [0,1,2,3,4,5]",
             "frontier g1-s1",
+            # Saved as soon as it joins the frontier: state.json, not
+            # evaluations/, is what a resume trusts.
+            "save_state",
             "lineage g1-s2<-g0-s0",
             "save_state",
             "snapshot g1-s2",
             "eval g1-s2 val [0,1,2,3,4,5]",
             "frontier g1-s2",
+            "save_state",
             "save_state",
         ]
         # Two parents sampled with replacement (both the seed here), two
@@ -411,26 +415,15 @@ class _CountingCriterion:
         )
 
 
-class TestAcceptanceMemo:
-    def test_repeated_consultation_runs_the_criterion_once(self) -> None:
+class TestJudgeAcceptance:
+    def test_runs_the_criterion_once(self) -> None:
         criterion = _CountingCriterion()
-        memo = AcceptanceMemo(criterion)
-        first = memo.judge(0, [0.1], [0.9])
-        again = memo.judge(0, [0.1], [0.9])
-        assert first is again
-        assert criterion.calls == 1
-        assert memo.criterion_calls == 1
-
-    def test_distinct_slots_are_judged_independently(self) -> None:
-        criterion = _CountingCriterion()
-        memo = AcceptanceMemo(criterion)
-        assert memo.judge(0, [0.1], [0.9]).accepted is True
-        assert memo.judge(1, [0.9], [0.1]).accepted is False
+        assert judge_acceptance(criterion, [0.1], [0.9]).accepted is True
+        assert judge_acceptance(criterion, [0.9], [0.1]).accepted is False
         assert criterion.calls == 2
 
     def test_improvement_is_the_gate_margin(self) -> None:
-        memo = AcceptanceMemo(_CountingCriterion())
-        judgement = memo.judge(0, [0.1, 0.2], [0.5, 0.4])
+        judgement = judge_acceptance(_CountingCriterion(), [0.1, 0.2], [0.5, 0.4])
         assert judgement.improvement == pytest.approx(0.6)
 
 
@@ -724,6 +717,49 @@ class TestChildDedupe:
         assert key_spy.call_count == 0
 
 
+class TestAcceptedChildIsSavedAtOnce:
+    def test_state_lists_the_first_top_k_winner_before_the_second_validates(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        """An interrupt during the second winner's validation must find the
+        first winner in state.json: the frontier, not evaluations/, is what
+        a resume trusts."""
+
+        class _Interrupt(BaseException):
+            pass
+
+        train_path = _write_train_jsonl(tmp_path, n=6)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        _scored_children(
+            all_mocks, seed.id, {"g1-s1": 0.4, "g1-s2": 0.9, "g1-s3": 0.6}
+        )
+        scored = all_mocks["run_evaluator"].side_effect
+
+        def run_eval(candidate: Candidate, config: HelixConfig, split: str = "val", **kw: Any) -> EvalResult:
+            if candidate.id == "g1-s3" and split == "val":
+                raise _Interrupt
+            return scored(candidate, config, split, **kw)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        saved_frontiers: list[list[str]] = []
+        all_mocks["save_state"].side_effect = (
+            lambda state, *a, **k: saved_frontiers.append(list(state.frontier))
+        )
+
+        config = _make_config(
+            train_path,
+            num_parallel_proposals=1,
+            mutations_per_parent=3,
+            proposal_selection="top_k",
+            proposal_top_k=2,
+        )
+        with pytest.raises(_Interrupt):
+            run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        assert saved_frontiers[-1] == ["g0-s0", "g1-s2"]
+
+
 class TestMinibatchRepeatWarning:
     def test_warns_when_batch_exceeds_available_minibatches(
         self, tmp_path: Path, all_mocks: dict[str, Any]
@@ -993,6 +1029,8 @@ class TestSiblingHistory:
             if instance_ids is None:
                 return _make_result(candidate.id, {"v1": 0.5})
             score = 0.3 if candidate.id == seed.id else scores[candidate.id]
+            if split == "val" and candidate.id == "g1-s2":
+                score = 0.95
             return _make_result(candidate.id, {i: score for i in instance_ids})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -1014,6 +1052,9 @@ class TestSiblingHistory:
             "approach taken by g1-s1",
             "approach taken by g1-s2",
         }
+        # The kept child's validation scored 0.95, its train gate 0.9:
+        # only the train score may reach the next mutation prompt.
+        assert {e["child_id"]: e["score"] for e in entries}["g1-s2"] == 0.9
 
     def test_a_resampled_parent_sees_its_earlier_child(
         self, tmp_path: Path, all_mocks: dict[str, Any]

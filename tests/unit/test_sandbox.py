@@ -1237,6 +1237,50 @@ def test_agent_copies_codex_transcript_from_auth_volume(tmp_path: Path, mocker):
     assert "--network" in copy_call and copy_call[copy_call.index("--network") + 1] == "none"
 
 
+def test_timed_out_agent_keeps_its_transcript(tmp_path: Path, mocker):
+    """``sandbox.timeout_seconds`` drops the edits, never the transcript."""
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "main.py").write_text("old\n")
+    partial = b'{"type":"thread.started","thread_id":"thr_123"}\n'
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["docker", "run"] and not _is_workspace_chown(args):
+            workspace = Path(args[args.index("-v") + 1].split(":", 1)[0])
+            if args[-3] == "sh" and "thr_123" in args[-1]:
+                transcript = (
+                    workspace / ".helix_artifacts/backend_transcripts/codex/thr_123.jsonl"
+                )
+                transcript.parent.mkdir(parents=True)
+                transcript.write_text('{"type":"session_meta"}\n')
+            else:
+                (workspace / "main.py").write_text("new\n")
+                raise subprocess.TimeoutExpired(
+                    args, kwargs["timeout"], output=partial, stderr=b""
+                )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    mocker.patch("helix.sandbox.subprocess.run", side_effect=fake_run)
+    mocker.patch("helix.sandbox._host_owner", return_value=None)
+
+    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+        run_sandboxed_command(
+            ["codex", "exec", "prompt"],
+            cwd=source,
+            env={},
+            sandbox=SandboxConfig(enabled=True, timeout_seconds=5),
+            scope="agent",
+            sync_back=True,
+            image="helix-test:latest",
+            agent_backend="codex",
+        )
+
+    assert excinfo.value.stdout == partial
+    assert (source / "main.py").read_text() == "old\n"
+    transcript = source / ".helix_artifacts/backend_transcripts/codex/thr_123.jsonl"
+    assert transcript.read_text() == '{"type":"session_meta"}\n'
+
+
 def test_agent_skips_transcript_helper_for_unsafe_session_id(tmp_path: Path, mocker):
     source = tmp_path / "candidate"
     source.mkdir()
@@ -1528,3 +1572,20 @@ def test_backend_transcript_sync_refuses_a_symlinked_directory(
 
     copied = source / ".helix_artifacts"
     assert not copied.exists() or not any(copied.rglob("reference.py"))
+
+
+def test_docker_args_keep_host_user_out_of_the_container(tmp_path) -> None:
+    from helix.sandbox import _docker_args
+
+    args = _docker_args(
+        ["true"],
+        {"USER": "hostuser", "HOME": "/Users/hostuser", "PATH": "/x", "K": "v"},
+        tmp_path,
+        SandboxConfig(enabled=True),
+        "agent",
+        "img",
+        "claude",
+    )
+    assert "USER=hostuser" not in args
+    assert "HOME=/home/node" in args
+    assert "K=v" in args

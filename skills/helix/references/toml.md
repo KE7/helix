@@ -116,7 +116,9 @@ val_path = "splits/val"
 
 Seedless mode (`enabled = true`) asks the backend to create the initial
 candidate from the objective instead of starting from the current working tree,
-and puts the first 3 `train_path` examples in that prompt.
+and puts the first 3 `train_path` examples in that prompt. The seed prompt does not show
+`evaluator.command`, so the objective or `agent.background` must name the file
+and interface the evaluator expects.
 
 `train_path` and `val_path` are also where HELIX reads its train and val
 instance ids, even with `enabled = false`:
