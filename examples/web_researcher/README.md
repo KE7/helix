@@ -24,8 +24,7 @@ fall behind as new releases ship.
 
 ## HELIX Features Used in This Example
 
-HELIX's search loop is ported from GEPA `optimize_anything`; see the
-[main README](../../README.md#design).
+HELIX's search loop is ported from GEPA `optimize_anything`.
 
 Three HELIX properties matter for this task.
 
@@ -106,9 +105,10 @@ work_dir="$(mktemp -d)/web_researcher"
 cp -R "$(git rev-parse --show-toplevel)/examples/web_researcher" "$work_dir"
 cd "$work_dir"
 
-# Score the seed on the validation split (default) or the training split
-uv run --no-project --python 3.12 --with anthropic python evaluate.py
-HELIX_SPLIT=train uv run --no-project --python 3.12 --with anthropic python evaluate.py
+# Score the seed on the validation split (default) or the training split.
+# evaluate.py uses helix.timed, so it needs helix-evo 0.3.0 or newer.
+uv run --no-project --python 3.12 --with anthropic --with 'helix-evo>=0.3.0' python evaluate.py
+HELIX_SPLIT=train uv run --no-project --python 3.12 --with anthropic --with 'helix-evo>=0.3.0' python evaluate.py
 
 # Start evolution
 helix evolve

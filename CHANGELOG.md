@@ -217,6 +217,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- `examples/web_researcher`: the evaluator command now installs HELIX
+  from PyPI (`--with 'helix-evo>=0.3.0'`, the first release with
+  `helix.timed`), so `from helix import timed` in `evaluate.py` no longer
+  fails with `ModuleNotFoundError`, in `helix evolve` or when run by hand
+  from the example README.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
