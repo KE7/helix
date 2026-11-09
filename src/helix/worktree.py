@@ -500,8 +500,18 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
         parent_ids=[],
         operation="seed",
     )
-    if _snapshot_dirty_working_tree(repo_root, worktree_path):
-        snapshot_candidate(candidate, "helix: snapshot dirty seed")
+    dirty = _snapshot_dirty_working_tree(repo_root, worktree_path)
+    # Every mutation appends HELIX's artifact names to the worktree's
+    # .gitignore.  Committing them into the seed keeps that edit out of its
+    # children's diffs, so their change summaries describe only the agent's
+    # work.  Imported here because helix.mutator imports this module.
+    from helix.mutator import _ignore_helix_artifacts
+
+    _ignore_helix_artifacts(worktree_path)
+    snapshot_candidate(
+        candidate,
+        "helix: snapshot dirty seed" if dirty else "helix: ignore HELIX artifacts",
+    )
     return candidate
 
 

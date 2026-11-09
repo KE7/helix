@@ -123,6 +123,27 @@ class TestCreateSeedWorktree:
         wt_path = Path(candidate.worktree_path)
         assert (wt_path / "README.md").exists()
 
+    def test_seed_children_start_with_helix_artifacts_ignored(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A child's diff shows only the agent's work, not HELIX's .gitignore."""
+        from helix.mutator import _ignore_helix_artifacts
+
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "HELIX Test")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "helix@test.local")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "HELIX Test")
+        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "helix@test.local")
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+
+        child = clone_candidate(seed, "g1-s0", base_dir)
+        _ignore_helix_artifacts(Path(child.worktree_path))
+
+        status = _run(["git", "status", "--porcelain"], Path(child.worktree_path))
+        assert status.stdout == ""
+
     def test_seed_worktree_snapshots_dirty_tree_and_clones_from_snapshot(
         self, tmp_path: Path, monkeypatch
     ) -> None:

@@ -250,6 +250,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutation when its prompt file cannot be written. A child that changed no
   files gets the fixed summary "No change: the agent left the parent's files
   as they were." without a paid summary call.
+- The seed now commits HELIX's `.gitignore` entries for its per-call
+  artifacts. Before, every child of the seed added them itself, so its diff
+  and its change summary (which later mutations of the seed read) described
+  that `.gitignore` edit as part of the agent's work, and a child of the seed
+  that changed nothing still paid for a summary.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
