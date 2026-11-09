@@ -48,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sandboxed agents start each generation from a clean session; credentials and
   config are kept. Give concurrent runs separate `auth_volume`s.
 - `xhigh` and `max` are accepted `effort` values for claude.
-- Runner images are rebuilt weekly, and a PR check builds and probes them.
+- Runner images are rebuilt weekly and whenever a merge changes them, and a
+  PR check builds and probes them.
 
 ### Changed
 - **BREAKING**: HELIX requires Python 3.12 or newer; 3.12 to 3.15 are tested.
