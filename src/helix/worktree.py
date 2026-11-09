@@ -754,3 +754,28 @@ def get_diff(
         operation=f"diff {candidate_a.id} vs {candidate_b.id}",
     )
     return result.stdout
+
+
+def export_candidate(candidate: Candidate, dest: Path) -> None:
+    """Copy *candidate*'s files to *dest*, which must not exist yet.
+
+    The candidate is what HELIX committed for it, so only git-tracked files
+    are copied: the prompt, backend logs, ``helix_batch.json``, transcripts
+    and caches HELIX and the evaluator leave in the worktree are not.
+    """
+    wt = Path(candidate.worktree_path)
+    listed = _run(
+        ["git", "ls-files", "-z"],
+        cwd=wt,
+        operation=f"export {candidate.id}: list tracked files",
+    )
+    dest.mkdir(parents=True)
+    for raw_path in listed.stdout.split("\x00"):
+        if not raw_path:
+            continue
+        src = wt / raw_path
+        if src.is_dir() and not src.is_symlink():
+            # A submodule checkout.
+            shutil.copytree(src, dest / raw_path, symlinks=True)
+        elif src.exists() or src.is_symlink():
+            _copy_path(src, dest / raw_path)

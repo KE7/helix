@@ -53,21 +53,9 @@ class TestBuildSeedGenerationPrompt:
         )
         assert "Domain Context" not in prompt
 
-    def test_contains_evaluator_cmd_when_provided(self):
-        """evaluator_cmd should appear in the prompt when given."""
-        evaluator_cmd = "python evaluate.py --split train"
-        prompt = build_seed_generation_prompt(
-            objective="Generate a solver",
-            evaluator_cmd=evaluator_cmd,
-        )
-        assert evaluator_cmd in prompt
-
-    def test_no_evaluator_section_when_absent(self):
-        """When evaluator_cmd=None, no evaluator section should appear."""
-        prompt = build_seed_generation_prompt(
-            objective="Generate a solver",
-            evaluator_cmd=None,
-        )
+    def test_never_shows_the_evaluator(self):
+        """No evaluator section, as in GEPA's _build_seed_generation_prompt."""
+        prompt = build_seed_generation_prompt(objective="Generate a solver")
         assert "Evaluator" not in prompt
 
     def test_returns_string(self):

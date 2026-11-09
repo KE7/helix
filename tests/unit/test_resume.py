@@ -237,6 +237,26 @@ def test_resume_rejects_semantic_config_change() -> None:
         _validate_resume_semantics(state, current_config)
 
 
+def test_resume_of_a_pre_0_3_state_says_it_cannot_be_resumed() -> None:
+    """A 0.2.x state pins evaluator.score_parser, which 0.3.0 removed: no
+    config can match it, so the error must not say to restore the config."""
+    from helix.config import EvaluatorConfig, HelixConfig
+    from helix.evolution import _resume_semantics, _validate_resume_semantics
+
+    config = HelixConfig(objective="test", evaluator=EvaluatorConfig(command="echo 1"))
+    state = make_state(frontier=[])
+    state.frontier_type = config.evolution.frontier_type
+    state.resume_semantics = _resume_semantics(config)
+    state.resume_semantics["evaluator"]["score_parser"] = "helix_result"
+
+    with pytest.raises(ResumeIncompatibleError) as exc_info:
+        _validate_resume_semantics(state, config)
+
+    assert "before 0.3.0" in str(exc_info.value)
+    assert "Restore the original config" not in (exc_info.value.suggestion or "")
+    assert "helix clean" in (exc_info.value.suggestion or "")
+
+
 def test_resume_allows_cache_toggle_without_semantic_rejection() -> None:
     """Cache toggles are handled by cache persistence, not semantic rejection."""
     from helix.config import EvolutionConfig, EvaluatorConfig, HelixConfig

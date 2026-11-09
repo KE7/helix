@@ -327,6 +327,22 @@ def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> No
     if not state.resume_semantics:
         return
 
+    # 0.2.x pinned ``evaluator.score_parser``, which 0.3.0 removed, so no
+    # current config can match it and "restore the config" cannot help.
+    if "score_parser" in state.resume_semantics.get("evaluator", {}):
+        raise ResumeIncompatibleError(
+            "This run was saved by HELIX before 0.3.0 (its state pins "
+            "evaluator.score_parser, which 0.3.0 removed) and cannot be "
+            "resumed by this version.",
+            operation="resume",
+            phase="validate_resume_semantics",
+            suggestion=(
+                "Finish the run with HELIX 0.2.x, or export what you want to "
+                "keep (`helix best --export PATH`), run `helix clean` and "
+                "start a fresh run."
+            ),
+        )
+
     diffs = _semantic_diffs(state.resume_semantics, current)
     if diffs:
         preview = "; ".join(diffs[:5])
@@ -1823,22 +1839,6 @@ def run_evolution(
     cross-example normalization, shared warm-up, or an aggregate metric used
     as an objective).
     """
-    # Mirror GEPA's ``optimize`` (``api.py``): at least one stopping condition is required.
-    # Without this, perfect-skip + always-perfect data + no effective bound =
-    # a run that terminates only by the OS.  In HELIX, max_generations (loop
-    # bound) and max_evaluations (budget cap, <= 0 disables) are the two
-    # supported stopping conditions.  max_generations defaults to 10 and is
-    # always a positive int; this guard fires only if a caller explicitly sets
-    # it to <= 0 while leaving max_evaluations disabled.
-    if (
-        config.evolution.max_generations <= 0
-        and config.evolution.max_evaluations <= 0
-    ):
-        raise ValueError(
-            "At least one stopping condition is required: set "
-            "config.evolution.max_generations to a positive integer, or "
-            "config.evolution.max_evaluations > 0."
-        )
     # Timing is always on, like budget accounting: every run appends its
     # spans to .helix/timing.jsonl.
     with recording(base_dir / TIMING_FILE_NAME), span("run"):
@@ -2187,7 +2187,6 @@ def _run_evolution_impl(
             seed_prompt = build_seed_generation_prompt(
                 objective=config.objective,
                 background=config.agent.background,
-                evaluator_cmd=config.evaluator.command,
                 dataset_examples=_dataset_examples,
             )
             # Single attempt, fail-fast — matches GEPA's _generate_seed_candidate.
@@ -2202,6 +2201,10 @@ def _run_evolution_impl(
                     candidate_id=seed.id,
                     source="seed_generation",
                 )
+                # Commit what the agent wrote, as a mutation is committed
+                # before its gate: children branch from the seed's commit,
+                # so an uncommitted seed would leave them without its code.
+                snapshot_candidate(seed, "helix: generated seed")
             except Exception:
                 _safe_remove_worktree(seed, label="failed seed generation")
                 raise
@@ -3055,6 +3058,11 @@ def _run_evolution_impl(
                 ``child.summary`` was read back in ``mutate`` while the
                 worktree still existed, so this works even for a child whose
                 worktree has since been removed.
+
+                ``result`` is always the child's train gate result, never a
+                val result: the history reaches the mutation prompt, and
+                GEPA's ``ReflectiveMutationProposer.propose`` shows the
+                reflection step only the train minibatch.
                 """
                 if not config.evolution.sibling_history:
                     return
@@ -3331,7 +3339,7 @@ def _run_evolution_impl(
                             stage="val_stage", example_ids=list(stage_val_example_ids),
                         )
                         _record_sibling(
-                            _parent.id, child, stage_result, accepted=False
+                            _parent.id, child, gated.gating_result, accepted=False
                         )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -3407,7 +3415,7 @@ def _run_evolution_impl(
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
                 _save_evaluation(base_dir, val_result)
-                _record_sibling(_parent.id, child, val_result, accepted=True)
+                _record_sibling(_parent.id, child, gated.gating_result, accepted=True)
                 frontier.add(child, val_result)
                 decision(child.id, accepted=True, reason="mutation")
                 _sync_frontier_state()
