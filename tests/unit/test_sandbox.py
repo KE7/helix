@@ -1528,3 +1528,20 @@ def test_backend_transcript_sync_refuses_a_symlinked_directory(
 
     copied = source / ".helix_artifacts"
     assert not copied.exists() or not any(copied.rglob("reference.py"))
+
+
+def test_docker_args_keep_host_user_out_of_the_container(tmp_path) -> None:
+    from helix.sandbox import _docker_args
+
+    args = _docker_args(
+        ["true"],
+        {"USER": "hostuser", "HOME": "/Users/hostuser", "PATH": "/x", "K": "v"},
+        tmp_path,
+        SandboxConfig(enabled=True),
+        "agent",
+        "img",
+        "claude",
+    )
+    assert "USER=hostuser" not in args
+    assert "HOME=/home/node" in args
+    assert "K=v" in args
