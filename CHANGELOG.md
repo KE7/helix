@@ -207,7 +207,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real `helix evolve` run with a real backend and model, not mocks) and
   gives **Try it by hand** steps from a clean checkout. Before the PR is
   opened, CI must pass locally and the author's coding agent must review the
-  diff (`/code-review`, `/review`, or a prompt any agent can run). `.github/pull_request_template.md`
+  diff (`/code-review`, `/review`, or a prompt any agent can run), including
+  docs, tests and changelog entries the change should have touched but didn't. `.github/pull_request_template.md`
   carries the same sections, and the rules are on the docs site.
   `AGENTS.md` (and `CLAUDE.md`, which imports it) point coding agents
   working on this repository to those rules.
@@ -217,6 +218,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- `helix log` shows the run. It had never printed anything: it read
+  `.helix/log/`, which nothing wrote. It now joins the records a run already
+  keeps into one row per candidate: generation, parent, outcome (on the
+  frontier and on how many ids, dominated, or rejected and why), score and its
+  change against the parent, files changed, and the first sentence of the
+  agent's change summary when `evolution.sibling_history` is on.
+- `lineage.json` records each mutation's and merge's `files_changed`, which
+  was always empty. It lists every path the child changed against its parent,
+  whether the agent committed it or not, and is written before the minibatch
+  gate, so rejected children keep their list after their worktree is removed.
+  Runs made before this have empty lists.
 
 - HELIX error panels print every field literally. Backend or evaluator output containing brackets (`[/INST]`) made the panel itself raise instead of showing the error, and suggestions lost TOML table names: "Raise [sandbox].timeout_seconds" printed as "Raise .timeout_seconds".
 - Unsandboxed opencode runs keep the operator's stored logins. Each
@@ -380,7 +392,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree of a rejected attempt whose removal the interrupt cut short,
   unless `retain_rejected_worktrees` kept it). A merge that
   fails its subsample gate is now recorded under `.helix/attempts/` (reason
-  `merge_subsample`) instead of `.helix/evaluations/`.
+  `merge_below_parents`, stage `merge_subsample`) instead of
+  `.helix/evaluations/`, so `helix attempts` lists it and `helix log` shows
+  it as rejected.
 - `helix init`: the next-steps message escapes bracketed table names such as
   `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
 - Backend transcript preservation now covers every backend. It was only ever

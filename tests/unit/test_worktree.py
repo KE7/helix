@@ -16,6 +16,7 @@ import pytest
 from helix.population import Candidate
 from helix.worktree import (
     _ensure_git_repo,
+    changed_files,
     clone_candidate,
     create_seed_worktree,
     get_diff,
@@ -720,6 +721,72 @@ class TestConcurrentWorktreeMetadata:
             "git worktree common-metadata commands ran concurrently "
             f"(peak={max_active}); they must be serialised"
         )
+
+
+class TestChangedFiles:
+    def test_lists_everything_the_snapshot_will_commit(self, tmp_path: Path) -> None:
+        """Committed, unstaged, untracked and deleted paths; ignored ones are not."""
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        (repo_root / "solve.py").write_text("x = 1\n")
+        (repo_root / "old.py").write_text("y = 1\n")
+        (repo_root / ".gitignore").write_text("*.log\n")
+        _run(["git", "add", "-A"], repo_root)
+        _run(["git", "commit", "-m", "files"], repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+
+        # The agent commits one change itself, then leaves others uncommitted.
+        (wt / "solve.py").write_text("x = 2\n")
+        _run(["git", "commit", "-am", "agent commit"], wt)
+        (wt / "README.md").write_text("# changed\n")
+        (wt / "old.py").unlink()
+        (wt / "new.py").write_text("z = 1\n")
+        (wt / "run.log").write_text("ignored\n")
+
+        assert changed_files(child, seed) == ["README.md", "new.py", "old.py", "solve.py"]
+
+    def test_lists_both_sides_of_a_rename_and_non_ascii_names(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        (repo_root / "a.py").write_text("x = 1\n" * 20)
+        _run(["git", "add", "-A"], repo_root)
+        _run(["git", "commit", "-m", "a"], repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        wt = Path(child.worktree_path)
+
+        _run(["git", "mv", "a.py", "b.py"], wt)
+        _run(["git", "commit", "-m", "rename"], wt)
+        (wt / "é.py").write_text("y = 1\n")
+
+        assert changed_files(child, seed) == ["a.py", "b.py", "é.py"]
+
+    def test_unchanged_child_has_no_files(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "project"
+        _make_repo(repo_root)
+        base_dir = tmp_path / "worktrees"
+        seed = create_seed_worktree(repo_root, base_dir)
+        child = clone_candidate(seed, "g1-s1", base_dir)
+        assert changed_files(child, seed) == []
+
+    def test_missing_worktree_gives_no_files_instead_of_raising(self, tmp_path: Path) -> None:
+        gone = Candidate(
+            id="g1-s1", worktree_path=str(tmp_path / "gone"), branch_name="helix/g1-s1",
+            generation=1, parent_id="g0-s0", parent_ids=["g0-s0"], operation="mutate",
+        )
+        assert changed_files(gone, gone) == []
+
+
+def test_snapshot_is_traced_and_changed_files_is_not() -> None:
+    """The ``snapshot`` timing span belongs to snapshot_candidate alone."""
+    import helix.worktree as worktree
+
+    assert hasattr(worktree.snapshot_candidate, "__wrapped__")
+    assert not hasattr(worktree.changed_files, "__wrapped__")
 
 
 def test_export_copies_the_candidate_without_helix_artifacts(

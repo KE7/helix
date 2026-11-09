@@ -8,10 +8,7 @@
 ├── evaluator_manifest.json # Protected evaluator file hashes
 ├── state.json           # Generation, frontier, budget
 ├── timing.jsonl         # Timing spans, appended by every run
-├── lineage.json         # Full ancestry graph
-├── log/                 # Semantic mutation logs
-│   ├── g1-m0.json
-│   └── g2-x0.json
+├── lineage.json         # Ancestry and files changed per candidate
 ├── worktrees/
 │   ├── g0-s0/           # Seed
 │   ├── g1-s1/           # Gen 1 Mutation 1
@@ -26,7 +23,7 @@
 
 | Module | Role |
 |---|---|
-| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log, attempts |
+| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log, attempts, timing |
 | `config.py` | TOML config parsing via Pydantic v2 |
 | `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |

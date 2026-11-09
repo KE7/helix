@@ -107,6 +107,7 @@ from helix.timing import (
 )
 from helix.trace import TRACE, EventType
 from helix.worktree import (
+    changed_files,
     create_seed_worktree,
     create_empty_seed_worktree,
     remove_worktree,
@@ -2717,7 +2718,7 @@ def _run_evolution_impl(
                                     parents=[a.id, b.id],
                                     operation="merge",
                                     generation=gen,
-                                    files_changed=[],
+                                    files_changed=changed_files(merged, a),
                                 ),
                             )
                             # Save state BEFORE snapshot so that if the commit
@@ -2894,11 +2895,11 @@ def _run_evolution_impl(
                                     base_dir,
                                     merge_result,
                                     status="rejected",
-                                    reason="merge_subsample",
+                                    reason="merge_below_parents",
                                     parent_id=a.id,
                                     generation=gen,
-                                    stage="merge",
-                                    example_ids=merge_subsample_ids,
+                                    stage="merge_subsample",
+                                    example_ids=list(merge_subsample_ids),
                                 )
                                 _safe_remove_worktree(merged, label="score-rejected merge candidate")
                                 if merged.id in candidates:
@@ -3212,7 +3213,7 @@ def _run_evolution_impl(
                         parents=[_parent.id],
                         operation="mutate",
                         generation=gen,
-                        files_changed=[],
+                        files_changed=changed_files(child, _parent),
                     ),
                 )
                 # Save state BEFORE snapshot so that if the commit crashes

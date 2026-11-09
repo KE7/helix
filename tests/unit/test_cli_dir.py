@@ -74,22 +74,21 @@ class TestDirResolvesRoot:
     """Commands should use the --dir path, not cwd, to locate .helix/."""
 
     def test_log_uses_dir_not_cwd(self, tmp_path, monkeypatch):
-        """log --dir <empty_dir> should NOT look in cwd for .helix/log."""
+        """log --dir <empty_dir> should NOT read the run in cwd."""
         other = tmp_path / "other"
         other.mkdir()
-        # Put a .helix/log in cwd but NOT in other/
-        helix_log = tmp_path / ".helix" / "log"
-        helix_log.mkdir(parents=True)
-        (helix_log / "g0.json").write_text(
-            '{"generation": 0, "candidate_id": "g0-s0", "operation": "seed", '
-            '"timestamp": "2024-01-01", "summary": {}}'
+        # Put a run's lineage in cwd but NOT in other/
+        helix_dir = tmp_path / ".helix"
+        helix_dir.mkdir()
+        (helix_dir / "lineage.json").write_text(
+            '[{"id": "g0-s0", "parent": null, "parents": [], '
+            '"operation": "seed", "generation": 0, "files_changed": []}]'
         )
-        monkeypatch.chdir(tmp_path)  # cwd has .helix/log entries
+        monkeypatch.chdir(tmp_path)
 
         runner = CliRunner()
         result = runner.invoke(cli, ["log", "--dir", str(other)])
-        # Pointing at `other/` which has no .helix/log → should warn "No log entries"
-        assert "no log entries" in result.output.lower(), result.output
+        assert "no candidates found" in result.output.lower(), result.output
 
     def test_best_uses_dir_not_cwd(self, tmp_path, monkeypatch):
         """best --dir <empty_dir> should not find evolution state."""

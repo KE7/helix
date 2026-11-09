@@ -268,6 +268,53 @@ class TestMergeFallthroughToMutation:
         )
         all_mocks["merge"].assert_called_once()
 
+    def test_rejected_merge_leaves_an_attempt_record(
+        self, mocker, tmp_path, all_mocks  # noqa: F811
+    ):
+        """A merge scoring below its parents is recorded under attempts/.
+
+        Its subsample result is saved to evaluations/ before the decision,
+        so without this record ``helix log`` and ``helix attempts`` could not
+        tell a rejected merge from an accepted one.
+        """
+        import json
+
+        seed = make_candidate("g0-s0")
+        child = make_candidate("g1-s1", generation=1)
+        merged = make_candidate("g2-m1", generation=2)
+        children = iter([child])
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].side_effect = lambda *a, **kw: next(children, None)
+        all_mocks["merge"].return_value = merged
+        all_mocks["find_merge_triplet"].return_value = ("g0-s0", "g1-s1", "g0-s0")
+
+        def run_eval(candidate, config, split=None, instance_ids=None, **kwargs):
+            if candidate.id == "g0-s0":
+                scores = {"1": 0.5, "2": 0.8}
+            elif candidate.id == "g1-s1":
+                scores = {"1": 0.9, "2": 0.5}
+            else:  # merged, worse than both parents
+                scores = {"1": 0.0, "2": 0.0}
+            if instance_ids is not None:
+                scores = {k: scores.get(k, 0.0) for k in instance_ids}
+            return make_eval_result(candidate.id, scores)
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = make_config(
+            max_generations=2,
+            merge_enabled=True,
+            max_merge_invocations=5,
+            merge_val_overlap_floor=1,
+            max_evaluations=100_000,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        record = json.loads((tmp_path / ".helix" / "attempts" / "g2-m1.json").read_text())
+        assert record["attempt"]["status"] == "rejected"
+        assert record["attempt"]["reason"] == "merge_below_parents"
+        assert record["attempt"]["stage"] == "merge_subsample"
+        assert record["attempt"]["parent_id"] == "g0-s0"
+
 
 # ---------------------------------------------------------------------------
 # MODERATE D — legacy (no-minibatch) gating uses sum-score acceptance

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, NoReturn
 
 import click
+from rich.markup import escape
 from rich.table import Table
 from rich.tree import Tree
 
@@ -27,7 +29,7 @@ from helix.display import (
     render_frontier_table,
 )
 from helix.exceptions import ResumeIncompatibleError, print_helix_error
-from helix.lineage import load_lineage
+from helix.lineage import LineageEntry, load_lineage
 from helix.population import EvalResult, FrontierType, ParetoFrontier, Candidate
 from helix.state import load_state, save_state
 from helix import timing
@@ -298,22 +300,6 @@ def _reconstruct_frontier(
         frontier.add(cand, result)
 
     return frontier, candidates, skipped
-
-
-def _load_log_entries(base_dir: Path) -> list[dict[str, Any]]:
-    """Load all log entries from base_dir/log/*.json, sorted by generation."""
-    log_dir = base_dir / "log"
-    if not log_dir.exists():
-        return []
-    entries: list[dict[str, Any]] = []
-    for path in log_dir.glob("*.json"):
-        try:
-            data = json.loads(path.read_text())
-            entries.append(data)
-        except Exception:
-            pass
-    entries.sort(key=lambda e: (e.get("generation", 0), e.get("candidate_id", "")))
-    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -870,37 +856,130 @@ def history(project_dir: Path | None) -> None:
     help="Project root directory (defaults to current working directory).",
 )
 def log_cmd(project_dir: Path | None) -> None:
-    """Show the evolution trajectory: per-generation parent lineage and mutation log."""
+    """Show every candidate in order: parent, outcome, score and what changed."""
     project_root = project_dir if project_dir is not None else Path.cwd()
     base_dir = _helix_dir(project_root)
     setup_file_logging(base_dir)
 
-    entries = _load_log_entries(base_dir)
-    if not entries:
-        print_warning("No log entries found. Run `helix evolve` first.")
+    rows = _log_rows(project_root, base_dir)
+    if not rows:
+        print_warning("No candidates found. Run `helix evolve` first.")
         return
 
     table = Table(title="Evolution Log", show_lines=True)
     table.add_column("Gen", style="bold cyan", justify="right")
     table.add_column("Candidate", style="cyan")
-    table.add_column("Operation", style="yellow")
-    table.add_column("Timestamp")
-    table.add_column("Summary")
-
-    for entry in entries:
-        summary = entry.get("summary", {})
-        summary_str = (
-            ", ".join(f"{k}={v}" for k, v in summary.items()) if summary else ""
-        )
-        table.add_row(
-            str(entry.get("generation", "")),
-            str(entry.get("candidate_id", "")),
-            str(entry.get("operation", "")),
-            str(entry.get("timestamp", "")),
-            summary_str,
-        )
-
+    table.add_column("Parent", style="cyan")
+    table.add_column("Outcome", style="yellow")
+    table.add_column("Score", justify="right")
+    table.add_column("Files")
+    table.add_column("What changed")
+    for row in rows:
+        table.add_row(*row)
     console.print(table)
+    if not any(row[6] for row in rows):
+        console.print(
+            "[dim]No change summaries recorded; they are written when "
+            "evolution.sibling_history is on.[/dim]"
+        )
+
+
+def _log_rows(project_root: Path, base_dir: Path) -> list[tuple[str, ...]]:
+    """Join the run's existing records into one row per candidate.
+
+    Read-only: lineage.json gives the order, parents and files changed,
+    evaluations/ and attempts/ the outcome and score, and state.json the
+    frontier and the change summaries (``sibling_history``).
+    """
+    lineage = load_lineage(base_dir / "lineage.json")
+    if not lineage:
+        return []
+    evaluations, _ = _load_all_evaluations(base_dir)
+    attempts = {r.get("candidate_id"): r for r in _load_attempts(base_dir)}
+    state = load_state(project_root)
+    wins: dict[str, int] = {}
+    if state:
+        for ids in state.active_frontier.values():
+            for cid in ids:
+                wins[cid] = wins.get(cid, 0) + 1
+    summaries: dict[str, str] = {}
+    if state:
+        for records in state.sibling_history.values():
+            for record in records:
+                child, text = record.get("child_id"), record.get("summary")
+                if isinstance(child, str) and isinstance(text, str):
+                    summaries[child] = _first_sentence(text)
+
+    rows: list[tuple[str, ...]] = []
+    def _run_order(entry: LineageEntry) -> tuple[int, int, str]:
+        # Ids are g<gen>-<s|m><counter>; sort the counter as a number so g1-s10
+        # follows g1-s9, not g1-s1.
+        counter = re.search(r"(\d+)$", entry.id)
+        return (entry.generation, int(counter.group(1)) if counter else 0, entry.id)
+
+    for entry in sorted(lineage.values(), key=_run_order):
+        attempt = attempts.get(entry.id)
+        result = evaluations.get(entry.id)
+        if attempt is not None:
+            info = attempt.get("attempt", {})
+            outcome = f"rejected ({info.get('reason', '?')})"
+            scores = attempt.get("instance_scores") or {}
+            score = (
+                f"{sum(scores.values()) / len(scores):.3f} on {info.get('stage', '?')}"
+                if scores
+                else ""
+            )
+        elif result is not None:
+            n = wins.get(entry.id, 0)
+            if not wins:
+                # No per-instance front saved (runs from before it existed).
+                outcome = "accepted"
+            elif not n:
+                outcome = "accepted, dominated"
+            elif state is not None and state.frontier_type == "instance":
+                outcome = f"frontier, best on {n} ids"
+            else:
+                outcome = "frontier"
+            score = f"{result.aggregate_score():.3f}"
+            parent_result = evaluations.get(entry.parent or "")
+            if parent_result is not None:
+                delta = result.aggregate_score() - parent_result.aggregate_score()
+                score += f" ({delta:+.3f})"
+        else:
+            outcome, score = "no result", ""
+        parent = " + ".join(entry.parents) if entry.parents else "-"
+        rows.append(
+            (
+                str(entry.generation),
+                entry.id,
+                parent,
+                outcome
+                if entry.operation != "seed"
+                else f"seed, {outcome.removeprefix('accepted, ')}",
+                score,
+                escape(_files_cell(entry.files_changed)),
+                escape(summaries.get(entry.id, "")),
+            )
+        )
+    return rows
+
+
+def _files_cell(files: list[str], limit: int = 5) -> str:
+    """Up to *limit* paths, one per line, then how many more there are."""
+    shown = files[:limit]
+    if len(files) > limit:
+        shown.append(f"... {len(files) - limit} more")
+    return "\n".join(shown)
+
+
+def _first_sentence(text: str) -> str:
+    """The first sentence of a change summary, skipping Markdown headings."""
+    for block in text.split("\n\n"):
+        lines = [ln for ln in block.strip().splitlines() if not ln.startswith("#")]
+        if lines:
+            paragraph = " ".join(ln.strip() for ln in lines)
+            return re.split(r"(?<=[.!?])\s+", paragraph, maxsplit=1)[0]
+    return ""
 
 
 # ---------------------------------------------------------------------------
