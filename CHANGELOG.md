@@ -241,8 +241,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an agent now; GEPA's merge shows no scores either.
 - Diffs in the merge prompt leave out protected evaluator files and
   `[sandbox].omit_from_agent` paths, which a candidate's history can hold
-  (for example after a protected-file refresh on resume). An omitted path is
-  left out as written even when it is now a symlink out of the project.
+  (for example after a protected-file refresh on resume).
 - Merges of two children of the seed now show the agent both parents' diffs.
   The seed's worktree is detached, so diffs against its branch name failed
   and came back empty; diffs now use each candidate's commit, and a diff
