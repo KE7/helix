@@ -55,7 +55,10 @@ protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutab
 # val_size  = 200
 
 [seedless]
-# Seedless mode: generate initial candidate from objective via LLM
+# Seedless mode: generate initial candidate from objective via LLM.
+# The seed prompt does not show evaluator.command (as in GEPA), so the
+# objective or agent.background must name the file and interface the
+# evaluator expects.
 enabled = false
 # Optional prompt-grounding training dataset (used only in seedless
 # seed generation).  Accepts a JSON array file, a JSONL file, or a
@@ -85,7 +88,7 @@ cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate; passing results carry into the tail
 sibling_history = false          # show the mutator every child already proposed from the same
-                                 # parent: each one's score, whether it was kept, and a note on
+                                 # parent: each one's training-gate score, whether it was kept, and a note on
                                  # what it changed. Every child is kept in state.
                                  # Advisory only — HELIX never filters a proposal on it.
 sibling_summary_max_words = 150  # budget for each of those notes; quoted to the summarising

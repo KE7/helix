@@ -217,6 +217,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- Sibling history (`sibling_history = true`) records each child's
+  training-gate score. Accepted children were recorded with their full
+  validation mean and val-stage rejects with their val-subset mean, and those
+  scores reached later mutation prompts. GEPA's
+  `ReflectiveMutationProposer.propose` reflects on the train minibatch only.
+- The seedless seed prompt no longer shows `evaluator.command`, matching
+  GEPA's `_build_seed_generation_prompt`. State the file and interface the
+  evaluator expects in the objective or `agent.background`.
 - The scrubbed environment of the agent and evaluator keeps `USER` on the
   host (the Docker sandbox still doesn't get it). Claude Code on macOS finds
   its Keychain login by it, so an unsandboxed run on a Claude subscription

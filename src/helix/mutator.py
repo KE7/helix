@@ -255,7 +255,6 @@ def _render_evaluator_output_fallback(eval_result: EvalResult) -> str:
 def build_seed_generation_prompt(
     objective: str,
     background: str | None = None,
-    evaluator_cmd: str | None = None,
     dataset_examples: list[str] | None = None,
 ) -> str:
     """Construct the seed generation prompt for the configured backend.
@@ -270,8 +269,6 @@ def build_seed_generation_prompt(
         Natural-language description of what to optimise.
     background:
         Optional domain context / constraints.
-    evaluator_cmd:
-        Optional evaluator command shown to the LLM for context.
     dataset_examples:
         Optional list of representative dataset inputs used to ground the LLM,
         matching GEPA's ``_build_seed_generation_prompt`` ``dataset`` argument.
@@ -285,12 +282,6 @@ def build_seed_generation_prompt(
     background_lines: list[str] = []
     if background:
         background_lines.append(f"\n## Domain Context & Constraints\n\n{background}")
-    if evaluator_cmd:
-        background_lines.append(
-            f"\n## Evaluator\n\nYour candidate will be evaluated by running:\n\n"
-            f"    {evaluator_cmd}\n\n"
-            f"Make sure your implementation is compatible with this command."
-        )
     background_section = "\n".join(background_lines) + (
         "\n" if background_lines else ""
     )
