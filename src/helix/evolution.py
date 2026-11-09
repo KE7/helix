@@ -1968,7 +1968,9 @@ def _run_evolution_impl(
     # Construct train/val loaders.  Missing train_path → single-task
     # mode (circle_packing parity); the existing non-minibatch path is
     # used end-to-end.
-    # Prompt-grounding / legacy payload paths live on SeedlessConfig.
+    # The paths live on SeedlessConfig but are read here whether or not
+    # seedless mode is on: a directory's file stems become the instance ids
+    # (e.g. "pushcube__0"), which is how stratified runs get grouped ids.
     train_loader: HelixDataLoader | _RangeDataLoader | None = _make_data_loader(
         config.seedless.train_path
     )
@@ -2435,7 +2437,10 @@ def _run_evolution_impl(
 
             # Sandboxed runs: wipe the backend CLI's session state in its auth
             # volume before any candidate of this generation is dispatched
-            # (merge or mutate), so no candidate sees another's history.
+            # (merge or mutate), so no candidate sees an earlier generation's
+            # sessions.  Only BACKEND_STATE_PATHS are deleted: other files an
+            # agent writes on the volume persist, and candidates of the same
+            # generation share it.
             # Transcripts from the previous generation were already copied
             # into the run at the end of each invocation.
             _reset_sandbox_agent_state_for_generation(config, gen)

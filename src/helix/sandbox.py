@@ -373,9 +373,12 @@ def reset_sandbox_agent_state(
     single-writer container that mounts the run's auth volume
     (``sandbox_auth_volume_name``) read-write
     with no network, so each generation's candidates start from a CLI with no
-    memory of earlier candidates.  Transcripts were already copied into the
+    session memory of earlier candidates.  Transcripts were already copied into the
     run at the end of each invocation, so nothing HELIX keeps is lost.  Credentials and operator configuration are
-    never touched (see ``BACKEND_STATE_PATHS``).  Returns the number of state
+    never touched (see ``BACKEND_STATE_PATHS``).  Only those paths are
+    deleted: other files an agent writes under ``/home/node`` (instruction
+    files, skills, hook settings) persist, and a second run sharing the
+    volume has its live sessions deleted too.  Returns the number of state
     paths in the table; a failure is logged as a warning and never raised.
     """
     script = _backend_state_reset_script(agent_backend)

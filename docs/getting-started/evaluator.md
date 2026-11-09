@@ -23,7 +23,7 @@ print("HELIX_RESULT=" + json.dumps([[score, {"feedback": feedback}]]))
 
 ## A dataset with train and validation splits
 
-Set the split sizes, and HELIX samples ids from them: `"0"` to `"199"` for training here, as strings. With `evolution.batch_sampler = "stratified"`, ids are opaque strings such as `"group_alpha__case_3"` instead, so key your examples by id rather than by position:
+Set the split sizes, and HELIX samples ids from them: `"0"` to `"199"` for training here, as strings. To use named ids such as `"pushcube__0"` instead (which `evolution.batch_sampler = "stratified"` needs to group examples), point `[seedless].train_path` / `val_path` at directories of `*.json` files; the file stems become the ids (see [Datasets](../guides/datasets.md)). Either way, key your examples by id rather than by position:
 
 ```toml
 [dataset]

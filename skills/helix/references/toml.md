@@ -92,29 +92,47 @@ train_size = 100
 val_size = 100
 ```
 
-HELIX does not own train/val files here. It only needs cardinality. For each
-evaluation, HELIX writes a JSON `list[str]` to `helix_batch.json`; the evaluator
-loads its own dataset and filters by those ids.
+HELIX does not own train/val files here. It only needs cardinality: the ids are
+`"0"` to `"train_size-1"` and `"0"` to `"val_size-1"`. For each evaluation,
+HELIX writes a JSON `list[str]` to `helix_batch.json`; the evaluator loads its
+own dataset and filters by those ids.
 
-Single-task mode: omit `[dataset]` or leave sizes unset.
+Single-task mode: leave `[dataset]` sizes and `[seedless]` paths unset.
 
-Stratified task ids: use ids shaped like `task__trial`; HELIX derives group
-keys by splitting on `evolution.group_key_separator`.
+Stratified task ids: `batch_sampler = "stratified"` groups ids by the text
+before the first `evolution.group_key_separator`, so it needs ids shaped like
+`task__trial`. `train_size` / `val_size` cannot give those: every id is a bare
+index, which is its own group of one. Use a `[seedless]` directory instead
+(next section).
 
 ## Seedless
 
 ```toml
 [seedless]
 enabled = false
-train_path = "data/train.jsonl"
-val_path = "data/val.jsonl"
+train_path = "splits/train"  # directory of *.json files, or a .json array / .jsonl file
+val_path = "splits/val"
 ```
 
-Seedless mode asks the backend to create the initial candidate from the
-objective instead of starting from the current working tree. `train_path` and
-`val_path` are prompt-grounding paths, not runtime dataset ownership.
-The seed prompt does not show `evaluator.command`, so the objective or
-`agent.background` must name the file and interface the evaluator expects.
+Seedless mode (`enabled = true`) asks the backend to create the initial
+candidate from the objective instead of starting from the current working tree,
+and puts the first 3 `train_path` examples in that prompt. The seed prompt does not show
+`evaluator.command`, so the objective or `agent.background` must name the file
+and interface the evaluator expects.
+
+`train_path` and `val_path` are also where HELIX reads its train and val
+instance ids, even with `enabled = false`:
+
+- A directory: the sorted file stems of its `*.json` files
+  (`splits/train/pushcube__0.json` gives `"pushcube__0"`). This is how to get
+  grouped ids for `batch_sampler = "stratified"`;
+  `examples/maniskill_pick_place` does it.
+- A JSON array or JSONL file: index ids `"0"` to `"n-1"`.
+- `val_path` unset: validation reuses the `train_path` ids.
+
+The evaluator still loads the examples itself. When both kinds of key are set,
+`train_path` wins over `dataset.train_size` for train ids, and
+`dataset.val_size` wins over `val_path` for validation ids.
 
 ## Evolution
 
@@ -126,17 +144,27 @@ max_evaluations = -1
 # stop_at_score = 0.95  # end the run once the best val score reaches it; unset = off
 
 minibatch_size = 3
-num_parallel_proposals = 4
+num_parallel_proposals = 4    # P parents per iteration (default 1)
+mutations_per_parent = 1      # N children per parent (default 1); P*N proposals
+proposal_selection = "all_improvements"  # | "best_improvement" | "top_k"
+# proposal_top_k = 2          # required with "top_k" (1..P*N), rejected otherwise
 max_workers = 32
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
 val_stage_size = 10
+retain_rejected_worktrees = false  # keep worktrees the val stage rejects
 sibling_history = false  # show the mutator every earlier child of the same parent
 sibling_summary_max_words = 150  # word budget for each of those summaries
 # sibling_history_max_entries = 5  # prompt shows only the N most recent; unset = all
 
+candidate_selection_strategy = "pareto"  # | "current_best" | "epsilon_greedy" | "top_k_pareto"
+# candidate_selection_epsilon = 0.1  # required with "epsilon_greedy" (0.0..1.0)
+# candidate_selection_top_k = 5      # required with "top_k_pareto" (>= 1)
+
 batch_sampler = "epoch_shuffled"  # or "stratified"
 group_key_separator = "__"
+# num_sampled_groups = 3        # stratified only; set with num_examples_per_group
+# num_examples_per_group = 2
 
 frontier_type = "instance"  # "instance" | "objective" | "hybrid" | "cartesian"
 
@@ -166,8 +194,37 @@ Important choices:
   objective scores warn and no-op the objective axis for `hybrid`, which
   continues on its instance axis; `objective` and `cartesian` raise
   `MissingObjectiveScoresError` when parent selection needs that axis.
-- `num_parallel_proposals` controls concurrent agent mutations per generation.
-  Keep it low for expensive agent backends.
+- `num_parallel_proposals` (P, default 1) is how many parents are sampled per
+  iteration, with replacement; `mutations_per_parent` (N, default 1, `>= 1`) is
+  how many children each proposes. One iteration proposes P*N children, each
+  gated on its own minibatch. Keep P*N low for expensive agent backends.
+- `proposal_selection` picks which children that pass the minibatch gate go on
+  to full validation: `"all_improvements"` (default, every improvement),
+  `"best_improvement"` (only the largest), or `"top_k"` (the
+  `proposal_top_k` largest). `proposal_top_k` is required for `"top_k"`, must
+  be between 1 and P*N, and is rejected for the other two. Ties go to the
+  earlier proposal in sampled order.
+- `candidate_selection_strategy` picks each parent, with GEPA's four
+  `gepa.strategies.candidate_selector` strategies: `"pareto"` (default,
+  frequency-weighted draw over the Pareto frontier), `"current_best"` (highest
+  mean validation score, ties to the earliest), `"epsilon_greedy"` (with
+  probability `candidate_selection_epsilon`, a uniform draw from every
+  evaluated candidate, else `"current_best"`), or `"top_k_pareto"` (the
+  Pareto draw restricted to the top `candidate_selection_top_k` by score).
+  `candidate_selection_epsilon` (0.0 to 1.0) and `candidate_selection_top_k`
+  (`>= 1`) have no default: each is required by its own strategy and rejected
+  by the others. GEPA's defaults are 0.1 and 5.
+- `batch_sampler = "stratified"` makes every minibatch touch distinct groups
+  (see Dataset for where grouped ids come from); with fewer groups than
+  needed it falls back to `"epoch_shuffled"`. `group_key_separator` (default
+  `"__"`) must be non-empty with it. `num_sampled_groups` and
+  `num_examples_per_group` (set both or neither, each `>= 1`, stratified only)
+  make each minibatch that many groups times that many examples per group;
+  unset, it is `minibatch_size` groups with one example each.
+- `retain_rejected_worktrees = true` keeps the worktree of a child rejected by
+  the `val_stage_size` gate, for inspection; by default it is removed and its
+  contents are lost (lineage and scores are still recorded). Each one is a
+  full repository copy; `helix clean` removes them.
 - `max_workers` bounds evaluation/mutation thread pools.
 - Enable `merge_enabled` only when candidate changes can be meaningfully merged.
 
@@ -233,13 +290,36 @@ evaluator = true   # also run evaluation in Docker through [evaluator.sidecar]
 image = "ghcr.io/ke7/helix-evo-runner-claude:latest" # optional
 network = "bridge"  # or the name of an existing Docker network
 # auth_volume = "my-run-home"  # dedicated /home/node volume instead of helix-auth-<backend>
-cpus = 4.0
-memory = "16g"
-timeout_seconds = 3600
-pids_limit = 512
+cpus = 4.0             # docker --cpus; default unset
+memory = "16g"         # docker --memory; default unset
+timeout_seconds = 3600 # per sandboxed command; default unset (no limit)
+pids_limit = 512       # docker --pids-limit; default 512
 add_host_gateway = false
+# extra_hosts = { "proxy.internal" = "10.0.0.5" }  # extra --add-host entries
 skip_special_files = true
 ```
+
+Resource and host options:
+
+- `cpus`, `memory` and `pids_limit` become `docker run --cpus`, `--memory` and
+  `--pids-limit` on agent and evaluator-runner containers. `cpus` and `memory`
+  are unset (no limit) by default; `pids_limit` defaults to 512. The
+  evaluator sidecar gets none of them.
+- `timeout_seconds` is a wall-clock limit on each sandboxed command: one agent
+  call, or one evaluator-runner command. When it expires the container is
+  removed and that call fails (a mutation fails like any backend error). Unset
+  means no limit. It does not apply to a host-run evaluator
+  (`evaluator = false`).
+- `add_host_gateway = true` adds `--add-host host.docker.internal:host-gateway`
+  to agent and evaluator-runner containers (needed on Linux; Docker Desktop
+  provides the name already).
+- `extra_hosts` maps host names to addresses, each passed as
+  `--add-host NAME:ADDRESS` to agent, evaluator-runner and sidecar containers.
+  Default empty.
+- `auth_volume` replaces the shared `helix-auth-<backend>` volume for agent
+  containers, the transcript copy and the per-generation reset.
+  `helix sandbox login` never writes it, so use it when the credential reaches
+  the agent another way. Give each concurrent run its own (see below).
 
 Recommended new-project workflow:
 
@@ -280,17 +360,31 @@ Sandbox behavior:
   the start of every generation. Credentials and operator configuration are
   never touched; the copied transcripts are the only durable record of what
   the agent did.
+- The reset deletes only the listed session-state paths
+  (`helix.backends.BACKEND_STATE_PATHS`). Anything else an agent writes under
+  `/home/node`, such as `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`, skills or
+  hook settings, stays on the volume and reaches later candidates and later
+  runs that mount it. Use a fresh `auth_volume` when that matters.
+- Two runs at once on the same volume (the default `helix-auth-<backend>`)
+  can delete each other's live sessions, and with them the transcripts HELIX
+  copies when each call ends, because each run's reset wipes the whole
+  volume's session state. Give each concurrent run its own `auth_volume`.
+- Sync-back drops any new symlink in the agent's workspace that is absolute
+  or resolves outside the candidate worktree, with a warning; links the
+  candidate already had are kept.
 - Special files are skipped by default; set `skip_special_files = false` to
   raise on unsupported file types instead.
 
-Use `add_host_gateway = true` on Linux when evaluator code must reach a
-host-side local proxy at `http://host.docker.internal:<port>/...`.
+Use `add_host_gateway = true` on Linux when code in an agent or
+evaluator-runner container must reach a host-side service at
+`http://host.docker.internal:<port>/...`.
 
 ## Worktree
 
 ```toml
 [worktree]
 base_dir = ".helix/worktrees"
+# cleanup_dominated = false  # deprecated and ignored; accepted so old configs load
 ```
 
 Leave this alone unless the project needs worktrees on a faster or larger disk.

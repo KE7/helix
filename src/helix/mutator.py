@@ -194,7 +194,7 @@ def _evaluator_failed(eval_result: EvalResult) -> bool:
 # section is suppressed) or a fully-formed Markdown section.  Empty
 # returns let ``build_mutation_prompt`` skip the section entirely —
 # mirrors GEPA's ``_build_reflection_prompt_template`` accumulator
-# pattern in ``gepa_launcher.py``.  Non-empty returns
+# pattern in ``gepa/optimize_anything.py``.  Non-empty returns
 # may carry trailing whitespace; ``build_mutation_prompt`` rstrips
 # before joining sections with a uniform blank-line separator.
 
@@ -475,7 +475,7 @@ def _render_scores_section(eval_result: EvalResult) -> str:
     """Render ``## Current Evaluation Scores`` or ``""`` when no scores exist.
 
     Mirrors GEPA O.A.'s "only emit a section when there is content for it"
-    pattern in ``_build_reflection_prompt_template`` (``gepa_launcher.py``).
+    pattern in ``_build_reflection_prompt_template`` (``gepa/optimize_anything.py``).
     Previously HELIX emitted the section with a ``"(no scores recorded)"``
     placeholder; now the section header is omitted entirely so the agent
     never sees a stub.
@@ -552,7 +552,7 @@ def build_mutation_prompt(
 
     Sections are emitted only when they have content, mirroring GEPA O.A.'s
     ``_build_reflection_prompt_template`` accumulator pattern
-    in ``gepa_launcher.py``.  Empty ``objective``, empty
+    in ``gepa/optimize_anything.py``.  Empty ``objective``, empty
     ``eval_result.scores``, absent diagnostics, absent evaluator notes,
     absent stdout/stderr fallback, absent extra ASI, and absent
     ``background`` all skip their respective sections entirely instead of
