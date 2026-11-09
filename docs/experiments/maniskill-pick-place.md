@@ -64,7 +64,7 @@ max_turns = 30
 
 `acceptance_criterion` is not set, so it is the default, `strict_improvement`. Each minibatch holds two training trials from each of the three families.
 
-The mutation agent runs in HELIX's Docker sandbox and the evaluator runs on the host (`evaluator = false`). The agent works on a copy of the candidate without the files listed in `omit_from_agent`, so it sees only `solver/`, the training ids under `splits/train`, `API_REFERENCE.md` and `check.py`. It logs in to Claude through HELIX's sandbox auth volume (`helix sandbox login claude`). Runs 1 to 10 ran the agent on the host, which needed `passthrough_env = ["USER"]`: HELIX's environment scrub drops `USER`, and Claude Code on macOS looks up its Keychain login by it.
+The mutation agent runs in HELIX's Docker sandbox and the evaluator runs on the host (`evaluator = false`). The agent works on a copy of the candidate without the files listed in `omit_from_agent`, so it sees only `solver/`, the training ids under `splits/train`, `API_REFERENCE.md` and `check.py`. It logs in to Claude through HELIX's sandbox auth volume (`helix sandbox login claude`). Runs 1 to 10 ran the agent on the host, which needed `passthrough_env = ["USER"]`: HELIX's environment scrub dropped `USER` then (it keeps it now), and Claude Code on macOS looks up its Keychain login by it.
 
 `[agent].background` tells the agent to read `API_REFERENCE.md` first, says every file but `solver/` is protected, asks it not to branch on trial ids or memorize coordinates, and gives `python3 check.py <training ids>` as the way to check a change.
 
