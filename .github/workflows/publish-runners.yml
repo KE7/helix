@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+    # A merge that changes an image publishes `latest` right away, instead of
+    # leaving it missing or stale until the weekly run.
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/publish-runners.yml"
   # Weekly rebuild of `latest` so the images track the agent CLIs' own
   # release cadence instead of waiting for the next HELIX version tag.
   # 12:00 UTC Monday matches the "before 6am on monday" America/Los_Angeles
@@ -18,8 +24,8 @@ env:
 
 jobs:
   # ── 0. Pick the image tag every later job builds against and publishes ───
-  # A `v*` tag publishes its version; `main` (a scheduled or manual run)
-  # publishes `latest`; any other branch publishes its own name, so a manual
+  # A `v*` tag publishes its version; `main` (a push, scheduled or manual
+  # run) publishes `latest`; any other branch publishes its own name, so a manual
   # dispatch from a feature branch has a tag to push instead of failing at
   # the manifest step with "can't push with no tags specified".
   resolve-tag:
