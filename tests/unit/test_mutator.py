@@ -3664,11 +3664,12 @@ class TestReturnedUsageMatchesArtifact:
         assert usage.to_dict() == payload["usage"]
 
     def test_claude_transcript_tool_counts_reach_the_caller(
-        self, tmp_path: Path, mocker
+        self, tmp_path: Path, mocker, monkeypatch
     ):
         root = tmp_path / "claude-root"
         root.mkdir()
         (root / "sess_tool.jsonl").write_text(_CLAUDE_TOOL_TRANSCRIPT)
+        monkeypatch.setenv("HELIX_CLAUDE_TRANSCRIPT_ROOT", str(root))
         mocker.patch(
             "helix.mutator.subprocess.run",
             return_value=MagicMock(
@@ -3684,7 +3685,6 @@ class TestReturnedUsageMatchesArtifact:
             str(wt),
             "prompt",
             AgentConfig(backend="claude"),
-            sandbox=SandboxConfig(claude_transcript_root=str(root)),
         )
 
         assert usage.tool_event_count == 3
