@@ -1950,7 +1950,7 @@ class TestParentMinibatchBudgetCharge:
             train_path,
             val_size=3,
             # Seed only: the budget is spent by the seed's 3 val examples.
-            max_generations=0,
+            max_generations=1,
             max_evaluations=3,
         )
         run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -2468,23 +2468,19 @@ class TestAlwaysPerfectDataTerminates:
 
 
 class TestStoppingConditionValidation:
-    """Mirror GEPA's ``gepa.api.optimize``: a config with no effective
-    stopping condition is refused.
-
-    In helix, max_generations (loop bound, default 10; ``<= 0`` disables it)
-    and max_evaluations (budget cap, ``<= 0`` disables it) are the two stops.
-    EvolutionConfig refuses both disabled, so the error is a config error
-    (``helix evolve`` exits 2) rather than one raised mid-run.
+    """max_generations must be at least 1, so every run has a stopping
+    condition.  GEPA has no generation cap (its stop is ``max_metric_calls``);
+    HELIX keeps a required one.  EvolutionConfig refuses it, so the error is a
+    config error (``helix evolve`` exits 2) rather than one raised mid-run.
     """
 
-    def test_no_stop_condition_raises_value_error(self) -> None:
-        """max_generations=0 and max_evaluations=-1 → refused by the config."""
-        with pytest.raises(ValueError, match="stopping condition"):
-            EvolutionConfig(max_generations=0, max_evaluations=-1)
+    def test_zero_max_generations_raises_value_error(self) -> None:
+        """max_generations=0 is refused even with a budget."""
+        with pytest.raises(ValueError, match="max_generations must be at least 1"):
+            EvolutionConfig(max_generations=0, max_evaluations=50)
 
     def test_negative_max_generations_raises_value_error(self) -> None:
-        """max_generations=-1 and max_evaluations=0 → refused by the config."""
-        with pytest.raises(ValueError, match="stopping condition"):
+        with pytest.raises(ValueError, match="max_generations must be at least 1"):
             EvolutionConfig(max_generations=-1, max_evaluations=0)
 
     def test_valid_max_generations_does_not_raise(

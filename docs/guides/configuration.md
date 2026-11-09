@@ -65,14 +65,9 @@ enabled = false
 # val_path   = "puzzles/val"
 
 [evolution]
-max_generations = 20             # generation cap (default: 10; ≤ 0 = no cap, as in GEPA,
-                                 # so the run ends on max_evaluations, or after a generation
-                                 # that charged no evaluation)
+max_generations = 20             # generation cap, at least 1 (default: 10; 0 is a config error)
 perfect_score_threshold = 1.0    # skip proposals whose instance_scores all reach this (default: unset)
 max_evaluations = -1             # evaluation budget cap (-1 = no cap)
-                                 # NOTE: at least one stopping condition is required —
-                                 # max_generations must be > 0 or max_evaluations must be > 0;
-                                 # setting both to ≤ 0 is a config error (exit 2).
 # stop_at_score = 0.95           # end the run once the best val score is >= this (unset = off);
                                  # unlike perfect_score_threshold, this stops the run
 merge_enabled = false            # enable merge/crossover operations

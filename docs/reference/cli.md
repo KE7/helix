@@ -24,24 +24,12 @@
 --config PATH       Path to config file (default: helix.toml)
 --objective TEXT     Override the objective string
 --evaluator TEXT     Override the evaluator command
---generations INT   Override max_generations (0 = no cap; then max_evaluations must be set)
+--generations INT   Override max_generations (at least 1)
 --stop-at-score X   Override stop_at_score: end the run once the best val score reaches X
 --no-merge          Disable merge operations
 --backend BACKEND   Override the mutation backend [agy|claude|codex|cursor|opencode|pi]
 --model TEXT        Override the backend model (backend-specific naming)
 --effort LEVEL      Reasoning effort: low | medium | high | xhigh | max
-```
-
-## `helix attempts` Options
-
-```
---dir PATH          Project directory (default: .)
---generation INT    Only this generation
---stage STAGE       Only attempts whose Stage column is STAGE: train_minibatch | train | val_stage
---reason TEXT       Only attempts whose reason contains TEXT, e.g. minibatch_gate, duplicate_child
---cid ID            Full JSON for one attempt
---json              Machine-readable output
---skips             Show perfect-subsample skips from .helix/skips/ instead
 ```
 
 Every command that reads or writes a run (`evolve`, `resume`, `frontier`,

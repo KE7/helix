@@ -217,24 +217,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
-- `max_generations = 0` (or `helix evolve --generations 0`) with
-  `max_evaluations` set now runs until the budget is spent, as the
-  configuration guide documents and as GEPA does (it has no generation
-  cap). It used to run no generations at all. Such a run also stops, with a
-  warning, after a generation that charged no evaluation, since the budget
-  would then never run out. Only single-task mode with `cache_evaluation`
-  can do that, by reusing the parent's cached score: every parent was
-  skipped as perfect, or every mutation failed or changed nothing. A config with
-  neither cap
-  (`max_generations <= 0` and `max_evaluations <= 0`) is now a config error
-  that exits 2, instead of a `ValueError` traceback from inside the run.
+- `max_generations` must be at least 1. `max_generations = 0` (or
+  `helix evolve --generations 0`) is now a config error that exits 2. It used
+  to run no generations with `max_evaluations` set, and end in a `ValueError`
+  traceback from inside the run without it. GEPA has no generation cap (its
+  stop is `max_metric_calls`); HELIX keeps a required one for simplicity.
 - `helix best --export PATH` copies only the candidate's files, the ones
   HELIX committed for it. It used to copy the whole worktree, including the
   agent's `.agent_task_prompt.md`, `.helix_backend_*` logs,
   `helix_batch.json`, `.helix_artifacts/` and caches.
-- Resuming a run saved before `num_sampled_groups` / `num_examples_per_group`
-  existed, or that recorded them as `null`, no longer fails with "missing in
-  saved state" when you leave them unset. Resuming a run saved by HELIX 0.2.x now says it cannot be resumed
+- Resuming a run saved by HELIX 0.2.x now says it cannot be resumed
   by 0.3.0 (its state pins the removed `evaluator.score_parser`) and to
   finish it with 0.2.x or start fresh, instead of telling you to restore a
   config 0.3.0 cannot load.
@@ -244,11 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command now resolves `--dir` to an absolute path.
 - `helix attempts` takes `--dir` (the project directory) like every other
   command, so `helix attempts --dir .` as the HELIX skill documents works.
-  The old `--path <.helix dir>` still works. `--stage` now filters on the
-  Stage column it is named after (`train_minibatch`, `train`, `val_stage`)
-  instead of the reason; to filter by reason (`minibatch_gate`,
-  `train_gate`, `duplicate_child`, `proposal_selection`, ...) use
-  `--reason`, so `--stage minibatch_gate` becomes `--reason minibatch_gate`.
+  The old `--path <.helix dir>` still works.
 - Seedless search now builds on its seed. The seed agent's files were never
   committed, so every child was cloned from an empty tree and had to rewrite
   the solver from scratch while being scored against the seed. HELIX now

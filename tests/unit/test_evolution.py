@@ -401,7 +401,7 @@ class TestBudgetExhaustionStopsLoop:
         all_mocks["save_state"].side_effect = capture
 
         # Seed only: the seed's one evaluation spends the budget.
-        config = make_config(max_generations=0, max_evaluations=1)
+        config = make_config(max_generations=1, max_evaluations=1)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # After single-task/no-example seed with no dataset ids: evaluations == 1.
@@ -2312,92 +2312,6 @@ class TestGenerationsFlagOverridesConfig:
         # so we count via mutate calls instead.)
         assert all_mocks["mutate"].call_count == 2
 
-    def test_uncapped_run_stops_when_a_generation_can_change_nothing(
-        self, mocker, tmp_path, all_mocks
-    ):
-        """No dataset, cache on, a perfect seed: every proposal skips on a
-        cached parent score, so generations charge nothing and the budget
-        never runs out.  With no generation cap the run must still end."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        mocker.patch("helix.evolution._candidate_content_key", return_value="tree")
-
-        all_mocks["run_evaluator"].side_effect = (
-            lambda candidate, config, **kwargs: make_eval_result(
-                candidate.id, {"i1": 1.0, "i2": 1.0}
-            )
-        )
-        generations: list[int] = []
-
-        def count_generations(state, *args):
-            generations.append(state.generation)
-            if len(set(generations)) > 50:
-                raise AssertionError("uncapped run never stopped")
-
-        all_mocks["save_state"].side_effect = count_generations
-        config = make_config(
-            max_generations=0, max_evaluations=10, perfect_score_threshold=1.0
-        )
-        config.evolution.cache_evaluation = True
-
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        all_mocks["mutate"].assert_not_called()
-        warnings = " ".join(str(c.args[0]) for c in all_mocks["print_warning"].call_args_list)
-        assert "charged no evaluation" in warnings
-
-    def test_uncapped_run_stops_when_no_mutation_produces_a_candidate(
-        self, mocker, tmp_path, all_mocks
-    ):
-        """Single-task + cache_evaluation: the parent score is cached, so a
-        generation whose mutations all fail charges nothing.  Without a
-        generation cap it must stop instead of paying for mutations forever."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = None
-        all_mocks["run_evaluator"].side_effect = (
-            lambda candidate, config, **kwargs: make_eval_result(candidate.id, {"i1": 0.5})
-        )
-
-        def guard(*args, **kwargs):
-            if all_mocks["mutate"].call_count > 50:
-                raise AssertionError("uncapped run never stopped")
-
-        all_mocks["save_state"].side_effect = guard
-        config = make_config(max_generations=0, max_evaluations=10)
-        config.evolution.cache_evaluation = True
-
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        # Generation 1 evaluates the parent's minibatch; generation 2 reuses
-        # the cached score, charges nothing, and stops.
-        assert all_mocks["mutate"].call_count == 2
-        warnings = " ".join(str(c.args[0]) for c in all_mocks["print_warning"].call_args_list)
-        assert "charged no evaluation" in warnings
-
-    def test_zero_generations_runs_until_the_budget(self, mocker, tmp_path, all_mocks):
-        """max_generations=0 disables the generation cap (GEPA has none; its
-        stop is max_metric_calls), so the run ends on max_evaluations."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].return_value = None
-
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            if all_mocks["mutate"].call_count > 50:
-                raise AssertionError("run did not stop on max_evaluations")
-            return make_eval_result(candidate.id, {"i1": 0.5})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-
-        config = make_config(
-            max_generations=0,
-            max_evaluations=4,
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        # Seed (1 evaluation) then one parent evaluation per generation.
-        assert all_mocks["mutate"].call_count == 3
-
 
 # ---------------------------------------------------------------------------
 # run_evolution — mutation counter tracking
@@ -2508,10 +2422,9 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        # Seed only: max_generations=0 disables the generation cap, and the
-        # seed's one evaluation spends max_evaluations=1, so no generation
-        # starts.
-        evolution=EvolutionConfig(max_generations=0, max_evaluations=1),
+        # Seed only: the seed's one evaluation spends max_evaluations=1, so
+        # no generation starts.
+        evolution=EvolutionConfig(max_generations=1, max_evaluations=1),
     )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -2576,7 +2489,7 @@ class TestActiveFrontierSyncOnObjectiveMode:
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
                 # Seed only: the seed's one evaluation spends the budget.
-                max_generations=0,
+                max_generations=1,
                 max_evaluations=1,
                 perfect_score_threshold=None,
                 frontier_type="objective",
@@ -2719,7 +2632,7 @@ class TestActiveFrontierSyncOnObjectiveMode:
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
                 # Seed only: the seed's one evaluation spends the budget.
-                max_generations=0,
+                max_generations=1,
                 max_evaluations=1,
                 perfect_score_threshold=None,
                 frontier_type="objective",

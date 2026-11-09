@@ -171,9 +171,7 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
         affect which examples saved scores were computed against.
       * ``seedless``: enabled flag and external train/val paths.
       * ``evolution``: frontier dimensionality, acceptance, minibatch /
-        sampler shape, val-stage size, and merge policy.  The grouped
-        sampler's ``num_sampled_groups`` / ``num_examples_per_group`` are
-        present only when set, so states saved before they existed resume.
+        sampler shape, val-stage size, and merge policy.
 
     Deliberately omitted (safe to toggle between runs):
       * ``evolution.cache_evaluation``: cache state is handled
@@ -239,6 +237,8 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
             "acceptance_criterion": config.evolution.acceptance_criterion,
             "minibatch_size": config.evolution.minibatch_size,
             "batch_sampler": config.evolution.batch_sampler,
+            "num_sampled_groups": config.evolution.num_sampled_groups,
+            "num_examples_per_group": config.evolution.num_examples_per_group,
             "group_key_separator": config.evolution.group_key_separator,
             "val_stage_size": config.evolution.val_stage_size,
             "merge_enabled": config.evolution.merge_enabled,
@@ -247,12 +247,6 @@ def _resume_semantics(config: HelixConfig) -> dict[str, Any]:
             "merge_subsample_size": config.evolution.merge_subsample_size,
         },
     }
-    # Present only when set, like ``web_access`` below, so states saved
-    # before these keys existed still resume while they stay unset.
-    for key in ("num_sampled_groups", "num_examples_per_group"):
-        value = getattr(config.evolution, key)
-        if value is not None:
-            semantics["evolution"][key] = value
     if not config.agent.web_access:
         semantics["agent"] = {"web_access": False}
     return semantics
@@ -284,10 +278,6 @@ def _semantic_diffs(
     diffs: list[str] = []
     for key in sorted(set(saved) | set(current)):
         path = f"{prefix}.{key}" if prefix else key
-        # A key recorded as null means the same as an absent one: keys pinned
-        # only when set were saved as explicit nulls by earlier builds.
-        if saved.get(key) is None and current.get(key) is None:
-            continue
         if key not in saved:
             diffs.append(
                 f"{path}: missing in saved state, current={_format_diff_value(current[key])}"
@@ -2310,12 +2300,7 @@ def _run_evolution_impl(
         mutations_accepted = 0
 
         gen = start_gen - 1
-        # ``max_generations <= 0`` disables the generation cap; the run then
-        # ends on max_evaluations (EvolutionConfig refuses neither being set).
-        while (
-            config.evolution.max_generations <= 0
-            or gen < config.evolution.max_generations
-        ):
+        while gen < config.evolution.max_generations:
             # GEPA parity: ScoreThresholdStopper (utils/stop_condition.py),
             # which GEPAEngine.run checks before each iteration, stops once
             # max(program_full_scores_val_set) >= threshold.  The frontier is
@@ -3548,29 +3533,6 @@ def _run_evolution_impl(
             # Write skip records for this generation (GEPA parity — single JSON list)
             if _gen_skip_records:
                 _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
-
-            # With no generation cap only the budget ends the run, so a
-            # generation that charged no evaluation leaves it where it was.
-            # That needs a cached parent score, which only the single-task
-            # path uses (the minibatch path re-evaluates, as GEPA does): every
-            # slot skipped a perfect parent, or its mutation failed or changed
-            # nothing, so the child was not evaluated either.  The next
-            # generation can do the same, and each one may still pay for its
-            # mutations, so stop rather than risk an unbounded run.  GEPA cannot stall: it evaluates the
-            # parent minibatch uncached every iteration and counts it
-            # (``ReflectiveMutationProposer.propose``, ``eval_curr``).
-            if (
-                config.evolution.max_generations <= 0
-                and state.budget.evaluations == _batch_budget_guard.evaluations_before
-            ):
-                print_warning(
-                    f"Generation {gen} charged no evaluation (every parent was "
-                    "skipped as perfect on a cached score, or no mutation "
-                    "produced a new candidate), so with no max_generations cap "
-                    "the budget would never run out -- stopping."
-                )
-                _save_state(state)
-                break
 
             # Check semantic skip: all proposals were perfect on the minibatch.
             # GEPA parity (mirrors GEPA unconditionally incrementing its own

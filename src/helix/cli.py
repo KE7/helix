@@ -1085,20 +1085,14 @@ def _load_skips(base_dir: Path) -> list[dict[str, Any]]:
     "--stage",
     "stage",
     default=None,
-    help=(
-        "Filter by the Stage column, the evaluation an attempt was scored on: "
-        "train_minibatch, train or val_stage (attempts view only)."
-    ),
+    type=click.Choice(["minibatch_gate", "train_gate", "val_stage"]),
+    help="Filter by rejection gate (attempts view only).",
 )
 @click.option(
     "--reason",
     "reason_substr",
     default=None,
-    help=(
-        "Filter by reason substring (matched against the reason field), e.g. "
-        "minibatch_gate, train_gate, val_stage, duplicate_child, "
-        "proposal_selection."
-    ),
+    help="Filter by reason substring (matched against the reason field).",
 )
 @click.option(
     "--cid",
@@ -1149,8 +1143,7 @@ def attempts_cmd(
     \b
       helix attempts                        # all rejected attempts
       helix attempts --generation 12        # only generation 12
-      helix attempts --reason minibatch_gate # only minibatch-gate rejections
-      helix attempts --stage val_stage      # only attempts scored on the val stage
+      helix attempts --stage minibatch_gate # only minibatch rejections
       helix attempts --skips                # perfect-subsample skips
       helix attempts --skips --generation 12
       helix attempts --cid g12-s4           # full JSON for one attempt
@@ -1226,7 +1219,7 @@ def attempts_cmd(
         ]
     if stage is not None:
         records = [
-            r for r in records if r.get("attempt", {}).get("stage") == stage
+            r for r in records if r.get("attempt", {}).get("reason") == stage
         ]
     if reason_substr is not None:
         records = [

@@ -98,9 +98,8 @@ reports its return value as JSON rather than a pickle. dspy is pinned to
 | Proposer | `reflection_lm="openai/gpt-5"`, round-robin over components | HELIX mutation agent: Claude Code on `claude-haiku-4-5`, 40 turns |
 
 HELIX's `max_evaluations` counts the same metric calls as GEPA's
-`max_metric_calls`; `max_generations = 1000` is a guard. With
-`cache_evaluation = true` and one task, a generation whose mutations all fail
-or change nothing reuses the parent's cached score and spends no evaluation.
+`max_metric_calls`; `max_generations = 1000` is only a guard, because every
+generation spends at least one evaluation.
 
 ### Environment
 

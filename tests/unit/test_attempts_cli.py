@@ -180,19 +180,6 @@ class TestAttemptsTableDefault:
         assert "g12-s4" not in result.output
         assert "g14-s6" not in result.output
 
-    def test_attempts_stage_filters_on_the_stage_column(self, tmp_path: Path) -> None:
-        """--stage matches what the Stage column shows (attempt.stage), not
-        the reason: g12-s4 has stage train_minibatch, reason minibatch_gate."""
-        helix_dir = _make_helix_dir(tmp_path)
-        runner = CliRunner()
-        result = runner.invoke(
-            cli, ["attempts", "--path", str(helix_dir), "--stage", "train_minibatch"]
-        )
-        assert result.exit_code == 0, result.output
-        assert "g12-s4" in result.output
-        assert "g13-s5" not in result.output
-        assert "g14-s6" not in result.output
-
     def test_attempts_reads_the_project_given_by_dir(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
