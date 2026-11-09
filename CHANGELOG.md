@@ -301,30 +301,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless `retain_rejected_worktrees` kept it). A merge that
   fails its subsample gate is now recorded under `.helix/attempts/` (reason
   `merge_subsample`) instead of `.helix/evaluations/`.
-- Single-task mode (no dataset): an evaluator run that raises on the parent
-  or on the child no longer ends the run. As with minibatches, the slot is
-  rejected, its worktree removed, and the evaluator run charged; with
-  `num_parallel_proposals > 1` a failed parent evaluation used to cost
-  nothing against `max_evaluations`. The child's train evaluation now runs
-  in the parallel proposal phase, like a minibatch child's.
-- Byte-identical children: under `proposal_selection = "all_improvements"`
-  (the default) a child claims its content only by joining the frontier, so
-  a child that fails its own parent's validation stage no longer gets an
-  identical child of another parent dropped as its duplicate.
-  `best_improvement` and `top_k` collapse identical children before ranking,
-  each content at its best-ranked copy, so `top_k` promotes k distinct
-  children instead of fewer.
-- A child evaluation that raises after a partial cache hit is charged for
-  the examples sent to the evaluator, not for the whole minibatch.
-- Grouped stratified sampling (`num_sampled_groups`,
-  `num_examples_per_group`) sets `minibatch_size` to their product, which is
-  what each minibatch holds; it used to ignore `minibatch_size` silently,
-  and a different explicit value is now a configuration error. The run
-  warns at start when a group has fewer than `num_examples_per_group`
-  examples (it is never sampled) and when too few groups are large enough,
-  so minibatches fall back to unstratified sampling.
-- A change-summary call whose revert of its own edits fails no longer drops
-  the mutation it describes; the failure is logged and the mutation kept.
 - `helix init`: the next-steps message escapes bracketed table names such as
   `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
 - Backend transcript preservation now covers every backend. It was only ever

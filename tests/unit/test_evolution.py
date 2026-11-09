@@ -913,63 +913,6 @@ class TestGatingInEvolutionLoop:
         assert result.aggregate_scores == first
 
 
-class TestSingleTaskEvalFailures:
-    """Single-task mode (no dataset): an evaluator run that raises is a failed
-    proposal slot, as on the minibatch path, never the end of the run."""
-
-    def _run(self, tmp_path, all_mocks, *, failing: str, n_proposals: int = 1):
-        from helix.exceptions import EvaluatorError
-
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        all_mocks["mutate"].side_effect = lambda **kw: make_candidate(
-            kw["new_id"], generation=1
-        )
-        seed_val_done: list[bool] = []
-
-        def run_eval(candidate, config, split=None, **kwargs):
-            if candidate.id == failing and (failing != "g0-s0" or seed_val_done):
-                raise EvaluatorError("no HELIX_RESULT line")
-            seed_val_done.append(True)
-            return make_eval_result(candidate.id, {"i1": 0.5})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-        config = make_config(max_generations=1, max_evaluations=10000)
-        config.evolution.num_parallel_proposals = n_proposals
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-        return all_mocks["save_state"].call_args[0][0]
-
-    @pytest.mark.parametrize("n_proposals", [1, 2])
-    def test_child_train_eval_error_rejects_the_child(
-        self, tmp_path, all_mocks, n_proposals
-    ):
-        state = self._run(
-            tmp_path, all_mocks, failing="g1-s1", n_proposals=n_proposals
-        )
-
-        removed = [c.args[0].id for c in all_mocks["remove_worktree"].call_args_list]
-        assert "g1-s1" in removed
-        lineage_ids = [c.args[1].id for c in all_mocks["record_entry"].call_args_list]
-        assert "g1-s1" not in lineage_ids
-        snapshotted = [c.args[0].id for c in all_mocks["snapshot_candidate"].call_args_list]
-        assert "g1-s1" not in snapshotted
-        # Seed val, then per slot: parent train + child train (the failed
-        # run is charged like any other evaluator run).
-        assert state.budget.evaluations == 1 + 2 * n_proposals
-
-    @pytest.mark.parametrize("n_proposals", [1, 2])
-    def test_parent_train_eval_error_skips_the_slot_and_is_charged(
-        self, tmp_path, all_mocks, n_proposals
-    ):
-        state = self._run(
-            tmp_path, all_mocks, failing="g0-s0", n_proposals=n_proposals
-        )
-
-        all_mocks["mutate"].assert_not_called()
-        # Seed val, then one failed parent train eval per slot.
-        assert state.budget.evaluations == 1 + n_proposals
-
-
 def _filter_charge_calls(spy, *, source: str, candidate_id: str) -> list:
     """Return the spy invocations whose kwargs match (source, candidate_id)."""
     return [

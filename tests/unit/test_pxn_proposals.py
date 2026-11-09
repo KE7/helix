@@ -29,7 +29,6 @@ from helix.config import (
 )
 from helix.evolution import run_evolution
 from helix.population import Candidate, EvalResult, ParetoFrontier
-from helix.state import BudgetState, EvolutionState
 from helix.proposals import (
     AcceptanceJudgement,
     EvaluatedProposal,
@@ -336,12 +335,7 @@ def _gated(order: int, improvement: float, child_id: str = "") -> GatedProposal:
     ctx = (_make_candidate("p"), None, None, child.id)
     return GatedProposal(
         order=order,
-        proposal=EvaluatedProposal(
-            presample_ctx=ctx,
-            parent_eval_result=None,  # type: ignore[arg-type]
-            child=child,
-            child_eval_result=_make_result(child.id, {}),
-        ),
+        proposal=EvaluatedProposal(presample_ctx=ctx, parent_eval_result=None, child=child),  # type: ignore[arg-type]
         judgement=AcceptanceJudgement(
             accepted=True, before=[0.0], after=[improvement]
         ),
@@ -722,105 +716,6 @@ class TestChildDedupe:
 
         assert key_spy.call_count == 0
 
-    def test_top_k_promotes_k_distinct_children(
-        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
-    ) -> None:
-        """Duplicates are collapsed before selection, so k distinct children
-        are promoted rather than k minus the duplicates among them."""
-        train_path = _write_train_jsonl(tmp_path, n=6)
-        seed = _make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        promoted = _scored_children(
-            all_mocks, seed.id, {"g1-s1": 0.9, "g1-s2": 0.9, "g1-s3": 0.6}
-        )
-        mocker.patch(
-            "helix.evolution._candidate_content_key",
-            side_effect=lambda c: {"g1-s1": "tree-a", "g1-s2": "tree-a"}.get(
-                c.id, f"tree-{c.id}"
-            ),
-        )
-
-        config = _make_config(
-            train_path,
-            num_parallel_proposals=1,
-            mutations_per_parent=3,
-            proposal_selection="top_k",
-            proposal_top_k=2,
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        assert [p for p in promoted if p != seed.id] == ["g1-s1", "g1-s3"]
-
-    def test_a_copy_that_fails_validation_does_not_claim_its_content(
-        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
-    ) -> None:
-        """Identical children of two parents: the first fails its parent's
-        validation stage, and the second, which passes its own parent's,
-        must still be promoted (it used to be dropped as a duplicate)."""
-        from helix.evolution import _resume_semantics
-
-        train_path = _write_train_jsonl(tmp_path, n=6)
-        config = _make_config(
-            train_path,
-            max_generations=2,
-            num_parallel_proposals=2,
-            val_stage_size=2,
-        )
-        config.dataset.val_size = 4
-        strong = _make_candidate("g0-s0")
-        weak = _make_candidate("g1-s1")
-        base_dir = tmp_path / ".helix"
-        for cid in (strong.id, weak.id):
-            (base_dir / "worktrees" / cid).mkdir(parents=True)
-        val_scores = {"g0-s0": 0.9, "g1-s1": 0.1}
-        all_mocks["load_state"].return_value = EvolutionState(
-            generation=1,
-            frontier=[strong.id, weak.id],
-            instance_scores={},
-            budget=BudgetState(),
-            config_hash="",
-            mutation_counter=1,
-            resume_semantics=_resume_semantics(config),
-        )
-        all_mocks["_load_evaluation"].side_effect = lambda _d, cid: _make_result(
-            cid, {str(i): val_scores[cid] for i in range(4)}
-        )
-        # Parent order: the strong parent's child is applied first.
-        parents = iter([strong, weak])
-        mocker.patch(
-            "helix.evolution.select_candidate",
-            side_effect=lambda *a, **k: next(parents),
-        )
-        mocker.patch(
-            "helix.evolution._candidate_content_key",
-            side_effect=lambda c: "same" if c.id.startswith("g2-") else c.id,
-        )
-        all_mocks["mutate"].side_effect = lambda **kw: _make_candidate(kw["new_id"])
-
-        def run_eval(
-            candidate: Candidate,
-            config: HelixConfig,
-            split: str = "val",
-            instance_ids: list[str] | None = None,
-            **kwargs: Any,
-        ) -> EvalResult:
-            assert instance_ids is not None
-            if split == "train":
-                score = 0.9 if candidate.id.startswith("g2-") else 0.3
-            else:
-                score = 0.5
-            return _make_result(candidate.id, {i: score for i in instance_ids})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-        promoted: list[str] = []
-        all_mocks["_save_evaluation"].side_effect = (
-            lambda _d, r, *a, **k: promoted.append(r.candidate_id)
-        )
-
-        run_evolution(config, tmp_path, base_dir)
-
-        assert promoted == ["g2-s3"]
-
 
 class TestAcceptedChildIsSavedAtOnce:
     def test_state_lists_the_first_top_k_winner_before_the_second_validates(
@@ -910,28 +805,6 @@ class TestMinibatchRepeatWarning:
 
         warnings = [str(c.args[0]) for c in all_mocks["print_warning"].call_args_list]
         assert not any("minibatches will repeat" in w for w in warnings)
-
-    def test_run_warns_when_stratified_sampling_cannot_stratify(
-        self, tmp_path: Path, all_mocks: dict[str, Any]
-    ) -> None:
-        """Ids without a group separator are one-id groups: none can supply
-        two examples, so the run says it samples without stratification."""
-        train_path = _write_train_jsonl(tmp_path, n=8)
-        seed = _make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-        _scored_children(all_mocks, seed.id, {"g1-s1": 0.9})
-
-        config = _make_config(
-            train_path,
-            minibatch_size=4,
-            batch_sampler="stratified",
-            num_sampled_groups=2,
-            num_examples_per_group=2,
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        warnings = [str(c.args[0]) for c in all_mocks["print_warning"].call_args_list]
-        assert any("without stratification" in w for w in warnings), warnings
 
 
 # ---------------------------------------------------------------------------

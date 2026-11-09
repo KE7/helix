@@ -71,7 +71,6 @@ from helix.proposals import (
     ProposalResult,
     SkippedProposal,
     TamperedProposal,
-    dedupe_children,
     judge_acceptance,
     select_proposals,
 )
@@ -1015,7 +1014,6 @@ def _cached_evaluate_batch(
     split: str,
     project_root: Path,
     evaluation_phase: str | None = None,
-    sent_ids: list[str] | None = None,
 ) -> tuple[EvalResult, int]:
     """Evaluate ``candidate`` on ``example_ids`` with per-example caching.
 
@@ -1037,10 +1035,6 @@ def _cached_evaluate_batch(
     is the number of examples that were actually sent to the evaluator
     subprocess (0 if all were cached) — mirrors GEPA's
     ``len(uncached_ids)`` return value.
-
-    ``sent_ids``, when given, collects the ids handed to the evaluator as it
-    starts, so a caller can still charge exactly those when the run raises
-    and no count is returned.
     """
     # Non-cached branch — mirrors GEPA's ``cached_evaluate_full`` verbatim
     # for the no-cache case.
@@ -1051,8 +1045,6 @@ def _cached_evaluate_batch(
         with _worktree_lock(candidate.worktree_path):
             _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, example_ids)
-            if sent_ids is not None:
-                sent_ids.extend(example_ids)
             result = run_evaluator(
                 candidate,
                 config,
@@ -1101,8 +1093,6 @@ def _cached_evaluate_batch(
         with _worktree_lock(candidate.worktree_path):
             _refresh_protected_evaluator_files(candidate, config, project_root)
             _write_helix_batch(candidate.worktree_path, batch)
-            if sent_ids is not None:
-                sent_ids.extend(batch)
             fresh = run_evaluator(
                 candidate,
                 config,
@@ -1669,26 +1659,15 @@ def _run_proposal_worker(
                 parent_n_uncached=len(_sub_ids),
             )
     else:
-        # No-minibatch path (single-task mode): one train eval of the parent,
-        # charged 0 when cached and 1 otherwise.  ``EvaluationCache`` locks
-        # every access, so concurrent slots may share it.
+        # No-minibatch path: run train eval inside worker.
+        # eval_cache is a shared dict; safe for n=1 (single-task mode).
         set_phase(HelixPhase.TRAIN_EVALUATION)
-        try:
-            _train_result, _train_cached = _cached_eval(
-                _parent, config, "train", eval_cache
-            )
-        except Exception as _pe_exc:
-            print_warning(
-                f"Parent eval for proposal {_new_id} "
-                f"(parent: {_parent.id}, gen {gen}) failed: "
-                f"{type(_pe_exc).__name__}: {_pe_exc} — proposal slot skipped."
-            )
-            # A cache hit cannot raise, so the evaluator ran.
-            return MutationFailedProposal(
-                presample_ctx=pre_ctx, parent_eval_result=None, parent_n_uncached=1
-            )
+        _train_result, _train_cached = _cached_eval(
+            _parent, config, "train", eval_cache
+        )
         _train_result.candidate_id = _parent.id
         _parent_eval = _train_result
+        # Encode was_cached as n_uncached (0 = was_cached, 1 = not cached)
         _parent_n_uncached = 0 if _train_cached else 1
 
     # ---- Step W2: Build eval_for_mutate ----
@@ -1780,40 +1759,34 @@ def _run_proposal_worker(
             child_usage=_child.usage if _child.usage else None,
         )
 
-    # ---- Step W6: Child gate eval ----
-    # The minibatch path evaluates the child on the parent's minibatch; the
-    # single-task path on its one train instance, like the parent above.
-    # Either way an evaluator run that raises rejects this child alone and
-    # is charged for the ids the evaluator was actually sent.
-    _sent_ids: list[str] = []
-    try:
-        if _sub_ids is not None:
-            _child_eval, _child_n_uncached = _cached_evaluate_batch(
+    # ---- Step W6: Child minibatch eval ----
+    _child_eval: "EvalResult | None" = None
+    _child_n_uncached: int = 0
+    if _sub_ids is not None:
+        try:
+            _ce, _cn = _cached_evaluate_batch(
                 _child,
                 list(_sub_ids),
                 minibatch_cache,  # use cache for child (unlike parent bypass)
                 config,
                 "train",
                 project_root,
-                sent_ids=_sent_ids,
             )
-        else:
-            _child_eval, _child_cached = _cached_eval(
-                _child, config, "train", eval_cache
+        except Exception as _ce_exc:
+            return ChildEvalFailedProposal(
+                presample_ctx=pre_ctx,
+                parent_eval_result=_parent_eval,
+                child=_child,
+                error=f"{type(_ce_exc).__name__}: {_ce_exc}",
+                parent_n_uncached=_parent_n_uncached,
+                # Every id the evaluator was sent; a fresh child's content is
+                # almost never already cached.
+                child_n_uncached=len(_sub_ids),
+                child_usage=_child.usage if _child.usage else None,
             )
-            _child_n_uncached = 0 if _child_cached else 1
-    except Exception as _ce_exc:
-        return ChildEvalFailedProposal(
-            presample_ctx=pre_ctx,
-            parent_eval_result=_parent_eval,
-            child=_child,
-            error=f"{type(_ce_exc).__name__}: {_ce_exc}",
-            parent_n_uncached=_parent_n_uncached,
-            # A cache hit cannot raise, so a single-task eval that raised ran.
-            child_n_uncached=len(_sent_ids) if _sub_ids is not None else 1,
-            child_usage=_child.usage if _child.usage else None,
-        )
-    _child_eval.candidate_id = _child.id
+        _ce.candidate_id = _child.id
+        _child_eval = _ce
+        _child_n_uncached = _cn
 
     return EvaluatedProposal(
         presample_ctx=pre_ctx,
@@ -2053,11 +2026,6 @@ def _run_evolution_impl(
                 num_sampled_groups=config.evolution.num_sampled_groups,
                 num_examples_per_group=config.evolution.num_examples_per_group,
             )
-            assert train_loader is not None
-            for _problem in batch_sampler.stratification_warnings(
-                train_loader.all_ids()
-            ):
-                print_warning(f"Stratified sampling: {_problem}")
         else:
             batch_sampler = EpochShuffledBatchSampler[str](
                 minibatch_size=config.evolution.minibatch_size,
@@ -3017,7 +2985,7 @@ def _run_evolution_impl(
                     2 * len(_context[2])
                     if _context[2] is not None
                     # In no-example mode the worker evaluates the parent and
-                    # the child once each, one unit apiece.
+                    # the sequential gate evaluates the child, one unit each.
                     else 2
                 )
                 for _context in presample_contexts
@@ -3093,11 +3061,7 @@ def _run_evolution_impl(
                         num_actual_examples=wr.child_n_uncached,
                         candidate_id=_slot_id,
                         split="train",
-                        source=(
-                            "mutation_minibatch_gate"
-                            if _slot_subsample is not None
-                            else "mutation_train_gate"
-                        ),
+                        source="mutation_minibatch_gate",
                     )
                 if not isinstance(wr, MutationFailedProposal):
                     mutations_attempted += 1
@@ -3249,17 +3213,24 @@ def _run_evolution_impl(
                 _save_state(state)
                 snapshot_candidate(child, f"helix: mutate {child.id}")
 
-                # --- Gating ---------------------------------------------------
-                # The worker evaluated the child on what it evaluated the
-                # parent on: (a) the parent's minibatch, or (b) in single-task
-                # mode, the one train instance.  Both gate on the configured
-                # strict-sum criterion (GEPA §5.1; ``acceptance_criterion``
-                # in ``GEPAEngine._accept_reflective_proposal``).
-                gating_result = wr.child_eval_result
-                _last_eval_result = gating_result
+                # --- Gating evaluation ----------------------------------------
+                # Two paths — both gate on GEPA's strict-sum acceptance criterion:
+                # (a) Minibatch gate: child eval already done in worker → use directly.
+                # (b) Legacy no-minibatch: run child eval sequentially here (old behavior).
+                _eval_for_mutate = wr.parent_eval_result  # parent baseline
 
-                if _subsample_ids is not None:
-                    # (a) Minibatch path.
+                if (
+                    use_minibatch_gate
+                    and _subsample_ids is not None
+                    and wr.parent_eval_result is not None
+                    and wr.child_eval_result is not None
+                ):
+                    # (a) Minibatch path: child eval result already in worker result
+                    gating_result = wr.child_eval_result
+                    _last_eval_result = gating_result
+
+                    # Apply the configured acceptance criterion on the
+                    # per-instance score vectors (GEPA §5.1).
                     #
                     # GEPA parity (``GEPAAdapter.evaluate``'s docstring,
                     # ``core/adapter.py``): a missing instance id in the
@@ -3319,8 +3290,25 @@ def _run_evolution_impl(
                         )
 
                 else:
-                    # (b) Single-task/no-example mode: gate on the train eval.
-                    _legacy_before = list(wr.parent_eval_result.instance_scores.values())
+                    # (b) Legacy no-minibatch path: run child eval sequentially
+                    # Single-task/no-example mode still gates on train eval.
+                    # The parent baseline comes from the train eval passed to the mutator.
+                    set_phase(HelixPhase.MUTATION_GATING)
+                    parent_acceptance_result = _eval_for_mutate
+                    gating_result, _gating_cached = _cached_eval(
+                        child, config, "train", eval_cache
+                    )
+                    gating_result.candidate_id = child.id
+                    _last_eval_result = gating_result
+                    # Single-task/no-example mode still charges on train eval.
+                    # GEPA parity (MODERATE D — mutation audit C3):
+                    # same strict-sum acceptance criterion as minibatch path.
+                    budget_api.charge_evaluation(
+                        state, was_cached=_gating_cached, candidate_id=child.id,
+                        split="train", source="mutation_train_gate",
+                    )
+
+                    _legacy_before = list(parent_acceptance_result.instance_scores.values())
                     _legacy_after = list(gating_result.instance_scores.values())
                     _judgement = judge_acceptance(
                         acceptance, _legacy_before, _legacy_after
@@ -3353,8 +3341,8 @@ def _run_evolution_impl(
                     subsample_ids=_subsample_ids,
                 )
 
-            def _apply_proposal(gated: GatedProposal) -> bool:
-                """Validate one gated proposal; True when it joined the frontier."""
+            def _apply_proposal(gated: GatedProposal) -> None:
+                """Promote one gated proposal to full validation and the frontier."""
                 nonlocal _last_eval_result
                 nonlocal merges_due, last_iter_found_new_program, mutations_accepted
 
@@ -3426,7 +3414,7 @@ def _run_evolution_impl(
                                 child, label="val-stage-rejected candidate"
                             )
                         del candidates[child.id]
-                        return False
+                        return
 
                     TRACE.emit(
                         EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -3509,7 +3497,6 @@ def _run_evolution_impl(
                     mutations_attempted=mutations_attempted,
                     mutations_accepted=mutations_accepted,
                 )
-                return True
 
             def _discard_gated_child(
                 gated: GatedProposal, *, label: str, reason: str, decision: str
@@ -3551,57 +3538,46 @@ def _run_evolution_impl(
                 _safe_remove_worktree(gated.child, label=label)
                 candidates.pop(gated.child.id, None)
 
-            # Byte-identical children: two slots can land on the same tree --
-            # most easily siblings of one parent, which start from the same
-            # worktree and the same reflection.  Promoting both would put two
-            # frontier entries on one point, spend a second full validation
-            # on a score already known, and weight parent selection toward
-            # it.  A child claims its content only by joining the frontier,
-            # so a copy that fails its own parent's validation stage leaves
-            # the content free for a copy from another parent.  This is a
-            # HELIX addition with no GEPA counterpart: GEPA's
-            # ``_run_parallel_reflective_batch`` (core/engine.py) adds every
-            # accepted proposal; only its merges dedupe, on
-            # ``merges_performed`` (gepa/proposer/merge.py).
-            #
-            # With a single slot per iteration there is no sibling to be
-            # identical to, so the default configuration pays nothing for
-            # the content keys (three git invocations each).
+            # Content key -> the child id that first claimed it this batch.
+            _seen_child_keys: dict[str, str] = {}
+            # With a single slot per iteration there is no sibling for a child
+            # to be identical to, so the default configuration pays nothing
+            # for the content keys (three git invocations each).
             _dedupe_batch = len(worker_results) > 1
-            _content_keys: dict[str, str] = {}
-            _promoted_keys: dict[str, str] = {}
 
-            def _content_key(child: Candidate) -> str:
-                # ``_candidate_content_key`` falls back to the candidate id
-                # when git cannot resolve a tree, so an unresolvable child is
-                # treated as unique: identical children are collapsed only
-                # when that can be proven, never guessed.
-                if child.id not in _content_keys:
-                    _content_keys[child.id] = _candidate_content_key(child)
-                return _content_keys[child.id]
+            def _drop_duplicate_child(gated: GatedProposal) -> bool:
+                """Drop a child byte-identical to one already promoted this batch.
 
-            def _discard_duplicate(gated: GatedProposal, original: str) -> None:
-                print_warning(
-                    f"Duplicate proposal: {gated.child.id} is byte-identical "
-                    f"to {original} -- removing."
-                )
-                _discard_gated_child(
-                    gated,
-                    label="duplicate proposal candidate",
-                    reason="duplicate_child",
-                    decision="reject_duplicate",
-                )
+                Two slots can land on the same tree — most easily multiple
+                siblings of one parent, which start from the same worktree and
+                the same reflection.  Applying both would put two
+                frontier entries on one point, spend a second full validation
+                on a score already known, and weight parent selection toward
+                whatever that point happens to be.
 
-            def _promote(gated: GatedProposal) -> None:
-                """Apply *gated* unless a copy of it already joined the frontier."""
+                ``_candidate_content_key`` falls back to the candidate id
+                when git cannot resolve a tree, so an unresolvable child
+                is treated as unique: this collapses children it can prove
+                identical and never guesses.
+                """
                 if not _dedupe_batch:
-                    _apply_proposal(gated)
-                    return
-                key = _content_key(gated.child)
-                if key in _promoted_keys:
-                    _discard_duplicate(gated, _promoted_keys[key])
-                elif _apply_proposal(gated):
-                    _promoted_keys[key] = gated.child.id
+                    return False
+                key = _candidate_content_key(gated.child)
+                first_claim = _seen_child_keys.get(key)
+                if first_claim is not None:
+                    print_warning(
+                        f"Duplicate proposal: {gated.child.id} is byte-identical "
+                        f"to {first_claim} -- removing."
+                    )
+                    _discard_gated_child(
+                        gated,
+                        label="duplicate proposal candidate",
+                        reason="duplicate_child",
+                        decision="reject_duplicate",
+                    )
+                    return True
+                _seen_child_keys[key] = gated.child.id
+                return False
 
             # ---- Step 3 driver -------------------------------------------
             # ``all_improvements`` promotes every proposal that clears the
@@ -3622,30 +3598,17 @@ def _run_evolution_impl(
             if _selection == "all_improvements":
                 for _p_idx, wr in enumerate(worker_results):
                     _gated = _gate_proposal(_p_idx, wr)
-                    if _gated is not None:
-                        _promote(_gated)
+                    if _gated is None:
+                        continue
+                    if _drop_duplicate_child(_gated):
+                        continue
+                    _apply_proposal(_gated)
             else:
                 _gated_batch: list[GatedProposal] = []
                 for _p_idx, wr in enumerate(worker_results):
                     _gated = _gate_proposal(_p_idx, wr)
                     if _gated is not None:
                         _gated_batch.append(_gated)
-
-                # Collapse identical children before ranking, so ``top_k``
-                # promotes k distinct ones.  Each content competes with its
-                # best-ranked copy (a stable sort, so ties go to the earlier
-                # slot).  Its other copies are dropped: validating a second
-                # copy would exceed the selected capacity the budget guard
-                # admitted for this batch.
-                if _dedupe_batch:
-                    _unique, _duplicates = dedupe_children(
-                        sorted(_gated_batch, key=lambda g: -g.improvement),
-                        _content_key,
-                    )
-                    _kept = {_content_key(g.child): g.child.id for g in _unique}
-                    for _g in sorted(_duplicates, key=lambda g: g.order):
-                        _discard_duplicate(_g, _kept[_content_key(_g.child)])
-                    _gated_batch = sorted(_unique, key=lambda g: g.order)
 
                 _selected = select_proposals(
                     _gated_batch,
@@ -3671,7 +3634,9 @@ def _run_evolution_impl(
                             decision="reject_selection",
                         )
                 for _g in _selected:
-                    _promote(_g)
+                    if _drop_duplicate_child(_g):
+                        continue
+                    _apply_proposal(_g)
 
             # Write skip records for this generation (GEPA parity — single JSON list)
             if _gen_skip_records:

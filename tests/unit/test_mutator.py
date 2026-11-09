@@ -1871,45 +1871,6 @@ class TestSummaryCallCannotAlterTheCandidate:
         # ...and the summary still came through.
         assert result.summary == "Fitted a gradient booster."
 
-    def test_a_revert_that_raises_never_drops_the_mutation(
-        self, tmp_path: Path, mocker
-    ):
-        """The revert is best-effort like the rest of the summary step: if
-        restoring a file fails, the mutation that already succeeded is kept."""
-        from helix.mutator import SUMMARY_PROMPT_ARTIFACT_NAME
-
-        wt = self._repo(tmp_path)
-        child = make_candidate("g1-s0", str(wt))
-        mocker.patch("helix.mutator.clone_candidate", return_value=child)
-        mocker.patch("helix.mutator.remove_worktree")
-        mocker.patch(
-            "helix.mutator._restore_paths_from_tree",
-            side_effect=PermissionError("read-only file"),
-        )
-
-        def fake_invoke(worktree_path, prompt, agent_config, **kwargs):
-            p = Path(worktree_path)
-            if kwargs.get("prompt_artifact_name") == SUMMARY_PROMPT_ARTIFACT_NAME:
-                (p / SUMMARY_ARTIFACT_NAME).write_text("Fitted a model.")
-                (p / "solver.py").write_text("def score(ctx):\n    return 0.0\n")
-            else:
-                (p / "solver.py").write_text("def score(ctx):\n    return real_model(ctx)\n")
-            return ({}, UsageStats())
-
-        mocker.patch("helix.mutator.invoke_claude_code", side_effect=fake_invoke)
-
-        result = mutate(
-            make_candidate("g0-s0"),
-            make_eval_result(),
-            "g1-s0",
-            make_config(),
-            Path("/tmp"),
-            sibling_history="",
-        )
-
-        assert result is child
-        assert result.summary == "Fitted a model."
-
     def test_the_real_index_is_left_alone(self, tmp_path: Path):
         """The hash is computed in a temp index; the worktree's own index
         belongs to the mutation and to ``snapshot_candidate`` after it."""

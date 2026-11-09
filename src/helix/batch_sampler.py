@@ -143,12 +143,9 @@ class StratifiedBatchSampler(Generic[DataId]):
       round, dropping any trailing remainder rather than padding with
       duplicates (padding would re-introduce a group collision within the
       final minibatch).
-    - Fallback: when fewer than ``num_sampled_groups`` groups hold at least
-      ``num_examples_per_group`` ids, a stratified minibatch is impossible,
-      so the sampler delegates to an internal
-      :class:`EpochShuffledBatchSampler` for GEPA parity semantics.
-      :meth:`stratification_warnings` reports this, and the groups too small
-      to sample, so the run can say so.
+    - Fallback: when ``len(groups) < num_sampled_groups``, a stratified
+      minibatch is impossible, so the sampler transparently delegates to an
+      internal :class:`EpochShuffledBatchSampler` for GEPA parity semantics.
 
     Invariants:
       S1. Every returned minibatch contains exactly ``m`` distinct group keys
@@ -197,34 +194,6 @@ class StratifiedBatchSampler(Generic[DataId]):
         # Fallback sampler used when num_groups < minibatch_size.  Lazily
         # created so the common case pays no extra allocations.
         self._fallback: EpochShuffledBatchSampler[DataId] | None = None
-
-    def stratification_warnings(self, ids: list[DataId]) -> list[str]:
-        """Say what this sampler will leave out of *ids*, which it does silently.
-
-        A group with fewer than ``num_examples_per_group`` ids never fills its
-        share of a minibatch, so it is never sampled.  When fewer than
-        ``num_sampled_groups`` groups are large enough, no stratified
-        minibatch exists and the sampler falls back to epoch-shuffled ones.
-        """
-        sizes = Counter(self.group_fn(_id) for _id in ids)
-        t = self.num_examples_per_group
-        small = sorted(group for group, n in sizes.items() if n < t)
-        usable = len(sizes) - len(small)
-        if usable < self.num_sampled_groups:
-            # The fallback samples every id, small groups included.
-            return [
-                f"Only {usable} groups have at least {t} examples, fewer than the "
-                f"{self.num_sampled_groups} groups each minibatch needs: minibatches "
-                "are sampled without stratification (epoch_shuffled)."
-            ]
-        if small:
-            shown = ", ".join(small[:5]) + (", ..." if len(small) > 5 else "")
-            return [
-                f"{len(small)} of {len(sizes)} groups have fewer than "
-                f"num_examples_per_group = {t} examples and are never sampled: "
-                f"{shown}."
-            ]
-        return []
 
     def _update_shuffled(self, loader: DataLoader[DataId]) -> None:
         all_ids = list(loader.all_ids())

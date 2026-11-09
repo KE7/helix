@@ -80,9 +80,7 @@ merge_subsample_size = 5         # stratified val subsample size for merge accep
 max_workers = 8                  # thread-pool cap for parent-eval + mutation pools
                                  # (default: os.cpu_count(), or 32 if that returns None)
 num_parallel_proposals = 1       # parallel mutations per generation
-minibatch_size = 3               # train-set minibatch size for reflective mutation; with the
-                                 # grouped stratified sampler it is num_sampled_groups *
-                                 # num_examples_per_group, and setting it otherwise is an error
+minibatch_size = 3               # train-set minibatch size for reflective mutation
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate; passing results carry into the tail

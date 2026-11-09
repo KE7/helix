@@ -74,7 +74,7 @@ class TamperedProposal:
 
 @dataclass
 class ChildEvalFailedProposal:
-    """The mutation produced a child, but the child's gate evaluation raised.
+    """The mutation produced a child, but the child's minibatch eval raised.
 
     ``child_n_uncached`` counts the ids the evaluator was sent, so the failed
     run is charged like any other evaluator run.
@@ -91,16 +91,12 @@ class ChildEvalFailedProposal:
 
 @dataclass
 class EvaluatedProposal:
-    """Every step completed, including the child's gate evaluation.
-
-    ``child_eval_result`` covers the same examples as ``parent_eval_result``:
-    the minibatch, or the one train instance in single-task mode.
-    """
+    """Every step completed; ``child_eval_result`` is None on the no-minibatch path."""
 
     presample_ctx: ProposalContext
     parent_eval_result: EvalResult
     child: Candidate
-    child_eval_result: EvalResult
+    child_eval_result: EvalResult | None = None
     parent_n_uncached: int = 0
     child_n_uncached: int = 0
     child_usage: UsageStats | None = None
@@ -256,9 +252,9 @@ def select_proposals(
 
 
 def dedupe_children(
-    gated: list[GatedProposal], content_key: Callable[[Candidate], str]
+    selected: list[GatedProposal], content_key: Callable[[Candidate], str]
 ) -> tuple[list[GatedProposal], list[GatedProposal]]:
-    """Split ``gated`` into first-seen children and byte-identical repeats.
+    """Split ``selected`` into first-seen children and byte-identical repeats.
 
     Two proposals in a batch can produce identical children — most easily
     multiple siblings of one parent, which start from the same worktree and
@@ -266,14 +262,13 @@ def dedupe_children(
     on one point, double-charge a full validation for a score already known,
     and skew parent selection toward whatever that point happens to be.
 
-    The first copy in the given order survives.  The ranking strategies pass
-    the batch best-ranked first, so each content competes for selection at
-    its best copy; the order never depends on completion timing.
+    Sampled order decides which copy survives, so the survivor does not
+    depend on completion timing.
     """
     seen: dict[str, GatedProposal] = {}
     unique: list[GatedProposal] = []
     duplicates: list[GatedProposal] = []
-    for candidate_proposal in gated:
+    for candidate_proposal in selected:
         key = content_key(candidate_proposal.child)
         if key in seen:
             duplicates.append(candidate_proposal)
