@@ -7,7 +7,8 @@ Rules for every contributor, human or agent. The core rule: **a PR shows that it
 When a design question comes up, check here first; when a review settles one, add it here.
 
 - **Say where HELIX follows GEPA and where it doesn't.** HELIX's search loop started from GEPA optimize_anything and has since diverged: whole-repository candidates, coding-agent mutations, P x N proposals, a protected evaluator. A change to selection, acceptance, minibatching, budgets or stopping says which it is. If it keeps GEPA's behaviour, cite the GEPA symbol (by name, not line number); if it departs, say why in the code and the PR.
-- **The smallest design that covers every case.** Hook the single place where the behaviour lives instead of adding special cases around it, and prefer a default that is right to a new opt-in flag.
+- **Design for how people actually use HELIX.** A user points HELIX at a normal git repository, gives it a finite budget, logs in to one coding agent and runs it until the budget or the generation cap ends it. Handle that well. Don't add code, config values or semantics for setups nobody runs: an unlimited budget, a symlink swapped in under a protected folder, a filename starting with `:`. When such a case can't happen by accident and costs nothing when it does, leave it alone; if it could hide a real failure, fail loudly instead of handling it.
+- **The smallest design that covers those cases.** Hook the single place where the behaviour lives instead of adding special cases around it, and prefer a default that is right to a new opt-in flag.
 - **The evaluator is protected.** Nothing may leak scoring code, held-out ids or answers to the mutation agent, through files, prompts, environment variables or logs. A change near the evaluator, the sandbox or the prompt says in its PR how it keeps that true.
 
 ## Repository
@@ -36,10 +37,10 @@ When a design question comes up, check here first; when a review settles one, ad
 10. **Before you open the PR, CI passes locally (rule 14) and you have reviewed your own diff.** Have your coding agent review it: `/code-review` in Claude Code, `/review` in Codex, or in any other agent this prompt:
 
     ```text
-    Review `git diff main...HEAD` for bugs and for anything that leaks the protected evaluator to the mutation agent. Report only what is worth fixing: a real bug, a leak, or complexity the change adds without need. Skip style nits and speculative findings.
+    Review `git diff main...HEAD` for bugs and for anything that leaks the protected evaluator to the mutation agent. Judge each finding against how a user actually runs HELIX: a normal git repository, a finite budget, one logged-in coding agent. Report only what is worth fixing: a bug a typical run would hit, a leak, or complexity the change adds without need. Skip style nits, speculative findings, and cases that need an unusual setup to happen.
     ```
 
-    Judge the findings by the smallest-design principle above: fix the ones that matter with the simplest change, and drop the rest. Say in the PR what the review found and what you did about it. Then re-run CI if you changed code.
+    Fix a finding only if a real run hit it, it leaks the evaluator or held-out data, or it breaks or wastes money in a typical setup. Drop the rest, even when the reviewer is right that the case exists; a line in the PR saying so is enough. Fix what you keep with the simplest change. Don't review again until a review comes back empty: reviewers always find another edge case, and each fix for one adds code. Say in the PR what the review found and what you did about it. Then re-run CI if you changed code.
 11. A PR that fixes an issue links it (`Fixes #N`), so merging closes it.
 12. Keep writing short and concrete: PR descriptions, docs, comments. Say what changed, why, and how you know it works.
 
