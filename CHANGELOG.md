@@ -217,6 +217,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- The scrubbed environment of the agent and evaluator keeps `USER` on the
+  host (the Docker sandbox still doesn't get it). Claude Code on macOS finds
+  its Keychain login by it, so an unsandboxed run on a Claude subscription
+  failed every mutation with "Not logged in" unless `passthrough_env` listed
+  `USER`.
 - `examples/web_researcher`: the evaluator command now installs HELIX
   from PyPI (`--with 'helix-evo>=0.3.0'`, the first release with
   `helix.timed`), so `from helix import timed` in `evaluate.py` no longer

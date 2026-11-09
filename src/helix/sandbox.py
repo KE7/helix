@@ -1323,8 +1323,11 @@ def _docker_args(
         )
     )
 
+    # The container has its own user, home and PATH; the host's don't apply.
     container_env = {
-        key: value for key, value in env.items() if key not in {"HOME", "PATH"}
+        key: value
+        for key, value in env.items()
+        if key not in {"HOME", "PATH", "USER"}
     }
     container_env["HOME"] = "/home/node"
     container_env["PATH"] = (
