@@ -255,12 +255,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and its change summary (which later mutations of the seed read) described
   that `.gitignore` edit as part of the agent's work, and a child of the seed
   that changed nothing still paid for a summary.
+- `max_generations` must be at least 1. `max_generations = 0` (or
+  `helix evolve --generations 0`) is now a config error that exits 2. It used
+  to run no generations with `max_evaluations` set, and end in a `ValueError`
+  traceback from inside the run without it. GEPA has no generation cap (its
+  stop is `max_metric_calls`); HELIX keeps a required one for simplicity.
+- `helix best --export PATH` copies only the candidate's files, the ones
+  HELIX committed for it. It used to copy the whole worktree, including the
+  agent's `.agent_task_prompt.md`, `.helix_backend_*` logs,
+  `helix_batch.json`, `.helix_artifacts/` and caches.
+- Resuming a run saved by HELIX 0.2.x now says it cannot be resumed
+  by 0.3.0 (its state pins the removed `evaluator.score_parser`) and to
+  finish it with 0.2.x or start fresh, instead of telling you to restore a
+  config 0.3.0 cannot load.
+- `--dir` with a relative path now works. `helix evolve --dir proj` created
+  the seed worktree at `proj/proj/.helix/worktrees/g0-s0` and then evaluated
+  `proj/.helix/worktrees/g0-s0`, which failed with "no HELIX_RESULT". Every
+  command now resolves `--dir` to an absolute path.
+- `helix attempts` takes `--dir` (the project directory) like every other
+  command, so `helix attempts --dir .` as the HELIX skill documents works.
+  The old `--path <.helix dir>` still works.
+- Seedless search now builds on its seed. The seed agent's files were never
+  committed, so every child was cloned from an empty tree and had to rewrite
+  the solver from scratch while being scored against the seed. HELIX now
+  commits the generated seed before evaluating it, as it does a mutation.
+- Sibling history (`sibling_history = true`) records each child's
+  training-gate score. Accepted children were recorded with their full
+  validation mean and val-stage rejects with their val-subset mean, and those
+  scores reached later mutation prompts. GEPA's
+  `ReflectiveMutationProposer.propose` reflects on the train minibatch only.
+- The seedless seed prompt no longer shows `evaluator.command`, matching
+  GEPA's `_build_seed_generation_prompt`. State the file and interface the
+  evaluator expects in the objective or `agent.background`.
+- The scrubbed environment of the agent and evaluator keeps `USER` on the
+  host (the Docker sandbox still doesn't get it). Claude Code on macOS finds
+  its Keychain login by it, so an unsandboxed run on a Claude subscription
+  failed every mutation with "Not logged in" unless `passthrough_env` listed
+  `USER`.
+- `examples/web_researcher`: the evaluator command now installs HELIX
+  from PyPI (`--with 'helix-evo>=0.3.0'`, the first release with
+  `helix.timed`), so `from helix import timed` in `evaluate.py` no longer
+  fails with `ModuleNotFoundError`, in `helix evolve` or when run by hand
+  from the example README.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
   (with pi on a local model it searched the disk for the file and produced
-  nothing). `generate_seed` now writes the prompt file the same way a
+  nothing). Seed generation now gets its prompt file the same way a
   mutation does.
+- Merge agents now get their task. Merges had the same missing
+  `.agent_task_prompt.md` as seed generation, on every backend since 0.2.x:
+  the agent was told to read a file that did not exist, so it could not see
+  the objective or either parent's diff, and usually changed nothing. The
+  prompt file is now written by the backend call itself, for mutations,
+  merges, seeds and change summaries alike.
+- A merge that leaves the code identical to one of its parents is rejected
+  before it is evaluated, recorded under `.helix/attempts/` with reason
+  `merge_no_change`, and the generation goes on to mutation. It used to be
+  scored, tie its parent at the subsample gate, and enter the frontier as a
+  duplicate of that parent. The comparison leaves out protected and omitted
+  paths, so HELIX's own refresh of the protected files does not count as a
+  change.
+- The merge prompt no longer shows the parents' validation ids or scores
+  (the "Candidate A/B Strengths" sections). Nothing from validation reaches
+  an agent now; GEPA's merge shows no scores either.
+- Diffs in the merge prompt leave out protected evaluator files and
+  `[sandbox].omit_from_agent` paths, which a candidate's history can hold
+  (for example after a protected-file refresh on resume).
+- Merges of two children of the seed now show the agent both parents' diffs.
+  The seed's worktree is detached, so diffs against its branch name failed
+  and came back empty; diffs now use each candidate's commit, and a diff
+  that fails fails the merge (before any tokens are spent) instead of
+  prompting with an empty diff.
+- A merge that passes its subsample gate is no longer thrown away when its
+  evaluations reach `max_evaluations`: it gets its full validation and joins
+  the frontier, as in GEPA, and the run stops at the next iteration. The
+  subsample evaluation it had already paid for used to be wasted.
 - Resuming after an interrupted generation no longer fails with "a branch
   named 'helix/g1-s2' already exists". An interrupt can stop cleanup after
   it removes a candidate's worktree but before it deletes the branch, and
@@ -296,6 +366,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are charged, it is recorded in sibling history, and its worktree is
   removed. A parent minibatch evaluation that raises is charged for the
   evaluator run as well.
+- Resume no longer loses a candidate that was validated just before an
+  interrupt. Its evaluation reached `.helix/evaluations/` before
+  `state.json` recorded the acceptance, and resume took the evaluation as
+  proof the attempt had finished, so the candidate never re-entered the
+  frontier while its worktree and evaluation stayed behind. HELIX now saves
+  the state as soon as a candidate joins the frontier, and resume counts an
+  attempt as finished only when the saved frontier or `.helix/attempts/`
+  lists it; anything else, including a merge interrupted in its full
+  validation and an interrupted merge's worktree, is removed with its
+  evaluation and the generation runs again (a leftover worktree from an
+  earlier generation is removed without rewinding the run, and so is the
+  worktree of a rejected attempt whose removal the interrupt cut short,
+  unless `retain_rejected_worktrees` kept it). A merge that
+  fails its subsample gate is now recorded under `.helix/attempts/` (reason
+  `merge_subsample`) instead of `.helix/evaluations/`.
 - `helix init`: the next-steps message escapes bracketed table names such as
   `[evaluator.sidecar]`, so Rich prints them instead of parsing them as markup.
 - Backend transcript preservation now covers every backend. It was only ever

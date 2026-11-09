@@ -14,10 +14,10 @@
 │   └── g2-x0.json
 ├── worktrees/
 │   ├── g0-s0/           # Seed
-│   ├── g1-m1/           # Gen 1 Mutation 1
-│   └── g2-x1/           # Gen 2 Merge 1
+│   ├── g1-s1/           # Gen 1 Mutation 1
+│   └── g2-m1/           # Gen 2 Merge 1
 ├── evaluations/
-│   └── g0-s0.json       # EvalResult per candidate
+│   └── g0-s0.json       # Full-validation EvalResult per frontier candidate
 ├── attempts/            # Per-rejected-candidate attempt records (JSON)
 └── skips/               # Per-generation perfect-skip event lists (JSON)
 ```

@@ -259,7 +259,6 @@ def _render_evaluator_output_fallback(eval_result: EvalResult) -> str:
 def build_seed_generation_prompt(
     objective: str,
     background: str | None = None,
-    evaluator_cmd: str | None = None,
     dataset_examples: list[str] | None = None,
 ) -> str:
     """Construct the seed generation prompt for the configured backend.
@@ -274,8 +273,6 @@ def build_seed_generation_prompt(
         Natural-language description of what to optimise.
     background:
         Optional domain context / constraints.
-    evaluator_cmd:
-        Optional evaluator command shown to the LLM for context.
     dataset_examples:
         Optional list of representative dataset inputs used to ground the LLM,
         matching GEPA's ``_build_seed_generation_prompt`` ``dataset`` argument.
@@ -289,12 +286,6 @@ def build_seed_generation_prompt(
     background_lines: list[str] = []
     if background:
         background_lines.append(f"\n## Domain Context & Constraints\n\n{background}")
-    if evaluator_cmd:
-        background_lines.append(
-            f"\n## Evaluator\n\nYour candidate will be evaluated by running:\n\n"
-            f"    {evaluator_cmd}\n\n"
-            f"Make sure your implementation is compatible with this command."
-        )
     background_section = "\n".join(background_lines) + (
         "\n" if background_lines else ""
     )
@@ -352,11 +343,6 @@ def generate_seed(
     MutationError
         Propagated directly from :func:`invoke_claude_code` on failure.
     """
-    # Every backend's argv tells the agent to read the prompt file rather
-    # than carrying the prompt itself, so the file must exist here just as
-    # it does for a mutation.  GEPA passes the seed prompt to the LM
-    # directly; this file is HELIX's way of doing the same.
-    prompt_artifact_name = _write_mutation_prompt_artifact(worktree_path, prompt)
     _, usage = invoke_claude_code(
         worktree_path,
         prompt,
@@ -364,7 +350,6 @@ def generate_seed(
         passthrough_env=config.passthrough_env,
         fixed_env=config.env,
         sandbox=config.sandbox,
-        prompt_artifact_name=prompt_artifact_name,
     )
     return usage
 
@@ -2205,6 +2190,7 @@ def invoke_claude_code(
     sandbox: SandboxConfig | None = None,
     prompt_artifact_name: str = MUTATION_PROMPT_ARTIFACT_NAME,
     artifact_infix: str = "",
+    prompt_artifact_fallback_name: str = MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
 ) -> tuple[dict[str, Any], UsageStats]:
     """Invoke the configured backend CLI in *worktree_path*.
 
@@ -2213,7 +2199,10 @@ def invoke_claude_code(
     worktree_path:
         Working directory for the backend subprocess.
     prompt:
-        Prompt / task instructions for the backend.
+        Prompt / task instructions for the backend.  Written here to the
+        prompt file the backend's argv names (*prompt_artifact_name*, or
+        *prompt_artifact_fallback_name* when a different file already sits
+        there), so no caller can start a backend without its task.
     config:
         Backend configuration (backend selector, model, effort, tool policy).
     passthrough_env:
@@ -2241,6 +2230,16 @@ def invoke_claude_code(
     backend_name = backend_display_name(backend)
     backend_worktree_path = (
         "/workspace" if sandbox is not None and sandbox.enabled else worktree_path
+    )
+    # Every backend's argv says "Read <file>" rather than carrying the prompt,
+    # so the file is written here, the one place every backend call passes
+    # through (merge once started without it).  GEPA hands its prompt to the
+    # LM directly; this file is HELIX's way of doing the same.
+    prompt_artifact_name = _write_mutation_prompt_artifact(
+        worktree_path,
+        prompt,
+        primary_name=prompt_artifact_name,
+        fallback_name=prompt_artifact_fallback_name,
     )
     args = _build_backend_args(
         backend_worktree_path,
@@ -2762,14 +2761,11 @@ def generate_change_summary(
     agent_config = config.agent.model_copy(update={"max_turns": SUMMARY_MAX_TURNS})
     before_tree: str | None = None  # the handlers below revert with it
     try:
-        artifact_name = _write_mutation_prompt_artifact(
-            worktree_path,
-            prompt,
-            primary_name=SUMMARY_PROMPT_ARTIFACT_NAME,
-            fallback_name=SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
-        )
-        # Taken after the prompt artifact and .gitignore are settled, so only
-        # the summary call's own doing can move this hash.
+        # Settle the ignore rules first (the mutation's call already did,
+        # unless this runs on its own), so only the summary call's own doing
+        # can move this hash; the prompt file invoke_claude_code writes is
+        # ignored by it.
+        _ignore_helix_artifacts(Path(worktree_path))
         before_tree = _content_tree_hash(worktree_path)
         _, usage = invoke_claude_code(
             worktree_path,
@@ -2778,7 +2774,8 @@ def generate_change_summary(
             passthrough_env=config.passthrough_env,
             fixed_env=config.env,
             sandbox=config.sandbox,
-            prompt_artifact_name=artifact_name,
+            prompt_artifact_name=SUMMARY_PROMPT_ARTIFACT_NAME,
+            prompt_artifact_fallback_name=SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
             # Own set of backend artifacts: this is the worktree's second
             # invocation, and the mutation's record must survive it.
             artifact_infix=SUMMARY_BACKEND_ARTIFACT_INFIX,
@@ -2868,15 +2865,6 @@ def mutate(
         sibling_history,
     )
 
-    # Persist the rendered prompt to the worktree for post-hoc inspection:
-    # what did the mutator actually see on this generation?  Sits next to
-    # ``helix_batch.json`` in the worktree root.  The leading dot and the
-    # per-worktree ``.gitignore`` entry (see ``_ignore_helix_artifacts``)
-    # keep it out of the candidate git tree — otherwise it'd leak into
-    # every subsequent mutation's diff and the mutator would see its own
-    # prior prompt file as part of the codebase.
-    prompt_artifact_name = _write_mutation_prompt_artifact(child.worktree_path, prompt)
-
     # Fixed point for the change summary's diff, taken before the backend can
     # move HEAD by committing its own work.  See ``_child_diff``.
     base_sha = (
@@ -2891,7 +2879,6 @@ def mutate(
             passthrough_env=config.passthrough_env,
             fixed_env=config.env,
             sandbox=config.sandbox,
-            prompt_artifact_name=prompt_artifact_name,
         )
         child.usage = usage
         if record_usage is not None:

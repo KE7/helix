@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import threading
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from dataclasses import replace
@@ -63,16 +63,15 @@ from helix.lines import split_lf_lines
 from helix.merger import merge, select_eval_subsample_for_merged_program
 from helix.mutator import mutate, build_seed_generation_prompt, generate_seed
 from helix.proposals import (
-    AcceptanceMemo,
     ChildEvalFailedProposal,
     EvaluatedProposal,
     GatedProposal,
     MutationFailedProposal,
     ProposalContext,
     ProposalResult,
-    ScoreVectors,
     SkippedProposal,
     TamperedProposal,
+    judge_acceptance,
     select_proposals,
 )
 from helix.population import (
@@ -129,6 +128,7 @@ from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatib
     _sha256_file,  # noqa: F401
     _to_repo_relative,  # noqa: F401
     _write_evaluator_integrity_manifest,
+    agent_hidden_paths,
     # Constants needed by _check_evaluator_script_exists (which stays in this module)
     _NO_SCRIPT_COMMANDS,
     _SHELL_COMMAND_FLAGS,
@@ -326,6 +326,22 @@ def _validate_resume_semantics(state: EvolutionState, config: HelixConfig) -> No
     if not state.resume_semantics:
         return
 
+    # 0.2.x pinned ``evaluator.score_parser``, which 0.3.0 removed, so no
+    # current config can match it and "restore the config" cannot help.
+    if "score_parser" in state.resume_semantics.get("evaluator", {}):
+        raise ResumeIncompatibleError(
+            "This run was saved by HELIX before 0.3.0 (its state pins "
+            "evaluator.score_parser, which 0.3.0 removed) and cannot be "
+            "resumed by this version.",
+            operation="resume",
+            phase="validate_resume_semantics",
+            suggestion=(
+                "Finish the run with HELIX 0.2.x, or export what you want to "
+                "keep (`helix best --export PATH`), run `helix clean` and "
+                "start a fresh run."
+            ),
+        )
+
     diffs = _semantic_diffs(state.resume_semantics, current)
     if diffs:
         preview = "; ".join(diffs[:5])
@@ -404,6 +420,7 @@ def _save_attempt_result(
     generation: int,
     stage: str,
     example_ids: list[str] | None = None,
+    retained: bool = False,
 ) -> None:
     """Persist a non-frontier attempt result without polluting evaluations/.
 
@@ -421,6 +438,9 @@ def _save_attempt_result(
         "generation": generation,
         "stage": stage,
         "example_ids": example_ids,
+        # True only when retain_rejected_worktrees kept the worktree; resume
+        # removes any other rejected attempt's worktree that survived.
+        "retained": retained,
     }
     _atomic_write_json(attempts_dir / f"{result.candidate_id}.json", payload)
 
@@ -500,22 +520,31 @@ def _reconcile_incomplete_attempts_on_resume(
     batch of ``P = evolution.num_parallel_proposals`` parents and
     ``N = evolution.mutations_per_parent`` reflective mutations per parent,
     with up to ``P×N`` proposal slots, is discarded and planned again on the next
-    invocation. A completed
-    proposal has either an evaluation artifact, an attempt artifact,
-    or frontier membership.  If a lineage entry still has a worktree but none of
-    those completion markers, HELIX likely stopped between candidate creation
-    and final result persistence.  Remove only those live incomplete worktrees;
-    historical lineage-only entries without worktrees are left untouched because
-    they may come from older completed runs that predate attempt artifacts.
+    invocation.  A completed attempt is in the saved frontier (accepted) or
+    has an attempt artifact (rejected).  ``evaluations/<id>.json`` is not a
+    completion marker: it is written before the state save that records the
+    acceptance, so an interrupt between the two leaves an evaluation for a
+    candidate the frontier never received.  GEPA's resume has the same rule
+    in coarser form: ``GEPAEngine.run`` saves ``GEPAState`` once per iteration
+    and an interrupted iteration's programs are simply absent from it.
+
+    If a lineage entry, or a mutation or merge worktree, still exists with
+    neither marker, HELIX stopped between candidate creation and final result
+    persistence.  Remove those live incomplete attempts, with any evaluation
+    they left behind; historical lineage-only entries without worktrees are
+    left untouched because they may come from older completed runs that
+    predate attempt artifacts.  A rejected attempt whose worktree survived
+    (the interrupt landed during its removal) keeps its record and loses the
+    worktree, unless ``retain_rejected_worktrees`` kept it on purpose.
     """
     if not lineage_path.exists():
         return False
 
     lineage = load_lineage(lineage_path)
     completed_ids = set(state.frontier)
-    for artifact_dir in (base_dir / "evaluations", base_dir / "attempts"):
-        if artifact_dir.exists():
-            completed_ids.update(path.stem for path in artifact_dir.glob("*.json"))
+    attempts_dir = base_dir / "attempts"
+    if attempts_dir.exists():
+        completed_ids.update(path.stem for path in attempts_dir.glob("*.json"))
 
     incomplete_ids: set[str] = set()
     for candidate_id, entry in lineage.items():
@@ -526,18 +555,62 @@ def _reconcile_incomplete_attempts_on_resume(
         if (worktrees_dir / candidate_id).exists():
             incomplete_ids.add(candidate_id)
 
-    for wt_path in worktrees_dir.glob("g*-s*"):
+    for wt_path in [*worktrees_dir.glob("g*-s*"), *worktrees_dir.glob("g*-m*")]:
         candidate_id = wt_path.name
         if candidate_id in completed_ids or candidate_id in lineage:
             continue
         if wt_path.is_dir():
             incomplete_ids.add(candidate_id)
 
-    if not incomplete_ids:
-        return False
+    # A rejected attempt is finished, but an interrupt can land while its
+    # worktree is being removed.  Finish that removal; it does not rewind the
+    # run.  Records from before ``retained`` existed keep a val-stage
+    # worktree, the only kind retain_rejected_worktrees ever kept.
+    leftover_rejected: list[str] = []
+    if attempts_dir.exists():
+        for path in sorted(attempts_dir.glob("*.json")):
+            candidate_id = path.stem
+            if candidate_id in state.frontier or not (worktrees_dir / candidate_id).exists():
+                continue
+            try:
+                attempt = json.loads(path.read_text()).get("attempt") or {}
+            except (OSError, ValueError, AttributeError):
+                continue
+            if attempt.get("status") != "rejected":
+                continue
+            if attempt.get("retained", attempt.get("stage") == "val_stage"):
+                continue
+            leftover_rejected.append(candidate_id)
+    for candidate_id in leftover_rejected:
+        _safe_remove_worktree(
+            Candidate(
+                id=candidate_id,
+                worktree_path=str(worktrees_dir / candidate_id),
+                branch_name=f"helix/{candidate_id}",
+                generation=_gen_from_id(candidate_id),
+                parent_id=None,
+                parent_ids=[],
+                operation="rejected",
+            ),
+            label="rejected candidate left by an interrupted removal",
+        )
+    if leftover_rejected:
+        print_warning(
+            "Removed worktree(s) of rejected attempt(s) whose removal was "
+            f"interrupted: {', '.join(leftover_rejected)}."
+        )
 
-    first_generation = min(_gen_from_id(candidate_id) for candidate_id in incomplete_ids)
-    first_counter = min(_proposal_counter_from_id(candidate_id) for candidate_id in incomplete_ids)
+    if not incomplete_ids:
+        return bool(leftover_rejected)
+
+    # Only the generation in progress can hold an interrupted attempt: the
+    # state was saved at the end of every earlier one.  An older leftover (a
+    # worktree whose removal failed) is removed without rewinding the run.
+    interrupted_ids = {
+        candidate_id
+        for candidate_id in incomplete_ids
+        if _gen_from_id(candidate_id) >= state.generation
+    }
 
     for candidate_id in sorted(incomplete_ids):
         wt_path = worktrees_dir / candidate_id
@@ -556,6 +629,7 @@ def _reconcile_incomplete_attempts_on_resume(
 
     _remove_lineage_records(lineage_path, incomplete_ids)
     for candidate_id in incomplete_ids:
+        (base_dir / "evaluations" / f"{candidate_id}.json").unlink(missing_ok=True)
         state.instance_scores.pop(candidate_id, None)
     state.frontier = [cid for cid in state.frontier if cid not in incomplete_ids]
     state.active_frontier = {
@@ -563,6 +637,15 @@ def _reconcile_incomplete_attempts_on_resume(
         for objective, ids in state.active_frontier.items()
     }
 
+    if not interrupted_ids:
+        print_warning(
+            "Removed leftover worktree(s) from earlier generations: "
+            f"{', '.join(sorted(incomplete_ids))}."
+        )
+        return True
+
+    first_generation = min(_gen_from_id(candidate_id) for candidate_id in interrupted_ids)
+    first_counter = min(_proposal_counter_from_id(candidate_id) for candidate_id in interrupted_ids)
     completed_counters = [
         _proposal_counter_from_id(candidate_id)
         for candidate_id in completed_ids
@@ -822,7 +905,9 @@ def _worktree_lock(worktree_path: str | Path) -> threading.Lock:
         return lock
 
 
-def _candidate_content_key(candidate: Candidate) -> str:
+def _candidate_content_key(
+    candidate: Candidate, exclude: Iterable[str] = ()
+) -> str:
     """Return a stable content key for cache reuse across equivalent candidates.
 
     The key is the tree ``snapshot_candidate`` would commit: ``git add -A``
@@ -839,6 +924,9 @@ def _candidate_content_key(candidate: Candidate) -> str:
     changing the submodule pointer changes the key but in-place edits inside
     an uncommitted submodule do not — keep submodule state committed for
     reliable reuse.  Falls back to ``candidate.id`` if git fails.
+
+    *exclude* names repo-relative files or directories to leave out of the
+    tree, so two candidates that differ only there get the same key.
     """
     worktree = Path(candidate.worktree_path)
     try:
@@ -864,6 +952,16 @@ def _candidate_content_key(candidate: Candidate) -> str:
                 check=True,
                 capture_output=True,
             )
+            pathspec = [f":(literal){os.path.normpath(p)}" for p in exclude]
+            if pathspec:
+                subprocess.run(
+                    ["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch",
+                     "--", *pathspec],
+                    cwd=worktree,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                )
             tree_proc = subprocess.run(
                 ["git", "write-tree"],
                 cwd=worktree,
@@ -1807,32 +1905,12 @@ def run_evolution(
     cross-example normalization, shared warm-up, or an aggregate metric used
     as an objective).
     """
-    # Mirror GEPA's ``optimize`` (``api.py``): at least one stopping condition is required.
-    # Without this, perfect-skip + always-perfect data + no effective bound =
-    # a run that terminates only by the OS.  In HELIX, max_generations (loop
-    # bound) and max_evaluations (budget cap, <= 0 disables) are the two
-    # supported stopping conditions.  max_generations defaults to 10 and is
-    # always a positive int; this guard fires only if a caller explicitly sets
-    # it to <= 0 while leaving max_evaluations disabled.
-    if (
-        config.evolution.max_generations <= 0
-        and config.evolution.max_evaluations <= 0
-    ):
-        raise ValueError(
-            "At least one stopping condition is required: set "
-            "config.evolution.max_generations to a positive integer, or "
-            "config.evolution.max_evaluations > 0."
-        )
     # Timing is always on, like budget accounting: every run appends its
     # spans to .helix/timing.jsonl.
     with recording(base_dir / TIMING_FILE_NAME), span("run"):
         if config.sandbox.enabled and config.sandbox.evaluator:
-            if config.evaluator.sidecar is None:
-                raise HelixError(
-                    "Docker sandboxing requires [evaluator.sidecar].",
-                    operation="start evaluator sidecar",
-                    suggestion="Configure evaluator.sidecar.image, command, and endpoint.",
-                )
+            # HelixConfig.model_post_init rejects this setting without a sidecar.
+            assert config.evaluator.sidecar is not None
             with start_evaluator_sidecar(
                 config.evaluator.sidecar,
                 passthrough_env=config.passthrough_env,
@@ -1962,10 +2040,10 @@ def _run_evolution_impl(
     # evidence, which is the thing that makes selecting among siblings
     # meaningful.
     if use_minibatch_gate and train_loader is not None:
-        _p_cfg = config.evolution.num_parallel_proposals
         _batch_slots = (
-            _p_cfg if isinstance(_p_cfg, int) else 1
-        ) * config.evolution.mutations_per_parent
+            config.evolution.num_parallel_proposals
+            * config.evolution.mutations_per_parent
+        )
         _distinct_minibatches = len(train_loader) // max(
             1, config.evolution.minibatch_size
         )
@@ -2171,7 +2249,6 @@ def _run_evolution_impl(
             seed_prompt = build_seed_generation_prompt(
                 objective=config.objective,
                 background=config.agent.background,
-                evaluator_cmd=config.evaluator.command,
                 dataset_examples=_dataset_examples,
             )
             # Single attempt, fail-fast — matches GEPA's _generate_seed_candidate.
@@ -2186,6 +2263,10 @@ def _run_evolution_impl(
                     candidate_id=seed.id,
                     source="seed_generation",
                 )
+                # Commit what the agent wrote, as a mutation is committed
+                # before its gate: children branch from the seed's commit,
+                # so an uncommitted seed would leave them without its code.
+                snapshot_candidate(seed, "helix: generated seed")
             except Exception:
                 _safe_remove_worktree(seed, label="failed seed generation")
                 raise
@@ -2477,7 +2558,7 @@ def _run_evolution_impl(
                     # now returns the canonical ``(i, j)`` (lex-sorted),
                     # so ``cid_i <= cid_j`` always — the merge subprocess,
                     # attempted-pair ledger and the description-triplet
-                    # dedup all see the same tuple order.
+                    # record all see the same tuple order.
                     cid_i, cid_j, ancestor_id = triplet
                     pair_key = [cid_i, cid_j]
 
@@ -2527,8 +2608,6 @@ def _run_evolution_impl(
                         config=config,
                         base_dir=worktrees_dir,
                         background=config.agent.background,
-                        eval_result_a=era,
-                        eval_result_b=erb,
                         prepare_worktree=lambda cand: (
                             _refresh_and_snapshot_protected_evaluator_files(
                                 cand, config, project_root
@@ -2536,6 +2615,7 @@ def _run_evolution_impl(
                         ),
                         ancestor=ancestor_candidate,
                         record_usage=merge_usage.append,
+                        project_root=project_root,
                     )
 
                     if merged is None:
@@ -2568,6 +2648,7 @@ def _run_evolution_impl(
                                 source="merge",
                             )
 
+                        merge_hidden = agent_hidden_paths(config, project_root)
                         merge_tamper = _detect_evaluator_tamper(
                             merged,
                             evaluator_manifest,
@@ -2583,6 +2664,49 @@ def _run_evolution_impl(
                                 f"({', '.join(merge_tamper)}) -- rejecting."
                             )
                             _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
+                        elif _candidate_content_key(merged, merge_hidden) in {
+                            _candidate_content_key(a, merge_hidden),
+                            _candidate_content_key(b, merge_hidden),
+                        }:
+                            # The agent left the tree equal to a parent: there
+                            # is no merge to evaluate.  Protected and omitted
+                            # paths are left out of the comparison, since
+                            # ``prepare_worktree`` may have refreshed them in
+                            # the merge but not in an older parent.  GEPA builds its merge
+                            # in code, which guarantees it takes something
+                            # from the other parent: ``filter_ancestors`` keeps
+                            # only triplets passing
+                            # ``does_triplet_have_desirable_predictors`` (a
+                            # component one parent changed and the other
+                            # kept), and the merge then takes the changed
+                            # version of that component
+                            # (gepa/proposer/merge.py::
+                            # sample_and_attempt_merge_programs_by_common_predictors;
+                            # ``merges_performed`` dedupes the result).
+                            # HELIX's merge is an agent's edit, which can be
+                            # no edit at all, so it needs this post-check
+                            # instead.  Rejected before any eval, like a
+                            # tamper reject: no eval spent, and the iteration
+                            # falls through to reflective mutation.
+                            print_warning(
+                                f"Merge {merge_id} left the code identical to a "
+                                f"parent ({a.id} or {b.id}) -- rejecting."
+                            )
+                            _save_attempt_result(
+                                base_dir,
+                                EvalResult(
+                                    candidate_id=merged.id,
+                                    scores={},
+                                    asi={},
+                                    instance_scores={},
+                                ),
+                                status="rejected",
+                                reason="merge_no_change",
+                                parent_id=a.id,
+                                generation=gen,
+                                stage="merge",
+                            )
+                            _safe_remove_worktree(merged, label="no-change merge candidate")
                         else:
                             candidates[merged.id] = merged
                             record_entry(
@@ -2603,28 +2727,23 @@ def _run_evolution_impl(
                             # GEPA parity (merge-pairing audit C1): the
                             # HEAD SHA of the snapshotted worktree is HELIX's
                             # port of GEPA's ``new_prog_desc``
-                            # (merge.py::sample_and_attempt_merge_programs_by_common_predictors);
-                            # content-addressed so two different triplets that
-                            # land on the same merged output hash once and skip
-                            # the eval on the duplicate, while the same pair
-                            # with a differently-merged result is still allowed
-                            # to retry.
+                            # (merge.py::sample_and_attempt_merge_programs_by_common_predictors),
+                            # recorded with the pair below.
                             merged_sha = snapshot_candidate(
                                 merged,
                                 f"helix: merge {merge_id} ({cid_i}+{cid_j})",
                             )
-                            _desc_triplet = [cid_i, cid_j, merged_sha]
-                            if _desc_triplet in state.merge_description_triplets:
-                                print_warning(
-                                    f"Merge {merge_id} produced a previously-seen "
-                                    f"output (desc {merged_sha[:8]}) -- skipping."
-                                )
-                                _safe_remove_worktree(merged, label="duplicate-desc merge candidate")
-                                if merged.id in candidates:
-                                    del candidates[merged.id]
-                                _save_state(state)
-                                continue
-                            state.merge_description_triplets.append(_desc_triplet)
+                            # GEPA checks ``merges_performed[1]`` for a repeat
+                            # before evaluating; HELIX needs no check, as the
+                            # pair (i, j) was just recorded in
+                            # ``merge_attempted_pairs`` and
+                            # ``find_merge_triplet`` never samples it again,
+                            # so (i, j, sha) cannot repeat.  GEPA records
+                            # (i, j, ancestor) attempts instead, so its pairs
+                            # can recur with another ancestor.
+                            state.merge_description_triplets.append(
+                                [cid_i, cid_j, merged_sha]
+                            )
                             # GEPA parity (M5): merge acceptance evaluates merged on a
                             # size-bounded stratified subsample of ids both parents have
                             # val-scored. Subsample selection ported from GEPA
@@ -2665,15 +2784,13 @@ def _run_evolution_impl(
                                 split="val",
                                 source="merge_subsample",
                             )
-                            _save_evaluation(base_dir, merge_result)
 
-                            # GEPA parity (Fix 13): mid-generation budget check.
-                            if budget_api.budget_exhausted(state, config):
-                                print_warning(
-                                    "Budget exhausted mid-generation -- stopping."
-                                )
-                                _save_state(state)
-                                break
+                            # No budget check until the next iteration: GEPA's
+                            # ``GEPAEngine.run`` checks ``_should_stop`` only at
+                            # the top of its loop, and runs
+                            # ``_run_full_eval_and_add`` on every merge that
+                            # passes the gate.  A merge whose subsample was
+                            # already paid for is judged, and kept if it passes.
 
                             # Merged subsample sum must be >= max of parent
                             # subsample sums (GEPA merge.py::MergeProposer.propose).
@@ -2751,13 +2868,6 @@ def _run_evolution_impl(
                                 )
                                 _save_evaluation(base_dir, full_val_result)
 
-                                if budget_api.budget_exhausted(state, config):
-                                    print_warning(
-                                        "Budget exhausted during merge full-val eval -- stopping."
-                                    )
-                                    _save_state(state)
-                                    break
-
                                 merges_due -= 1
                                 budget_api.record_merge_invocation(state)
                                 frontier.add(merged, full_val_result)
@@ -2777,6 +2887,18 @@ def _run_evolution_impl(
                                 print_warning(
                                     f"Merge {merge_id} score {merge_score:.4f} < "
                                     f"max parent {required_score:.4f} -- rejecting."
+                                )
+                                # attempts/, not evaluations/: only frontier
+                                # members' full validations go there.
+                                _save_attempt_result(
+                                    base_dir,
+                                    merge_result,
+                                    status="rejected",
+                                    reason="merge_subsample",
+                                    parent_id=a.id,
+                                    generation=gen,
+                                    stage="merge",
+                                    example_ids=merge_subsample_ids,
                                 )
                                 _safe_remove_worktree(merged, label="score-rejected merge candidate")
                                 if merged.id in candidates:
@@ -2828,10 +2950,6 @@ def _run_evolution_impl(
             # live workers.
             # =============================================================
 
-            _np_raw = config.evolution.num_parallel_proposals
-            assert isinstance(_np_raw, int)
-            n_proposals = _np_raw
-
             presample_contexts, _budget_break = _plan_proposals(
                 config=config,
                 state=state,
@@ -2841,7 +2959,7 @@ def _run_evolution_impl(
                 train_loader=train_loader,
                 use_minibatch_gate=use_minibatch_gate,
                 gen=gen,
-                n_proposals=n_proposals,
+                n_proposals=config.evolution.num_parallel_proposals,
                 mutations_per_parent=config.evolution.mutations_per_parent,
             )
 
@@ -2880,9 +2998,7 @@ def _run_evolution_impl(
                 + (len(full_val_example_ids) if full_val_example_ids else 1)
             )
             _batch_budget_guard = budget_api.begin_batch_budget_guard(
-                state,
-                max_evaluations=config.evolution.max_evaluations,
-                max_in_flight_evaluations=_batch_in_flight_units,
+                state, max_in_flight_evaluations=_batch_in_flight_units
             )
 
             # Rendered here, in the sequential phase, because it reads
@@ -2984,7 +3100,6 @@ def _run_evolution_impl(
             _gen_skip_records: "list[dict[str, Any]]" = []
             semantic_skip_count = 0
             retryable_semantic_skip_count = 0
-            _acceptance_memo = AcceptanceMemo(acceptance)
 
             def _record_sibling(
                 parent_id: str,
@@ -3004,6 +3119,11 @@ def _run_evolution_impl(
                 ``child.summary`` was read back in ``mutate`` while the
                 worktree still existed, so this works even for a child whose
                 worktree has since been removed.
+
+                ``result`` is always the child's train gate result, never a
+                val result: the history reaches the mutation prompt, and
+                GEPA's ``ReflectiveMutationProposer.propose`` shows the
+                reflection step only the train minibatch.
                 """
                 if not config.evolution.sibling_history:
                     return
@@ -3145,7 +3265,7 @@ def _run_evolution_impl(
                         float(gating_result.instance_scores[str(eid)])
                         for eid in _subsample_ids
                     ]
-                    _judgement = _acceptance_memo.judge(_p_idx, _before, _after)
+                    _judgement = judge_acceptance(acceptance, _before, _after)
                     if not _judgement.accepted:
                         _save_attempt_result(
                             base_dir, gating_result,
@@ -3198,8 +3318,8 @@ def _run_evolution_impl(
 
                     _legacy_before = list(parent_acceptance_result.instance_scores.values())
                     _legacy_after = list(gating_result.instance_scores.values())
-                    _judgement = _acceptance_memo.judge(
-                        _p_idx, _legacy_before, _legacy_after
+                    _judgement = judge_acceptance(
+                        acceptance, _legacy_before, _legacy_after
                     )
                     if not _judgement.accepted:
                         parent_sum = sum(_legacy_before)
@@ -3265,22 +3385,18 @@ def _run_evolution_impl(
                         stage_val_example_ids,
                     )
                     _stage_after = _scores_for_example_ids(stage_result, stage_val_example_ids)
-                    # Not routed through the acceptance memo: this is the val
-                    # stage's own comparison, a different pair of vectors from
-                    # the proposal gate's, and it runs at most once per child.
-                    _stage_proposal = ScoreVectors(
-                        subsample_scores_before=_stage_before,
-                        subsample_scores_after=_stage_after,
-                    )
-                    if not acceptance.should_accept(_stage_proposal):
+                    if not judge_acceptance(
+                        acceptance, _stage_before, _stage_after
+                    ).accepted:
                         _save_attempt_result(
                             base_dir, stage_result,
                             status="rejected", reason="val_stage",
                             parent_id=_parent.id, generation=gen,
                             stage="val_stage", example_ids=list(stage_val_example_ids),
+                            retained=config.evolution.retain_rejected_worktrees,
                         )
                         _record_sibling(
-                            _parent.id, child, stage_result, accepted=False
+                            _parent.id, child, gated.gating_result, accepted=False
                         )
                         TRACE.emit(
                             EventType.ACCEPT_DECISION, candidate_id=child.id,
@@ -3356,7 +3472,7 @@ def _run_evolution_impl(
                 # --- Update frontier ------------------------------------------
                 set_phase(HelixPhase.PARETO_UPDATE)
                 _save_evaluation(base_dir, val_result)
-                _record_sibling(_parent.id, child, val_result, accepted=True)
+                _record_sibling(_parent.id, child, gated.gating_result, accepted=True)
                 frontier.add(child, val_result)
                 decision(child.id, accepted=True, reason="mutation")
                 _sync_frontier_state()
@@ -3366,6 +3482,10 @@ def _run_evolution_impl(
                 # Mirrors GEPA's ``update_state_with_new_program``
                 # (``core/state.py``).
                 budget_api.record_discovery_budget(state, child.id)
+                # Saved at once: state.json, not evaluations/, is what a
+                # resume trusts, and the batch may still validate other
+                # children before its next save.
+                _save_state(state)
                 TRACE.emit(
                     EventType.FRONTIER_UPDATE,
                     candidate_id=child.id,
@@ -3530,6 +3650,11 @@ def _run_evolution_impl(
             if _gen_skip_records:
                 _save_skip_record(base_dir, generation=gen, records=_gen_skip_records)
 
+            # The batch has drained: save it, then check that what it spent
+            # fits the bound it was admitted with.
+            _save_state(state)
+            budget_api.enforce_batch_budget_guard(state, _batch_budget_guard)
+
             # Check semantic skip: all proposals were perfect on the minibatch.
             # GEPA parity (mirrors GEPA unconditionally incrementing its own
             # iteration counter in ``core/engine.py`` and the
@@ -3548,44 +3673,13 @@ def _run_evolution_impl(
                 and semantic_skip_count
                 and retryable_semantic_skip_count == semantic_skip_count
             ):
-                budget_api.enforce_batch_budget_guard(
-                    state,
-                    _batch_budget_guard,
-                    actual_in_flight_evaluations=(
-                        state.budget.evaluations
-                        - _batch_budget_guard.evaluations_before
-                    ),
-                )
-                _save_state(state)
                 TRACE.emit(EventType.ITER_END, decision=f"{gen}:skip")
                 continue
-            # The batch has drained; stop if it reached the cap.
+            # Stop if the batch reached the cap.
             if budget_api.budget_exhausted(state, config):
                 print_warning("Budget exhausted -- stopping.")
-                _save_state(state)
-                budget_api.enforce_batch_budget_guard(
-                    state,
-                    _batch_budget_guard,
-                    actual_in_flight_evaluations=(
-                        state.budget.evaluations
-                        - _batch_budget_guard.evaluations_before
-                    ),
-                )
                 break
 
-            budget_api.enforce_batch_budget_guard(
-                state,
-                _batch_budget_guard,
-                actual_in_flight_evaluations=(
-                    state.budget.evaluations - _batch_budget_guard.evaluations_before
-                ),
-            )
-
-            # Render at end of generation using the last result seen.
-            # Post-UX upgrade: we update the live display but do NOT
-            # print a scrolling panel every generation.
-
-            _save_state(state)
             TRACE.emit(EventType.ITER_END, decision=str(gen))
 
     # ------------------------------------------------------------------

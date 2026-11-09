@@ -23,21 +23,23 @@ NO_WEB_FLAGS = {a for flags in NO_WEB_ARGS.values() for a in flags if a != "-c"}
 OPENCODE_PERMISSION = '{"webfetch": "deny", "websearch": "deny"}'
 
 
-def _invoke(mocker: Any, config: AgentConfig, **kwargs: Any) -> MagicMock:
+def _invoke(tmp_path: Any, mocker: Any, config: AgentConfig, **kwargs: Any) -> MagicMock:
     run = mocker.patch(
         "helix.mutator.run_sandboxed_command"
         if "sandbox" in kwargs
         else "helix.mutator.subprocess.run"
     )
     run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
-    invoke_claude_code("/tmp/wt", "the prompt", config, **kwargs)
+    invoke_claude_code(str(tmp_path), "the prompt", config, **kwargs)
     return run
 
 
 @pytest.mark.parametrize("backend", sorted(NO_WEB_ARGS))
 @pytest.mark.parametrize("web_access", [True, False])
-def test_web_access_argv_and_env(mocker: Any, backend: str, web_access: bool) -> None:
-    run = _invoke(mocker, AgentConfig(backend=backend, web_access=web_access))
+def test_web_access_argv_and_env(
+    tmp_path: Any, mocker: Any, backend: str, web_access: bool
+) -> None:
+    run = _invoke(tmp_path, mocker, AgentConfig(backend=backend, web_access=web_access))
     args, env = run.call_args[0][0], run.call_args[1]["env"]
     assert ".agent_task_prompt.md" in args[-1]
     # User config is never skipped: web_access only removes web tools.
@@ -57,8 +59,9 @@ def test_web_access_argv_and_env(mocker: Any, backend: str, web_access: bool) ->
         assert "OPENCODE_PERMISSION" not in env
 
 
-def test_opencode_web_deny_reaches_the_sandbox(mocker: Any) -> None:
+def test_opencode_web_deny_reaches_the_sandbox(tmp_path: Any, mocker: Any) -> None:
     run = _invoke(
+        tmp_path,
         mocker,
         AgentConfig(backend="opencode", web_access=False),
         sandbox=SandboxConfig(enabled=True),

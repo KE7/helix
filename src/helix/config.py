@@ -319,6 +319,8 @@ class EvolutionConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    # Generation cap, at least 1.  GEPA has no generation cap (its stop is
+    # `max_metric_calls`); HELIX keeps a required one for simplicity.
     max_generations: int = 10
     perfect_score_threshold: float | None = None
     # Evaluation budget cap. `-1` (default) disables the cap, so HELIX runs until
@@ -622,6 +624,14 @@ class EvolutionConfig(BaseModel):
     )
 
     def model_post_init(self, __context: object) -> None:
+        # Checked here, not in run_evolution, so it is a config error (exit 2)
+        # rather than a traceback from inside the run.
+        if self.max_generations < 1:
+            raise ValueError(
+                "evolution.max_generations must be at least 1 "
+                f"(got {self.max_generations}); use max_evaluations or "
+                "stop_at_score to end a run earlier"
+            )
         if self.stop_at_score is not None and not math.isfinite(self.stop_at_score):
             raise ValueError(
                 "evolution.stop_at_score must be a finite number "
