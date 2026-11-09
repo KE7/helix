@@ -11,8 +11,9 @@ passthrough_env = ["ANTHROPIC_API_KEY"]
 
 [evaluator]
 # Pin the interpreter and bring the anthropic SDK so evaluation does not
-# depend on the host python3.
-command = "uv run --no-project --python 3.12 --with anthropic python evaluate.py"
+# depend on the host python3. evaluate.py imports helix.timed, added in
+# helix-evo 0.3.0.
+command = "uv run --no-project --python 3.12 --with anthropic --with 'helix-evo>=0.3.0' python evaluate.py"
 # A candidate that modifies a protected file is rejected.
 protected_files = ["evaluate.py", "train", "val"]
 

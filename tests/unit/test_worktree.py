@@ -699,3 +699,55 @@ class TestConcurrentWorktreeMetadata:
             "git worktree common-metadata commands ran concurrently "
             f"(peak={max_active}); they must be serialised"
         )
+
+
+def test_export_copies_the_candidate_without_helix_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``helix best --export`` writes the candidate's committed tree, not the
+    prompt, backend logs, batch file and caches HELIX left in its worktree."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+
+    from helix.cli import cli
+
+    for key in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+        monkeypatch.setenv(key, "HELIX Test")
+    for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(key, "helix@test.local")
+    repo_root = tmp_path / "project"
+    _make_repo(repo_root)
+    base_dir = tmp_path / "worktrees"
+    child = clone_candidate(create_seed_worktree(repo_root, base_dir), "g1-s0", base_dir)
+    wt = Path(child.worktree_path)
+    (wt / "pkg").mkdir()
+    (wt / "pkg" / "solve.py").write_text("x = 1\n")
+    os.symlink("pkg/solve.py", wt / "link.py")
+    snapshot_candidate(child, "helix: mutate g1-s0")
+    # What HELIX and the evaluator leave behind after the snapshot.
+    (wt / ".agent_task_prompt.md").write_text("prompt")
+    (wt / ".helix_backend_stdout.txt").write_text("log")
+    (wt / "helix_batch.json").write_text("[]")
+    (wt / ".helix_artifacts" / "backend_transcripts").mkdir(parents=True)
+    (wt / "pkg" / "__pycache__").mkdir()
+    (wt / "pkg" / "__pycache__" / "solve.pyc").write_bytes(b"\0")
+
+    frontier = SimpleNamespace(
+        _candidates={child.id: child}, _results={}, best=lambda: child
+    )
+    monkeypatch.setattr("helix.cli.load_state", lambda root: object())
+    monkeypatch.setattr(
+        "helix.cli._reconstruct_frontier", lambda base, state: (frontier, {}, [])
+    )
+    dest = tmp_path / "export"
+    result = CliRunner().invoke(
+        cli, ["best", "--dir", str(repo_root), "--export", str(dest)]
+    )
+    assert result.exit_code == 0, result.output
+
+    exported = sorted(
+        str(p.relative_to(dest)) for p in dest.rglob("*") if not p.is_dir()
+    )
+    assert exported == ["README.md", "link.py", "pkg/solve.py"]
+    assert os.readlink(dest / "link.py") == "pkg/solve.py"

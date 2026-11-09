@@ -400,7 +400,8 @@ class TestBudgetExhaustionStopsLoop:
 
         all_mocks["save_state"].side_effect = capture
 
-        config = make_config(max_generations=0, max_evaluations=10000)
+        # Seed only: the seed's one evaluation spends the budget.
+        config = make_config(max_generations=1, max_evaluations=1)
         run_evolution(config, tmp_path, tmp_path / ".helix")
 
         # After single-task/no-example seed with no dataset ids: evaluations == 1.
@@ -2498,25 +2499,6 @@ class TestGenerationsFlagOverridesConfig:
         # so we count via mutate calls instead.)
         assert all_mocks["mutate"].call_count == 2
 
-    def test_zero_generations_skips_loop(self, mocker, tmp_path, all_mocks):
-        """max_generations=0 means the generation loop body never executes."""
-        seed = make_candidate("g0-s0")
-        all_mocks["create_seed_worktree"].return_value = seed
-
-        def run_eval(candidate, config, split=None, instances=None, **kwargs):
-            return make_eval_result(candidate.id, {"i1": 0.5})
-
-        all_mocks["run_evaluator"].side_effect = run_eval
-
-        config = make_config(
-            max_generations=0,
-            max_evaluations=10000,
-        )
-        run_evolution(config, tmp_path, tmp_path / ".helix")
-
-        # No generations → mutate never called
-        all_mocks["mutate"].assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # run_evolution — mutation counter tracking
@@ -2627,13 +2609,9 @@ def test_sandboxed_run_starts_evaluator_sidecar(tmp_path: Path, all_mocks):
             evaluator=True,
             extra_hosts={"evaluator-endpoint": "10.0.0.1"},
         ),
-        # max_evaluations=1: Change 3 guard requires at least one effective
-        # stopping condition.  max_generations=0 means the loop runs 0
-        # iterations (while gen < 0 is immediately False), but the guard
-        # requires max_evaluations > 0 when max_generations <= 0.
-        # max_evaluations=1 satisfies the guard; budget exhausts immediately
-        # at the first budget check if any iteration were to start.
-        evolution=EvolutionConfig(max_generations=0, max_evaluations=1),
+        # Seed only: the seed's one evaluation spends max_evaluations=1, so
+        # no generation starts.
+        evolution=EvolutionConfig(max_generations=1, max_evaluations=1),
     )
 
     run_evolution(config, tmp_path, tmp_path / ".helix")
@@ -2697,8 +2675,9 @@ class TestActiveFrontierSyncOnObjectiveMode:
             evaluator=EvaluatorConfig(command="pytest -q"),
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
-                max_generations=0,
-                max_evaluations=10,
+                # Seed only: the seed's one evaluation spends the budget.
+                max_generations=1,
+                max_evaluations=1,
                 perfect_score_threshold=None,
                 frontier_type="objective",
             ),
@@ -2784,7 +2763,7 @@ class TestActiveFrontierSyncOnObjectiveMode:
         Spying on ``active_frontier_snapshot`` is the most direct
         observation: it isolates the init touch point from save-state
         plumbing (``save_state`` only fires later in the loop, which
-        does not run when ``max_generations=0``).
+        does not run once the budget is spent).
         """
         seed = make_candidate("g0-s0")
         all_mocks["create_seed_worktree"].return_value = seed
@@ -2839,8 +2818,9 @@ class TestActiveFrontierSyncOnObjectiveMode:
             evaluator=EvaluatorConfig(command="pytest -q"),
             dataset=DatasetConfig(),
             evolution=EvolutionConfig(
-                max_generations=0,
-                max_evaluations=10,
+                # Seed only: the seed's one evaluation spends the budget.
+                max_generations=1,
+                max_evaluations=1,
                 perfect_score_threshold=None,
                 frontier_type="objective",
             ),

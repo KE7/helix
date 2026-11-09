@@ -102,16 +102,17 @@ def _scrub_environment(
             helix.toml.
 
     Returns:
-        Dict containing only PATH, HOME, HELIX_* variables,
+        Dict containing only PATH, HOME, USER, HELIX_* variables,
         and any explicitly listed passthrough_env keys.
     """
     scrubbed: dict[str, str] = {}
 
-    # Always include PATH and HOME if available
-    if "PATH" in os.environ:
-        scrubbed["PATH"] = os.environ["PATH"]
-    if "HOME" in os.environ:
-        scrubbed["HOME"] = os.environ["HOME"]
+    # Always include PATH, HOME and USER if available. Claude Code on macOS
+    # looks up its Keychain login by USER; without it a subscription login
+    # reads as "Not logged in".
+    for key in ("PATH", "HOME", "USER"):
+        if key in os.environ:
+            scrubbed[key] = os.environ[key]
 
     # Add HELIX_SPLIT when running evaluators.
     if split is not None:

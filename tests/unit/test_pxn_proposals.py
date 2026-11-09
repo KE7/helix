@@ -1029,6 +1029,8 @@ class TestSiblingHistory:
             if instance_ids is None:
                 return _make_result(candidate.id, {"v1": 0.5})
             score = 0.3 if candidate.id == seed.id else scores[candidate.id]
+            if split == "val" and candidate.id == "g1-s2":
+                score = 0.95
             return _make_result(candidate.id, {i: score for i in instance_ids})
 
         all_mocks["run_evaluator"].side_effect = run_eval
@@ -1050,6 +1052,9 @@ class TestSiblingHistory:
             "approach taken by g1-s1",
             "approach taken by g1-s2",
         }
+        # The kept child's validation scored 0.95, its train gate 0.9:
+        # only the train score may reach the next mutation prompt.
+        assert {e["child_id"]: e["score"] for e in entries}["g1-s2"] == 0.9
 
     def test_a_resampled_parent_sees_its_earlier_child(
         self, tmp_path: Path, all_mocks: dict[str, Any]

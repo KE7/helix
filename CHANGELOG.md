@@ -217,6 +217,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other projects, link `skills/helix` into `~/.claude/skills/`.
 
 ### Fixed
+- `max_generations` must be at least 1. `max_generations = 0` (or
+  `helix evolve --generations 0`) is now a config error that exits 2. It used
+  to run no generations with `max_evaluations` set, and end in a `ValueError`
+  traceback from inside the run without it. GEPA has no generation cap (its
+  stop is `max_metric_calls`); HELIX keeps a required one for simplicity.
+- `helix best --export PATH` copies only the candidate's files, the ones
+  HELIX committed for it. It used to copy the whole worktree, including the
+  agent's `.agent_task_prompt.md`, `.helix_backend_*` logs,
+  `helix_batch.json`, `.helix_artifacts/` and caches.
+- Resuming a run saved by HELIX 0.2.x now says it cannot be resumed
+  by 0.3.0 (its state pins the removed `evaluator.score_parser`) and to
+  finish it with 0.2.x or start fresh, instead of telling you to restore a
+  config 0.3.0 cannot load.
+- `--dir` with a relative path now works. `helix evolve --dir proj` created
+  the seed worktree at `proj/proj/.helix/worktrees/g0-s0` and then evaluated
+  `proj/.helix/worktrees/g0-s0`, which failed with "no HELIX_RESULT". Every
+  command now resolves `--dir` to an absolute path.
+- `helix attempts` takes `--dir` (the project directory) like every other
+  command, so `helix attempts --dir .` as the HELIX skill documents works.
+  The old `--path <.helix dir>` still works.
+- Seedless search now builds on its seed. The seed agent's files were never
+  committed, so every child was cloned from an empty tree and had to rewrite
+  the solver from scratch while being scored against the seed. HELIX now
+  commits the generated seed before evaluating it, as it does a mutation.
+- Sibling history (`sibling_history = true`) records each child's
+  training-gate score. Accepted children were recorded with their full
+  validation mean and val-stage rejects with their val-subset mean, and those
+  scores reached later mutation prompts. GEPA's
+  `ReflectiveMutationProposer.propose` reflects on the train minibatch only.
+- The seedless seed prompt no longer shows `evaluator.command`, matching
+  GEPA's `_build_seed_generation_prompt`. State the file and interface the
+  evaluator expects in the objective or `agent.background`.
+- The scrubbed environment of the agent and evaluator keeps `USER` on the
+  host (the Docker sandbox still doesn't get it). Claude Code on macOS finds
+  its Keychain login by it, so an unsandboxed run on a Claude subscription
+  failed every mutation with "Not logged in" unless `passthrough_env` listed
+  `USER`.
+- `examples/web_researcher`: the evaluator command now installs HELIX
+  from PyPI (`--with 'helix-evo>=0.3.0'`, the first release with
+  `helix.timed`), so `from helix import timed` in `evaluate.py` no longer
+  fails with `ModuleNotFoundError`, in `helix evolve` or when run by hand
+  from the example README.
 - Seedless mode now gives the agent its task. Every backend is told to read
   `.agent_task_prompt.md`, but seed generation never wrote that file, so the
   seed agent started in an empty worktree with no objective and had to guess
