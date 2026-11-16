@@ -364,8 +364,9 @@
     const type = frontierType();
     const nobj = (S.frontier && S.frontier.objectives && S.frontier.objectives.length) || (r && r.objective_bests && r.objective_bests.length) || 0;
     const typeSub = type === 'hybrid' ? `instances + ${nobj || '?'} objectives` : type === 'objective' ? `${nobj || '?'} objectives` : type === 'cartesian' ? `instances × ${nobj || '?'} objectives` : null;
+    // edges always flow at the run's own speeds (the loop's shape is the point, finished or not); glow only while it runs
     const m = {
-      run: !!r, anim: animate(), agent: iso.agent || (c.sandbox && c.sandbox.enabled ? 'sandbox' : 'host'), evaluator: iso.evaluator || 'host',
+      run: !!r, anim: animate(), flow: !reduceMotion.matches, agent: iso.agent || (c.sandbox && c.sandbox.enabled ? 'sandbox' : 'host'), evaluator: iso.evaluator || 'host',
       merge: !!c.merge_enabled, warn: warnings().map((x) => [x.id, x.text, x.detail || '']), dark: dark.matches,
       front: S.front.map((x) => [x.id, x.mean]),
     };
@@ -405,16 +406,20 @@
       if (sub) g.appendChild(s('text', { x: 16, y: 88, class: 's', text: sub }));
       return g;
     };
-    const edge = (d, secs, kind, color) => {
+    // dots carry data, dashes carry decisions; a dot crosses in sqrt-scaled real seconds, so slow stages move slowly
+    const edge = (d, secs, kind, color, what, clock) => {
       if (kind === 'data') {
         add(s('path', { d, class: 'ed', stroke: color }));
-        if (!m.anim) return;
-        const du = speed(secs);
-        for (let i = 0; i < 2; i++) {
-          const c = add(s('circle', { r: 2.8, fill: color }));
-          c.appendChild(s('animateMotion', { dur: du + 's', begin: -i * du / 2 + 's', repeatCount: 'indefinite', path: d }));
+        if (m.flow) {
+          const du = speed(secs);
+          for (let i = 0; i < 3; i++) {
+            const c = add(s('circle', { r: 3.2, fill: color, class: 'fd' }));
+            c.appendChild(s('animateMotion', { dur: du + 's', begin: -i * du / 3 + 's', repeatCount: 'indefinite', path: d }));
+          }
         }
-      } else add(s('path', { d, class: 'ed dec' + (m.anim ? '' : ' still'), stroke: color, style: { '--d': speed(secs) * 1.6 + 's' } }));
+      } else add(s('path', { d, class: 'ed dec' + (m.flow ? '' : ' still'), stroke: color, style: { '--d': speed(secs) * 1.6 + 's' } }));
+      // a wide invisible stroke on top, so the line is easy to hover for what it carries
+      add(s('path', { d, class: 'eh' })).appendChild(s('title', { text: m.run && clock ? `${what}; moves at the median ${clock}, ${dur(secs)}` : what }));
     };
     const sandboxAll = m.agent === 'sandbox' && m.evaluator === 'sandbox';
     let box = null;
@@ -439,15 +444,15 @@
       })));
     }
     const [aSec, gSec, vSec] = m.secs;
-    edge('M210 145 H282', aSec, 'dec', C);
-    edge('M492 145 H592', aSec, 'data', M);
-    edge('M708 200 V272', gSec, 'dec', P);
+    edge('M210 145 H282', aSec, 'dec', C, 'a parent is picked from the frontier', 'agent time');
+    edge('M492 145 H592', aSec, 'data', M, "the agent's edits go to the gate", 'agent time');
+    edge('M708 200 V272', gSec, 'dec', P, 'a child that passes the gate is validated', 'gate time');
     const back = m.merge ? 300 : 327;
-    edge(`M592 ${back} H210`, vSec, 'data', P);
+    edge(`M592 ${back} H210`, vSec, 'data', P, 'validation scores update the frontier', 'validation time');
     if (m.merge) {
       node(20, 342, 190, 100, 'm', null, 'Merge', m.mg);
-      edge('M115 320 V342', vSec, 'dec', C);
-      edge('M210 392 H708 V382', vSec, 'data', P);
+      edge('M115 320 V342', vSec, 'dec', C, 'two frontier members are picked to merge', null);
+      edge('M210 392 H708 V382', vSec, 'data', P, 'a merged candidate is validated', 'validation time');
     }
     if (box) {
       add(s('circle', { cx: 262, cy: 145, r: 4, class: 'port' }));
