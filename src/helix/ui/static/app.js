@@ -512,8 +512,10 @@
           : [money(sp.cost_per_generation), 'per generation']];
       rows.push(...(shareRow.length ? shareRow : [[money(sp.cost_per_accepted), 'per accepted']]));
     } else if (tokens > 0) {
-      rows = [[compact(sp.input_tokens), 'tokens in', num(sp.cached_input_tokens) ? `${compact(sp.cached_input_tokens)} cached` : null], [compact(sp.output_tokens), 'tokens out']];
-      rows.push(...(shareRow.length ? shareRow : [[compact(sp.cached_input_tokens), 'cached in']]));
+      // the three amounts a provider prices separately; Codex's input includes its cached input
+      const t = tokParts(sp);
+      title = 'Tokens';
+      rows = [[compact(t.uncached), 'input, uncached'], [compact(t.cached), 'input, cached'], [compact(t.out), 'output', 'includes reasoning'], ...shareRow];
     } else {
       title = 'Budget used';
       const ev = (r && r.evaluations) || {}, g = (r && r.generation) || {};
@@ -542,6 +544,12 @@
     }
     if (bars) spendBars(bars, gens, sp.has_cost);
   }
+  // Codex (OpenAI) counts cached input inside input and reasoning inside output
+  const tokParts = (u) => {
+    const input = u.input_tokens || 0, cached = Math.min(u.cached_input_tokens || 0, input);
+    return { uncached: input - cached, cached, out: u.output_tokens || 0 };
+  };
+  const tokText = (u) => { const t = tokParts(u); return `${compact(t.uncached)} uncached + ${compact(t.cached)} cached in · ${compact(t.out)} out`; };
   // usage: dollars when there is a cost, else tokens (Codex reports cost 0 with tokens)
   const uVal = (u, cost) => (!u ? 0 : cost ? (num(u.cost_usd) ? u.cost_usd : 0) : (u.input_tokens || 0) + (u.output_tokens || 0));
   const uText = (u, cost) => (cost ? money(u.cost_usd) : `${compact(u.input_tokens)} in · ${compact(u.output_tokens)} out`);
@@ -1120,7 +1128,7 @@
     if (!u || !(uVal(u, true) > 0 || uVal(u, false) > 0)) return null;
     const cost = num(u.cost_usd) && u.cost_usd > 0, tm = d.timing || {};
     const any = ['agent_seconds', 'gate_seconds', 'validation_seconds'].some((k) => num(tm[k]));
-    const tip = `${compact(u.input_tokens)} in · ${compact(u.output_tokens)} out` + (u.cached_input_tokens ? ` · ${compact(u.cached_input_tokens)} cached` : '')
+    const tip = (cost ? `${compact(u.input_tokens)} in · ${compact(u.output_tokens)} out` : tokText(u))
       + (d.usage_source === 'worktree' ? ' · from the worktree' : '');
     return [any ? ' · ' : '', h('b', { class: 'use', title: tip, text: cost ? money(u.cost_usd) : `${compact(u.input_tokens)} in · ${compact(u.output_tokens)} out` }),
       cost ? null : ' tokens'];
@@ -1819,7 +1827,7 @@
   }
   function useCell(u, cost) {
     if (!u) return h('td', { class: 'n', text: '–' });
-    const tok = `${compact(u.input_tokens)} in · ${compact(u.output_tokens)} out` + (num(u.cached_input_tokens) && u.cached_input_tokens ? ` · ${compact(u.cached_input_tokens)} cached` : '');
+    const tok = cost ? `${compact(u.input_tokens)} in · ${compact(u.output_tokens)} out` : tokText(u);
     return h('td', { class: 'n', title: tok, text: cost ? money(u.cost_usd) : compact((u.input_tokens || 0) + (u.output_tokens || 0)) });
   }
   function propKey(e) {

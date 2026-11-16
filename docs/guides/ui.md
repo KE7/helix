@@ -102,7 +102,9 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   projected cost at the end while the run is going, and the total and cost per generation once it has stopped. A run that writes `usage` records to [`.helix/timing.jsonl`](timing.md#record-format) also
   shows a bar of cost per generation and the share spent on proposals that were rejected or failed, and projects from
   the median cost of a finished generation; an older run projects from the run total divided by the generations so far.
-  Codex reports no cost, so a Codex run shows the bars and the share in tokens, with no projection.
+  Codex reports no cost, so a Codex run shows the bars and the share in tokens, with no projection, and splits its
+  tokens the way OpenAI prices them: uncached input, cached input, and output (which includes reasoning). Codex counts
+  cached input inside its input total; the dashboard subtracts it, so the three rows add up to the run's tokens.
 - **Current generation**: each proposal's phase and elapsed time, and the live transcript of the selected agent.
 
 ## Live transcripts
