@@ -133,7 +133,12 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
   exactly what was charged: the tokens and `cost_usd`, the `candidate` it was
   for, and `source` (`seed_generation`, `mutation`, `mutation_failed`, `merge`
   or `merge_failed`). A mutation's record includes the usage of its change
-  summary call, and the generated seed counts as generation 0. GEPA keeps only running totals of the reflection LM's cost and tokens (`gepa.lm.TrackingLM`, read by `MaxReflectionCostStopper`); it writes no per-call or per-candidate record.
+  summary call, and the generated seed counts as generation 0. The records
+  keep every charge, so after `helix resume` they can exceed the totals in
+  `state.json`, which lose the charges of an interrupted generation. GEPA
+  keeps only running totals of the reflection LM's cost and tokens
+  (`gepa.lm.TrackingLM`, read by `MaxReflectionCostStopper`) and writes no
+  per-call or per-candidate record.
 
 | span | measures | `attrs` |
 | --- | --- | --- |

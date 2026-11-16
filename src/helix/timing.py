@@ -216,9 +216,11 @@ USAGE_TOKEN_FIELDS = (
 def usage(stats: UsageStats, *, candidate_id: str | None, source: str | None) -> None:
     """Record one charge of agent tokens and cost, as the budget charged it.
 
-    Called by :func:`helix.budget.charge_llm_usage` once per charge, so the
-    ``usage`` records of a trace add up to the run's budget counters and a
-    generation's agent cost is a flat group-by.  ``generation`` comes from the
+    Called by :func:`helix.budget.charge_llm_usage` once per charge, so a
+    generation's agent cost is a flat group-by.  The records keep every
+    charge, including those of a generation interrupted before its state was
+    saved, so after ``helix resume`` they can exceed ``state.json``'s totals:
+    they count money spent, not only what the restored state remembers.  ``generation`` comes from the
     open span like a :func:`decision`'s; the seed is generated before any
     generation span opens, so a ``seed_generation`` charge with none counts as
     generation 0.
