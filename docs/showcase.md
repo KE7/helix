@@ -40,6 +40,15 @@ HELIX runs optimize_anything's circle-packing experiment: pack 26 circles in the
 
 [Write-up](experiments/circle-packing.md) · [Example](https://github.com/KE7/helix/tree/main/examples/circle_packing)
 
+### Eterna100 RNA design
+
+An RNA sequence designer for the Eterna100-V2 benchmark: for a target secondary structure from the Eterna citizen-science game, return a sequence whose ViennaRNA 2 minimum-free-energy fold is exactly that structure. The seed pairs every stem G-C and does no search.
+
+- Codex agents raised the designer from 5 to 21 of 30 validation puzzles over 12 generations: 11 after generation 1, 19 after generation 2, 21 in generation 11.
+- On 50 held-out puzzles it solves 32 or 33 (two scorings), against 6 for the seed, with 8 seconds per puzzle.
+
+[Write-up](experiments/eterna100.md) · [Example](https://github.com/KE7/helix/tree/main/examples/eterna100)
+
 ### Web researcher
 
 A question-answering agent for software-engineering questions whose answers change over time, such as current package versions. The seed asks Claude Haiku directly, with no web access, and the evaluator scores answers against versions it fetches live from PyPI and endoflife.date.
