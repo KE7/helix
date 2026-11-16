@@ -637,6 +637,9 @@ class RunReader:
         state_gen = state.generation if state is not None else 0
         current = int(open_gen["attrs"]["generation"]) if open_gen else state_gen
         done_gen = current - 1 if open_gen else state_gen
+        # `helix evolve --generations N` overrides max_generations without recording it, so a
+        # run past the TOML's limit has an unknown one: no denominator and no projection from it.
+        max_gen: int | None = ev.max_generations if current <= ev.max_generations else None
 
         summary = summarize(records)
         finished_gens = {g: s for g, s in summary.generation_seconds.items()
@@ -662,13 +665,14 @@ class RunReader:
                 gens_by_evals = max(0, max_evals - used) / per_gen
         time_left, basis = None, None
         if running and median_gen is not None:
-            if open_gen is not None:
-                in_gen = now - float(open_gen["wall_time"])
-                left_gens = max(0.0, median_gen - in_gen) + max(0, ev.max_generations - current) * median_gen
-            else:
-                left_gens = max(0, ev.max_generations - done_gen) * median_gen
-            time_left, basis = left_gens, "generations"
-            if gens_by_evals is not None and gens_by_evals * median_gen < left_gens:
+            if max_gen is not None:
+                if open_gen is not None:
+                    in_gen = now - float(open_gen["wall_time"])
+                    left_gens = max(0.0, median_gen - in_gen) + max(0, max_gen - current) * median_gen
+                else:
+                    left_gens = max(0, max_gen - done_gen) * median_gen
+                time_left, basis = left_gens, "generations"
+            if gens_by_evals is not None and (time_left is None or gens_by_evals * median_gen < time_left):
                 time_left, basis = gens_by_evals * median_gen, "evaluations"
 
         accepted = front.accepted if front else []
@@ -684,16 +688,16 @@ class RunReader:
                     if g in trace.usage_by_generation]
         if has_cost and per_record and recorded:
             per_gen_cost = _median(recorded)
-        gens_left = float(max(0, ev.max_generations - gens_recorded))
+        gens_left: float | None = None if max_gen is None else float(max(0, max_gen - gens_recorded))
         if gens_by_evals is not None:
-            gens_left = min(gens_left, gens_by_evals)
+            gens_left = gens_by_evals if gens_left is None else min(gens_left, gens_by_evals)
         kept = [c for c in accepted if _generation_of(c, lineage) > 0]
         spend = {
             "cost_usd": cost,
             "input_tokens": budget.input_tokens if budget else 0,
             "output_tokens": budget.output_tokens if budget else 0,
             "cached_input_tokens": budget.cached_input_tokens if budget else 0,
-            "projected_cost_usd": None if per_gen_cost is None or not running
+            "projected_cost_usd": None if per_gen_cost is None or gens_left is None or not running
             else cost + per_gen_cost * gens_left,
             "cost_per_generation": per_gen_cost,
             "cost_per_accepted": cost / len(kept) if has_cost and kept else None,
@@ -822,7 +826,7 @@ class RunReader:
 
         return {
             "status": {"state": state_name, "detail": detail, "stale_seconds": stale},
-            "generation": {"current": current, "max": ev.max_generations},
+            "generation": {"current": current, "max": max_gen},
             "elapsed_seconds": elapsed,
             "evaluations": {"used": used, "max": max_evals},
             "time_left_seconds": time_left,

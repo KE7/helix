@@ -528,6 +528,26 @@ def test_running_projection_by_generations_and_evaluations(tmp_path: Path) -> No
     assert RunReader(tmp_path, config).snapshot(now=450.0)["config_changed"] is True  # type: ignore[index]
 
 
+def test_run_past_the_toml_generation_limit_has_no_denominator(tmp_path: Path) -> None:
+    """`helix evolve --generations 6` on a TOML saying 2 is not recorded anywhere."""
+    config = _config(max_generations=2)
+    _evaluation(tmp_path, "g0-s0", [1, 0, 0, 0])
+    _state(tmp_path, config, 2, ["g0-s0"], budget=BudgetState(evaluations=100, cost_usd=4.0))
+    trace = Trace()
+    run = trace.start("run", 0.0)
+    trace.span("generation", 0.0, 100.0, run, generation=1)
+    trace.span("generation", 100.0, 400.0, run, generation=2)
+    trace.start("generation", 400.0, run, generation=3)
+    trace.write(tmp_path)
+
+    snap = RunReader(tmp_path, config).snapshot(now=450.0)
+    assert snap is not None
+    assert snap["generation"] == {"current": 3, "max": None}
+    assert (snap["time_left_seconds"], snap["time_left_basis"]) == (None, None)
+    assert snap["spend"]["projected_cost_usd"] is None
+    assert snap["spend"]["cost_per_generation"] == 2.0
+
+
 def test_hybrid_frontier_with_objective_scores(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     config = _config(frontier_type="hybrid")
     _evaluation(tmp_path, "g0-s0", [1, 0, 0, 0], [{"x": 1.0, "y": 0.0}] * 4)

@@ -131,3 +131,6 @@ backends; other backends show none.
   work. The Candidate view then takes the cost from the backend's result files in the worktree, which go with a
   rejected candidate's worktree.
 - The parent's score on the minibatch gate is not saved, so a rejected proposal shows the child's score only.
+- Settings come from `helix.toml`. HELIX does not record command-line overrides such as `helix evolve --generations`,
+  so once a run passes the file's `max_generations` the header shows the generation without a total and no time left
+  from it.

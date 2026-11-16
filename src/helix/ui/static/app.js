@@ -179,7 +179,7 @@
         seed ? h('span', { class: 'sd' }, ' · seed ', h('b', { text: seed })) : null));
     }
     const g = r.generation || {};
-    out.push(stat(`${num(g.current) ? g.current : '–'}/${num(g.max) ? g.max : c.max_generations}`, 'generations'));
+    out.push(stat(`${num(g.current) ? g.current : '–'}${num(g.max) ? '/' + g.max : ''}`, 'generations'));
     const ev = r.evaluations || {};
     out.push(stat(num(ev.max) ? `${compact(ev.used)}/${compact(ev.max)}` : compact(ev.used), 'evaluations'));
     if (num(r.time_left_seconds) && running()) out.push(stat('~' + dur(r.time_left_seconds), 'left'));
@@ -510,7 +510,7 @@
     } else {
       title = 'Budget used';
       const ev = (r && r.evaluations) || {}, g = (r && r.generation) || {};
-      rows = [[`${num(g.current) ? g.current : 0}/${num(g.max) ? g.max : c.max_generations}`, 'generations'],
+      rows = [[`${num(g.current) ? g.current : 0}${num(g.max) ? '/' + g.max : ''}`, 'generations'],
         [num(ev.max ?? c.max_evaluations) ? `${compact(ev.used || 0)}/${compact(ev.max ?? c.max_evaluations)}` : compact(ev.used || 0), 'evaluations'],
         [r ? dur(r.elapsed_seconds) : '–', 'elapsed']];
     }
@@ -1045,7 +1045,7 @@
     const zero = num(run.zero) ? run.zero : null;
     const fs = h('div', { class: 'fs' },
       h('span', null, h('b', { text: score(d) }), bin ? 'instances succeeded' : 'mean score'),
-      d.front ? [h('span', null, h('b', { text: '#' + (d.rank ?? S.rank[d.id] ?? '–') }), `of ${S.front.length} on the frontier`),
+      d.front ? [h('span', null, h('b', { text: '#' + (S.rank[d.id] ?? '–') }), `of ${S.front.length} on the frontier`),
         h('span', null, h('b', { text: num(d.keys) ? String(d.keys) : '–' }), 'frontier keys'),
         num(d.sole) ? h('span', null, h('b', { text: String(d.sole) }), 'held alone') : null]
         : h('span', null, h('b', { text: '–' }), status),
