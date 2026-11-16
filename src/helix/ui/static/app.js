@@ -501,8 +501,10 @@
     const bars = gens.length > 1 ? s('svg', { class: 'spk' }) : null;
     let title = 'Spend', rows;
     if (sp.has_cost) {
-      rows = [[money(sp.cost_usd), 'so far', num(sp.cost_per_accepted) ? `${money(sp.cost_per_accepted)} per accepted` : null],
-        [num(sp.projected_cost_usd) ? '~' + money(sp.projected_cost_usd) : '–', 'at finish', num(sp.cost_per_generation) ? `${money(sp.cost_per_generation)} per generation` : null]];
+      // a projection only while the run is going; after it, the cost of a generation
+      rows = [[money(sp.cost_usd), running() ? 'so far' : 'in all', num(sp.cost_per_accepted) ? `${money(sp.cost_per_accepted)} per accepted` : null],
+        running() ? [num(sp.projected_cost_usd) ? '~' + money(sp.projected_cost_usd) : '–', 'at finish', num(sp.cost_per_generation) ? `${money(sp.cost_per_generation)} per generation` : null]
+          : [money(sp.cost_per_generation), 'per generation']];
       rows.push(...(shareRow.length ? shareRow : [[money(sp.cost_per_accepted), 'per accepted']]));
     } else if (tokens > 0) {
       rows = [[compact(sp.input_tokens), 'tokens in', num(sp.cached_input_tokens) ? `${compact(sp.cached_input_tokens)} cached` : null], [compact(sp.output_tokens), 'tokens out']];
@@ -663,7 +665,7 @@
   function renderTx() {
     const t = S.tx, box = $('tx');
     if (!t) return;
-    const label = t.source === 'live' ? 'live' : t.source === 'finished' ? 'finished' : t.source === 'none' ? (t.note || 'no transcript') : '…';
+    const label = t.source === 'live' ? 'live' : t.source === 'finished' ? 'finished' : t.source === 'none' ? 'no transcript' : '…';
     $('txw').textContent = `${t.id} · ${label}`;
     $('txw').title = t.note || '';
     const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
