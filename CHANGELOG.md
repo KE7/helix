@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `examples/web_researcher`: when `solve()` raises, the question's feedback now
+  says so under `error`. Before, a failed model call (a missing key, or one
+  with no credit) was recorded only as an empty answer, so a run could stall
+  at the questions only the model can answer with nothing pointing at the key.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
