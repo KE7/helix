@@ -83,6 +83,7 @@ helix attempts
 helix attempts --skips
 helix timing
 helix timing --perfetto trace.json
+helix ui            # live dashboard; over SSH: ssh -N -L 8790:127.0.0.1:8790 host
 ```
 
 ### Where the time went

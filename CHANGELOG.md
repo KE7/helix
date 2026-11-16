@@ -9,11 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `helix ui` opens a read-only live dashboard of a project in the browser: run
+  progress, the frontier, the lineage of every proposal, a table of all
+  proposals with outcome filters, every candidate with its diff (against its
+  parent or the seed), task prompt, children and per-instance scores against
+  its parent, the current generation with the agent's live transcript (Codex
+  and Claude), run health with cost per generation and the share spent on
+  rejected proposals, and where the agent and evaluator run. It never writes
+  to the run and every request needs the token it prints. See the
+  [Live dashboard](https://ke7.github.io/helix/guides/ui.html) guide.
 - `.helix/timing.jsonl` now has a `usage` record for every agent charge:
   tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
   `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
   per generation and per proposal is exact, rejected proposals included.
   `helix timing` and the Perfetto export are unchanged.
+
+### Packaging
+
+- New dependencies `starlette` and `uvicorn`, for `helix ui`'s local server.
 
 ## [0.3.0] - 2026-11-09
 

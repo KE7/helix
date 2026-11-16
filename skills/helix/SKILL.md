@@ -296,6 +296,7 @@ helix attempts --dir .
 helix attempts --skips --dir .
 helix timing --dir .
 helix timing --perfetto trace.json --dir .
+helix ui --dir .
 helix clean --dir .
 ```
 

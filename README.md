@@ -76,6 +76,7 @@ print("HELIX_RESULT=" + json.dumps([[score, {"feedback": feedback}]]))
 ```bash
 helix evolve        # run the search
 helix frontier      # candidates on the Pareto frontier
+helix ui            # live dashboard in the browser
 helix best --export ./best
 ```
 
