@@ -24,6 +24,15 @@ HELIX optimizes a whole repository against your evaluator. Each mutation is a mu
 
 One HELIX mutation by Claude Sonnet 5.5 rewrote a Franka Panda solver package on ManiSkill 3: validation went from 0.064 to 1.0, and the evolved package solves all 141 train, validation and held-out trials. The videos show validation trial 26 of each task, with the wrist camera in the top left. [Read the write-up](experiments/maniskill-pick-place.md).
 
+## Watch the search live
+
+`helix ui` opens a live dashboard of a run in your browser: the best score generation by generation, each agent at work with its transcript streaming, and every candidate's diff, weakest cases and evaluator feedback. The loop is drawn inside its isolation boundaries, so a sandbox setting you did not intend stands out. The dashboard only reads the run; for a run on another machine, forward one port over SSH. [Read the guide](guides/ui.md).
+
+<div class="helix-ui" markdown>
+<video class="ui-light" src="assets/ui/helix-ui-tour-light.mp4" poster="assets/ui/helix-ui-light.png" aria-label="helix ui on a live eterna100 RNA design run" width="1440" height="900" autoplay loop muted playsinline></video>
+<video class="ui-dark" src="assets/ui/helix-ui-tour-dark.mp4" poster="assets/ui/helix-ui-dark.png" aria-label="helix ui on a live eterna100 RNA design run" width="1440" height="900" autoplay loop muted playsinline></video>
+</div>
+
 ## Results
 
 | | |
@@ -43,4 +52,6 @@ More in [How HELIX works](concepts/how-it-works.md).
   .helix-demo table { width: 100%; }
   .helix-demo video { width: 100%; max-width: 420px; display: block; border-radius: 4px; }
   .md-typeset td strong { white-space: nowrap; }
+  .helix-ui video { width: 100%; height: auto; display: block; border-radius: 6px; border: 1px solid var(--md-default-fg-color--lightest); }
+  [data-md-color-scheme="slate"] .helix-ui .ui-light, [data-md-color-scheme="default"] .helix-ui .ui-dark { display: none; }
 </style>

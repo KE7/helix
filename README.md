@@ -11,7 +11,7 @@
 
 [![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://github.com/KE7/helix/blob/main/LICENSE) [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/) [![PyPI](https://img.shields.io/pypi/v/helix-evo.svg)](https://pypi.org/project/helix-evo/) [![CI](https://github.com/KE7/helix/actions/workflows/ci.yml/badge.svg)](https://github.com/KE7/helix/actions/workflows/ci.yml)
 
-[Docs](https://ke7.github.io/helix/) · [Quickstart](#quickstart) · [Results](#results) · [Built with HELIX](#built-with-helix) · [Examples](#examples)
+[Docs](https://ke7.github.io/helix/) · [Quickstart](#quickstart) · [Live dashboard](#watch-the-search-live) · [Results](#results) · [Built with HELIX](#built-with-helix) · [Examples](#examples)
 
 </div>
 
@@ -39,6 +39,17 @@
 HELIX optimizes a whole repository against your evaluator. Each mutation is a multi-turn session of a coding agent, such as Claude Code or Codex, that reads, edits, runs and tests code in its own git worktree before HELIX scores the result. Candidates are kept on an instance-level Pareto frontier, so a program that is best on any one case survives. The search loop comes from GEPA's [optimize_anything](https://doi.org/10.1145/3786335.3813167).
 
 Unlike a single coding-agent session, HELIX keeps going: it runs many attempts against a scorer you control, keeps only changes that measurably help, and hands back plain code. You provide a repository, an objective, and an evaluator that prints a score per case.
+
+## Watch the search live
+
+`helix ui` opens a live dashboard of a run in your browser: the best score generation by generation, each agent at work with its transcript streaming, and every candidate's diff, weakest cases and evaluator feedback. The loop is drawn inside its isolation boundaries, so a sandbox setting you did not intend stands out. The dashboard only reads the run; for a run on another machine, forward one port over SSH. [Live dashboard guide](https://ke7.github.io/helix/guides/ui.html)
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-dark.gif">
+  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-light.gif" width="900" alt="helix ui on a live run of the eterna100 RNA design example: Codex agents improve an RNA sequence designer in parallel with a live transcript, the best score winds up a helix from 5 to 19 of 30 puzzles, the lineage highlights the best candidate's ancestry, and a candidate opens to its diff">
+</picture>
+</p>
 
 ## Results
 
