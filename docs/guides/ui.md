@@ -12,10 +12,8 @@ HELIX UI for my-project: http://127.0.0.1:8790/?token=Ux3kQ9vN2pLm7RtA5yWc8dEf1H
 Read-only. Press Ctrl+C to stop.
 ```
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="../assets/ui/helix-ui-dark.png">
-  <img src="../assets/ui/helix-ui-light.png" alt="The helix ui dashboard of a long run: header numbers, the helix progress chart, the loop with live numbers, run health and the current generation's agents with a live transcript">
-</picture>
+![The helix ui dashboard during a run: header numbers, the helix progress chart, the loop with live numbers, run health, and the current generation's agents with a live transcript](../assets/ui/helix-ui-light.png#only-light)
+![The helix ui dashboard during a run: header numbers, the helix progress chart, the loop with live numbers, run health, and the current generation's agents with a live transcript](../assets/ui/helix-ui-dark.png#only-dark)
 
 ## Options
 
@@ -66,7 +64,9 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
 - **Frontier** (click the box): the non-dominated candidates (GEPA's `remove_dominated_programs` over the frontier
   keys), their mean score against the keys they hold, and a strip of the best score on every validation instance. Click
   a cell of the strip for that instance's score in every accepted candidate. With an `objective`, `hybrid` or
-  `cartesian` frontier it shows a table of objective means and a plot of one objective against another.
+  `cartesian` frontier it shows a table of objective means and a plot of one objective against another. Candidates
+  with the same score on every key keep one place on the frontier between them, as in GEPA, so the candidate with the
+  best score can be listed as dominated.
 - **Lineage**: every proposal by generation, joined to its parents, with the path to the best candidate in cyan,
   frontier members ringed and rejected proposals as small open dots (shown up to 400 nodes; a toggle turns them on or
   off). Hover a node to light its ancestors and descendants and fade the rest. Click it to pin it and open its panel:

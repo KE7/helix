@@ -263,7 +263,7 @@ pre.six.muted{color:var(--ink3)}
 .tog{margin-left:auto;font-size:11.5px;border:1px solid var(--line);border-radius:12px;padding:1px 9px;cursor:pointer;color:var(--ink2);background:none;flex:none}
 .tog.on{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .tx{flex:1;min-height:0;overflow-y:auto;mask-image:linear-gradient(transparent,#000 20px);padding-top:8px}
-.ev{padding:6px 0;font-size:13px;overflow-wrap:anywhere}.ev .w{font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
+.ev{padding:6px 0;font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}.ev .w{font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
 .ev code{display:block;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ev code.x{color:var(--amber)}
 .tx.nocmd .ev.cmd{display:none}
