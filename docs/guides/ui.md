@@ -58,8 +58,10 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   objectives, a selector on the chart switches the line from the aggregate to one objective's best so far; the browser
   remembers the choice. Click the chart's background to open the Lineage.
 - **Loop**: frontier, mutation, minibatch gate and validation, each with one live number. Dots carry data and dashes
-  carry decisions along the arrows, at the speed of the run's own median durations, during the run and after it; hover
-  an arrow for what it carries and the time it moves at. They stand still when the system asks for reduced motion. The
+  carry decisions along the arrows, at the speed of the run's own median durations, during the run and after it. The
+  arrow into the gate carries one dot per proposal of a generation and the arrow back to the frontier one per proposal
+  that passes the gate (at most six), so the gate's filtering shows as a thinner flow; hover an arrow for what it
+  carries and the time it moves at. They stand still when the system asks for reduced motion. The
   sandbox is drawn when the agent runs in Docker; the evaluator sits outside it unless it runs in a sidecar. Amber marks
   only settings that are likely mistakes, such as `agent.web_access = false` with an open network. Click the gate for
   the rejected proposals.

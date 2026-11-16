@@ -351,6 +351,7 @@
 
   // ---------------- the loop, with live numbers ----------------
   const speed = (sec) => Math.min(12, Math.max(0.6, 0.35 * Math.sqrt(sec)));
+  const FLOW_MAX = 6;  // dots on one edge: past this, the short edit edge reads as a beaded line, not a flow
   function warnings() {
     const w = [...((S.static.isolation && S.static.isolation.warnings) || [])];
     if (S.run && S.run.config_changed && !w.some((x) => x.id === 'config-changed')) {
@@ -365,10 +366,12 @@
     const nobj = (S.frontier && S.frontier.objectives && S.frontier.objectives.length) || (r && r.objective_bests && r.objective_bests.length) || 0;
     const typeSub = type === 'hybrid' ? `instances + ${nobj || '?'} objectives` : type === 'objective' ? `${nobj || '?'} objectives` : type === 'cartesian' ? `instances × ${nobj || '?'} objectives` : null;
     // edges always flow at the run's own speeds (the loop's shape is the point, finished or not); glow only while it runs
+    // one dot per proposal per generation into the gate, one per passing proposal out of validation
+    const perGen = Math.max(1, (c.proposals_per_generation || 1) * (c.mutations_per_parent || 1));
     const m = {
       run: !!r, anim: animate(), flow: !reduceMotion.matches, agent: iso.agent || (c.sandbox && c.sandbox.enabled ? 'sandbox' : 'host'), evaluator: iso.evaluator || 'host',
       merge: !!c.merge_enabled, warn: warnings().map((x) => [x.id, x.text, x.detail || '']), dark: dark.matches,
-      front: S.front.map((x) => [x.id, x.mean]),
+      front: S.front.map((x) => [x.id, x.mean]), perGen, passShare: null,
     };
     if (!L) {
       m.f = ['–', '', typeSub];
@@ -380,12 +383,14 @@
       return m;
     }
     const mu = L.mutation || {}, gt = L.gate || {}, va = L.validation || {}, fr = L.frontier || {};
+    m.passShare = gt.tried ? gt.passed / gt.tried : null;
     m.f = [String(num(fr.size) ? fr.size : S.front.length), `of ${num(fr.accepted) ? fr.accepted : (r.candidates || []).length} accepted`, typeSub];
     m.m = [String(mu.running ?? 0), 'running', num(mu.median_seconds) ? `median ${dur(mu.median_seconds)}` : (mu.finished ? `${mu.finished} finished` : 'none finished yet'), (mu.running || 0) > 0];
     m.g = gt.tried ? [pct(gt.passed / gt.tried), 'pass', `${gt.passed} of ${gt.tried} · ${gt.ids_each ?? c.minibatch_size} ids each`] : ['–', '', `${gt.ids_each ?? c.minibatch_size} ids each`];
     m.v = [num(va.median_seconds) ? dur(va.median_seconds) : '–', num(va.median_seconds) ? 'median' : '', `${va.count ?? 0} validated · ${va.ids ?? '–'} ids`, (va.running || 0) > 0];
     const merges = (r.candidates || []).filter((x) => x.operation === 'merge').length;
     m.mg = [String(merges), 'accepted', null];
+    m.merges = merges;
     const split = Object.fromEntries(((r.health && r.health.time_split) || []).map((t) => [t.kind, t.seconds]));
     m.secs = [mu.median_seconds || 900, gt.tried && split.gate ? split.gate / gt.tried : 120, va.median_seconds || 300];
     return m;
@@ -406,15 +411,17 @@
       if (sub) g.appendChild(s('text', { x: 16, y: 88, class: 's', text: sub }));
       return g;
     };
-    // dots carry data, dashes carry decisions; a dot crosses in sqrt-scaled real seconds, so slow stages move slowly
-    const edge = (d, secs, kind, color, what, clock) => {
+    // Dots carry things (edits, scores), dashes carry decisions. A dot crosses in sqrt-scaled real seconds, so slow
+    // stages move slowly; a data edge carries one dot per item per generation (up to FLOW_MAX), so the gate's
+    // filtering shows as a thinner flow back to the frontier.
+    const edge = (d, secs, kind, color, what, clock, count = 1) => {
       if (kind === 'data') {
         add(s('path', { d, class: 'ed', stroke: color }));
         if (m.flow) {
           const du = speed(secs);
-          for (let i = 0; i < 3; i++) {
+          for (let i = 0; i < count; i++) {
             const c = add(s('circle', { r: 3.2, fill: color, class: 'fd' }));
-            c.appendChild(s('animateMotion', { dur: du + 's', begin: -i * du / 3 + 's', repeatCount: 'indefinite', path: d }));
+            c.appendChild(s('animateMotion', { dur: du + 's', begin: -i * du / count + 's', repeatCount: 'indefinite', path: d }));
           }
         }
       } else add(s('path', { d, class: 'ed dec' + (m.flow ? '' : ' still'), stroke: color, style: { '--d': speed(secs) * 1.6 + 's' } }));
@@ -444,15 +451,22 @@
       })));
     }
     const [aSec, gSec, vSec] = m.secs;
+    const edits = Math.min(FLOW_MAX, m.perGen);
+    // before the gate has run, one dot just shows the direction; after, one per passing proposal (a gate that passed
+    // nothing leaves the edge empty)
+    const passing = m.passShare == null ? 1 : m.passShare > 0 ? Math.max(1, Math.round(edits * m.passShare)) : 0;
+    const passText = m.passShare == null ? '' : m.passShare > 0 ? `, for the ${pct(m.passShare)} of proposals that pass the gate` : '; no proposal has passed the gate yet';
     edge('M210 145 H282', aSec, 'dec', C, 'a parent is picked from the frontier', 'agent time');
-    edge('M492 145 H592', aSec, 'data', M, "the agent's edits go to the gate", 'agent time');
+    edge('M492 145 H592', aSec, 'data', M, `the agent's edits go to the gate, ${m.perGen} per generation`, 'agent time', edits);
     edge('M708 200 V272', gSec, 'dec', P, 'a child that passes the gate is validated', 'gate time');
     const back = m.merge ? 300 : 327;
-    edge(`M592 ${back} H210`, vSec, 'data', P, 'validation scores update the frontier', 'validation time');
+    edge(`M592 ${back} H210`, vSec, 'data', P, `validation scores update the frontier${passText}`, 'validation time', passing);
     if (m.merge) {
       node(20, 342, 190, 100, 'm', null, 'Merge', m.mg);
       edge('M115 320 V342', vSec, 'dec', C, 'two frontier members are picked to merge', null);
-      edge('M210 392 H708 V382', vSec, 'data', P, 'a merged candidate is validated', 'validation time');
+      // empty until a merge is accepted, as the return edge is until a proposal passes the gate
+      const mergeDots = m.run && !m.merges ? 0 : 1;
+      edge('M210 392 H708 V382', vSec, 'data', P, `a merged candidate is validated${m.run && !m.merges ? '; no merge accepted yet' : ''}`, 'validation time', mergeDots);
     }
     if (box) {
       add(s('circle', { cx: 262, cy: 145, r: 4, class: 'port' }));
