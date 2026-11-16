@@ -117,7 +117,7 @@ Useful files:
   worktrees/gN-sN/
   attempts/           (per-rejected-candidate JSON records)
   skips/              (per-generation perfect-skip event lists)
-  timing.jsonl        (timing spans; read with `helix timing`)
+  timing.jsonl        (timing spans and agent usage; read with `helix timing`)
 ```
 
 For backend diagnostics in a candidate worktree, inspect:
