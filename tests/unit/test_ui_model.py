@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ import pytest
 
 import helix
 from helix.config import HelixConfig, load_config
-from helix.ui.model import build_static, dataset_sizes, evaluator_modules
+from helix.ui.model import agent_files, build_static, dataset_sizes, evaluator_modules
 
 EXAMPLES = sorted((Path(__file__).parents[2] / "examples").glob("*/helix.toml"))
 
@@ -34,7 +35,7 @@ def test_example_configs_build_a_well_formed_model(config_path: Path) -> None:
 
     json.dumps(static)
     assert set(static) == {
-        "project", "config", "loop", "isolation", "repro", "evaluator_modules", "sizes",
+        "project", "config", "loop", "isolation", "repro", "evaluator_modules", "sizes", "files",
     }
     assert static["project"]["name"] == config_path.parent.name
     assert static["project"]["helix_version"] == helix.__version__
@@ -264,3 +265,32 @@ def test_evaluator_module_scan_tolerates_missing_and_unparseable(tmp_path: Path)
 def test_group_key_separator_is_in_static(tmp_path: Path) -> None:
     static = build_static(_config(evolution={"group_key_separator": "::"}), tmp_path, tmp_path / "helix.toml")
     assert static["config"]["group_key_separator"] == "::"
+
+
+def _repo(root: Path, files: list[str]) -> None:
+    for name in files:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("x\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+
+
+def test_agent_files_split_hidden_protected_and_mutable(tmp_path: Path) -> None:
+    _repo(tmp_path, ["evaluate.py", "train/a.json", "val/b.json", "val/c.json", "src/solver.py", "README.md"])
+    (tmp_path / "untracked.py").write_text("x\n")  # HELIX snapshots untracked files into the seed too
+    config = _config(
+        evaluator={"command": "python evaluate.py", "protected_files": ["train", "val"]},
+        sandbox={"enabled": True, "omit_from_agent": ["val"]},
+    )
+    files = agent_files(config, tmp_path)
+    assert files["hidden"] == [{"path": "val", "files": 2, "protected": True}]
+    # evaluate.py is protected because the evaluator command runs it, as HELIX decides.
+    assert files["protected"] == [{"path": "evaluate.py", "files": None}, {"path": "train", "files": 1}]
+    assert files["mutable"] == ["README.md", "src/solver.py", "untracked.py"] and files["mutable_total"] == 3
+
+
+def test_agent_files_without_the_sandbox_hide_nothing(tmp_path: Path) -> None:
+    _repo(tmp_path, ["evaluate.py", "val/b.json", "solver.py"])
+    files = agent_files(_config(sandbox={"enabled": False, "omit_from_agent": ["val"]}), tmp_path)
+    assert files["sandboxed"] is False and files["hidden"] == []
+    assert files["mutable"] == ["solver.py", "val/b.json"]

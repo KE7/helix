@@ -286,8 +286,8 @@ def test_live_unsandboxed_claude_project_folder(tmp_path: Path, monkeypatch: pyt
     assert out["source"] == "live" and out["session"] == "abc" and len(out["events"]) == 6
 
 
-def _volume_block(path: str, offset: int, first_ts: str, content: bytes) -> bytes:
-    header = f"\n@@HELIX_UI_FILE@@\t{offset}\t{path}\t\"timestamp\":\"{first_ts}\"\n".encode()
+def _volume_block(path: str, offset: int, first_ts: str, content: bytes, marker: str = "") -> bytes:
+    header = f"\n@@HELIX_UI_FILE@@\t{offset}\t{path}\t\"timestamp\":\"{first_ts}\"\t{marker}\n".encode()
     return header + content + b"\n@@HELIX_UI_END@@\n"
 
 
@@ -375,12 +375,12 @@ def test_volume_script_runs_under_sh(tmp_path: Path) -> None:
     listing = f"printf '%s\\n' {shlex.quote(str(path))}"
 
     out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 0)], capture_output=True, check=True).stdout
-    [(name, offset, stamp, content)] = list(tmod._split_volume_output(out))
-    assert (name, offset, content) == (str(path), 0, data)
+    [(name, offset, stamp, marker, content)] = list(tmod._split_volume_output(out))
+    assert (name, offset, marker, content) == (str(path), 0, "", data)
     assert tmod._epoch(stamp) == pytest.approx(T0)
 
     out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 10)], capture_output=True, check=True).stdout
-    [(_, offset, _, content)] = list(tmod._split_volume_output(out))
+    [(_, offset, _, _, content)] = list(tmod._split_volume_output(out))
     assert offset == 10 and content == data[10:]
 
 
@@ -391,5 +391,36 @@ def test_volume_script_finds_claude_start_after_an_untimed_first_line(tmp_path: 
     path.write_bytes(owner + b'{"type":"queue-operation","timestamp":"2026-11-16T07:31:33.062Z"}\n')
     listing = f"printf '%s\\n' {shlex.quote(str(path))}"
     out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 0)], capture_output=True, check=True).stdout
-    [(_, _, stamp, _)] = list(tmod._split_volume_output(out))
+    [(_, _, stamp, _, _)] = list(tmod._split_volume_output(out))
     assert tmod._epoch(stamp) == pytest.approx(1794814293.062)
+
+
+def test_volume_script_reads_the_candidate_from_the_launch_line(tmp_path: Path) -> None:
+    """HELIX names the candidate in the line it launches the agent with, the session's first user message."""
+    path = tmp_path / "s.jsonl"
+    launch = {"type": "response_item", "payload": {"role": "user", "content": [
+        {"type": "input_text", "text": "Read .agent_task_prompt.md in the current workspace and follow "
+                                       "those instructions exactly. This is HELIX candidate g12-s345."}]}}
+    path.write_bytes(_jsonl(_codex_rows()[:1]) + _jsonl([launch]))
+    listing = f"printf '%s\\n' {shlex.quote(str(path))}"
+    out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 0)], capture_output=True, check=True).stdout
+    [(_, _, _, marker, _)] = list(tmod._split_volume_output(out))
+    assert marker == "g12-s345"
+
+
+def test_marked_sessions_match_exactly_whatever_their_start_order(tmp_path: Path) -> None:
+    """Parallel agents' sessions can start out of order; the launch-line marker decides."""
+    s = "/home/node/.codex/sessions/2026/11/15/rollout-2026-11-15T00-00-0{}-aaaaaaaa-0000-0000-0000-00000000000{}.jsonl"
+    files = {
+        s.format(5, 1): (0, _iso(T0 + 5), "g1-s2", b""),   # g1-s2's session began first
+        s.format(6, 2): (0, _iso(T0 + 6), "g1-s1", b""),
+        s.format(7, 3): (0, _iso(T0 + 7), "", b""),         # an older-style session with no marker
+    }
+    records = [_start("run", "run", T0 - 60), _start("sandbox_reset", "r", T0 - 10),
+               _start("agent", "a1", T0, "g1-s1"), _start("agent", "a2", T0 + 1, "g1-s2"),
+               _start("agent", "a3", T0 + 2, "g1-s3")]
+    spans = {r["candidate"]: r for r in records if r.get("span") == "agent"}
+    assert tmod._match_session(spans["g1-s1"], records, files, "g1-s1") == (s.format(6, 2), True)
+    assert tmod._match_session(spans["g1-s2"], records, files, "g1-s2") == (s.format(5, 1), True)
+    # g1-s3 has no marked session: start order among the unmarked ones.
+    assert tmod._match_session(spans["g1-s3"], records, files, "g1-s3") == (s.format(7, 3), False)

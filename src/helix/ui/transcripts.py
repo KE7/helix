@@ -69,7 +69,7 @@ class TranscriptReader:
         self._backend = config.agent.backend
         self._lock = threading.Lock()
         # cid -> (agent span_id, session file, session id) once a live session is matched.
-        self._sessions: dict[str, tuple[str, str, str]] = {}
+        self._sessions: dict[str, tuple[str, str, str, bool]] = {}
         self._last_docker: dict[str, float] = {}
         add_env_names([*config.passthrough_env, *config.env])
 
@@ -168,7 +168,8 @@ class TranscriptReader:
                 self._sessions.pop(cid, None)
             now = time.monotonic()
             if now - self._last_docker.get(cid, -math.inf) < _DOCKER_INTERVAL:
-                return self._reply("live", cursor, session=known[2] if known else None, note=heuristic)
+                return self._reply("live", cursor, session=known[2] if known else None,
+                                   note=None if known and known[3] else heuristic)
             self._last_docker[cid] = now
         try:
             image = resolve_sandbox_image(self._config.sandbox, self._backend)
@@ -192,21 +193,21 @@ class TranscriptReader:
         if result.returncode != 0:
             return self._reply("live", cursor, note=f"could not read the auth volume: docker exit {result.returncode}")
         files = {
-            path: (offset, stamp, content)
-            for path, offset, stamp, content in _split_volume_output(result.stdout)
+            path: (offset, stamp, marker, content)
+            for path, offset, stamp, marker, content in _split_volume_output(result.stdout)
             if _VOLUME_PATH_RE[self._backend].match(path)
         }
-        path = known[1] if known is not None else _match_session(span, records, files)
+        path, exact = (known[1], known[3]) if known is not None else _match_session(span, records, files, cid)
         if path is None or path not in files:
             with self._lock:
                 self._sessions.pop(cid, None)
             return self._reply("live", cursor, note="no session file found yet")
         session = _session_id(Path(path).name)
         with self._lock:
-            self._sessions[cid] = (str(span["span_id"]), path, session)
-        offset, _, content = files[path]
+            self._sessions[cid] = (str(span["span_id"]), path, session, exact)
+        offset, _, _, content = files[path]
         events, new_cursor = _consume(self._backend, content, offset, complete=False)
-        note = _tail_note(cursor, offset) or heuristic
+        note = _tail_note(cursor, offset) or (None if exact else heuristic)
         return self._reply("live", new_cursor, session=session, events=events, note=note)
 
 
@@ -239,25 +240,37 @@ def _open_agent_span(records: list[dict[str, Any]], cid: str) -> dict[str, Any] 
 
 
 def _match_session(
-    span: dict[str, Any], records: list[dict[str, Any]], files: dict[str, tuple[int, str, bytes]]
-) -> str | None:
-    """Pair this generation's agent calls with session files in start order.
+    span: dict[str, Any], records: list[dict[str, Any]], files: dict[str, tuple[int, str, str, bytes]], cid: str
+) -> tuple[str | None, bool]:
+    """The session file of the agent call *span* of *cid*, and whether the match is exact.
 
-    Parallel agents of one backend share one auth volume and every session
-    records ``cwd`` ``/workspace``, so nothing on disk links a session to a
-    candidate (datamap transcripts section 3).  Each ``agent`` span since the
-    latest ``sandbox_reset`` (which empties the volume's sessions every
-    generation, sandbox.py:363), taken in start order, gets the earliest
-    unclaimed session whose first-line timestamp is at or after its start.
+    HELIX launches each agent with a line naming its candidate ("This is
+    HELIX candidate g3-s12", mutator.py ``_prompt_file_instruction``), the
+    first user message of its session file.  The earliest session carrying
+    *cid*'s marker that began at or after the span's start is exact.
+
+    Sessions from runs before that line carry no marker.  Parallel agents of
+    one backend share one auth volume and every session records ``cwd``
+    ``/workspace``, so for those, each ``agent`` span since the latest
+    ``sandbox_reset`` (which empties the volume's sessions every generation,
+    sandbox.py:363) without a marked session, taken in start order, gets the
+    earliest unmarked session whose first timestamp is at or after its start.
     """
+    stamped = [(at, path, marker) for path, (_, stamp, marker, _) in files.items() if (at := _epoch(stamp)) is not None]
+    start = float(span["wall_time"]) - _CLOCK_SLACK
+    mine = sorted((at, path) for at, path, marker in stamped if marker == cid and at >= start)
+    if mine:
+        return mine[0][1], True
+    marked = {marker for _, _, marker in stamped if marker}
     run = _latest_run(records)
     resets = [rec["wall_time"] for rec in run if rec.get("span") == "sandbox_reset" and rec.get("event") == "start"]
     since = max(resets, default=-math.inf)
     spans = sorted(
-        (rec for rec in run if rec.get("event") == "start" and rec.get("span") == "agent" and rec["wall_time"] >= since),
+        (rec for rec in run if rec.get("event") == "start" and rec.get("span") == "agent"
+         and rec["wall_time"] >= since and rec.get("candidate") not in marked),
         key=lambda rec: rec["wall_time"],
     )
-    sessions = sorted((at, path) for path, (_, stamp, _) in files.items() if (at := _epoch(stamp)) is not None)
+    sessions = sorted((at, path) for at, path, marker in stamped if not marker)
     claimed: set[str] = set()
     for rec in spans:
         pick = next(
@@ -267,8 +280,8 @@ def _match_session(
             continue
         claimed.add(pick)
         if rec.get("span_id") == span.get("span_id"):
-            return pick
-    return None
+            return pick, False
+    return None, False
 
 
 def _host_codex_session(home: Path, worktree: Path, start: float) -> Path | None:
@@ -402,10 +415,11 @@ def docker_argv(image: str, volume: str, script: str) -> list[str]:
 def _volume_script(listing: str, cursor: int) -> str:
     """Shell that, for each file *listing* prints, emits a header, then its bytes from the cursor.
 
-    The header carries the start offset, the path and the first ``timestamp``
+    The header carries the start offset, the path, the first ``timestamp``
     in the first five lines (codex ``session_meta``; claude's first timed entry,
-    since current Claude Code opens with an untimed ``session-owner`` line).  Symlinks are
-    skipped, so nothing outside the session folders is ever opened.
+    since current Claude Code opens with an untimed ``session-owner`` line), and
+    the candidate id the launch line names in the first 40 lines, if any.
+    Symlinks are skipped, so nothing outside the session folders is ever opened.
     """
     return (
         f"{listing} | while IFS= read -r f; do "
@@ -414,22 +428,28 @@ def _volume_script(listing: str, cursor: int) -> str:
         f"if [ {cursor} -gt 0 ] && [ {cursor} -le \"$s\" ]; then st={cursor}; "
         f"elif [ \"$s\" -gt {_MAX_READ} ]; then st=$((s - {_MAX_READ})); else st=0; fi; "
         "ts=$(head -n 5 \"$f\" | head -c 1048576 | grep -o '\"timestamp\": *\"[^\"]*\"' | head -n 1); "
-        "printf '\\n@@HELIX_UI_FILE@@\\t%s\\t%s\\t%s\\n' \"$st\" \"$f\" \"$ts\"; "
+        "mk=$(head -n 40 \"$f\" | head -c 4194304 | grep -o 'HELIX candidate g[0-9][0-9]*-[sm][0-9][0-9]*' | head -n 1); "
+        "printf '\\n@@HELIX_UI_FILE@@\\t%s\\t%s\\t%s\\t%s\\n' \"$st\" \"$f\" \"$ts\" \"${mk##* }\"; "
         f'tail -c +$((st + 1)) "$f" | head -c {_MAX_READ}; '
         "printf '\\n@@HELIX_UI_END@@\\n'; "
         "done"
     )
 
 
-def _split_volume_output(out: bytes) -> Iterable[tuple[str, int, str, bytes]]:
-    """``(path, start offset, first-line timestamp, bytes)`` per file block of :func:`_volume_script`."""
+#: The candidate id in a session's launch line (mutator.py ``_prompt_file_instruction``).
+_MARKER_RE = re.compile(r"^g\d+-[sm]\d+$")
+
+
+def _split_volume_output(out: bytes) -> Iterable[tuple[str, int, str, str, bytes]]:
+    """``(path, start offset, first timestamp, candidate marker, bytes)`` per file block of :func:`_volume_script`."""
     for block in out.split(_FILE_MARK)[1:]:
         header, _, rest = block.partition(b"\n")
         fields = header.decode("utf-8", "replace").split("\t")
-        if len(fields) != 3 or not fields[0].isdigit() or _END_MARK not in rest:
+        if len(fields) != 4 or not fields[0].isdigit() or _END_MARK not in rest:
             continue
         match = _TIMESTAMP_RE.search(fields[2])
-        yield fields[1], int(fields[0]), match.group(1) if match else "", rest.rpartition(_END_MARK)[0]
+        marker = fields[3] if _MARKER_RE.match(fields[3]) else ""
+        yield fields[1], int(fields[0]), match.group(1) if match else "", marker, rest.rpartition(_END_MARK)[0]
 
 
 def _consume(backend: str, data: bytes, start: int, *, complete: bool) -> tuple[list[dict[str, Any]], int]:

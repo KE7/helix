@@ -99,6 +99,11 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   its gate scores, labelled `gate`.
 - **Mutation** and **Validation** (click the box): the agent's time by tool, and the evaluator's command, sizes, errors and
   the time of each [`helix.timed`](timing.md) name it reports.
+- **Files** (in the Mutation view): what the agent cannot see, can see but must not change, and may change. *Hidden* is
+  `sandbox.omit_from_agent`, left out of the agent's workspace copy (with the sandbox on only). *Protected* is HELIX's
+  protected set, the evaluator script in the command plus `evaluator.protected_files`: a candidate that changes one is
+  rejected before it is scored. *Mutable* is every other file HELIX snapshots into the seed. A candidate's diff marks
+  any protected file it changed, and a proposal rejected for changing one lists those files on its page.
 - **Run health**: generations since a new best and the gate pass rate, where the time goes, spend, and failures (agent
   timeouts, agent errors, evaluator errors; click a count for the failed proposals). Spend is the cost so far and a
   projected cost at the end while the run is going, and the total and cost per generation once it has stopped. A run that writes `usage` records to [`.helix/timing.jsonl`](timing.md#record-format) also
@@ -114,9 +119,12 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
 The transcript comes from the agent CLI's own session file, which Codex and Claude Code write as they run. With the
 Docker sandbox on, that file is in the run's login volume, so the dashboard reads it with a short-lived container that
 mounts the volume read-only and has no network, at most once every 4 seconds and only while the transcript is on
-screen. HELIX does not record which session belongs to which agent until the call ends, so a live session is matched to
-its agent by start time. After a call ends the dashboard shows the copy HELIX keeps in the candidate's worktree; rejected
-candidates' worktrees are removed, and their transcripts with them. Transcripts are shown for the `codex` and `claude`
+screen. Every agent is launched with a line that names its candidate ("This is HELIX candidate g3-s12"), the first
+message of its session file, so a live session is matched to its own agent exactly, however many agents run at once
+(`num_parallel_proposals` × `mutations_per_parent`). Runs made with a HELIX older than that line fall back to start
+order: parallel agents that start within the same second can then show each other's live transcript until they finish,
+and the panel says "session matched to this agent by start time". After a call ends the dashboard shows the copy HELIX
+keeps in the candidate's worktree; rejected candidates' worktrees are removed, and their transcripts with them. Transcripts are shown for the `codex` and `claude`
 backends; other backends show none.
 
 ## Safety

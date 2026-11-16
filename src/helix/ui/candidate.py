@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from helix.config import HelixConfig
+from helix.evaluator_manifest import _collect_protected_evaluator_paths
+from helix.exceptions import HelixError
 from helix.lineage import load_lineage
 from helix.ui.redact import add_env_names, redact
 from helix.ui.run_state import RunReader, add_usage, candidate_usage, empty_usage, family_of
@@ -41,6 +43,19 @@ _BACKEND_RESULTS = (".helix_backend_result.json", ".helix_backend_summary_result
 _BACKEND_RESULT_BYTES = 8 * 1024 * 1024
 #: Diff bases ``?vs=`` accepts.
 DIFF_BASES = ("parent", "seed")
+
+
+def protected_paths(config: HelixConfig, project_root: Path) -> list[str]:
+    """HELIX's own protected set: the evaluator script it finds in the command plus ``evaluator.protected_files``."""
+    try:
+        return _collect_protected_evaluator_paths(config, project_root)
+    except HelixError:  # a path outside the project; HELIX refuses to start such a run
+        return sorted(config.evaluator.protected_files)
+
+
+def under(path: str, roots: list[str]) -> bool:
+    """Whether *path* is one of *roots* or inside one (sandbox.py ``_matches_omitted_path``)."""
+    return any(path == root or path.startswith(root.rstrip("/") + "/") for root in roots)
 
 
 def candidate_detail(
@@ -89,6 +104,16 @@ def candidate_detail(
         if commit and base_sha:
             files = _numstat(worktree, base_sha, commit)
             diff, truncated = _diff(worktree, base_sha, commit)
+    if files:
+        protected = protected_paths(config, project_root)
+        for f in files:
+            f["protected"] = under(f["path"], protected)
+    # A candidate rejected for changing protected files loses its worktree; its decision names them.
+    touched = next(
+        (r.get("paths") for r in reversed(reader.timing_records())
+         if r.get("event") == "decision" and r.get("candidate") == cid and r.get("paths")),
+        None,
+    )
     prompt, prompt_truncated = _prompt(worktree) if exists else (None, False)
     usage = candidate_usage(reader.timing_records(), cid)
     usage_source = "timing" if usage is not None else None
@@ -125,6 +150,7 @@ def candidate_detail(
         "worktree_exists": exists,
         "commit": commit[:7] if commit else None,
         "files": files,
+        "touched_protected": touched,
         "diff": diff,
         "diff_truncated": truncated,
         "diff_base": vs,

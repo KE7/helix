@@ -1106,11 +1106,16 @@
         h('div', { class: 'path' }, 'commit ', h('code', { text: d.commit || '–' }), d.commit ? copyBtn(d.commit) : null),
         seg,
         seg && !(d.files && d.files.length) && !d.diff ? h('div', { class: 'muted', text: '–' }) : null,
-        d.files && d.files.length ? h('div', { class: 'files' }, d.files.map((f) => h('div', null, h('span', { class: 'mono', text: f.path, title: f.path }),
-          h('span', null, h('span', { class: 'a', text: num(f.added) ? '+' + f.added : '' }), ' ', h('span', { class: 'r', text: num(f.removed) ? '−' + f.removed : '' }))))) : null,
+        d.files && d.files.length ? h('div', { class: 'files' }, d.files.map((f) => h('div', null,
+          h('span', { class: 'mono', text: f.path, title: f.protected ? `${f.path}: protected, so a proposal that changes it is rejected` : f.path }),
+          h('span', null, f.protected ? h('span', { class: 'pt-tag', text: 'protected' }) : null, ' ',
+            h('span', { class: 'a', text: num(f.added) ? '+' + f.added : '' }), ' ', h('span', { class: 'r', text: num(f.removed) ? '−' + f.removed : '' }))))) : null,
         d.diff ? diffView(d.diff + (d.diff_truncated ? '\n…' : '')) : null,
         h('div', { class: 'path tml' }, [['mutation', tm.agent_seconds], ['gate', tm.gate_seconds], ['validation', tm.validation_seconds]]
           .filter(([, v]) => num(v)).map(([k, v]) => `${k} ${dur(v)}`).join(' · '), candUse(d))),
+      d.touched_protected && d.touched_protected.length ? h('section', null, h('h4', { text: 'Rejected before scoring' }),
+        h('div', { class: 'muted', text: 'It changed protected files:' }),
+        h('div', { class: 'files' }, d.touched_protected.map((p) => h('div', null, h('span', { class: 'mono', text: p, title: p }), h('span', { class: 'pt-tag', text: 'protected' }))))) : null,
       d.attempt ? h('section', null, h('h4', { text: 'Attempt' }), h('div', { class: 'muted', text: [
         String(d.attempt.reason || '').replace(/_/g, ' '), d.attempt.stage ? 'at ' + String(d.attempt.stage).replace(/_/g, ' ') : null,
         num(d.attempt.score) ? `${d.attempt.score.toFixed(3)}${num(d.attempt.n) ? ` on ${d.attempt.n} ids` : ''}` : null].filter(Boolean).join(' · ') })) : null,
@@ -1341,7 +1346,7 @@
       ['runs in', iso.agent === 'sandbox' ? 'sandbox' : 'host'],
       ...(iso.agent === 'sandbox' ? [['network', sb.network, warnKeys.has('sandbox.network')], ['host gateway', sb.add_host_gateway ? 'on' : 'off'],
         ['timeout', num(sb.timeout_seconds) ? dur(sb.timeout_seconds) : null], ['auth volume', sb.auth_volume ?? 'shared', warnKeys.has('sandbox.auth_volume')],
-        ['image', sb.image], ['cpus', sb.cpus], ['memory', sb.memory], ['hidden from agent', num(sb.omit_from_agent) ? `${sb.omit_from_agent} paths` : null]] : []),
+        ['image', sb.image], ['cpus', sb.cpus], ['memory', sb.memory]] : []),
       ['proposals', c.proposals_per_generation != null ? `${c.proposals_per_generation} per generation` : null],
       ['mutations per parent', c.mutations_per_parent], ['sibling history', c.sibling_history == null ? null : c.sibling_history ? 'on' : 'off'],
       ['env', (c.env_names || []).join(', ') || null],
@@ -1353,8 +1358,26 @@
       brows.length ? h('section', null, h('h4', { text: 'Where agent time goes' }), barRows(brows, '--mag')) : null);
     fill($('v-mutation'), crumbs(['Loop', 'map'], ['Mutation', '']),
       h('div', { class: 'ch' }, h('h2', { text: 'Mutation' }), h('span', { text: [a.backend, a.model, a.effort].filter(Boolean).join(' · ') })),
-      fs, h('div', { class: 'cgrid' }, h('div', null, facts), right));
+      fs, h('div', { class: 'cgrid' }, h('div', null, facts, agentFiles()), right));
     agentScatter(num(sb.timeout_seconds) && iso.agent === 'sandbox' ? sb.timeout_seconds : null);
+  }
+  // what the agent cannot see, can see but must not change, and may change, by HELIX's own rules
+  function agentFiles() {
+    const fl = S.static.files;
+    if (!fl || !fl.known) return null;
+    const row = (e, tag) => h('li', null, h('span', { class: 'mono', text: e.path + (e.files ? '/' : '') }),
+      e.files ? h('small', { text: `${e.files} file${e.files > 1 ? 's' : ''}` }) : null, tag ? h('small', { class: 'tag', text: tag }) : null);
+    const group = (title, n, note, rows, open) => h('details', { class: 'fg', open: open || null },
+      h('summary', null, h('b', { text: title }), h('span', { text: String(n) })), h('p', { class: 'sub', text: note }),
+      rows.length ? h('ul', null, rows) : null);
+    const more = fl.mutable_total > fl.mutable.length ? `; the first ${fl.mutable.length} of ${fl.mutable_total} are listed` : '';
+    return h('section', { class: 'af' }, h('h4', { text: 'Files' }),
+      group('Hidden from the agent', fl.hidden.length,
+        fl.sandboxed ? 'Left out of the agent\'s workspace copy (sandbox.omit_from_agent).' : 'Nothing: without the sandbox the agent works in the candidate\'s worktree.',
+        fl.hidden.map((e) => row(e, e.protected ? 'also protected' : null)), true),
+      group('Protected', fl.protected.length, 'The agent can read these; a candidate that changes one is rejected before it is scored.',
+        fl.protected.map((e) => row(e)), true),
+      group('Mutable', fl.mutable_total, `Everything else the agent may change${more}.`, fl.mutable.map((p) => row({ path: p })), fl.mutable_total <= 20));
   }
   function agentScatter(timeout) {
     const S0 = $('as');

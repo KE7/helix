@@ -483,3 +483,23 @@ def test_no_usage_without_records_or_worktree(tmp_path: Path) -> None:
                               "g1-s2")
     assert detail is not None and detail["usage_source"] == "timing"
     assert detail["usage"] == {"cost_usd": 0.0, "input_tokens": 80, "output_tokens": 8, "cached_input_tokens": 0}
+
+
+def test_changed_protected_files_are_marked(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    config = HelixConfig(objective="grasp", evaluator=EvaluatorConfig(command="python eval.py", protected_files=["notes.md"]))
+    detail = candidate_detail(root, config, FakeReader(_snapshot(), _RECORDS), "g1-s1")
+    assert detail is not None
+    assert {f["path"]: f["protected"] for f in detail["files"]} == {"notes.md": True, "policy.py": False}
+    assert detail["touched_protected"] is None
+
+
+def test_a_tamper_rejected_proposal_names_the_protected_files_it_changed(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    records = [{"event": "decision", "candidate": "g1-s3", "accepted": False,
+                "reason": "tamper-rejected mutation candidate", "paths": ["eval.py"]}]
+    reader = FakeReader(_snapshot(), records, rows=[{"id": "g1-s3", "parents": ["g0-s0"], "outcome": "failed"}])
+    reader.candidate_ids = lambda: {"g0-s0", "g1-s1", "g1-s3"}  # type: ignore[method-assign]
+    detail = candidate_detail(root, _config(), reader, "g1-s3")
+    assert detail is not None and detail["worktree_exists"] is False
+    assert detail["touched_protected"] == ["eval.py"]

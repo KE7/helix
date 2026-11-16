@@ -14,8 +14,10 @@ from typing import Any
 
 import helix
 from helix.config import HelixConfig
+from helix.evaluator_manifest import _to_repo_relative
 from helix.evolution import _config_hash, _load_dataset_ids
 from helix.sandbox import sandbox_auth_volume_name
+from helix.ui.candidate import _git, protected_paths, under
 
 _OBJECTIVE_CHARS = 300
 _MAX_MODULE_FILES = 200
@@ -51,6 +53,43 @@ def build_static(config: HelixConfig, project_root: Path, config_path: Path) -> 
         "repro": _repro(config, project_root, config_path, evaluator_zone),
         "evaluator_modules": evaluator_modules(config, project_root),
         "sizes": sizes,
+        "files": agent_files(config, project_root),
+    }
+
+
+#: Paths listed per group; a large repository's mutable files are summarized past this.
+_FILES_LISTED = 400
+
+
+def agent_files(config: HelixConfig, project_root: Path) -> dict[str, Any]:
+    """What a mutation agent cannot see, can see but must not change, and may change.
+
+    Hidden is ``sandbox.omit_from_agent``, left out of the agent's workspace
+    copy, and only with the sandbox on.  Protected is HELIX's protected set:
+    a candidate that changes one of them is rejected before it is scored.
+    Mutable is every other file of the project that HELIX snapshots into the
+    seed (tracked or untracked, not ignored).
+    """
+    protected = protected_paths(config, project_root)
+    hidden = (
+        sorted({rel for p in config.sandbox.omit_from_agent if (rel := _to_repo_relative(p, project_root))})
+        if config.sandbox.enabled else []
+    )
+    listing = _git(project_root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    files = sorted({f for f in (listing or "").split("\0") if f and not under(f, [".helix"])})
+
+    def entry(path: str, **extra: Any) -> dict[str, Any]:
+        inside = sum(1 for f in files if f != path and under(f, [path]))
+        return {"path": path, "files": inside or None, **extra}
+
+    mutable = [f for f in files if not under(f, hidden) and not under(f, protected)]
+    return {
+        "known": listing is not None,
+        "sandboxed": config.sandbox.enabled,
+        "hidden": [entry(p, protected=under(p, protected)) for p in hidden],
+        "protected": [entry(p) for p in protected if not under(p, hidden)],
+        "mutable": mutable[:_FILES_LISTED],
+        "mutable_total": len(mutable),
     }
 
 
