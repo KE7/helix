@@ -204,7 +204,10 @@ class TranscriptReader:
             return self._reply("live", cursor, note="no session file found yet")
         session = _session_id(Path(path).name)
         with self._lock:
-            self._sessions[cid] = (str(span["span_id"]), path, session, exact)
+            if exact:  # a start-order guess is made afresh on every read
+                self._sessions[cid] = (str(span["span_id"]), path, session, exact)
+            else:
+                self._sessions.pop(cid, None)
         offset, _, _, content = files[path]
         events, new_cursor = _consume(self._backend, content, offset, complete=False)
         note = _tail_note(cursor, offset) or (None if exact else heuristic)
@@ -262,6 +265,10 @@ def _match_session(
     if mine:
         return mine[0][1], True
     marked = {marker for _, _, marker in stamped if marker}
+    if marked:
+        # This run marks its sessions: an unmarked one is still starting up (Codex
+        # writes session_meta a second or more before the launch line), not old-style.
+        return None, False
     run = _latest_run(records)
     resets = [rec["wall_time"] for rec in run if rec.get("span") == "sandbox_reset" and rec.get("event") == "start"]
     since = max(resets, default=-math.inf)

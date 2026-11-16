@@ -1373,8 +1373,8 @@
     const more = fl.mutable_total > fl.mutable.length ? `; the first ${fl.mutable.length} of ${fl.mutable_total} are listed` : '';
     return h('section', { class: 'af' }, h('h4', { text: 'Files' }),
       group('Hidden from the agent', fl.hidden.length,
-        fl.sandboxed ? 'Left out of the agent\'s workspace copy (sandbox.omit_from_agent).' : 'Nothing: without the sandbox the agent works in the candidate\'s worktree.',
-        fl.hidden.map((e) => row(e, e.protected ? 'also protected' : null)), true),
+        fl.sandboxed ? 'Left out of the agent\'s workspace copy: sandbox.omit_from_agent, and always helix.toml, .env files and .git.' : 'Nothing: without the sandbox the agent works in the candidate\'s worktree.',
+        fl.hidden.map((e) => row(e, e.builtin ? 'always left out' : e.protected ? 'also protected' : null)), true),
       group('Protected', fl.protected.length, 'The agent can read these; a candidate that changes one is rejected before it is scored.',
         fl.protected.map((e) => row(e)), true),
       group('Mutable', fl.mutable_total, `Everything else the agent may change${more}.`, fl.mutable.map((p) => row({ path: p })), fl.mutable_total <= 20));

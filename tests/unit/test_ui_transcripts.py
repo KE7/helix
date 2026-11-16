@@ -347,12 +347,33 @@ def test_live_sandboxed_reads_the_auth_volume_read_only(tmp_path: Path, monkeypa
     assert reader.read("g1-s2", out["cursor"])["events"] == []
     assert len(calls) == 1
 
-    # After 4 s: one call that tails only the matched file from the cursor.
+    # After 4 s: a start-order guess is not cached, so the next read lists the sessions again.
     clock[0] += 4.0
     reader.read("g1-s2", out["cursor"])
-    assert len(calls) == 2
+    assert len(calls) == 2 and "find" in calls[1][-1]
+
+
+def test_a_marked_session_is_cached_and_tailed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _worktree(tmp_path, "g1-s2")
+    path = "/home/node/.codex/sessions/2026/11/15/rollout-2026-11-15T00-00-05-aaaaaaaa-0000-0000-0000-000000000009.jsonl"
+    data = _jsonl(_codex_rows(T0 + 5))
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, _volume_block(path, 0, _iso(T0 + 5), data, "g1-s2"), b"")
+
+    monkeypatch.setattr(tmod.subprocess, "run", fake_run)
+    clock = [100.0]
+    monkeypatch.setattr(tmod.time, "monotonic", lambda: clock[0])
+    records = [_start("run", "run", T0 - 60), _start("agent", "a1", T0, "g1-s1"), _start("agent", "a2", T0 + 1, "g1-s2")]
+    reader = TranscriptReader(tmp_path, _config(sandbox=True), FakeReader(records))
+    out = reader.read("g1-s2")
+    assert out["session"] == "aaaaaaaa-0000-0000-0000-000000000009" and out["note"] is None
+    clock[0] += 5.0
+    reader.read("g1-s2", out["cursor"])
     follow = calls[1][-1]
-    assert follow.startswith(f"printf '%s\\n' {shlex.quote(second)} |")
+    assert follow.startswith(f"printf '%s\\n' {shlex.quote(path)} |")
     assert f"st={len(data)}" in follow and "find" not in follow
 
 
@@ -422,5 +443,8 @@ def test_marked_sessions_match_exactly_whatever_their_start_order(tmp_path: Path
     spans = {r["candidate"]: r for r in records if r.get("span") == "agent"}
     assert tmod._match_session(spans["g1-s1"], records, files, "g1-s1") == (s.format(6, 2), True)
     assert tmod._match_session(spans["g1-s2"], records, files, "g1-s2") == (s.format(5, 1), True)
-    # g1-s3 has no marked session: start order among the unmarked ones.
-    assert tmod._match_session(spans["g1-s3"], records, files, "g1-s3") == (s.format(7, 3), False)
+    # This run marks its sessions, so the unmarked one is still starting up: no guess for g1-s3 yet.
+    assert tmod._match_session(spans["g1-s3"], records, files, "g1-s3") == (None, False)
+    # A run from before the marker: start order.
+    old = {path: (o, stamp, "", data) for path, (o, stamp, _, data) in files.items()}
+    assert tmod._match_session(spans["g1-s3"], records, old, "g1-s3") == (s.format(7, 3), False)

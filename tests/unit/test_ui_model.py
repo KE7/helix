@@ -276,14 +276,16 @@ def _repo(root: Path, files: list[str]) -> None:
 
 
 def test_agent_files_split_hidden_protected_and_mutable(tmp_path: Path) -> None:
-    _repo(tmp_path, ["evaluate.py", "train/a.json", "val/b.json", "val/c.json", "src/solver.py", "README.md"])
+    _repo(tmp_path, ["evaluate.py", "train/a.json", "val/b.json", "val/c.json", "src/solver.py", "README.md", "helix.toml"])
     (tmp_path / "untracked.py").write_text("x\n")  # HELIX snapshots untracked files into the seed too
     config = _config(
         evaluator={"command": "python evaluate.py", "protected_files": ["train", "val"]},
         sandbox={"enabled": True, "omit_from_agent": ["val"]},
     )
     files = agent_files(config, tmp_path)
-    assert files["hidden"] == [{"path": "val", "files": 2, "protected": True}]
+    # The sandbox always leaves helix.toml out of the agent's copy (sandbox.py _ignore_for_copy).
+    assert files["hidden"] == [{"path": "val", "files": 2, "protected": True},
+                               {"path": "helix.toml", "files": None, "protected": False, "builtin": True}]
     # evaluate.py is protected because the evaluator command runs it, as HELIX decides.
     assert files["protected"] == [{"path": "evaluate.py", "files": None}, {"path": "train", "files": 1}]
     assert files["mutable"] == ["README.md", "src/solver.py", "untracked.py"] and files["mutable_total"] == 3

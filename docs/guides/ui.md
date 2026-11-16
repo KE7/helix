@@ -99,8 +99,9 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   its gate scores, labelled `gate`.
 - **Mutation** and **Validation** (click the box): the agent's time by tool, and the evaluator's command, sizes, errors and
   the time of each [`helix.timed`](timing.md) name it reports.
-- **Files** (in the Mutation view): what the agent cannot see, can see but must not change, and may change. *Hidden* is
-  `sandbox.omit_from_agent`, left out of the agent's workspace copy (with the sandbox on only). *Protected* is HELIX's
+- **Files** (in the Mutation view): what the agent cannot see, can see but must not change, and may change. *Hidden* is what
+  the sandbox leaves out of the agent's workspace copy: `sandbox.omit_from_agent`, and always `helix.toml`, `.env` files
+  and `.git` (nothing without the sandbox). *Protected* is HELIX's
   protected set, the evaluator script in the command plus `evaluator.protected_files`: a candidate that changes one is
   rejected before it is scored. *Mutable* is every other file HELIX snapshots into the seed. A candidate's diff marks
   any protected file it changed, and a proposal rejected for changing one lists those files on its page.

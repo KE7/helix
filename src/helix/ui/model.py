@@ -16,7 +16,7 @@ import helix
 from helix.config import HelixConfig
 from helix.evaluator_manifest import _to_repo_relative
 from helix.evolution import _config_hash, _load_dataset_ids
-from helix.sandbox import sandbox_auth_volume_name
+from helix.sandbox import _ignore_for_copy, sandbox_auth_volume_name
 from helix.ui.candidate import _git, protected_paths, under
 
 _OBJECTIVE_CHARS = 300
@@ -64,8 +64,9 @@ _FILES_LISTED = 400
 def agent_files(config: HelixConfig, project_root: Path) -> dict[str, Any]:
     """What a mutation agent cannot see, can see but must not change, and may change.
 
-    Hidden is ``sandbox.omit_from_agent``, left out of the agent's workspace
-    copy, and only with the sandbox on.  Protected is HELIX's protected set:
+    Hidden is what the sandbox leaves out of the agent's workspace copy:
+    ``sandbox.omit_from_agent``, and always ``helix.toml``, ``.env`` files and
+    ``.git`` (sandbox.py ``_ignore_for_copy``); without the sandbox, nothing.  Protected is HELIX's protected set:
     a candidate that changes one of them is rejected before it is scored.
     Mutable is every other file of the project that HELIX snapshots into the
     seed (tracked or untracked, not ignored).
@@ -82,11 +83,13 @@ def agent_files(config: HelixConfig, project_root: Path) -> dict[str, Any]:
         inside = sum(1 for f in files if f != path and under(f, [path]))
         return {"path": path, "files": inside or None, **extra}
 
-    mutable = [f for f in files if not under(f, hidden) and not under(f, protected)]
+    builtin = [f for f in files if _ignore_for_copy(Path(f))] if config.sandbox.enabled else []
+    mutable = [f for f in files if not under(f, hidden) and not under(f, protected) and f not in builtin]
     return {
         "known": listing is not None,
         "sandboxed": config.sandbox.enabled,
-        "hidden": [entry(p, protected=under(p, protected)) for p in hidden],
+        "hidden": [entry(p, protected=under(p, protected)) for p in hidden]
+        + [entry(f, protected=under(f, protected), builtin=True) for f in builtin if not under(f, hidden)],
         "protected": [entry(p) for p in protected if not under(p, hidden)],
         "mutable": mutable[:_FILES_LISTED],
         "mutable_total": len(mutable),
