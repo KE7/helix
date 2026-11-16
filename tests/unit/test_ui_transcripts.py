@@ -373,3 +373,14 @@ def test_volume_script_runs_under_sh(tmp_path: Path) -> None:
     out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 10)], capture_output=True, check=True).stdout
     [(_, offset, _, content)] = list(tmod._split_volume_output(out))
     assert offset == 10 and content == data[10:]
+
+
+def test_volume_script_finds_claude_start_after_an_untimed_first_line(tmp_path: Path) -> None:
+    """Current Claude Code opens a session with an untimed ``session-owner`` line."""
+    path = tmp_path / "c.jsonl"
+    owner = b'{"type":"session-owner","sessionId":"abc"}\n'
+    path.write_bytes(owner + b'{"type":"queue-operation","timestamp":"2026-11-16T07:31:33.062Z"}\n')
+    listing = f"printf '%s\\n' {shlex.quote(str(path))}"
+    out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 0)], capture_output=True, check=True).stdout
+    [(_, _, stamp, _)] = list(tmod._split_volume_output(out))
+    assert tmod._epoch(stamp) == pytest.approx(1794814293.062)

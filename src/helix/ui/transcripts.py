@@ -394,8 +394,9 @@ def docker_argv(image: str, volume: str, script: str) -> list[str]:
 def _volume_script(listing: str, cursor: int) -> str:
     """Shell that, for each file *listing* prints, emits a header, then its bytes from the cursor.
 
-    The header carries the start offset, the path and the first line's
-    ``timestamp`` (codex ``session_meta``, claude's first entry).  Symlinks are
+    The header carries the start offset, the path and the first ``timestamp``
+    in the first five lines (codex ``session_meta``; claude's first timed entry,
+    since current Claude Code opens with an untimed ``session-owner`` line).  Symlinks are
     skipped, so nothing outside the session folders is ever opened.
     """
     return (
@@ -404,7 +405,7 @@ def _volume_script(listing: str, cursor: int) -> str:
         's=$(( $(wc -c < "$f") )); '
         f"if [ {cursor} -gt 0 ] && [ {cursor} -le \"$s\" ]; then st={cursor}; "
         f"elif [ \"$s\" -gt {_MAX_READ} ]; then st=$((s - {_MAX_READ})); else st=0; fi; "
-        "ts=$(head -n 1 \"$f\" | head -c 1048576 | grep -o '\"timestamp\": *\"[^\"]*\"' | head -n 1); "
+        "ts=$(head -n 5 \"$f\" | head -c 1048576 | grep -o '\"timestamp\": *\"[^\"]*\"' | head -n 1); "
         "printf '\\n@@HELIX_UI_FILE@@\\t%s\\t%s\\t%s\\n' \"$st\" \"$f\" \"$ts\"; "
         f'tail -c +$((st + 1)) "$f" | head -c {_MAX_READ}; '
         "printf '\\n@@HELIX_UI_END@@\\n'; "
