@@ -131,15 +131,11 @@ def test_web_access_open_network(tmp_path: Path, sections: dict[str, Any], fires
     assert ("web-access-open-network" in _warning_ids(_config(**sections), tmp_path)) == fires
 
 
-def test_shared_auth_volume(tmp_path: Path) -> None:
+def test_the_auth_volume_is_a_fact_not_a_warning(tmp_path: Path) -> None:
     shared = build_static(_config(sandbox={"enabled": True}), tmp_path, tmp_path / "helix.toml")
-    assert [w["id"] for w in shared["isolation"]["warnings"]] == ["shared-auth-volume"]
+    assert shared["isolation"]["warnings"] == []
     assert shared["config"]["sandbox"]["auth_volume"] == "helix-auth-claude"
     assert shared["config"]["sandbox"]["auth_volume_shared"] is True
-    assert "shared-auth-volume" not in _warning_ids(
-        _config(sandbox={"enabled": True, "auth_volume": "run"}), tmp_path
-    )
-    assert "shared-auth-volume" not in _warning_ids(_config(), tmp_path)
 
 
 def test_omit_without_sandbox(tmp_path: Path) -> None:

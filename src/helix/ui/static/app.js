@@ -462,7 +462,7 @@
     // amber only for likely mistakes, on the boundary they concern
     const top = box ? box.y : 90, bottom = box ? box.y + box.h : 200;
     const anchors = {
-      'web-access-open-network': [387, top, -1], 'omit-without-sandbox': [387, top, -1], 'shared-auth-volume': [387, bottom, 1],
+      'web-access-open-network': [387, top, -1], 'omit-without-sandbox': [387, top, -1],
       'minibatch-repeats': [708, 90, -1], 'config-changed': [115, 70, -1],
     };
     const used = {};

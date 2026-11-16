@@ -194,20 +194,6 @@ def isolation_warnings(config: HelixConfig, train_size: int | None) -> list[dict
                 "keys": ["agent.web_access", "sandbox.network" if sandbox.enabled else "sandbox.enabled"],
             }
         )
-    # docs/guides/sandboxing.md:76-104: the default helix-auth-<backend> volume
-    # is shared by every candidate and run; set a per-run sandbox.auth_volume.
-    if sandbox.enabled and sandbox.auth_volume is None:
-        warnings.append(
-            {
-                "id": "shared-auth-volume",
-                "text": "shared auth volume",
-                "detail": (
-                    f"Agents mount the shared {_auth_volume(config) or 'helix-auth-<backend>'} "
-                    "volume, so files written there reach later candidates and other runs."
-                ),
-                "keys": ["sandbox.auth_volume"],
-            }
-        )
     # sandbox.py:1385-1389: omit_from_agent only filters the sandbox workspace
     # copy, which unsandboxed runs never make.
     if sandbox.omit_from_agent and not sandbox.enabled:
