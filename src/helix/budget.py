@@ -22,6 +22,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 
+from helix import timing
 from helix.config import HelixConfig
 from helix.display import UsageStats
 from helix.state import EvolutionState
@@ -166,7 +167,9 @@ def charge_llm_usage(
     Safe to call with ``None``; short-circuits without touching counters
     or emitting a trace event.  A non-None ``UsageStats`` with all-zero
     deltas still emits one ``BUDGET_UPDATE`` event (the call indicates a
-    real backend response was processed).
+    real backend response was processed), and, while a timing recording is
+    open, one ``usage`` record in ``.helix/timing.jsonl``
+    (:func:`helix.timing.usage`).
     """
     if usage is None:
         return
@@ -195,6 +198,7 @@ def charge_llm_usage(
         output_tokens=state.budget.output_tokens,
         cost_usd=state.budget.cost_usd,
     )
+    timing.usage(usage, candidate_id=candidate_id, source=source)
 
 
 def set_generation(state: EvolutionState, generation: int) -> None:
