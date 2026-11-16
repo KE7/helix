@@ -38,6 +38,7 @@ _MAX_READ = 1 << 20  # bytes per read; a first read starts this far before the e
 _DOCKER_INTERVAL = 4.0
 _DOCKER_TIMEOUT = 10.0
 _CLOCK_SLACK = 2.0  # seconds a session file may appear to start before its agent span
+_MARKER_WAIT = 20.0  # seconds an unmarked session may still be waiting for its launch line
 _LIMITS = {"message": 2000, "command": 1000, "output": 400, "tool": 300, "diff": 2000, "tokens": 200}
 
 # Sandboxed session files, as the auth volume holds them (datamap transcripts
@@ -168,8 +169,8 @@ class TranscriptReader:
                 self._sessions.pop(cid, None)
             now = time.monotonic()
             if now - self._last_docker.get(cid, -math.inf) < _DOCKER_INTERVAL:
-                return self._reply("live", cursor, session=known[2] if known else None,
-                                   note=None if known and known[3] else heuristic)
+                note = "no session file found yet" if known is None else None if known[3] else heuristic
+                return self._reply("live", cursor, session=known[2] if known else None, note=note)
             self._last_docker[cid] = now
         try:
             image = resolve_sandbox_image(self._config.sandbox, self._backend)
@@ -197,17 +198,18 @@ class TranscriptReader:
             for path, offset, stamp, marker, content in _split_volume_output(result.stdout)
             if _VOLUME_PATH_RE[self._backend].match(path)
         }
-        path, exact = (known[1], known[3]) if known is not None else _match_session(span, records, files, cid)
+        path: str | None
+        if known is not None:
+            path, exact = known[1], known[3]
+        else:
+            path, exact = _match_session(span, records, files, cid, time.time())
         if path is None or path not in files:
             with self._lock:
                 self._sessions.pop(cid, None)
             return self._reply("live", cursor, note="no session file found yet")
         session = _session_id(Path(path).name)
         with self._lock:
-            if exact:  # a start-order guess is made afresh on every read
-                self._sessions[cid] = (str(span["span_id"]), path, session, exact)
-            else:
-                self._sessions.pop(cid, None)
+            self._sessions[cid] = (str(span["span_id"]), path, session, exact)
         offset, _, _, content = files[path]
         events, new_cursor = _consume(self._backend, content, offset, complete=False)
         note = _tail_note(cursor, offset) or (None if exact else heuristic)
@@ -243,7 +245,11 @@ def _open_agent_span(records: list[dict[str, Any]], cid: str) -> dict[str, Any] 
 
 
 def _match_session(
-    span: dict[str, Any], records: list[dict[str, Any]], files: dict[str, tuple[int, str, str, bytes]], cid: str
+    span: dict[str, Any],
+    records: list[dict[str, Any]],
+    files: dict[str, tuple[int, str, str, bytes]],
+    cid: str,
+    now: float,
 ) -> tuple[str | None, bool]:
     """The session file of the agent call *span* of *cid*, and whether the match is exact.
 
@@ -258,6 +264,9 @@ def _match_session(
     ``sandbox_reset`` (which empties the volume's sessions every generation,
     sandbox.py:363) without a marked session, taken in start order, gets the
     earliest unmarked session whose first timestamp is at or after its start.
+    Codex writes ``session_meta`` a few seconds before the launch line, so a
+    session counts as unmarked only once it is ``_MARKER_WAIT`` seconds old; a
+    match, once made, is kept for the rest of the agent call.
     """
     stamped = [(at, path, marker) for path, (_, stamp, marker, _) in files.items() if (at := _epoch(stamp)) is not None]
     start = float(span["wall_time"]) - _CLOCK_SLACK
@@ -265,9 +274,8 @@ def _match_session(
     if mine:
         return mine[0][1], True
     marked = {marker for _, _, marker in stamped if marker}
-    if marked:
-        # This run marks its sessions: an unmarked one is still starting up (Codex
-        # writes session_meta a second or more before the launch line), not old-style.
+    if marked or any(at > now - _MARKER_WAIT for at, _, _ in stamped):
+        # A session without a marker yet may be one still starting up, not an old-style one.
         return None, False
     run = _latest_run(records)
     resets = [rec["wall_time"] for rec in run if rec.get("span") == "sandbox_reset" and rec.get("event") == "start"]

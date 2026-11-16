@@ -17,6 +17,7 @@ from helix.ui.redact import MASK
 from helix.ui.transcripts import TranscriptReader, parse_events
 
 T0 = 1_794_787_200.0  # 2026-11-15T00:00:00Z
+LATER = T0 + 3600.0
 
 
 def _iso(t: float) -> str:
@@ -342,15 +343,18 @@ def test_live_sandboxed_reads_the_auth_volume_read_only(tmp_path: Path, monkeypa
     assert out["note"] == "session matched to this agent by start time"
     assert "CREDENTIAL" not in json.dumps(out)
 
-    # Within 4 s: no docker call, nothing new.
+    # Within 4 s: no docker call, nothing new, the same session and note.
     clock[0] += 1.0
-    assert reader.read("g1-s2", out["cursor"])["events"] == []
-    assert len(calls) == 1
+    again = reader.read("g1-s2", out["cursor"])
+    assert again["events"] == [] and len(calls) == 1
+    assert again["session"] == out["session"] and again["note"] == out["note"]
 
-    # After 4 s: a start-order guess is not cached, so the next read lists the sessions again.
+    # After 4 s: a guess is made only once every session is old enough to carry its marker, so it is
+    # kept, and a session a sibling starts later (its change summary, say) cannot take the lane over.
     clock[0] += 4.0
-    reader.read("g1-s2", out["cursor"])
-    assert len(calls) == 2 and "find" in calls[1][-1]
+    again = reader.read("g1-s2", out["cursor"])
+    assert len(calls) == 2 and "find" not in calls[1][-1] and second in calls[1][-1]
+    assert again["note"] == "session matched to this agent by start time"
 
 
 def test_a_marked_session_is_cached_and_tailed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -441,10 +445,20 @@ def test_marked_sessions_match_exactly_whatever_their_start_order(tmp_path: Path
                _start("agent", "a1", T0, "g1-s1"), _start("agent", "a2", T0 + 1, "g1-s2"),
                _start("agent", "a3", T0 + 2, "g1-s3")]
     spans = {r["candidate"]: r for r in records if r.get("span") == "agent"}
-    assert tmod._match_session(spans["g1-s1"], records, files, "g1-s1") == (s.format(6, 2), True)
-    assert tmod._match_session(spans["g1-s2"], records, files, "g1-s2") == (s.format(5, 1), True)
+    assert tmod._match_session(spans["g1-s1"], records, files, "g1-s1", LATER) == (s.format(6, 2), True)
+    assert tmod._match_session(spans["g1-s2"], records, files, "g1-s2", LATER) == (s.format(5, 1), True)
     # This run marks its sessions, so the unmarked one is still starting up: no guess for g1-s3 yet.
-    assert tmod._match_session(spans["g1-s3"], records, files, "g1-s3") == (None, False)
+    assert tmod._match_session(spans["g1-s3"], records, files, "g1-s3", LATER) == (None, False)
     # A run from before the marker: start order.
     old = {path: (o, stamp, "", data) for path, (o, stamp, _, data) in files.items()}
-    assert tmod._match_session(spans["g1-s3"], records, old, "g1-s3") == (s.format(7, 3), False)
+    assert tmod._match_session(spans["g1-s3"], records, old, "g1-s3", LATER) == (s.format(7, 3), False)
+
+
+def test_no_start_order_guess_while_sessions_may_still_get_their_marker() -> None:
+    """Codex writes session_meta a few seconds before the launch line; guessing then shows a sibling's session."""
+    s = "/home/node/.codex/sessions/2026/11/15/rollout-2026-11-15T00-00-0{}-aaaaaaaa-0000-0000-0000-00000000000{}.jsonl"
+    files = {s.format(5, 1): (0, _iso(T0 + 5), "", b""), s.format(6, 2): (0, _iso(T0 + 6), "", b"")}
+    records = [_start("run", "run", T0 - 60), _start("agent", "a1", T0, "g1-s1"), _start("agent", "a2", T0 + 1, "g1-s2")]
+    span = records[2]
+    assert tmod._match_session(span, records, files, "g1-s2", T0 + 8) == (None, False)
+    assert tmod._match_session(span, records, files, "g1-s2", T0 + 6 + tmod._MARKER_WAIT + 1) == (s.format(6, 2), False)
