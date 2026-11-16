@@ -226,6 +226,15 @@ def test_missing_worktree_and_bad_ids(tmp_path: Path) -> None:
     assert other.read("g1-s1")["note"] == "cursor transcripts are not shown"
 
 
+def test_a_proposal_whose_agent_has_not_started_is_not_called_removed(tmp_path: Path) -> None:
+    # g1-s2 waits for a slot while g1-s1's agent ran and its worktree is gone.
+    started = _start("agent", "a1", 100.0, "g1-s1")
+    records = [started, _end(started)]
+    reader = TranscriptReader(tmp_path, _config(), FakeReader(records))
+    assert reader.read("g1-s2")["note"] == "agent not started yet"
+    assert reader.read("g1-s1")["note"] == "worktree removed, and its transcript with it"
+
+
 def test_first_read_of_a_large_file_starts_near_the_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tmod, "_MAX_READ", 300)
     wt = _worktree(tmp_path, "g1-s1")

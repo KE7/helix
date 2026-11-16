@@ -83,7 +83,7 @@ class TranscriptReader:
         records = self._reader.timing_records()
         span = _open_agent_span(records, cid)
         if span is None:
-            return self._finished(cid, cursor)
+            return self._finished(cid, cursor, records)
         if self._config.sandbox.enabled:
             return self._live_sandboxed(cid, cursor, span, records)
         return self._live_host(cid, cursor, span)
@@ -111,10 +111,18 @@ class TranscriptReader:
 
     # -- finished ---------------------------------------------------------
 
-    def _finished(self, cid: str, cursor: int) -> dict[str, Any]:
+    def _finished(self, cid: str, cursor: int, records: list[dict[str, Any]]) -> dict[str, Any]:
         worktree = self._worktree(cid)
         if not worktree.is_dir():
-            return self._reply("none", cursor, note="worktree removed, and its transcript with it")
+            # A proposal waiting for its slot has no worktree yet; one whose
+            # agent ran and lost it was rejected.  A run without timing
+            # records cannot tell, and only finished runs lack them.
+            started = not records or any(
+                rec.get("event") == "start" and rec.get("span") == "agent" and rec.get("candidate") == cid
+                for rec in records
+            )
+            note = "worktree removed, and its transcript with it" if started else "agent not started yet"
+            return self._reply("none", cursor, note=note)
         path = _finished_transcript(worktree, self._config.sandbox.transcript_artifact_dir, self._backend)
         if path is None:
             return self._reply("none", cursor, note="no transcript recorded")

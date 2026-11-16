@@ -660,7 +660,8 @@
       const key = `${t.source}|${t.note}|${t.seen}`;
       if (key !== t.shown) { t.shown = key; renderTx(); }
     }
-    if (!d || d.source === 'live') t.timer = setTimeout(() => fetchTx(t), 4000);
+    // "none" can change while the run goes on: a proposal selected before its agent starts
+    if (!d || d.source === 'live' || (d.source === 'none' && running())) t.timer = setTimeout(() => fetchTx(t), 4000);
   }
   function renderTx() {
     const t = S.tx, box = $('tx');
