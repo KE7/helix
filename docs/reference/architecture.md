@@ -23,7 +23,7 @@
 
 | Module | Role |
 |---|---|
-| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log, attempts, timing |
+| `cli.py` | Click CLI — init, evolve, frontier, best, history, resume, clean, log, attempts, timing, ui |
 | `config.py` | TOML config parsing via Pydantic v2 |
 | `evolution.py` | Main generation loop with gating, merge, and termination on `max_generations` / `max_evaluations` |
 | `population.py` | `Candidate`, `EvalResult`, `ParetoFrontier` |
@@ -36,3 +36,4 @@
 | `state.py` | Atomic state persistence and resume |
 | `display.py` | Rich terminal UI with phase tracking |
 | `timing.py` | Always-on JSONL timing spans and agent usage records (`.helix/timing.jsonl`) |
+| `ui/` | `helix ui`: a read-only local dashboard (Starlette server and a static page) built from `helix.toml` and `.helix/` |
