@@ -109,8 +109,9 @@ group_key_separator = "__"       # stratified: an id's group is its text before 
 cache_evaluation = true          # reuse per-instance evaluator results
 acceptance_criterion = "strict_improvement"
 val_stage_size = 0               # optional first-N val gate; passing results carry into the tail
-retain_rejected_worktrees = false  # keep the worktree of a child the val stage rejects, for
-                                 # inspection (default: false; `helix clean` removes them)
+retain_rejected_worktrees = false  # keep every rejected candidate (worktree, helix/<id> ref,
+                                 # agent transcript) at every gate, to inspect, run or
+                                 # re-score later (default: false; `helix clean` removes them)
 sibling_history = false          # show the mutator every child already proposed from the same
                                  # parent: each one's training-gate score, whether it was kept, and a note on
                                  # what it changed. Every child is kept in state, and

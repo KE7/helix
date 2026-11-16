@@ -453,14 +453,18 @@ class EvolutionConfig(BaseModel):
     retain_rejected_worktrees: bool = Field(
         default=False,
         description=(
-            "Whether to keep the worktree of a candidate rejected by the "
-            "validation-stage gate, for inspecting what it changed. Either "
-            "way its identity, lineage, and scores are recorded in "
-            ".helix/lineage.json and .helix/attempts/. When disabled (the "
-            "default), the worktree and its helix/<id> ref are removed and "
-            "the candidate's contents become unrecoverable. Retaining costs "
-            "one full candidate repository per rejection; run helix clean to "
-            "reclaim them."
+            "Whether to keep every rejected candidate (its worktree, its "
+            "helix/<id> ref and the agent transcript inside the worktree) "
+            "for inspecting, running or re-scoring later. This covers every "
+            "rejection: an evaluator-tamper reject, a child whose minibatch "
+            "eval raised, the train minibatch gate, the validation-stage "
+            "gate, a child dropped by proposal selection or as a duplicate, "
+            "and a merge that is tampered, unchanged or scores below its "
+            "parents. Either way its scores are recorded in "
+            ".helix/attempts/. When disabled (the default), the worktree and "
+            "its helix/<id> ref are removed and the candidate's contents "
+            "become unrecoverable. Retaining costs one full candidate "
+            "repository per rejection; run helix clean to reclaim them."
         ),
     )
     batch_sampler: Literal["epoch_shuffled", "stratified"] = Field(

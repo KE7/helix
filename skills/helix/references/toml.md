@@ -152,7 +152,7 @@ max_workers = 32
 cache_evaluation = true
 acceptance_criterion = "strict_improvement"
 val_stage_size = 10
-retain_rejected_worktrees = false  # keep worktrees the val stage rejects
+retain_rejected_worktrees = false  # keep every rejected candidate's worktree
 sibling_history = false  # show the mutator every earlier child of the same parent
 sibling_summary_max_words = 150  # word budget for each of those summaries
 # sibling_history_max_entries = 5  # prompt shows only the N most recent; unset = all
@@ -221,10 +221,13 @@ Important choices:
   `num_examples_per_group` (set both or neither, each `>= 1`, stratified only)
   make each minibatch that many groups times that many examples per group;
   unset, it is `minibatch_size` groups with one example each.
-- `retain_rejected_worktrees = true` keeps the worktree of a child rejected by
-  the `val_stage_size` gate, for inspection; by default it is removed and its
-  contents are lost (lineage and scores are still recorded). Each one is a
-  full repository copy; `helix clean` removes them.
+- `retain_rejected_worktrees = true` keeps every rejected candidate (its
+  worktree, `helix/<id>` ref and the agent transcript inside it) at every
+  gate: evaluator tamper, a raised minibatch eval, the train minibatch gate,
+  the `val_stage_size` gate, selection or duplicate drops, and rejected
+  merges. By default each is removed and its contents are lost (scores are
+  still recorded in `.helix/attempts/`). Each one is a full repository copy;
+  `helix clean` removes them.
 - `max_workers` bounds evaluation/mutation thread pools.
 - Enable `merge_enabled` only when candidate changes can be meaningfully merged.
 

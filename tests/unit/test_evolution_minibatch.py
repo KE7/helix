@@ -3200,3 +3200,200 @@ def test_merge_partitioned_evaluations_preserves_id_alignment() -> None:
         {"judge": "tail-2"}, {"judge": "stage-0"}, {"judge": "stage-1"}
     ]
 
+
+
+class TestRetainRejectedWorktrees:
+    """``retain_rejected_worktrees`` keeps rejects from every gate, not only
+    the val stage; off, each is removed as before."""
+
+    @staticmethod
+    def _run_minibatch_reject(
+        tmp_path: Path, all_mocks: dict[str, Any], *, retain: bool
+    ) -> dict[str, Any]:
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if instance_ids is not None:
+                # The child is worse than its parent on the minibatch.
+                score = 0.8 if candidate.id == seed.id else 0.1
+                return _make_result(candidate.id, {i: score for i in instance_ids})
+            return _make_result(candidate.id, {"v1": 0.0})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=100,
+            retain_rejected_worktrees=retain,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+        attempt_path = tmp_path / ".helix" / "attempts" / "g1-s1.json"
+        attempt: dict[str, Any] = json.loads(attempt_path.read_text())["attempt"]
+        return attempt
+
+    def test_minibatch_gate_reject_is_kept(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        attempt = self._run_minibatch_reject(tmp_path, all_mocks, retain=True)
+
+        assert attempt["reason"] == "minibatch_gate"
+        assert attempt["retained"] is True
+        all_mocks["remove_worktree"].assert_not_called()
+        assert any(
+            "g1-s1 rejected" in str(call.args[0])
+            and "-- retaining worktree for review." in str(call.args[0])
+            for call in all_mocks["print_warning"].call_args_list
+        )
+
+    def test_minibatch_gate_reject_is_removed_by_default(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        attempt = self._run_minibatch_reject(tmp_path, all_mocks, retain=False)
+
+        assert attempt["retained"] is False
+        removed = [c.args[0].id for c in all_mocks["remove_worktree"].call_args_list]
+        assert removed == ["g1-s1"]
+
+    def test_tamper_reject_is_kept_committed_and_recorded(
+        self, tmp_path: Path, all_mocks: dict[str, Any], mocker: Any
+    ) -> None:
+        """A tamper reject has no snapshot or attempt record of its own, so a
+        kept one gets both: the ref holds what the agent wrote, and resume
+        sees a finished attempt rather than an interrupted one."""
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+        mocker.patch(
+            "helix.evolution._detect_evaluator_tamper", return_value=["evaluate.py"]
+        )
+        all_mocks["run_evaluator"].side_effect = (
+            lambda candidate, config, split="val", instance_ids=None, **kw: _make_result(
+                candidate.id, {i: 0.5 for i in (instance_ids or ["v1"])}
+            )
+        )
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            retain_rejected_worktrees=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        all_mocks["remove_worktree"].assert_not_called()
+        snapped = [c.args[0].id for c in all_mocks["snapshot_candidate"].call_args_list]
+        assert "g1-s1" in snapped
+        record = json.loads(
+            (tmp_path / ".helix" / "attempts" / "g1-s1.json").read_text()
+        )["attempt"]
+        assert record["reason"] == "evaluator_tamper"
+        assert record["stage"] == "mutation"
+        assert record["retained"] is True
+
+    def test_child_whose_minibatch_eval_raised_is_kept_and_recorded(
+        self, tmp_path: Path, all_mocks: dict[str, Any]
+    ) -> None:
+        train_path = _write_train_jsonl(tmp_path, n=4)
+        seed = _make_candidate("g0-s0")
+        all_mocks["create_seed_worktree"].return_value = seed
+        all_mocks["mutate"].return_value = _make_candidate("g1-s1")
+
+        def run_eval(
+            candidate: Candidate,
+            config: HelixConfig,
+            split: str = "val",
+            instance_ids: list[str] | None = None,
+            **kwargs: Any,
+        ) -> EvalResult:
+            if candidate.id == "g1-s1":
+                raise RuntimeError("simulated child evaluator failure")
+            return _make_result(candidate.id, {i: 0.5 for i in (instance_ids or ["v1"])})
+
+        all_mocks["run_evaluator"].side_effect = run_eval
+        config = _make_minibatch_config(
+            train_path,
+            minibatch_size=2,
+            max_generations=1,
+            max_evaluations=1000,
+            retain_rejected_worktrees=True,
+        )
+        run_evolution(config, tmp_path, tmp_path / ".helix")
+
+        all_mocks["remove_worktree"].assert_not_called()
+        snapped = [c.args[0].id for c in all_mocks["snapshot_candidate"].call_args_list]
+        assert "g1-s1" in snapped
+        record = json.loads(
+            (tmp_path / ".helix" / "attempts" / "g1-s1.json").read_text()
+        )["attempt"]
+        assert record["reason"] == "child_eval_error"
+        assert record["stage"] == "train_minibatch"
+        assert record["retained"] is True
+        assert len(record["example_ids"]) == 2
+
+    def test_resume_leaves_kept_rejects_from_any_stage(
+        self, tmp_path: Path, mocker: Any
+    ) -> None:
+        """Kept rejects are finished attempts: resume neither removes them nor
+        rewinds the generation, even a tamper reject with no lineage entry."""
+        base_dir = tmp_path / ".helix"
+        worktrees_dir = base_dir / "worktrees"
+        attempts_dir = base_dir / "attempts"
+        lineage_path = base_dir / "lineage.json"
+        worktrees_dir.mkdir(parents=True)
+        attempts_dir.mkdir(parents=True)
+        records = {
+            "g2-s1": {"status": "rejected", "stage": "mutation", "retained": True},
+            "g2-s2": {"status": "rejected", "stage": "train_minibatch", "retained": True},
+            "g2-m3": {"status": "rejected", "stage": "merge_subsample", "retained": True},
+        }
+        for cid, attempt in records.items():
+            (worktrees_dir / cid).mkdir()
+            (attempts_dir / f"{cid}.json").write_text(json.dumps({"attempt": attempt}))
+        # The tamper reject (g2-s1) never got a lineage entry.
+        lineage_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "id": cid,
+                        "parent": "g0-s0",
+                        "parents": ["g0-s0"],
+                        "operation": "merge" if "-m" in cid else "mutate",
+                        "generation": 2,
+                        "files_changed": [],
+                    }
+                    for cid in ("g2-s2", "g2-m3")
+                ]
+            )
+        )
+        state = EvolutionState(
+            generation=2,
+            frontier=["g0-s0"],
+            instance_scores={},
+            budget=BudgetState(),
+            config_hash="hash",
+            mutation_counter=3,
+        )
+        remove_mock = mocker.patch("helix.evolution.remove_worktree")
+
+        changed = _reconcile_incomplete_attempts_on_resume(
+            state=state,
+            base_dir=base_dir,
+            worktrees_dir=worktrees_dir,
+            lineage_path=lineage_path,
+        )
+
+        assert changed is False
+        remove_mock.assert_not_called()
+        assert state.generation == 2
+        assert state.mutation_counter == 3
