@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.helix/timing.jsonl` now has a `usage` record for every agent charge:
+  tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
+  `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
+  per generation and per proposal is exact, rejected proposals included.
+  `helix timing` and the Perfetto export are unchanged.
+
 ### Changed
+
 - `evolution.retain_rejected_worktrees = true` now keeps every rejected
   candidate, not only validation-stage rejects: evaluator-tamper rejects,
   children whose minibatch eval raised, minibatch- and train-gate rejects,
