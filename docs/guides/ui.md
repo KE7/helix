@@ -127,6 +127,20 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   cached input inside its input total; the dashboard subtracts it, so the three rows add up to the run's tokens.
 - **Current generation**: each proposal's phase and elapsed time, and the live transcript of the selected agent.
 
+### Lineage and Path
+
+![The Lineage view of an eterna100 run in generation 12: the path to the best candidate, g6-s25 at 21 of 30, runs straight across from the seed through g1-s5 and g4-s16; frontier members are ringed, rejected proposals are small open circles, and groups of three or four rejected children of one parent show as circles with their count](../assets/ui/lineage-light.png#only-light)
+![The Lineage view of an eterna100 run in generation 12: the path to the best candidate, g6-s25 at 21 of 30, runs straight across from the seed through g1-s5 and g4-s16; frontier members are ringed, rejected proposals are small open circles, and groups of three or four rejected children of one parent show as circles with their count](../assets/ui/lineage-dark.png#only-dark)
+
+*Views → Lineage. Hover a node to light its ancestry; click a counted circle to list the rejected proposals in it.*
+
+![The Path view of the same run: from the seed at 5 of 30 to g1-s5 at 20 (3 of 6 proposals from the seed accepted), g4-s16 at 19 (one fewer than its parent, accepted because it solves puzzles its parent misses) and g6-s25 at 21, with files changed, agent time and tokens for each step and the generations between steps](../assets/ui/path-light.png#only-light)
+![The Path view of the same run: from the seed at 5 of 30 to g1-s5 at 20 (3 of 6 proposals from the seed accepted), g4-s16 at 19 (one fewer than its parent, accepted because it solves puzzles its parent misses) and g6-s25 at 21, with files changed, agent time and tokens for each step and the generations between steps](../assets/ui/path-dark.png#only-dark)
+
+*Views → Path, or "Path from seed" on a pinned candidate in the Lineage.*
+
+<small>Screenshots from November 2026; `scripts/docs_screenshots.py` regenerates them from a running dashboard.</small>
+
 ## Live transcripts
 
 The transcript comes from the agent CLI's own session file, which Codex and Claude Code write as they run. With the

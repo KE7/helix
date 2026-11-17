@@ -721,7 +721,7 @@
     if (gn) {
       const ms = gn.members.map((m) => S.lin.byId[m]).filter(Boolean);
       fill(k, h('div', { class: 'h' }, h('b', { text: `${ms.length} rejected` }), h('span', { text: (gn.parents.length > 1 ? 'merges of ' : 'from ') + gn.parents.join(' + ') })),
-        h('div', { class: 'note', text: ms.map((m) => `${m.id} ${propScore(m)}`).join(' · ') }),
+        h('div', { class: 'note', text: ms.map((m) => `${m.id} ${propScore(propOf(m.id) || m)}`).join(' · ') }),
         h('div', { class: 't', text: 'click to list them' }));
       placeCard(k, target);
       return;
@@ -1475,6 +1475,8 @@
   async function drawLineage() {
     const V = $('v-lineage');
     if (!V.firstChild) fill(V, crumbs(['Loop', 'map'], ['Lineage', '']));
+    // the proposals rows carry the gate's successes and n, which the panels and cards show as 2/3 rather than 0.667
+    if (S.run) loadInto(S.prop, proposalsKey(), '/api/proposals');
     await loadInto(S.lin, lineageKey(), '/api/lineage');
     if (S.view === 'lineage') paintLineage();
   }

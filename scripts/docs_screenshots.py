@@ -24,12 +24,12 @@ from pathlib import Path
 from playwright.async_api import Page, async_playwright
 
 OUT = Path(__file__).resolve().parent.parent / "docs" / "assets" / "ui"
-VIEWPORT = {"width": 1440, "height": 900}
-# name, route, the element to crop to (None for the whole window), device scale factor
+# name, route, the element to crop to (None for the whole window), window height, device scale factor;
+# the Lineage gets a shorter window, since a tree of a few dozen proposals leaves the rest of the height empty
 SHOTS = [
-    ("helix-ui", "", None, 1),
-    ("lineage", "#lineage", "#v-lineage", 2),
-    ("path", "#path", "#v-path", 2),
+    ("helix-ui", "", None, 900, 1),
+    ("lineage", "#lineage", "#v-lineage", 760, 2),
+    ("path", "#path", "#v-path", 900, 2),
 ]
 
 
@@ -50,8 +50,9 @@ async def main(url: str, out: Path, chromium: bool) -> None:
     async with async_playwright() as p:
         browser = await (p.chromium.launch() if chromium else p.chromium.launch(channel="chrome"))
         for scheme in ("light", "dark"):
-            for name, route, crop, scale in SHOTS:
-                ctx = await browser.new_context(viewport=VIEWPORT, device_scale_factor=scale, color_scheme=scheme)
+            for name, route, crop, height, scale in SHOTS:
+                viewport = {"width": 1440, "height": height}
+                ctx = await browser.new_context(viewport=viewport, device_scale_factor=scale, color_scheme=scheme)
                 page = await ctx.new_page()
                 errors: list[str] = []
                 page.on("pageerror", lambda e: errors.append(str(e)))
