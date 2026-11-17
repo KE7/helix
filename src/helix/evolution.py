@@ -440,7 +440,8 @@ def _save_attempt_result(
         "stage": stage,
         "example_ids": example_ids,
         # True only when retain_rejected_worktrees kept the worktree; resume
-        # removes any other rejected attempt's worktree that survived.
+        # leaves it and removes any other rejected attempt's worktree that
+        # survived.
         "retained": retained,
     }
     _atomic_write_json(attempts_dir / f"{result.candidate_id}.json", payload)
@@ -566,7 +567,7 @@ def _reconcile_incomplete_attempts_on_resume(
     # A rejected attempt is finished, but an interrupt can land while its
     # worktree is being removed.  Finish that removal; it does not rewind the
     # run.  Records from before ``retained`` existed keep a val-stage
-    # worktree, the only kind retain_rejected_worktrees ever kept.
+    # worktree, the only kind retain_rejected_worktrees kept in 0.3.0.
     leftover_rejected: list[str] = []
     if attempts_dir.exists():
         for path in sorted(attempts_dir.glob("*.json")):
@@ -681,6 +682,63 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
         print_warning(
             f"Could not remove worktree for {label} {candidate.id}: {exc}"
         )
+
+
+def _discard_rejected(
+    candidate: Candidate, *, label: str, retain: bool, commit: bool = False
+) -> None:
+    """Remove a rejected candidate, or keep it when *retain* is set.
+
+    *retain* is ``evolution.retain_rejected_worktrees``: the worktree, its
+    ``helix/<id>`` ref and the agent's transcript inside it stay for
+    inspection, and ``helix clean`` removes them.  The caller has already
+    written the candidate's ``attempts/`` record with ``retained=True``, which
+    tells resume the worktree is finished, not an interrupted attempt.
+    *commit* snapshots a candidate rejected before its usual snapshot, so its
+    ref holds what the agent wrote.
+    """
+    if not retain:
+        _safe_remove_worktree(candidate, label=label)
+        return
+    decision(candidate.id, accepted=False, reason=label)
+    if commit:
+        try:
+            snapshot_candidate(candidate, f"helix: rejected {candidate.id} ({label})")
+        except Exception as exc:
+            print_warning(f"Could not commit kept {label} {candidate.id}: {exc}")
+
+
+def _save_kept_reject_record(
+    base_dir: Path,
+    candidate_id: str,
+    *,
+    reason: str,
+    parent_id: str,
+    generation: int,
+    stage: str,
+    example_ids: list[str] | None = None,
+) -> None:
+    """Record a kept reject that no gate scored, so resume sees it finished.
+
+    Without an ``attempts/`` record, resume would take the kept worktree for
+    an interrupted attempt, remove it and run its generation again.
+    """
+    _save_attempt_result(
+        base_dir,
+        EvalResult(candidate_id=candidate_id, scores={}, asi={}, instance_scores={}),
+        status="rejected",
+        reason=reason,
+        parent_id=parent_id,
+        generation=generation,
+        stage=stage,
+        example_ids=example_ids,
+        retained=True,
+    )
+
+
+def _rejected_suffix(retain: bool) -> str:
+    """End of a rejection message: what happens to the worktree."""
+    return "retaining worktree for review" if retain else "removing"
 
 
 def _check_evaluator_script_exists(evaluator_command: str, project_root: Path) -> None:
@@ -1997,6 +2055,8 @@ def _run_evolution_impl(
     ):
         val_loader = _RangeDataLoader(config.dataset.val_size)
     use_minibatch_gate = train_loader is not None
+    # Keep every rejected candidate's worktree instead of removing it.
+    retain_rejected = config.evolution.retain_rejected_worktrees
 
     # Batch sampler (GEPA §2) — only wired in when a train loader exists.
     #
@@ -2667,9 +2727,20 @@ def _run_evolution_impl(
                             # (init-engine audit B3).  Fall through.
                             print_warning(
                                 f"Merge {merge_id} touched protected evaluator files "
-                                f"({', '.join(merge_tamper)}) -- rejecting."
+                                f"({', '.join(merge_tamper)}) -- rejecting"
+                                + (", retaining worktree for review." if retain_rejected else ".")
                             )
-                            _safe_remove_worktree(merged, label="tamper-rejected merge candidate")
+                            if retain_rejected:
+                                _save_kept_reject_record(
+                                    base_dir, merged.id, reason="evaluator_tamper",
+                                    parent_id=a.id, generation=gen, stage="merge",
+                                )
+                            _discard_rejected(
+                                merged,
+                                label="tamper-rejected merge candidate",
+                                retain=retain_rejected,
+                                commit=True,
+                            )
                         elif _candidate_content_key(merged, merge_hidden) in {
                             _candidate_content_key(a, merge_hidden),
                             _candidate_content_key(b, merge_hidden),
@@ -2711,8 +2782,14 @@ def _run_evolution_impl(
                                 parent_id=a.id,
                                 generation=gen,
                                 stage="merge",
+                                retained=retain_rejected,
                             )
-                            _safe_remove_worktree(merged, label="no-change merge candidate")
+                            _discard_rejected(
+                                merged,
+                                label="no-change merge candidate",
+                                retain=retain_rejected,
+                                commit=True,
+                            )
                         else:
                             candidates[merged.id] = merged
                             record_entry(
@@ -2905,8 +2982,13 @@ def _run_evolution_impl(
                                     generation=gen,
                                     stage="merge_subsample",
                                     example_ids=list(merge_subsample_ids),
+                                    retained=retain_rejected,
                                 )
-                                _safe_remove_worktree(merged, label="score-rejected merge candidate")
+                                _discard_rejected(
+                                    merged,
+                                    label="score-rejected merge candidate",
+                                    retain=retain_rejected,
+                                )
                                 if merged.id in candidates:
                                     del candidates[merged.id]
 
@@ -3190,19 +3272,41 @@ def _run_evolution_impl(
                 if isinstance(wr, TamperedProposal):
                     print_warning(
                         f"Mutation {wr.child.id} touched protected evaluator files "
-                        f"({', '.join(wr.tampered_paths)}) -- rejecting."
+                        f"({', '.join(wr.tampered_paths)}) -- rejecting"
+                        + (", retaining worktree for review." if retain_rejected else ".")
                     )
-                    _safe_remove_worktree(wr.child, label="tamper-rejected mutation candidate")
+                    if retain_rejected:
+                        _save_kept_reject_record(
+                            base_dir, wr.child.id, reason="evaluator_tamper",
+                            parent_id=_parent.id, generation=gen, stage="mutation",
+                        )
+                    _discard_rejected(
+                        wr.child,
+                        label="tamper-rejected mutation candidate",
+                        retain=retain_rejected,
+                        commit=True,
+                    )
                     return None
 
                 if isinstance(wr, ChildEvalFailedProposal):
                     _record_sibling(_parent.id, wr.child, None, accepted=False)
                     print_warning(
                         f"Child eval for {wr.child.id} raised ({wr.error}) "
-                        f"-- rejecting."
+                        f"-- rejecting"
+                        + (", retaining worktree for review." if retain_rejected else ".")
                     )
-                    _safe_remove_worktree(
-                        wr.child, label="child whose minibatch eval raised"
+                    if retain_rejected:
+                        _save_kept_reject_record(
+                            base_dir, wr.child.id, reason="child_eval_error",
+                            parent_id=_parent.id, generation=gen,
+                            stage="train_minibatch",
+                            example_ids=list(_subsample_ids) if _subsample_ids else None,
+                        )
+                    _discard_rejected(
+                        wr.child,
+                        label="child whose minibatch eval raised",
+                        retain=retain_rejected,
+                        commit=True,
                     )
                     return None
 
@@ -3278,6 +3382,7 @@ def _run_evolution_impl(
                             status="rejected", reason="minibatch_gate",
                             parent_id=_parent.id, generation=gen,
                             stage="train_minibatch", example_ids=list(_subsample_ids),
+                            retained=retain_rejected,
                         )
                         _record_sibling(
                             _parent.id, child, gating_result, accepted=False
@@ -3289,10 +3394,13 @@ def _run_evolution_impl(
                         )
                         print_warning(
                             f"Minibatch gate: {child.id} rejected "
-                            f"(sum {sum(_after):.4f} vs parent {sum(_before):.4f}) -- removing."
+                            f"(sum {sum(_after):.4f} vs parent {sum(_before):.4f}) "
+                            f"-- {_rejected_suffix(retain_rejected)}."
                         )
-                        _safe_remove_worktree(
-                            child, label="minibatch-gate-rejected candidate"
+                        _discard_rejected(
+                            child,
+                            label="minibatch-gate-rejected candidate",
+                            retain=retain_rejected,
                         )
                         del candidates[child.id]
                         return None
@@ -3335,15 +3443,21 @@ def _run_evolution_impl(
                             status="rejected", reason="train_gate",
                             parent_id=_parent.id, generation=gen,
                             stage="train", example_ids=None,
+                            retained=retain_rejected,
                         )
                         _record_sibling(
                             _parent.id, child, gating_result, accepted=False
                         )
                         print_warning(
                             f"Acceptance: {child.id} does not improve "
-                            f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) -- removing."
+                            f"(child_sum={child_sum:.4f}, parent_sum={parent_sum:.4f}) "
+                            f"-- {_rejected_suffix(retain_rejected)}."
                         )
-                        _safe_remove_worktree(child, label="train-gate-rejected candidate")
+                        _discard_rejected(
+                            child,
+                            label="train-gate-rejected candidate",
+                            retain=retain_rejected,
+                        )
                         del candidates[child.id]
                         return None
 
@@ -3399,7 +3513,7 @@ def _run_evolution_impl(
                             status="rejected", reason="val_stage",
                             parent_id=_parent.id, generation=gen,
                             stage="val_stage", example_ids=list(stage_val_example_ids),
-                            retained=config.evolution.retain_rejected_worktrees,
+                            retained=retain_rejected,
                         )
                         _record_sibling(
                             _parent.id, child, gated.gating_result, accepted=False
@@ -3409,24 +3523,18 @@ def _run_evolution_impl(
                             decision="reject_stage", example_ids=list(stage_val_example_ids),
                             score=float(sum(_stage_after)),
                         )
-                        if config.evolution.retain_rejected_worktrees:
-                            print_warning(
-                                f"Val stage: {child.id} rejected on first "
-                                f"{len(stage_val_example_ids)} val ids "
-                                f"(sum {sum(_stage_after):.4f} vs parent "
-                                f"{sum(_stage_before):.4f}) -- retaining worktree "
-                                f"for review."
-                            )
-                        else:
-                            print_warning(
-                                f"Val stage: {child.id} rejected on first "
-                                f"{len(stage_val_example_ids)} val ids "
-                                f"(sum {sum(_stage_after):.4f} vs parent "
-                                f"{sum(_stage_before):.4f}) -- removing."
-                            )
-                            _safe_remove_worktree(
-                                child, label="val-stage-rejected candidate"
-                            )
+                        print_warning(
+                            f"Val stage: {child.id} rejected on first "
+                            f"{len(stage_val_example_ids)} val ids "
+                            f"(sum {sum(_stage_after):.4f} vs parent "
+                            f"{sum(_stage_before):.4f}) "
+                            f"-- {_rejected_suffix(retain_rejected)}."
+                        )
+                        _discard_rejected(
+                            child,
+                            label="val-stage-rejected candidate",
+                            retain=retain_rejected,
+                        )
                         del candidates[child.id]
                         return
 
@@ -3535,6 +3643,7 @@ def _run_evolution_impl(
                     generation=gen,
                     stage="train_minibatch" if _discard_ids is not None else "train",
                     example_ids=list(_discard_ids) if _discard_ids else None,
+                    retained=retain_rejected,
                 )
                 _record_sibling(
                     _discard_parent.id,
@@ -3549,7 +3658,7 @@ def _run_evolution_impl(
                     example_ids=list(_discard_ids) if _discard_ids else None,
                     score=float(sum(gated.judgement.after)),
                 )
-                _safe_remove_worktree(gated.child, label=label)
+                _discard_rejected(gated.child, label=label, retain=retain_rejected)
                 candidates.pop(gated.child.id, None)
 
             # Content key -> the child id that first claimed it this batch.
