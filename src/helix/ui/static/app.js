@@ -4,8 +4,8 @@
 (() => {
   const NS = 'http://www.w3.org/2000/svg';
   const ID_RE = /^g\d+-[sm]\d+$/;
-  const VIEWS = ['map', 'frontier', 'candidate', 'mutation', 'validation', 'lineage', 'proposals'];
-  const MENU = [['map', 'Loop'], ['frontier', 'Frontier'], ['lineage', 'Lineage'], ['proposals', 'Proposals']];
+  const VIEWS = ['map', 'frontier', 'candidate', 'mutation', 'validation', 'lineage', 'path', 'proposals'];
+  const MENU = [['map', 'Loop'], ['frontier', 'Frontier'], ['lineage', 'Lineage'], ['path', 'Path'], ['proposals', 'Proposals']];
   const OUTCOMES = ['frontier', 'dominated', 'rejected', 'skipped', 'failed', 'running'];
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const dark = matchMedia('(prefers-color-scheme: dark)');
@@ -16,7 +16,9 @@
     frontier: null, frontierKey: null, frontierLoading: null, viewKey: null,
     view: 'map', from: 'map', cand: null, candData: null,
     lane: null, tx: null, mapKey: null, laneKey: null, popKey: null, chart: null, phase: 0, error: null,
-    lin: { data: null, key: null, loading: null, byId: {}, showRej: null, pts: [], pin: null, hov: null, g: null, ix: null },
+    lin: { data: null, key: null, loading: null, byId: {}, showRej: null, pts: [], pin: null, hov: null, g: null, ix: null,
+      open: new Set(), groups: new Map(), groupOf: new Map(), scroll: null },
+    path: { id: null },
     prop: { data: null, key: null, loading: null, byId: {}, filter: 'all', sort: 'gen', dir: 1, sel: null, rows: [], bodyKey: null },
     candVs: 'parent', kids: {}, inst: null, ci: null, pobj: null, pobjKey: null, opop: { pin: false, timer: 0 },
   };
@@ -715,6 +717,15 @@
   let hoverEl = null;
   function showCard(target) {
     const id = target.getAttribute('data-c'), c = S.byId[id], k = $('card');
+    const gn = S.view === 'lineage' && S.lin.groups.get(id);
+    if (gn) {
+      const ms = gn.members.map((m) => S.lin.byId[m]).filter(Boolean);
+      fill(k, h('div', { class: 'h' }, h('b', { text: `${ms.length} rejected` }), h('span', { text: (gn.parents.length > 1 ? 'merges of ' : 'from ') + gn.parents.join(' + ') })),
+        h('div', { class: 'note', text: ms.map((m) => `${m.id} ${propScore(propOf(m.id) || m)}`).join(' · ') }),
+        h('div', { class: 't', text: 'click to list them' }));
+      placeCard(k, target);
+      return;
+    }
     document.querySelectorAll('.hot').forEach((x) => x.classList.remove('hot'));
     document.querySelectorAll(`[data-c="${CSS.escape(id)}"]`).forEach((x) => x.classList.add('hot'));
     if (S.view === 'frontier') strip(id);
@@ -781,10 +792,11 @@
       : h('b', { text: label })));
   }
   const propRoute = () => 'proposals' + (S.prop.filter !== 'all' ? '/' + S.prop.filter : '');
-  const linRoute = () => 'lineage' + (S.lin.pin ? '/' + S.lin.pin : '');
+  const linRoute = () => 'lineage' + (S.lin.pin && ID_RE.test(S.lin.pin) ? '/' + S.lin.pin : '');
+  const pathRoute = () => 'path' + (S.path.id ? '/' + S.path.id : '');
   function setHash() {
     const want = S.view === 'map' ? '' : S.view === 'candidate' ? '#candidate/' + S.cand : S.view === 'proposals' ? '#' + propRoute()
-      : S.view === 'lineage' ? '#' + linRoute() : '#' + S.view;
+      : S.view === 'lineage' ? '#' + linRoute() : S.view === 'path' ? '#' + pathRoute() : '#' + S.view;
     if (location.hash !== want) history.replaceState(null, '', location.pathname + location.search + want);
   }
   function go(v) {
@@ -799,7 +811,14 @@
       const id = v.split('/')[1];
       S.lin.pin = id && ID_RE.test(id) ? id : null;
       S.lin.hov = null;
+      S.lin.jump = !!S.lin.pin;  // bring the requested node into view, whatever the scroll was
       v = 'lineage';
+    }
+    // path/<id> follows that candidate's ancestry; the plain path route follows the best candidate's
+    if (v.startsWith('path')) {
+      const id = v.split('/')[1];
+      S.path.id = id && ID_RE.test(id) ? id : null;
+      v = 'path';
     }
     if (!VIEWS.includes(v)) v = 'map';
     if (v !== 'candidate') S.cand = null;
@@ -815,6 +834,7 @@
     // redraw a view only when its inputs changed, so hover, scroll and selects survive live updates
     const r = S.run;
     const key = S.view === 'lineage' ? ['lineage', lineageKey(), dark.matches, innerWidth, innerHeight].join('|')
+      : S.view === 'path' ? ['path', S.path.id, proposalsKey(), dark.matches].join('|')
       : S.view === 'proposals' ? ['proposals', proposalsKey(), dark.matches].join('|')
         : [S.view, frontierKey(), dark.matches, innerWidth, r ? JSON.stringify([r.loop, r.health && r.health.failures, r.details, (r.candidates || []).length]) : ''].join('|');
     if (!force && key === S.viewKey) return;
@@ -823,6 +843,7 @@
     else if (S.view === 'mutation') drawMutation();
     else if (S.view === 'validation') drawValidation();
     else if (S.view === 'lineage') drawLineage();
+    else if (S.view === 'path') drawPath();
     else if (S.view === 'proposals') drawProposals();
   }
 
@@ -1454,6 +1475,8 @@
   async function drawLineage() {
     const V = $('v-lineage');
     if (!V.firstChild) fill(V, crumbs(['Loop', 'map'], ['Lineage', '']));
+    // the proposals rows carry the gate's successes and n, which the panels and cards show as 2/3 rather than 0.667
+    if (S.run) loadInto(S.prop, proposalsKey(), '/api/proposals');
     await loadInto(S.lin, lineageKey(), '/api/lineage');
     if (S.view === 'lineage') paintLineage();
   }
@@ -1462,11 +1485,12 @@
     S.lin.byId = {};
     for (const n of nodes) S.lin.byId[n.id] = n;
     // a pinned id the loaded run does not have is dropped; a pinned rejected node turns rejected nodes on so it can be seen
+    const pinGroup = !!S.lin.pin && S.lin.pin.startsWith('grp:');
     const pinned = S.lin.pin && S.lin.byId[S.lin.pin];
-    if (S.lin.pin && d && !pinned) { S.lin.pin = null; setHash(); }
+    if (S.lin.pin && d && !pinned && !pinGroup) { S.lin.pin = null; setHash(); }
     if (pinned && !pinned.accepted) S.lin.showRej = true;
     const nacc = nodes.filter((n) => n.accepted).length, nrej = nodes.length - nacc;
-    const showRej = S.lin.showRej ?? nodes.length <= 400;
+    const showRej = S.lin.showRej ?? true;
     const best = d && d.best ? S.byId[d.best] || null : null;
     const stats = h('div', { class: 'fs' },
       h('span', null, h('b', { text: S.run ? String(nacc) : '–' }), 'accepted'),
@@ -1484,25 +1508,89 @@
         },
       })) : null);
     const svg = h('div', { class: 'lgw', id: 'lg', role: 'img', 'aria-label': 'Lineage' });
+    const mm = h('div', { class: 'lmm', id: 'lmm', 'aria-hidden': 'true' });
+    // a redraw keeps the reader's place: the same scroll, or the latest generations if they were at the end
+    const old = $('lg');
+    if (S.lin.jump) S.lin.scroll = null;
+    else if (old && old.scrollWidth > old.clientWidth) S.lin.scroll = { left: old.scrollLeft, end: old.scrollLeft + old.clientWidth >= old.scrollWidth - 4 };
+    S.lin.jump = false;
     if (hoverEl && V.contains(hoverEl)) { hoverEl = null; hideCard(); }
     S.lin.hov = null;
-    fill(V, crumbs(['Loop', 'map'], ['Lineage', '']), stats, svg);
-    lineageGraph(svg, d, showRej ? nodes : nodes.filter((n) => n.accepted));
+    fill(V, crumbs(['Loop', 'map'], ['Lineage', '']), stats, mm, svg);
+    lineageGraph(svg, d, groupRejected(showRej ? nodes : nodes.filter((n) => n.accepted)));
+    if (pinGroup && !S.lin.groups.has(S.lin.pin)) S.lin.pin = null;  // the group came apart: a member was pinned or it shrank
     linFocus();
     linPanel();
   }
   const counter = (id) => { const m = /(\d+)$/.exec(id); return m ? +m[1] : 0; };
+  // three or more rejected children of one parent (or one pair of merge parents) in one generation are drawn as one
+  // counted node; its panel lists them, and pinning one of them opens that group
+  const GROUP_MIN = 3;
+  const famKey = (n) => 'grp:' + (n.generation || 0) + ':' + (n.parents || []).join('+');
+  function groupRejected(list) {
+    const fams = new Map(), out = [];
+    S.lin.groups = new Map();
+    S.lin.groupOf = new Map();
+    for (const n of list) {
+      if (n.accepted) { out.push(n); continue; }
+      const k = famKey(n);
+      if (!fams.has(k)) fams.set(k, []);
+      fams.get(k).push(n);
+    }
+    for (const [k, ms] of fams) {
+      // a pinned member opens its group for good, so unpinning does not move the tree
+      if (ms.some((m) => m.id === S.lin.pin)) S.lin.open.add(k);
+      if (ms.length < GROUP_MIN || S.lin.open.has(k)) { out.push(...ms); continue; }
+      const gn = { id: k, group: true, accepted: false, generation: ms[0].generation, parents: ms[0].parents || [], members: ms.map((m) => m.id) };
+      S.lin.groups.set(k, gn);
+      for (const m of ms) S.lin.groupOf.set(m.id, k);
+      out.push(gn);
+    }
+    return out;
+  }
+  // siblings in order of how many descendants they have, the largest in the middle and the others alternating above
+  // and below it, so a parent's most productive line runs on from it and rejected leaves sit at the family's edges
+  function middleOut(fam, size) {
+    const byRank = fam.slice().sort((a, b) => size(b) - size(a) || (b.accepted - a.accepted) || counter(a.id) - counter(b.id));
+    const out = [];
+    byRank.forEach((n, i) => { if (i % 2) out.push(n); else out.unshift(n); });
+    return out;
+  }
   function layoutLineage(list) {
+    const gap = (n) => (n.accepted || n.group ? 1 : 0.6);
+    const ix = linIndex(), size = (n) => (n.group ? 0 : ix.desc(n.id).size), later = new Map();
+    // the generation of a parent's last accepted child: its line is drawn up to there
+    const lastKid = (p) => {
+      if (!later.has(p)) later.set(p, Math.max(-1, ...(ix.kids[p] || []).map((k) => ix.by[k]).filter((k) => k && k.accepted).map((k) => k.generation || 0)));
+      return later.get(p);
+    };
+    // the path to the best runs at the row of its last node so far, up to its last generation
+    const pathEnd = Math.max(-1, ...list.filter((n) => n.best_path).map((n) => n.generation || 0));
+    let pathRow = null;
     const cols = new Map(), pos = new Map();
     for (const n of list) { const g = n.generation || 0; if (!cols.has(g)) cols.set(g, []); cols.get(g).push(n); }
     for (const g of [...cols.keys()].sort((a, b) => a - b)) {
-      const want = new Map();
-      for (const n of cols.get(g)) {
-        const ps = (n.parents || []).map((p) => pos.get(p)).filter(num);
-        want.set(n, ps.length ? avg(ps) : 0);
+      const want = new Map(), fam = new Map();
+      for (const n of cols.get(g)) { const k = famKey(n); if (!fam.has(k)) fam.set(k, []); fam.get(k).push(n); }
+      const onPath = cols.get(g).some((n) => n.best_path);
+      for (const [k, f] of fam) {
+        const ordered = middleOut(f, size), pp = f[0].parents || [];
+        fam.set(k, ordered);
+        const ps = pp.map((p) => pos.get(p)).filter(num);
+        let w = ps.length ? avg(ps) : 0;
+        const fo = [0];
+        for (let i = 1; i < ordered.length; i++) fo.push(fo[i - 1] + (gap(ordered[i - 1]) + gap(ordered[i])) / 2);
+        const top = w - avg(fo), bottom = top + fo[fo.length - 1];
+        // where the path to the best crosses this generation without a node, no family sits on its row: one that would
+        // moves wholly below it (or above, if it centres above). A family of rejected proposals only also keeps off
+        // its own parent's line when that runs on, so neither reads as part of a line it is not on
+        if (pathRow != null && g < pathEnd && !onPath && top < pathRow + 0.6 && bottom > pathRow - 0.6) {
+          w = w >= pathRow ? pathRow + 1 + avg(fo) : pathRow - 1 - (fo[fo.length - 1] - avg(fo));
+        } else if (f.every((m) => !m.accepted) && pp.some((p) => lastKid(p) > g)) w += 1 + avg(fo);
+        for (const n of f) want.set(n, w);
       }
-      const col = cols.get(g).sort((a, b) => want.get(a) - want.get(b) || counter(a.id) - counter(b.id));
-      const gap = (n) => (n.accepted ? 1 : 0.6), off = [0];
+      const col = [...fam.values()].sort((a, b) => want.get(a[0]) - want.get(b[0]) || counter(a[0].id) - counter(b[0].id)).flat();
+      const off = [0];
       for (let i = 1; i < col.length; i++) off.push(off[i - 1] + (gap(col[i - 1]) + gap(col[i])) / 2);
       // least-squares rows that keep the order and the gaps: pool adjacent violators on want - offset
       const blocks = [];
@@ -1516,6 +1604,8 @@
       });
       let i = 0;
       for (const b of blocks) for (let j = 0; j < b.cnt; j++, i++) pos.set(col[i].id, b.sum / b.cnt + off[i]);
+      const pn = col.find((n) => n.best_path);
+      if (pn) pathRow = pos.get(pn.id);
     }
     return pos;
   }
@@ -1544,16 +1634,27 @@
   // four stacked svgs: axis, lines, nodes and the focus overlay. A focus fades the lines and nodes layers as whole
   // composited layers and redraws only the overlay, so a hover at 1000+ nodes repaints a few elements, not the tree
   function lineageGraph(wrap, d, list) {
-    const W = wrap.clientWidth || 800, Hh = wrap.clientHeight || 400, pl = 18, pr = 18, pt = 12, pb = 24;
+    const W = wrap.clientWidth || 800, pl = 18, pr = 18, pt = 12, pb = 24;
+    let Hh = wrap.clientHeight || 400;
     const C = { cyan: css('--cyan'), ink: css('--ink'), ink2: css('--ink2'), ink3: css('--ink3'), line: css('--line'), paper: css('--paper') };
     S.lin.pts = [];
     S.lin.g = null;
-    const [AX, ED, ND, OV] = ['lx', 'le', 'ln', 'lo'].map((k) => wrap.appendChild(s('svg', { class: 'lg ' + k, 'aria-hidden': 'true' })));
     let G = Math.max(1, (d && d.max_generation) || 0);
     for (const n of list) if ((n.generation || 0) > G) G = n.generation;
-    const x = (g) => pl + (g || 0) / G * (W - pl - pr);
-    AX.appendChild(s('line', { x1: pl, x2: W - pr, y1: Hh - pb + 6, y2: Hh - pb + 6, stroke: C.line }));
-    for (const g of ticks(G)) AX.appendChild(s('text', { x: x(g), y: Hh - 4, class: 'ax', 'text-anchor': 'middle', text: g }));
+    // past LIN_COL px a generation the tree scrolls sideways and the minimap shows where the view is
+    const CW = Math.max(W, Math.ceil(pl + pr + G * LIN_COL)), scroll = CW > W;
+    wrap.classList.toggle('scr', scroll);
+    const inner = wrap.appendChild(h('div', { class: 'lgi', style: { width: CW + 'px' } }));
+    // the minimap strip and the scrollbar both take height: measure once they are in place
+    const mmEl = $('lmm');
+    if (mmEl) mmEl.classList.toggle('on', scroll);
+    if (scroll) Hh = wrap.clientHeight || Hh;
+    const [AX, ED, ND, OV] = ['lx', 'le', 'ln', 'lo'].map((k) => inner.appendChild(s('svg', { class: 'lg ' + k, 'aria-hidden': 'true' })));
+    const x = (g) => pl + (g || 0) / G * (CW - pl - pr);
+    AX.appendChild(s('line', { x1: pl, x2: CW - pr, y1: Hh - pb + 6, y2: Hh - pb + 6, stroke: C.line }));
+    // a scrolled tree shows a few dozen generations at a time: label every tenth
+    const gt = scroll ? Array.from({ length: Math.floor(G / 10) + 1 }, (_, i) => i * 10) : ticks(G);
+    for (const g of gt) AX.appendChild(s('text', { x: x(g), y: Hh - 4, class: 'ax', 'text-anchor': 'middle', text: g }));
     if (!list.length) return;
     const pos = layoutLineage(list), byId = {};
     let lo = Infinity, hi = -Infinity, mlo = Infinity, mhi = -Infinity;
@@ -1564,11 +1665,11 @@
     }
     const unit = Math.min(44, (Hh - pt - pb) / Math.max(1, hi - lo)), mid = (pt + Hh - pb) / 2, c0 = (lo + hi) / 2;
     const y = (v) => mid + (v - c0) * unit;
-    const big = list.length > 600, colW = (W - pl - pr) / G;
+    const big = list.length > 600, colW = (CW - pl - pr) / G;
     const rmax = Math.max(2.4, Math.min(big ? 3.4 : 5.5, unit * 0.45, colW * 0.8 + 1.6));
     const tt = (n) => (num(n.mean) && mhi > mlo ? (n.mean - mlo) / (mhi - mlo) : 1);
     // edges: one path per kind keeps 1000+ nodes cheap; each segment is kept by child so a focus can draw its own lines
-    const g = { wrap, W, els: new Map(), edges: new Map(), at: new Map(), cols: new Map(), cur: undefined };
+    const g = { wrap, inner, W, CW, scroll, els: new Map(), edges: new Map(), at: new Map(), cols: new Map(), cur: undefined };
     let dN = '', dB = '', dR = '';
     const f1 = (v) => v.toFixed(1);
     for (const n of list) {
@@ -1599,7 +1700,14 @@
       S.lin.pts.push({ x: x(n.generation), y: y(pos.get(n.id)), r: +a.r, el: e });
       own(n.id, e);
     };
-    for (const n of list) if (!n.accepted) dot(n, { r: big ? 1.5 : 2.2, fill: C.paper, stroke: C.ink3, 'stroke-width': 1 });
+    for (const n of list) if (!n.accepted && !n.group) dot(n, { r: big ? 1.5 : 2.2, fill: C.paper, stroke: C.ink3, 'stroke-width': 1 });
+    // a counted group of rejected children: an open circle with the count in it
+    for (const n of list) {
+      if (!n.group) continue;
+      const r = Math.max(big ? 3 : 5.5, Math.min(8, unit * 0.42));
+      dot(n, { r: r.toFixed(1), fill: C.paper, stroke: C.ink3, 'stroke-width': 1 });
+      if (r >= 5) own(n.id, ND.appendChild(s('text', { x: f1(x(n.generation)), y: f1(y(pos.get(n.id))), class: 'lgn', 'text-anchor': 'middle', 'dominant-baseline': 'central', text: String(n.members.length) })));
+    }
     // dominated first, then the frontier with a ring, then the best on top
     const acc = list.filter((n) => n.accepted).sort((a, b) => (a.front - b.front) || (tt(a) - tt(b)));
     for (const n of acc) {
@@ -1621,7 +1729,7 @@
     S.lin.g = g;
     // nearest-node hover and click: the dots themselves take no pointer events, so dense layers stay usable
     const near = (ev) => {
-      const bb = wrap.getBoundingClientRect(), mx = ev.clientX - bb.left, my = ev.clientY - bb.top;
+      const bb = inner.getBoundingClientRect(), mx = ev.clientX - bb.left, my = ev.clientY - bb.top;
       let hit = null, bd = 64;
       for (const q of S.lin.pts) {
         const dx = q.x - mx, dy = q.y - my, dd = dx * dx + dy * dy - q.r * q.r;
@@ -1646,7 +1754,45 @@
     };
     // a click pins the node and opens its panel, empty space clears it, a double click opens the candidate
     wrap.onclick = (ev) => { const el = near(ev); linPin(el ? el.getAttribute('data-c') : null); };
-    wrap.ondblclick = (ev) => { const el = near(ev); if (el) { $('card').style.display = 'none'; openCand(el.getAttribute('data-c')); } };
+    wrap.ondblclick = (ev) => { const el = near(ev); if (el && ID_RE.test(el.getAttribute('data-c'))) { $('card').style.display = 'none'; openCand(el.getAttribute('data-c')); } };
+    if (!scroll) return;
+    const keep = S.lin.scroll, at = S.lin.pin && g.at.get(S.lin.pin);
+    wrap.scrollLeft = keep && !keep.end ? keep.left : at && !keep ? at[0] - W / 2 : CW;
+    minimap(g, list, pos, lo, hi, d);
+  }
+  const LIN_COL = 26;
+  // the whole run in a thin strip: accepted candidates, the path to the best, and the part of the tree in view
+  function minimap(g, list, pos, lo, hi, d) {
+    const mm = $('lmm');
+    if (!mm) return;
+    mm.classList.add('on');
+    const W = mm.clientWidth || g.W, H = 30, sx = W / g.CW, span = Math.max(1, hi - lo);
+    const yy = (v) => 3 + (v - lo) / span * (H - 6);
+    const svg = s('svg', { width: W, height: H, class: 'lms' });
+    const acc = list.filter((n) => n.accepted), at = (n) => g.at.get(n.id);
+    for (const n of acc) svg.appendChild(s('circle', { cx: (at(n)[0] * sx).toFixed(1), cy: yy(pos.get(n.id)).toFixed(1), r: 1.3, fill: css('--cyan'), opacity: n.best_path ? 1 : 0.45 }));
+    const onPath = new Map(acc.filter((n) => n.best_path).map((n) => [n.id, n]));
+    let dp = '';
+    for (const n of onPath.values()) for (const p of n.parents || []) {
+      const q = onPath.get(p);
+      if (q) dp += `M${(at(q)[0] * sx).toFixed(1)} ${yy(pos.get(q.id)).toFixed(1)}L${(at(n)[0] * sx).toFixed(1)} ${yy(pos.get(n.id)).toFixed(1)}`;
+    }
+    if (dp) svg.appendChild(s('path', { d: dp, fill: 'none', stroke: css('--cyan'), 'stroke-width': 1.2 }));
+    const win = svg.appendChild(s('rect', { class: 'lmw', y: 0.5, height: H - 1, rx: 3 }));
+    const place = () => { win.setAttribute('x', (g.wrap.scrollLeft * sx).toFixed(1)); win.setAttribute('width', Math.max(6, g.W * sx).toFixed(1)); };
+    place();
+    mm.replaceChildren(svg);
+    g.wrap.onscroll = place;
+    const jump = (ev) => { const bb = mm.getBoundingClientRect(); g.wrap.scrollLeft = (ev.clientX - bb.left) / sx - g.W / 2; };
+    mm.onpointerdown = (ev) => { jump(ev); mm.setPointerCapture(ev.pointerId); mm.onpointermove = jump; };
+    mm.onpointerup = (ev) => { mm.onpointermove = null; mm.releasePointerCapture(ev.pointerId); };
+  }
+  // keep the pinned node in view when the tree scrolls sideways
+  function linReveal(id) {
+    const g = S.lin.g, at = g && g.scroll && g.at.get(id);
+    if (!at) return;
+    const l = g.wrap.scrollLeft;
+    if (at[0] < l + 40 || at[0] > l + g.W - 40) g.wrap.scrollLeft = at[0] - g.W / 2;
   }
   // light the focus (the hovered node, else the pinned one), its ancestors and its descendants: their lines and copies
   // of their nodes go in the overlay, while CSS fades the lines and nodes layers underneath
@@ -1663,7 +1809,8 @@
     g.wrap.classList.toggle('fx', !!id);
     // leaving focus keeps the overlay's content so it can fade out with the layers fading back in
     if (!id) return;
-    const ix = linIndex(), anc = ix.anc(id), desc = ix.desc(id), frag = document.createDocumentFragment();
+    const ix = linIndex(), grp = S.lin.groups.get(id), frag = document.createDocumentFragment();
+    const anc = grp ? new Set(grp.parents.flatMap((p) => [p, ...ix.anc(p)])) : ix.anc(id), desc = grp ? new Set() : ix.desc(id);
     const d = { r: '', n: '', b: '' };
     const light = (v, up) => {
       const es = g.els.get(v);
@@ -1674,20 +1821,27 @@
     light(id, true);
     for (const v of anc) light(v, true);
     for (const v of desc) light(v, false);
+    for (const [k, gn] of S.lin.groups) if (k !== id && gn.parents.some((p) => p === id || desc.has(p))) light(k, false);
     g.hl[0].setAttribute('d', d.r); g.hl[1].setAttribute('d', d.n); g.hl[2].setAttribute('d', d.b);
     g.lit.replaceChildren(frag);
   }
   function linPin(id) {
-    if (id && !S.lin.byId[id]) return;
+    if (id && !S.lin.byId[id] && !S.lin.groups.has(id)) return;
     S.lin.pin = id || null;
     S.lin.hov = null;
     // the hover card is off while pinned; unpinning lets the next move over a node show it again
     hideCard();
     hoverEl = null;
-    if (id && !S.lin.byId[id].accepted && !(S.lin.g && S.lin.g.els.has(id))) { S.lin.showRej = true; setHash(); paintLineage(); return; }
+    if (id && S.lin.byId[id] && !(S.lin.g && S.lin.g.els.has(id))) {
+      // pinning a member of a counted group opens that group; one hidden by the toggle turns rejected nodes on
+      const k = S.lin.groupOf.get(id);
+      if (k) S.lin.open.add(k); else S.lin.showRej = true;
+      setHash(); paintLineage(); linReveal(id); return;
+    }
     setHash();
     linFocus();
     linPanel();
+    if (id) linReveal(id);
   }
   // keyboard moves of a pinned focus: Left the parent, Right the best child, Up and Down the neighbour in the same generation
   function linKey(key) {
@@ -1695,10 +1849,23 @@
     if (!g || !id || !g.els.has(id)) return false;
     const n = S.lin.byId[id], ix = linIndex();
     let to = null;
+    if (!n) {  // a counted group: Left goes to its parent, Up and Down move along the column
+      const gn = S.lin.groups.get(id);
+      if (!gn) return false;
+      if (key === 'ArrowLeft') to = gn.parents.find((p) => g.els.has(p)) || null;
+      else if (key === 'ArrowUp' || key === 'ArrowDown') { const col = g.cols.get(gn.generation || 0) || [], i = col.indexOf(id); to = col[i + (key === 'ArrowUp' ? -1 : 1)] || null; }
+      else if (key !== 'ArrowRight') return false;
+      if (to) linPin(to);
+      return true;
+    }
     if (key === 'ArrowLeft') to = (n.parents || []).find((p) => g.els.has(p)) || null;
     else if (key === 'ArrowRight') {
       const val = (c) => (c.accepted ? 1e6 + (num(c.mean) ? c.mean : -1) : pScore(c) ?? -1);
-      for (const k of ix.kids[id] || []) if (g.els.has(k) && (!to || val(ix.by[k]) > val(ix.by[to]))) to = k;
+      let bestKid = null;
+      for (const k of ix.kids[id] || []) {
+        const at = g.els.has(k) ? k : S.lin.groupOf.get(k);
+        if (at && g.els.has(at) && (!bestKid || val(ix.by[k]) > val(ix.by[bestKid]))) { bestKid = k; to = at; }
+      }
     } else if (key === 'ArrowUp' || key === 'ArrowDown') {
       const col = g.cols.get(n.generation || 0) || [], i = col.indexOf(id);
       to = col[i + (key === 'ArrowUp' ? -1 : 1)] || null;
@@ -1735,9 +1902,27 @@
       return [h('span', { text: o, title: o }), h('b', { class: top ? 'best' : null, text: ofmt(v) })];
     }));
   }
+  function groupPanel(gn) {
+    const ms = gn.members.map((m) => S.lin.byId[m]).filter(Boolean);
+    // the proposals rows carry the gate's successes and n, so a binary run reads 2/3 rather than 0.667
+    if (!S.prop.data && S.run) loadInto(S.prop, proposalsKey(), '/api/proposals').then((pd) => { if (pd && S.lin.pin === gn.id && S.view === 'lineage') linPanel(); });
+    const pars = gn.parents.map((p, i) => [i ? ' + ' : '', h('button', { class: 'lnk mono', type: 'button', onclick: () => linPin(p), text: p })]);
+    return [
+      h('div', { class: 'lph' }, h('b', { text: `${ms.length} rejected` }),
+        h('button', { class: 'lpx', type: 'button', 'aria-label': 'Close', title: 'Close (Esc)', onclick: () => linPin(null), text: '×' })),
+      h('div', { class: 'lps' }, 'generation ' + (gn.generation || 0), pars.length ? [gn.parents.length > 1 ? ' · merges of ' : ' · from ', pars] : null),
+      h('div', { class: 'lpn muted', text: 'Proposals the gate turned down, drawn as one node. Pick one to show it in the tree.' }),
+      h('div', { class: 'lpc' }, ms.map((k) => {
+        const [ks, kt] = linScore(k);
+        return h('button', { type: 'button', class: 'lpr', onclick: () => linPin(k.id) },
+          h('span', { class: 'mono', text: k.id }), h('span', { class: 'o-rejected', text: why(k) || 'rejected' }), h('span', { class: 'n' }, ks, kt ? h('span', { class: 'bt', text: kt }) : null));
+      })),
+      h('button', { class: 'lpo', type: 'button', onclick: () => { S.lin.open.add(gn.id); S.lin.pin = null; setHash(); paintLineage(); }, text: 'Show them in the tree' })];
+  }
   function linPanel() {
-    const V = $('v-lineage'), old = $('lp'), id = S.lin.pin, n = id && S.lin.byId[id], g = S.lin.g;
-    if (!n || !g || !g.wrap.isConnected) { if (old) old.remove(); return; }
+    const V = $('v-lineage'), old = $('lp'), id = S.lin.pin, g = S.lin.g, gn = id && S.lin.groups.get(id), n = id && !gn && S.lin.byId[id];
+    if ((!n && !gn) || !g || !g.wrap.isConnected) { if (old) old.remove(); return; }
+    if (gn) return placePanel(h('div', { class: 'lp', id: 'lp', role: 'region', 'aria-label': `${gn.members.length} rejected proposals` }, groupPanel(gn)), id);
     const ix = linIndex(), pars = n.parents || [], o = outcomeOf(n), c = S.byId[id] || {};
     const go2 = (p) => h('button', { class: 'lnk mono', type: 'button', onclick: () => linPin(p), onmouseenter: () => { S.lin.hov = p; linFocus(); }, onmouseleave: () => { S.lin.hov = null; linFocus(); }, text: p });
     const from = pars.length > 1 ? [' · merge of ', pars.map((p, i) => [i ? ' + ' : '', S.lin.byId[p] ? go2(p) : p])]
@@ -1764,16 +1949,90 @@
         return h('button', { type: 'button', class: 'lpr', onclick: () => linPin(k.id), onmouseenter: () => { S.lin.hov = k.id; linFocus(); }, onmouseleave: () => { S.lin.hov = null; linFocus(); } },
           h('span', { class: 'mono', text: k.id }), h('span', { class: 'o-' + ko, text: ko }), h('span', { class: 'n' }, ks, kt ? h('span', { class: 'bt', text: kt }) : null));
       })), kids.length > 40 ? h('div', { class: 'muted', text: `+${kids.length - 40} more` }) : null] : null,
-      ID_RE.test(id) ? h('button', { class: 'lpo', type: 'button', 'data-open': id, text: 'Open candidate' }) : null);
-
-    // the panel sits over the tree's right edge, or its left edge when the pinned node is under it
-    const at = g.at.get(id), wide = 312;
+      ID_RE.test(id) ? h('div', { class: 'lpb' },
+        h('button', { class: 'lpo', type: 'button', 'data-open': id, text: 'Open candidate' }),
+        n.accepted ? h('button', { class: 'lpo', type: 'button', 'data-go': 'path/' + id, text: 'Path from seed' }) : null) : null);
+    placePanel(panel, id);
+  }
+  // the panel sits over the tree's right edge, or its left edge when the pinned node is under it
+  function placePanel(panel, id) {
+    const V = $('v-lineage'), old = $('lp'), g = S.lin.g, at = g.at.get(id), wide = 312;
     const top = Math.round(g.wrap.getBoundingClientRect().top - V.getBoundingClientRect().top + V.scrollTop);
     panel.style.top = top + 'px';
     panel.style.maxHeight = `calc(100% - ${top + 4}px)`;
-    panel.classList.toggle('left', !!at && at[0] > g.W - wide - 24 && at[0] > wide + 24);
+    const vx = at ? at[0] - (g.scroll ? g.wrap.scrollLeft : 0) : 0;
+    panel.classList.toggle('left', !!at && vx > g.W - wide - 24 && vx > wide + 24);
     if (old) old.replaceWith(panel); else V.appendChild(panel);
   }
+  // path: one candidate's ancestry from the seed, step by step, with what each step changed and what it cost to find
+  async function drawPath() {
+    const V = $('v-path');
+    if (!V.firstChild) fill(V, crumbs(['Loop', 'map'], ['Path', '']));
+    await Promise.all([loadInto(S.lin, lineageKey(), '/api/lineage'), loadInto(S.prop, proposalsKey(), '/api/proposals')]);
+    if (S.view === 'path') paintPath();
+  }
+  // a candidate's ancestry, oldest first; at a merge it follows the parent on the best path, else the stronger parent
+  function ancestry(id) {
+    const by = linIndex().by, out = [];
+    for (let cur = id; cur && by[cur] && !out.includes(cur);) {
+      out.push(cur);
+      const ps = (by[cur].parents || []).filter((p) => by[p]);
+      cur = ps.find((p) => by[p].best_path) || ps.sort((a, b) => (by[b].mean ?? -1) - (by[a].mean ?? -1))[0] || null;
+    }
+    return out.reverse();
+  }
+  function paintPath() {
+    const V = $('v-path'), d = S.lin.data, ix = linIndex(), id = S.path.id || (d && d.best);
+    const head = crumbs(['Loop', 'map'], ['Path', '']);
+    if (!d || !id || !ix.by[id]) return fill(V, head, h('div', { class: 'muted pth0', text: S.run ? 'No accepted candidate yet.' : 'No run yet.' }));
+    const steps = ancestry(id).map((k) => ix.by[k]), first = steps[0], last = steps[steps.length - 1];
+    const sc = (n) => { const c = S.byId[n.id]; return c && num(c.mean) ? score(c) : num(n.mean) ? n.mean.toFixed(3) : '–'; };
+    const isBest = id === d.best;
+    const sub = h('div', { class: 'fs' },
+      h('span', null, h('b', { text: String(steps.length - 1) }), plural(steps.length - 1, 'step', 'steps') + ' from the seed'),
+      h('span', null, h('b', { text: String(last.generation || 0) }), plural(last.generation || 0, 'generation', 'generations')),
+      h('span', null, h('b', { text: sc(first) + ' → ' + sc(last) }), binary() ? 'validation' : 'validation mean'),
+      isBest ? null : h('button', { class: 'lnk', type: 'button', 'data-go': 'path', text: 'path to the best' }),
+      h('button', { class: 'lnk', type: 'button', 'data-go': 'lineage/' + id, text: 'show in the lineage' }));
+    const prev = (i) => (i ? steps[i - 1] : null);
+    const rows = steps.map((n, i) => {
+      const p = prev(i), r = propOf(n.id), c = S.byId[n.id] || {};
+      // what it took: how many proposals from the same parent in that generation, and how many were accepted
+      let tried = null;
+      if (p) {
+        // every proposal from the same parent in that generation, failed ones included (the lineage has no failures)
+        const rowsOf = ((S.prop.data && S.prop.data.rows) || []).filter((x) => (x.generation || 0) === (n.generation || 0)
+          && (x.parents || []).includes(p.id) && x.outcome !== 'skipped');
+        const sib = rowsOf.length ? rowsOf : (ix.kids[p.id] || []).map((k) => ix.by[k]).filter((k) => (k.generation || 0) === (n.generation || 0));
+        const ok = sib.filter((k) => ['frontier', 'dominated'].includes(outcomeOf(k))).length;
+        tried = `${ok} of ${sib.length} ${plural(sib.length, 'proposal', 'proposals')} from ${p.id} accepted`;
+      }
+      const gap = p ? (n.generation || 0) - (p.generation || 0) - 1 : 0;
+      const pars = n.parents || [], merge = pars.length > 1;
+      const dv = p && num(n.mean) && num(p.mean) ? n.mean - p.mean : null;
+      const dtxt = dv == null ? null : binary() && num(c.n) && S.byId[p.id] && num(S.byId[p.id].n)
+        ? `${Math.round(n.mean * c.n - p.mean * S.byId[p.id].n) >= 0 ? '+' : '−'}${Math.abs(Math.round(n.mean * c.n - p.mean * S.byId[p.id].n))} solved`
+        : (dv >= 0 ? '+' : '−') + Math.abs(dv).toFixed(3);
+      const summary = linSummary(n.id);
+      const meta = [r && num(r.files) && r.files > 0 ? `${r.files} ${plural(r.files, 'file', 'files')} changed` : null,
+        r && num(r.agent_seconds) ? 'agent ' + dur(r.agent_seconds) : null,
+        r && r.usage && uVal(r.usage, false) + uVal(r.usage, true) > 0 ? uText(r.usage, r.usage.cost_usd > 0) : null].filter(Boolean).join(' · ');
+      return [
+        gap > 0 ? h('div', { class: 'pgap', text: `${gap} ${plural(gap, 'generation', 'generations')} without an accepted child on this line` }) : null,
+        h('div', { class: 'pst' + (n.id === d.best ? ' best' : '') },
+          h('div', { class: 'pgen mono', text: 'g' + (n.generation || 0) }),
+          h('div', { class: 'pcard' },
+            h('div', { class: 'ph' }, h('button', { class: 'lnk mono', type: 'button', 'data-open': n.id, text: n.id }),
+              h('span', { class: 'o-' + outcomeOf(n), text: i ? outcomeOf(n) : 'seed' }),
+              merge ? h('span', { class: 'muted', text: 'merge of ' + pars.join(' + ') }) : null,
+              h('span', { class: 'psc' }, h('b', { text: sc(n) }), dtxt ? h('span', { class: dv > 0 ? 'up' : dv < 0 ? 'dn' : null, text: dtxt }) : null)),
+            summary || !i ? h('div', { class: 'pn' + (summary ? '' : ' muted'), text: summary || (S.static.config.seedless ? 'Generated from the objective.' : 'Your repository as given.') }) : null,
+            meta || tried ? h('div', { class: 'pm', text: [tried, meta].filter(Boolean).join(' · ') }) : null))];
+    });
+    fill(V, head, h('div', { class: 'ch' }, h('h2', { text: isBest ? 'Path to the best candidate' : 'Path to ' + id }), h('span', { class: 'mono', text: id })),
+      sub, h('div', { class: 'pth' }, rows));
+  }
+
   // proposals: one row per proposal in `helix log` order; past 500 rows only the visible slice is in the DOM
   async function drawProposals() {
     const V = $('v-proposals');
@@ -1974,7 +2233,7 @@
   function fromHash() {
     const hs = decodeURIComponent(location.hash.slice(1));
     if (hs.startsWith('candidate/') && ID_RE.test(hs.slice(10))) openCand(hs.slice(10));
-    else if (hs === 'proposals' || hs.startsWith('proposals/') || hs.startsWith('lineage/')) go(hs);
+    else if (hs === 'proposals' || hs.startsWith('proposals/') || hs.startsWith('lineage/') || hs.startsWith('path/')) go(hs);
     else if (VIEWS.includes(hs)) go(hs);
     else if (!hs && S.view !== 'map') go('map');
   }

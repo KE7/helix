@@ -39,10 +39,10 @@ evaluator feedback, and anything other than loopback exposes them to the network
 
 ## Views
 
-The **Views** menu at the top right switches between the Loop, Frontier, Lineage and Proposals. With the menu open, the
+The **Views** menu at the top right switches between the Loop, Frontier, Lineage, Path and Proposals. With the menu open, the
 arrow keys, Home and End move through it and Escape closes it; Down on the Views button opens it. Elsewhere, Escape
 closes the open popover or panel, and otherwise returns to the Loop. Each view has its own address, such as
-`#proposals/rejected`, `#lineage/g12-s3` or `#candidate/g12-s3`, so a link to it opens that view.
+`#proposals/rejected`, `#lineage/g12-s3`, `#path/g12-s3` or `#candidate/g12-s3`, so a link to it opens that view.
 
 ## What it shows
 
@@ -71,13 +71,25 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   `cartesian` frontier it shows a table of objective means and a plot of one objective against another. Candidates
   with the same score on every key keep one place on the frontier between them, as in GEPA, so the candidate with the
   best score can be listed as dominated.
-- **Lineage**: every proposal by generation, joined to its parents, with the path to the best candidate in cyan,
-  frontier members ringed and rejected proposals as small open dots (shown up to 400 nodes; a toggle turns them on or
-  off). Hover a node to light its ancestors and descendants and fade the rest. Click it to pin it and open its panel:
-  generation and parents, score (labelled `val` or `gate`), outcome and reason, objective values, the change summary,
-  how many descendants it has and how many of them were accepted, and its children. Double-click a node, or use "Open
-  candidate", to open it. While a node is pinned, Left moves to its parent, Right to its best child, and Up and Down to
-  its neighbours in the same generation; Escape unpins it. `#lineage/<id>` opens the view with that node pinned.
+- **Lineage**: every proposal by generation, joined to its parents, with the path to the best candidate in cyan and
+  frontier members ringed. Height has no meaning. Among siblings the one with the most descendants sits in the middle,
+  so a parent's most productive line runs on from it, and the others alternate above and below; proposals that branch
+  off a line which continues past them sit a row below it, so nothing reads as part of the path to the best. Rejected
+  proposals are small open dots; three or more rejected from one parent in one generation are one circle with their
+  count, whose panel lists them (a toggle hides rejected proposals altogether). Hover a node to light its ancestors and
+  descendants and fade the rest. Click it to pin it and open its panel: generation and parents, score (labelled `val`
+  or `gate`), outcome and reason, objective values, the change summary, how many descendants it has and how many of
+  them were accepted, and its children. Double-click a node, or use "Open candidate", to open it, or "Path from seed"
+  for its ancestry. While a node is pinned, Left moves to its parent, Right to its best child, and Up and Down to its
+  neighbours in the same generation; Escape unpins it. Hovering and pinning never move the tree; only opening a group
+  of rejected proposals (from its panel, or by pinning one of its members) or the toggle changes the layout. When the
+  generations no longer fit across, the tree scrolls sideways and a strip above it shows the whole run, the path to the
+  best and the part in view; click or drag the strip to move. `#lineage/<id>` opens the view with that node pinned.
+- **Path**: the best candidate's ancestry from the seed, one step per accepted ancestor: its score and the change
+  against the step before, the change summary, files changed, agent time and tokens or cost, and how many proposals
+  from the same parent in that generation it took (for example "1 of 6 proposals from g0-s0 accepted"). Gaps of
+  generations with no accepted child on the line are marked. At a merge it follows the parent on the path to the best.
+  `#path/<id>` shows the path to any accepted candidate.
 - **Proposals**: one row per proposal in `helix log` order, including perfect-score skips, failed proposals and the ones
   still running. Filter by outcome (frontier, dominated, rejected, skipped, failed, running) and sort by generation,
   score, Δ parent or cost. A score labelled `val` is an accepted candidate's validation mean; one labelled `gate` is
@@ -114,6 +126,20 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   tokens the way OpenAI prices them: uncached input, cached input, and output (which includes reasoning). Codex counts
   cached input inside its input total; the dashboard subtracts it, so the three rows add up to the run's tokens.
 - **Current generation**: each proposal's phase and elapsed time, and the live transcript of the selected agent.
+
+### Lineage and Path
+
+![The Lineage view of an eterna100 run in generation 12: the path to the best candidate, g6-s25 at 21 of 30, runs straight across from the seed through g1-s5 and g4-s16; frontier members are ringed, rejected proposals are small open circles, and groups of three or four rejected children of one parent show as circles with their count](../assets/ui/lineage-light.png#only-light)
+![The Lineage view of an eterna100 run in generation 12: the path to the best candidate, g6-s25 at 21 of 30, runs straight across from the seed through g1-s5 and g4-s16; frontier members are ringed, rejected proposals are small open circles, and groups of three or four rejected children of one parent show as circles with their count](../assets/ui/lineage-dark.png#only-dark)
+
+*Views → Lineage. Hover a node to light its ancestry; click a counted circle to list the rejected proposals in it.*
+
+![The Path view of the same run: from the seed at 5 of 30 to g1-s5 at 20 (3 of 6 proposals from the seed accepted), g4-s16 at 19 (one fewer than its parent, accepted because it solves puzzles its parent misses) and g6-s25 at 21, with files changed, agent time and tokens for each step and the generations between steps](../assets/ui/path-light.png#only-light)
+![The Path view of the same run: from the seed at 5 of 30 to g1-s5 at 20 (3 of 6 proposals from the seed accepted), g4-s16 at 19 (one fewer than its parent, accepted because it solves puzzles its parent misses) and g6-s25 at 21, with files changed, agent time and tokens for each step and the generations between steps](../assets/ui/path-dark.png#only-dark)
+
+*Views → Path, or "Path from seed" on a pinned candidate in the Lineage.*
+
+<small>Screenshots from November 2026; `scripts/docs_screenshots.py` regenerates them from a running dashboard.</small>
 
 ## Live transcripts
 
