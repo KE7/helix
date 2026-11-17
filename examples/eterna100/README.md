@@ -122,7 +122,8 @@ cost about $0.42 at OpenAI's API list prices.
 
 The 8-second limit is `BUDGET_S` in `evaluate.py`. Every held-out failure with
 an error was a timeout on a long target, so a longer limit is the obvious next
-experiment.
+experiment; a stronger model such as `gpt-6.1-sol` (`agent.model` in
+`helix.toml`) is another, at about 20 times the price per token.
 
 ## Files
 

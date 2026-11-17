@@ -144,6 +144,10 @@ A single `inverse_fold` call on a long target cannot be interrupted. All 7 of
 
 ## Next
 
-Rerun with a longer per-puzzle limit (`BUDGET_S` in `evaluate.py`), during the
-search as well as on the held-out puzzles, to see how far a longer budget
-takes the designer the agents evolve.
+- **A longer per-puzzle limit** (`BUDGET_S` in `evaluate.py`), during the
+  search as well as on the held-out puzzles, to see how far more time takes
+  the designer the agents evolve.
+- **A stronger model**, such as `gpt-6.1-sol` (`agent.model` in
+  `helix.toml`). Its list prices are 20 times `gpt-6-luna`'s for input and
+  output and 10 times for cached input: this run's tokens would cost about
+  $6.88 with it.
