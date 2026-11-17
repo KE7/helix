@@ -41,3 +41,22 @@ def test_a_decision_records_paths_only_when_given(tmp_path: Path) -> None:
     decisions = [r for r in timing.read_records(path) if r.get("event") == "decision"]
     assert decisions[0]["paths"] == ["evaluate.py", "val/b.json"]
     assert "paths" not in decisions[1]
+
+
+@pytest.mark.parametrize("retain", [False, True])
+def test_a_tamper_reject_records_its_paths_whether_kept_or_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retain: bool
+) -> None:
+    from helix import evolution
+    from helix.population import Candidate
+
+    monkeypatch.setattr(evolution, "remove_worktree", lambda c: None)
+    monkeypatch.setattr(evolution, "snapshot_candidate", lambda c, m: "sha")
+    child = Candidate(id="g2-s5", worktree_path=str(tmp_path / "g2-s5"), branch_name="helix/g2-s5",
+                      generation=2, parent_id="g1-s1", parent_ids=["g1-s1"], operation="mutate")
+    path = tmp_path / "timing.jsonl"
+    with recording(path), span("generation", generation=2):
+        evolution._discard_rejected(child, label="tamper-rejected mutation candidate", retain=retain,
+                                    commit=True, paths=["val/b.json", "evaluate.py"])
+    [rec] = [r for r in timing.read_records(path) if r.get("event") == "decision"]
+    assert rec["paths"] == ["evaluate.py", "val/b.json"] and rec["accepted"] is False

@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - New dependencies `starlette` and `uvicorn`, for `helix ui`'s local server.
 
+### Changed
+
+- `evolution.retain_rejected_worktrees = true` now keeps every rejected
+  candidate, not only validation-stage rejects: evaluator-tamper rejects,
+  children whose minibatch eval raised, minibatch- and train-gate rejects,
+  children dropped by proposal selection or as duplicates, and rejected
+  merges. Each kept one has its worktree, its `helix/<id>` ref and the agent's
+  transcript, and a record in `helix attempts`. A run that already set it
+  keeps more worktrees; `helix clean` removes them. Off (the default), nothing
+  changes.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
