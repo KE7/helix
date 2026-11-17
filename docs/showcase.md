@@ -40,12 +40,16 @@ HELIX runs optimize_anything's circle-packing experiment: pack 26 circles in the
 
 [Write-up](experiments/circle-packing.md) · [Example](https://github.com/KE7/helix/tree/main/examples/circle_packing)
 
-### Eterna100 RNA design
+### Eterna100 RNA design: 6 → 32–33 of 50 held-out puzzles in 49 minutes
 
-An RNA sequence designer for the Eterna100-V2 benchmark: for a target secondary structure from the Eterna citizen-science game, return a sequence whose ViennaRNA 2 minimum-free-energy fold is exactly that structure. The seed pairs every stem G-C and does no search.
+HELIX evolves an RNA sequence designer for the Eterna100-V2 benchmark: for a target secondary structure from the Eterna citizen-science game, return a sequence whose ViennaRNA 2 minimum-free-energy fold is exactly that structure. The seed pairs every stem G-C and does no search. The agent is Codex with `gpt-6-luna`, OpenAI's lowest-priced GPT-6 model.
 
-- Codex agents raised the designer from 5 to 21 of 30 validation puzzles over 12 generations: 11 after generation 1, 19 after generation 2, 21 in generation 11.
-- On 50 held-out puzzles it solves 32 or 33 (two scorings), against 6 for the seed, with 8 seconds per puzzle.
+**Key results** (from the recorded run):
+
+- On 50 held-out puzzles never shown to the agents, the evolved designer solves 32–33 (two scorings) at 8 seconds per puzzle, against 6 for the seed.
+- That is on par with the published SentRNA (33) and LEARNA (34), with median times per puzzle of 73 minutes for SentRNA and 30 seconds for LEARNA. DesiRNA solves 45 and NEMO 44.
+- The agents built it on ViennaRNA's own `RNAinverse` (8 of 50 alone), adding restarts and simulated annealing.
+- The run took 49 minutes; its tokens would cost about $0.42 at OpenAI's API list prices.
 
 [Write-up](experiments/eterna100.md) · [Example](https://github.com/KE7/helix/tree/main/examples/eterna100)
 

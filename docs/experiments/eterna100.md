@@ -1,28 +1,36 @@
 # Eterna100 RNA design
 
-HELIX evolved an RNA sequence designer on the Eterna100-V2 benchmark. Starting
-from a designer that does no search, Codex agents raised it from 5 to 21 of 30
-validation puzzles over 12 generations. On 50 held-out puzzles no agent ever
-saw, the evolved designer solves 32 or 33, against 6 for the seed.
+In a 49-minute run, HELIX with `gpt-6-luna`, OpenAI's lowest-priced GPT-6
+model, evolved an RNA sequence designer from 6 to 32–33 of 50 held-out
+Eterna100-V2 puzzles, with 8 seconds per puzzle. That is on par with two
+published learned designers, SentRNA (33) and LEARNA (34). The agents built it
+on ViennaRNA's own `RNAinverse`, which solves 8 of the 50 alone, by restarting
+it and refining its output with simulated annealing. The agent's tokens would
+cost about $0.42 at OpenAI's API list prices.
+
+The 50 held-out puzzles were never shown to the agents. The strongest
+published designers, DesiRNA and NEMO, solve 45 and 44 of them.
 
 The example is [`examples/eterna100`](https://github.com/KE7/helix/tree/main/examples/eterna100).
 
 ## The task
 
 An RNA molecule folds into a secondary structure: some bases pair into stems,
-the rest form loops. The design problem runs the other way: given a target
-structure, find a sequence that folds into exactly that structure.
+the rest form loops. Inverse folding runs the other way: given a target
+structure, find a sequence that folds into exactly that structure. Designed
+RNAs such as riboswitches, aptamers and mRNA therapeutics start from this step.
+
 [Eterna100](https://github.com/eternagame/eterna100-benchmarking) is the
 standard benchmark for it: 100 targets from the Eterna citizen-science game,
 12 to 400 bases long. A design solves its puzzle when the sequence's
 minimum-free-energy structure under ViennaRNA 2 is exactly the target. This is
-Eterna100-V2, which adapted 19 targets so that 99 of the 100 are solvable
-under ViennaRNA 2.
+Eterna100-V2, which adapted 19 targets so that 99 of the 100 are solvable under
+ViennaRNA 2 ([Koodli et al.](https://www.biorxiv.org/content/10.1101/2021.08.26.457839)).
 
 The candidate is `designer.py`, with `design(target, budget_s, seed)`. The
 evaluator gives each puzzle 8 seconds, kills the designer at 12, and folds the
-result with ViennaRNA 2.8.0. The seed pairs every stem G-C, leaves every loop
-A, and does no search.
+result with ViennaRNA 2.8.0. The seed pairs every stem G-C, leaves every loop A,
+and does no search.
 
 The 100 puzzles are split 20 train, 30 validation and 50 held out, stratified
 by how many of the 15 published algorithm variants solve each one, so the
@@ -33,75 +41,109 @@ their feedback only.
 
 | | |
 |---|---|
-| HELIX | the `helix ui` branch; the search loop is `main`'s |
-| Agent | Codex CLI 0.167.0, model `gpt-6-luna`, in the Docker sandbox, signed in with a ChatGPT subscription; web tools off |
-| Search | 12 generations, 6 proposals per generation, merges on, minibatch of 3 training puzzles |
-| Evaluator | on the host, ViennaRNA 2.8.0, 4 puzzles at a time; the version before two review fixes (worker processes killed on timeout, only top-level splits skipped by the stored-sequence check), neither of which changes a score in this run |
+| Agent | Codex CLI 0.167.0, model `gpt-6-luna`, in HELIX's Docker sandbox with web tools off, signed in with a ChatGPT subscription |
+| Search | 12 generations: 6 mutations in each of generations 1–11 and one merge in generation 12; a minibatch of 3 training puzzles |
+| Evaluator | on the host, ViennaRNA 2.8.0, 4 puzzles at a time |
 | Machine | Apple M4 Pro, 14 cores |
+| HELIX | 0.3.0 plus the `helix ui` dashboard; the search loop is unchanged |
+
+The run used the evaluator from before two later fixes: worker processes are
+now killed on timeout, and the stored-sequence check now skips only the
+top-level split folders. Neither changes a score in this run.
 
 ## Results
 
-Best validation score (of 30) by generation:
+The seed solves 6 of the 50 held-out puzzles. The best candidate, `g11-s62`,
+solves 32 in one scoring and 33 in a second. The two differ by one borderline
+puzzle, which the 8-second wall-clock budget makes load-dependent.
+
+| | Train (20) | Validation (30) | Held out (50) |
+|---|---|---|---|
+| Seed designer | 5 | 5 | 6 |
+| `g11-s62` | 13 | 21 | 32–33 |
+
+Best validation score by generation:
 
 | Generation | 0 | 1 | 2 | 3–10 | 11 | 12 |
 |---|---|---|---|---|---|---|
 | Best so far | 5 | 11 | 19 | 19 | 21 | 21 |
 
-- 67 proposals: 13 accepted (12 mutations and one merge), 54 rejected at the
-  minibatch gate. 821 evaluations in 49 minutes.
-- Tokens, as Codex reports them: 1.64M uncached input, 14.27M cached input and
-  216k output (72k of it reasoning).
-- The best candidate, `g11-s62`, solves 21 of 30 validation puzzles, 13 of 20
-  training puzzles and **32 of 50 held-out puzzles**, 33 on a second scoring
-  (the seed: 5, 5 and 6). The two held-out scorings differ by one borderline
-  puzzle, which the 8-second wall-clock budget makes load-dependent.
-  Its 7 held-out failures with an error are all timeouts on targets of 108 to
-  400 bases.
+The run made 67 proposals. 13 were accepted (12 mutations and the merge) and
+54 were rejected at the minibatch gate, for 821 puzzle evaluations in all.
 
-On the same 50 held-out puzzles, the published Vienna 2 results in the
-benchmark's `results.tsv`:
+The benchmark's `results.tsv` holds the published Eterna100-V2 runs. On the
+same 50 held-out puzzles:
 
-| Method | Held-out puzzles solved |
-|---|---|
-| DesiRNA | 45 |
-| NEMO | 44 |
-| LEARNA (pretrained) | 34 |
-| SentRNA | 33 |
-| **HELIX-evolved designer, 8 s per puzzle** | **32–33** |
-| EternaBrain (pretrained) | 25 |
-| RNAinverse | 8 |
-| Seed designer | 6 |
+| Method | Held-out puzzles solved | Median time per puzzle |
+|---|---|---|
+| DesiRNA | 45 | 2 min |
+| NEMO | 44 | 2 s |
+| LEARNA (pretrained) | 34 | 30 s |
+| SentRNA (pretrained) | 33 | 73 min |
+| **HELIX-evolved designer** | **32–33** | **8 s limit** |
+| EternaBrain (pretrained) | 25 | 2.7 min |
+| RNAinverse | 8 | 3 s |
+| Seed designer | 6 | |
 
-These methods ran under their own time limits, not 8 seconds: LEARNA's median
-time per puzzle in those results is 28 s and SentRNA's over an hour.
+The published methods ran with their own time limits, up to 24 hours per
+puzzle, on other hardware. Their medians count failed runs too. NEMO is fast as
+well as strong: 32 of its 44 solves took 8 seconds or less.
+
+### Cost
+
+The run was on a ChatGPT subscription, so it was not billed per token. At
+OpenAI's [API list prices](https://developers.openai.com/api/docs/pricing) for
+`gpt-6-luna` (checked 2026-11-16), the same tokens cost $0.42.
+
+| | Tokens | Per 1M tokens | Cost |
+|---|---|---|---|
+| Input, uncached | 1,642,142 | $0.10 | $0.164 |
+| Input, cached | 14,273,280 | $0.01 | $0.143 |
+| Output, including 71,573 reasoning | 216,421 | $0.50 | $0.108 |
+| **Total** | | | **$0.415** |
+
+Codex counts cached input inside its input total; the table splits it out.
+Long-context prices start at 272K input tokens per request. The largest request
+in the 13 transcripts HELIX kept, one per accepted candidate, was 24K input
+tokens.
 
 ## What the agents built
 
-`g11-s62` is a 131-line `designer.py`, four accepted mutations from the seed:
+`g11-s62` is a 131-line `designer.py`, four accepted mutations from the seed
+(`g1-s4`, `g2-s12`, `g6-s36`, `g11-s62`). It works in three stages:
 
-1. It uses ViennaRNA's own `RNA.inverse_fold` as a restarted proposal
-   generator, from three kinds of starting sequence, and returns as soon as a
-   proposal folds to the target.
+1. It runs ViennaRNA's `RNA.inverse_fold` (the function behind `RNAinverse`)
+   as a restarted proposal generator, from three kinds of starting sequence,
+   and returns as soon as a proposal folds to the target.
 2. With what is left of the budget it runs simulated annealing from the best
-   proposal: a move changes one base pair to another legal pair, or one
-   unpaired base, and a candidate is scored by base-pair distance to the
-   target, with the energy gap between the target and the folded structure as
-   a tie-breaker.
+   proposal. A move changes one base pair to another legal pair, or one
+   unpaired base. A candidate is scored by base-pair distance to the target,
+   with the energy gap between the target and the folded structure as a
+   tie-breaker.
 3. It stops `inverse_fold` restarts at 88% of the budget so the refinement
    always gets some time.
 
-The generation-12 merge (`g12-m1`) combined it with another frontier
-candidate and skips `inverse_fold` on targets of 250 bases or more; it scored
-19 on validation and did not replace `g11-s62`. A single `inverse_fold` call on a long target cannot
-be interrupted, which is where the held-out timeouts come from.
+The generation-12 merge, `g12-m1`, combined it with another frontier candidate
+and skips `inverse_fold` on targets of 250 bases or more. It scored 19 on
+validation and did not replace `g11-s62`.
+
+A single `inverse_fold` call on a long target cannot be interrupted. All 7 of
+`g11-s62`'s held-out failures with an error are timeouts on targets of 108 to
+400 bases.
 
 ## Limits
 
-- The 8-second budget is wall-clock time, and up to six evaluations run at
-  once, so a borderline puzzle can pass under light load and fail under heavy
-  load.
+- The 8-second budget is wall-clock time, and up to three evaluations, each
+  running 4 puzzles at once, ran at the same time. A borderline puzzle can
+  pass under light load and fail under heavy load.
 - The agent's sandbox had an open network. Its instructions forbid fetching
   published solutions, and the evaluator scores 0 for any candidate file that
   stores an RNA sequence of 40 or more letters, but nothing stops a designer
   from fetching at run time. `g11-s62` makes no network call.
 - One run, one seed.
+
+## Next
+
+Rerun with a longer per-puzzle limit (`BUDGET_S` in `evaluate.py`), during the
+search as well as on the held-out puzzles, to see how far a longer budget
+takes the designer the agents evolve.

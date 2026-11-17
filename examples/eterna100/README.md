@@ -1,6 +1,10 @@
 # eterna100
 
-HELIX evolves an RNA sequence designer on the Eterna100-V2 benchmark.
+HELIX evolves an RNA sequence designer on the Eterna100-V2 benchmark. In one
+49-minute run with `gpt-6-luna`, OpenAI's lowest-priced GPT-6 model, the
+designer went from 6 to 32–33 of 50 held-out puzzles at 8 seconds per puzzle,
+on par with the published SentRNA (33) and LEARNA (34). See
+[Results](#results).
 
 ## The problem
 
@@ -98,18 +102,27 @@ puzzle; the scores add up to the number solved.
 
 ## Results
 
-One run, 12 generations with Codex (`gpt-6-luna`), 6 proposals per
-generation ([write-up](https://ke7.github.io/helix/experiments/eterna100.html)):
+One run with Codex and `gpt-6-luna` on a ChatGPT subscription: 12 generations,
+6 mutations in each of the first 11 and a merge in the last
+([write-up](https://ke7.github.io/helix/experiments/eterna100.html)).
 
 | | Train (20) | Validation (30) | Held out (50) |
 |---|---|---|---|
 | Seed designer | 5 | 5 | 6 |
-| Best candidate, generation 11 | 13 | 21 | 32 (33 on a second scoring) |
+| Best candidate, generation 11 | 13 | 21 | 32–33 (two scorings) |
 
 The best validation score went 5, 11, 19 in the first two generations and
-reached 21 in generation 11. On the held-out puzzles the evolved designer
-solves about as many as LEARNA (32 to 34) and SentRNA (33) in the benchmark's own
-results, with 8 seconds per puzzle; NEMO solves 44 and DesiRNA 45.
+reached 21 in generation 11. The evolved designer restarts ViennaRNA's
+`RNAinverse` (8 of the 50 held-out puzzles on its own) and refines its output
+with simulated annealing. On the held-out puzzles it solves about as many as
+SentRNA (33) and LEARNA (34) in the benchmark's published runs, where the
+median time per puzzle is 73 minutes for SentRNA and 30 seconds for LEARNA;
+DesiRNA solves 45 and NEMO 44. The run took 49 minutes, and its tokens would
+cost about $0.42 at OpenAI's API list prices.
+
+The 8-second limit is `BUDGET_S` in `evaluate.py`. Every held-out failure with
+an error was a timeout on a long target, so a longer limit is the obvious next
+experiment.
 
 ## Files
 
