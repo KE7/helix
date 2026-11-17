@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target. 20 training, 30 validation and 50 held-out puzzles, stratified by how
   many published algorithms solve each one; the agent is Codex.
 
+### Changed
+
+- `evolution.retain_rejected_worktrees = true` now keeps every rejected
+  candidate, not only validation-stage rejects: evaluator-tamper rejects,
+  children whose minibatch eval raised, minibatch- and train-gate rejects,
+  children dropped by proposal selection or as duplicates, and rejected
+  merges. Each kept one has its worktree, its `helix/<id>` ref and the agent's
+  transcript, and a record in `helix attempts`. A run that already set it
+  keeps more worktrees; `helix clean` removes them. Off (the default), nothing
+  changes.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
