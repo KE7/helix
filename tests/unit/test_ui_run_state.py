@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -268,6 +269,9 @@ def test_phases_before_the_agents_then_incremental_append(tmp_path: Path, monkey
     monkeypatch.setattr(EvalResult, "from_dict", classmethod(counted))
     # The rest of the generation, appended to the same file.
     path = tmp_path / ".helix" / "timing.jsonl"
+    # Hold the old file open by a second name, so the new one gets a new inode
+    # (Linux reuses a freed inode number at once; macOS does not).
+    os.link(path, tmp_path / "old-timing.jsonl")
     path.unlink()
     _seed_only_with_two_agents(tmp_path, config, upto=1401.0)
     lines = path.read_text().splitlines()
