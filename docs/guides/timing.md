@@ -113,6 +113,7 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 {"event": "start", "span": "evaluate", "span_id": "7d44…", "parent_span_id": "a1f0…", "run_id": "c93e…", "generation": 3, "candidate": "g3-s9", "wall_time": 1757400000.1, "thread_id": 6199, "attrs": {"candidate_id": "g2-s4", "split": "train", "examples": 8}}
 {"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
 {"event": "decision", "candidate": "g3-s9", "accepted": false, "reason": "train-gate-rejected candidate", "generation": 3, …}
+{"event": "usage", "candidate": "g3-s9", "source": "mutation", "input_tokens": 48211, "output_tokens": 3920, "cached_input_tokens": 40960, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "reasoning_tokens": 1536, "cost_usd": 0.0871, "generation": 3, …}
 ```
 
 - `generation` and `candidate` say what the work was for. The example is the
@@ -128,6 +129,16 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 - Each candidate gets one `decision` record. A candidate with none was still
   undecided when the run stopped, and a `start` with no `end` was in flight
   when the process died.
+- Each time the budget is charged for an agent call, a `usage` record holds
+  exactly what was charged: the tokens and `cost_usd`, the `candidate` it was
+  for, and `source` (`seed_generation`, `mutation`, `mutation_failed`, `merge`
+  or `merge_failed`). A mutation's record includes the usage of its change
+  summary call, and the generated seed counts as generation 0. The records
+  keep every charge, so after `helix resume` they can exceed the totals in
+  `state.json`, which lose the charges of an interrupted generation. GEPA
+  keeps only running totals of the reflection LM's cost and tokens
+  (`gepa.lm.TrackingLM`, read by `MaxReflectionCostStopper`) and writes no
+  per-call or per-candidate record.
 
 | span | measures | `attrs` |
 | --- | --- | --- |
@@ -149,4 +160,10 @@ are flat queries. For example, agent seconds per generation:
 
 ```console
 $ jq -s 'map(select(.event == "end" and .span == "agent")) | group_by(.generation) | map({gen: .[0].generation, seconds: (map(.duration_seconds) | add)})' .helix/timing.jsonl
+```
+
+Or agent cost per generation:
+
+```console
+$ jq -s 'map(select(.event == "usage")) | group_by(.generation) | map({gen: .[0].generation, cost_usd: (map(.cost_usd) | add)})' .helix/timing.jsonl
 ```

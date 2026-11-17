@@ -7,7 +7,7 @@
 ├── helix.log            # Run log: errors and warnings land here
 ├── evaluator_manifest.json # Protected evaluator file hashes
 ├── state.json           # Generation, frontier, budget
-├── timing.jsonl         # Timing spans, appended by every run
+├── timing.jsonl         # Timing spans and agent usage, appended by every run
 ├── lineage.json         # Ancestry and files changed per candidate
 ├── worktrees/
 │   ├── g0-s0/           # Seed
@@ -35,4 +35,4 @@
 | `lineage.py` | Ancestry graph tracking |
 | `state.py` | Atomic state persistence and resume |
 | `display.py` | Rich terminal UI with phase tracking |
-| `timing.py` | Always-on JSONL timing spans (`.helix/timing.jsonl`) |
+| `timing.py` | Always-on JSONL timing spans and agent usage records (`.helix/timing.jsonl`) |

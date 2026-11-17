@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `.helix/timing.jsonl` now has a `usage` record for every agent charge:
+  tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
+  `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
+  per generation and per proposal is exact, rejected proposals included.
+  `helix timing` and the Perfetto export are unchanged.
 - `examples/eterna100`: HELIX evolves an RNA sequence designer on the
   Eterna100-V2 benchmark. Each puzzle is a target secondary structure; a
   design solves it when its ViennaRNA 2 minimum-free-energy fold matches the
