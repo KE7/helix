@@ -28,7 +28,8 @@ that lost its context is still recorded, with those fields ``null``.
 Spans are written whatever becomes of the candidate they worked on, the same
 way its tokens are charged whatever its fate.  :func:`decision` then records
 that fate once per candidate, so time can be split into what went to accepted
-and to rejected candidates.
+and to rejected candidates.  :func:`usage` records each charge of agent tokens
+and cost, so a generation's agent cost is exact rather than estimated.
 
 The ``helix.timed`` section is the other side: the API that code HELIX runs
 (the evaluator, scripts the agent runs) uses to report its own operations.
@@ -51,10 +52,13 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, ParamSpec, TextIO, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Iterator, ParamSpec, TextIO, TypeVar
 from uuid import uuid4
 
 from helix.asi import append_line
+
+if TYPE_CHECKING:
+    from helix.display import UsageStats
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +192,55 @@ def decision(candidate_id: str, *, accepted: bool, reason: str) -> None:
             "candidate": candidate_id,
             "accepted": accepted,
             "reason": reason,
+            "parent_span_id": parent,
+            "run_id": _run_id,
+            "generation": generation,
+            "wall_time": time.time(),
+            "thread_id": threading.get_ident(),
+        }
+    )
+
+
+#: The token counters of :class:`helix.display.UsageStats` a ``usage`` record
+#: carries, in record order.
+USAGE_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "reasoning_tokens",
+)
+
+
+def usage(stats: UsageStats, *, candidate_id: str | None, source: str | None) -> None:
+    """Record one charge of agent tokens and cost, as the budget charged it.
+
+    Called by :func:`helix.budget.charge_llm_usage` once per charge, so a
+    generation's agent cost is a flat group-by.  The records keep every
+    charge, including those of a generation interrupted before its state was
+    saved, so after ``helix resume`` they can exceed ``state.json``'s totals:
+    they count money spent, not only what the restored state remembers.  ``generation`` comes from the
+    open span like a :func:`decision`'s; the seed is generated before any
+    generation span opens, so a ``seed_generation`` charge with none counts as
+    generation 0.
+
+    GEPA keeps only running totals of the reflection LM's cost and tokens
+    (``gepa.lm.TrackingLM``, read by ``MaxReflectionCostStopper``); it writes
+    no per-call or per-candidate record, so this has no GEPA counterpart.
+    """
+    if _sink is None:
+        return
+    parent, generation, _ = _context.get()
+    if generation is None and source == "seed_generation":
+        generation = 0
+    _write(
+        {
+            "event": "usage",
+            "candidate": candidate_id,
+            "source": source,
+            **{name: getattr(stats, name) for name in USAGE_TOKEN_FIELDS},
+            "cost_usd": stats.cost_usd,
             "parent_span_id": parent,
             "run_id": _run_id,
             "generation": generation,

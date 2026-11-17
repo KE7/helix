@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.helix/timing.jsonl` now has a `usage` record for every agent charge:
+  tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
+  `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
+  per generation and per proposal is exact, rejected proposals included.
+  `helix timing` and the Perfetto export are unchanged.
+
 ## [0.3.0] - 2026-11-09
 
 ### Added
