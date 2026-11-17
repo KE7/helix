@@ -42,12 +42,12 @@ Unlike a single coding-agent session, HELIX keeps going: it runs many attempts a
 
 ## Watch the search live
 
-`helix ui` opens a live dashboard of a run in your browser: the best score generation by generation, each agent at work with its transcript streaming, and every candidate's diff, weakest cases and evaluator feedback. The loop is drawn inside its isolation boundaries, so a sandbox setting you did not intend stands out. The dashboard only reads the run; for a run on another machine, forward one port over SSH. [Live dashboard guide](https://ke7.github.io/helix/guides/ui.html)
+`helix ui` opens a live dashboard of a run in your browser: the best score generation by generation, each agent at work with its transcript streaming, the lineage of every proposal and the path from the seed to the best candidate, and every candidate's diff, weakest cases and evaluator feedback. The loop is drawn inside its isolation boundaries, so a sandbox setting you did not intend stands out. The dashboard only reads the run; for a run on another machine, forward one port over SSH. [Live dashboard guide](https://ke7.github.io/helix/guides/ui.html)
 
 <p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-dark.gif">
-  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-light.gif" width="900" alt="helix ui on a live run of the eterna100 RNA design example: Codex agents improve an RNA sequence designer in parallel with a live transcript, the best score winds up a helix from 5 to 19 of 30 puzzles, the lineage highlights the best candidate's ancestry, and a candidate opens to its diff">
+  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-light.gif" width="900" alt="helix ui on a live run of the eterna100 RNA design example: Codex agents improve an RNA sequence designer in parallel with a live transcript, the best score winds up a helix from 5 to 21 of 30 puzzles, the lineage shows the path to the best candidate with rejected proposals counted, and the Path view lists its steps from the seed">
 </picture>
 </p>
 
