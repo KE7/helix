@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `helix ui` opens a read-only live dashboard of a project in the browser: run
-  progress, the frontier, the lineage of every proposal, a table of all
-  proposals with outcome filters, every candidate with its diff (against its
+  progress, the frontier, the lineage of every proposal (with a minimap for
+  long runs), the path from the seed to the best candidate step by step, a
+  table of all proposals with outcome filters, every candidate with its diff (against its
   parent or the seed), task prompt, children and per-instance scores against
   its parent, the current generation with the agent's live transcript (Codex
   and Claude), run health with cost per generation and the share spent on
