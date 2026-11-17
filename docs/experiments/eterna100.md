@@ -54,8 +54,8 @@ top-level split folders. Neither changes a score in this run.
 ## Results
 
 The seed solves 6 of the 50 held-out puzzles. The best candidate, `g11-s62`,
-solves 32 in one scoring and 33 in a second. The two differ by one borderline
-puzzle, which the 8-second wall-clock budget makes load-dependent.
+solves 32 in two of three scorings and 33 in the third. They differ by one
+borderline puzzle, which the 8-second wall-clock budget makes load-dependent.
 
 | | Train (20) | Validation (30) | Held out (50) |
 |---|---|---|---|

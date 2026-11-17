@@ -46,7 +46,7 @@ HELIX evolves an RNA sequence designer for the Eterna100-V2 benchmark: for a tar
 
 **Key results** (from the recorded run):
 
-- On 50 held-out puzzles never shown to the agents, the evolved designer solves 32–33 (two scorings) at 8 seconds per puzzle, against 6 for the seed.
+- On 50 held-out puzzles never shown to the agents, the evolved designer solves 32–33 (three scorings) at 8 seconds per puzzle, against 6 for the seed.
 - That is on par with the published SentRNA (33) and LEARNA (34), with median times per puzzle of 73 minutes for SentRNA and 30 seconds for LEARNA. DesiRNA solves 45 and NEMO 44.
 - The agents built it on ViennaRNA's own `RNAinverse` (8 of 50 alone), adding restarts and simulated annealing.
 - The run took 49 minutes; its tokens would cost about $0.42 at OpenAI's API list prices.

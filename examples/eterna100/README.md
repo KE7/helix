@@ -109,7 +109,7 @@ One run with Codex and `gpt-6-luna` on a ChatGPT subscription: 12 generations,
 | | Train (20) | Validation (30) | Held out (50) |
 |---|---|---|---|
 | Seed designer | 5 | 5 | 6 |
-| Best candidate, generation 11 | 13 | 21 | 32–33 (two scorings) |
+| Best candidate, generation 11 | 13 | 21 | 32–33 (three scorings) |
 
 The best validation score went 5, 11, 19 in the first two generations and
 reached 21 in generation 11. The evolved designer restarts ViennaRNA's
