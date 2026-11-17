@@ -10,7 +10,9 @@ under `.helix/attempts/` (rejected). Every other mutation or merge left by the
 interrupt, including one whose evaluation reached `.helix/evaluations/` before
 the state save, is removed with its worktree, lineage entry and evaluation,
 and its generation runs again. HELIX does not resume a partially completed
-proposal batch slot-by-slot. The random number generator is seeded again for
+proposal batch slot-by-slot. A rejected candidate that
+`evolution.retain_rejected_worktrees` kept is finished too: resume leaves its
+worktree and `helix/<id>` ref in place and never evaluates it again. The random number generator is seeded again for
 each invocation, so a resumed search need not take the same path as an
 uninterrupted run.
 
