@@ -373,7 +373,7 @@
     const m = {
       run: !!r, anim: animate(), flow: !reduceMotion.matches, agent: iso.agent || (c.sandbox && c.sandbox.enabled ? 'sandbox' : 'host'), evaluator: iso.evaluator || 'host',
       merge: !!c.merge_enabled, warn: warnings().map((x) => [x.id, x.text, x.detail || '']), dark: dark.matches,
-      front: S.front.map((x) => [x.id, x.mean]), perGen, passShare: null,
+      front: S.front.map((x) => [x.id, x.mean]), perGen, passShare: null, files: filesSummary(st.files),
     };
     if (!L) {
       m.f = ['–', '', typeSub];
@@ -386,7 +386,8 @@
     }
     const mu = L.mutation || {}, gt = L.gate || {}, va = L.validation || {}, fr = L.frontier || {};
     m.passShare = gt.tried ? gt.passed / gt.tried : null;
-    m.f = [String(num(fr.size) ? fr.size : S.front.length), `of ${num(fr.accepted) ? fr.accepted : (r.candidates || []).length} accepted`, typeSub];
+    // large counts abbreviate (12k), so the frontier box's header stays inside it
+    m.f = [compact(num(fr.size) ? fr.size : S.front.length), `of ${compact(num(fr.accepted) ? fr.accepted : (r.candidates || []).length)} accepted`, typeSub];
     m.m = [String(mu.running ?? 0), 'running', num(mu.median_seconds) ? `median ${dur(mu.median_seconds)}` : (mu.finished ? `${mu.finished} finished` : 'none finished yet'), (mu.running || 0) > 0];
     m.g = gt.tried ? [pct(gt.passed / gt.tried), 'pass', `${gt.passed} of ${gt.tried} · ${gt.ids_each ?? c.minibatch_size} ids each`] : ['–', '', `${gt.ids_each ?? c.minibatch_size} ids each`];
     m.v = [num(va.median_seconds) ? dur(va.median_seconds) : '–', num(va.median_seconds) ? 'median' : '', `${va.count ?? 0} validated · ${va.ids ?? '–'} ids`, (va.running || 0) > 0];
@@ -396,6 +397,34 @@
     const split = Object.fromEntries(((r.health && r.health.time_split) || []).map((t) => [t.kind, t.seconds]));
     m.secs = [mu.median_seconds || 900, gt.tried && split.gate ? split.gate / gt.tried : 120, va.median_seconds || 300];
     return m;
+  }
+  const FRONT_DOTS = 200;
+  // shorten an SVG label to max px, cutting the middle so a path keeps its start and its extension. The cut point is
+  // found by binary search over whole characters; a browser that measures 0 (nothing laid out) gets a character limit
+  function fitText(t, max) {
+    const full = Array.from(t.textContent), len = (e) => (e.getComputedTextLength ? e.getComputedTextLength() : 0);
+    const cut = (k) => { const a = Math.ceil(k * 0.55), b = k - a; return full.slice(0, a).join('') + '…' + (b ? full.slice(-b).join('') : ''); };
+    const w = len(t);
+    if (w <= max && w > 0) return t;
+    if (w === 0) { const k = Math.floor(max / 6.8); if (full.length > k) t.textContent = cut(Math.max(2, k - 1)); return t; }
+    let lo = 2, hi = full.length - 1;
+    while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); t.textContent = cut(mid); if (len(t) <= max) lo = mid; else hi = mid - 1; }
+    t.textContent = cut(lo);
+    return t;
+  }
+  // the agent's files at a glance: what it may change, what it may only read, and how many it cannot see
+  function filesSummary(fl) {
+    if (!fl || !fl.known) return null;
+    const name = (e) => e.path + (e.files ? '/' : '');
+    const count = (es) => es.reduce((a, e) => a + (e.files || 1), 0);
+    // the files that matter first: code, then docs and licences, then dotfiles and caches
+    const rank = (p) => (/(^|\/)(\.|__pycache__)/.test(p) ? 2 : /(^|\/)(README|LICENSE|CHANGELOG|NOTICE)|\.(md|txt|rst)$/i.test(p) ? 1 : 0);
+    const mutable = fl.mutable.slice().sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    return {
+      ch: mutable.slice(0, 3), chMore: fl.mutable_total - Math.min(3, fl.mutable.length), chN: fl.mutable_total,
+      ro: fl.protected.slice(0, 3).map(name), roMore: Math.max(0, fl.protected.length - 3), roN: fl.protected_total ?? count(fl.protected),
+      hid: fl.sandboxed ? (fl.hidden_total ?? count(fl.hidden)) : 0,
+    };
   }
   function renderMap() {
     const m = mapModel(), key = JSON.stringify(m);
@@ -431,24 +460,33 @@
       add(s('path', { d, class: 'eh' })).appendChild(s('title', { text: m.run && clock ? `${what}; moves at the median ${clock}, ${dur(secs)}` : what }));
     };
     const sandboxAll = m.agent === 'sandbox' && m.evaluator === 'sandbox';
+    const FY = 218, FH = m.files ? (m.files.hid ? 118 : 100) : 0;  // the files card under Mutation
     let box = null;
     if (m.agent === 'sandbox') {
-      box = sandboxAll ? { x: 262, y: 70, w: 582, h: 332 } : { x: 262, y: 70, w: 250, h: 150 };
+      box = sandboxAll ? { x: 262, y: 70, w: 582, h: 332 } : { x: 262, y: 70, w: 250, h: m.files ? FY + FH + 14 - 70 : 150 };
       add(s('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 16, class: 'sb' }));
       add(s('text', { x: 276, y: 62, class: 'zl', fill: M, text: 'sandbox' }));
     }
     if (!sandboxAll) add(s('text', { x: 592, y: 62, class: 'zl', fill: I3, text: m.evaluator === 'sidecar' ? 'sidecar' : 'host' }));
-    node(20, 70, 190, m.merge ? 250 : 332, 'f', 'frontier', 'Frontier', m.f);
+    // the frontier box is as tall as its members need: a small box for one, a taller grid for many
+    const n = m.front.length, cap = m.merge ? 222 : 332, sp0 = 18, cols0 = Math.floor(150 / sp0);
+    const fh = Math.max(140, Math.min(cap, 112 + Math.ceil(Math.max(1, n) / cols0) * sp0 + 10));
+    node(20, 70, 190, fh, 'f', 'frontier', 'Frontier', m.f);
     node(282, 90, 210, 110, 'm', 'mutation', 'Mutation', m.m);
     node(592, 90, 232, 110, 'e', 'proposals/rejected', 'Minibatch gate', m.g);
     node(592, 272, 232, 110, 'e', 'validation', 'Validation', m.v);
-    // frontier members as dots inside the frontier node
-    const n = m.front.length;
+    // frontier members as dots inside the frontier node; a massive frontier shows its best FRONT_DOTS and a count of the rest
     if (n) {
-      const bw = 150, bh = m.merge ? 130 : 190, cyc = m.merge ? 225 : 275, sp = Math.min(24, Math.sqrt(bw * bh / n)), cols = Math.max(1, Math.min(n, Math.floor(bw / sp))), rows = Math.ceil(n / cols), rr = Math.min(8, sp * 0.36);
-      const means = m.front.map((f) => f[1]).filter(num), lo = Math.min(...means), hi = Math.max(...means);
-      m.front.forEach(([id, mean], i) => add(s('circle', {
-        cx: 115 - (Math.min(n, cols) - 1) * sp / 2 + (i % cols) * sp, cy: cyc - (rows - 1) * sp / 2 + Math.floor(i / cols) * sp, r: rr, fill: C,
+      const shown = m.front.slice(0, FRONT_DOTS), k = shown.length, extra = n - k;
+      const bw = 150, bh = fh - 116 - (extra > 0 ? 22 : 0);
+      // the largest spacing whose grid fits the box
+      let sp = Math.min(24, Math.sqrt(bw * Math.max(bh, sp0) / k)), cols = 1, rows = k;
+      for (; sp > 2; sp -= 0.25) { cols = Math.max(1, Math.min(k, Math.floor(bw / sp))); rows = Math.ceil(k / cols); if (rows * sp <= Math.max(bh, sp0)) break; }
+      const cyc = 70 + 108 + bh / 2, rr = Math.min(8, sp * 0.36);
+      const means = shown.map((f) => f[1]).filter(num), lo = Math.min(...means), hi = Math.max(...means);
+      if (extra > 0) add(s('text', { x: 36, y: 70 + fh - 14, class: 'fx', text: `+${compact(extra)} more on the frontier` }));
+      shown.forEach(([id, mean], i) => add(s('circle', {
+        cx: 115 - (Math.min(k, cols) - 1) * sp / 2 + (i % cols) * sp, cy: cyc - (rows - 1) * sp / 2 + Math.floor(i / cols) * sp, r: rr, fill: C,
         opacity: hi > lo && num(mean) ? 0.3 + 0.7 * (mean - lo) / (hi - lo) : 1, 'data-c': id, class: 'cd',
       })));
     }
@@ -460,20 +498,44 @@
     const passText = m.passShare == null ? '' : m.passShare > 0 ? `, for the ${pct(m.passShare)} of proposals that pass the gate` : '; no proposal has passed the gate yet';
     edge('M210 145 H282', aSec, 'dec', C, 'a parent is picked from the frontier', 'agent time');
     edge('M492 145 H592', aSec, 'data', M, `the agent's edits go to the gate, ${m.perGen} per generation`, 'agent time', edits);
+    // the reflective step: the parent's minibatch scores and the evaluator's feedback go into the agent's task prompt
+    edge('M592 112 H492', gSec, 'data', P, "the parent's minibatch scores and the evaluator's feedback go into the agent's task prompt", 'gate time', edits);
     edge('M708 200 V272', gSec, 'dec', P, 'a child that passes the gate is validated', 'gate time');
-    const back = m.merge ? 300 : 327;
-    edge(`M592 ${back} H210`, vSec, 'data', P, `validation scores update the frontier${passText}`, 'validation time', passing);
+    // validation scores run back below the sandbox, and up into the frontier box when it is short
+    const back = 368, into = Math.min(back, 70 + fh - 26);
+    edge(into === back ? `M592 ${back} H210` : `M592 ${back} H238 V${into} H210`, vSec, 'data', P, `validation scores update the frontier${passText}`, 'validation time', passing);
+    if (m.files) {
+      const F = m.files, g = add(s('g', { class: 'nd wk', transform: `translate(272,${FY})`, 'data-go': 'mutation', tabindex: 0, role: 'button', 'aria-label': 'The files the agent may change, the protected ones, and how many it cannot see' }));
+      g.appendChild(s('rect', { width: 230, height: FH, rx: 10 }));
+      const W2 = 100;  // each column's width
+      const col = (x, head, n, items, more) => {
+        const hd = g.appendChild(s('text', { x, y: 22, class: 'h', text: head }));
+        hd.appendChild(s('tspan', { class: 'n', dx: 5, text: compact(n) }));
+        if (hd.getComputedTextLength && hd.getComputedTextLength() > W2) { hd.textContent = `${head} ${compact(n)}`; fitText(hd, W2); }
+        items.forEach((p, i) => {
+          const t = fitText(g.appendChild(s('text', { x, y: 41 + i * 15, class: 'f', text: p })), W2);
+          t.appendChild(s('title', { text: p }));
+        });
+        if (more > 0) g.appendChild(s('text', { x, y: 41 + items.length * 15, class: 's', text: `+${compact(more)} more` }));
+        if (!items.length) g.appendChild(s('text', { x, y: 41, class: 's', text: '–' }));
+      };
+      col(14, 'Mutable', F.chN, F.ch, F.chMore);
+      col(122, 'Protected', F.roN, F.ro, F.roMore);
+      if (F.hid) fitText(g.appendChild(s('text', { x: 14, y: FH - 12, class: 's', text: `${compact(F.hid)} ${plural(F.hid, 'file', 'files')} hidden from the agent` })), 202);
+    }
+    // Merge sits under the frontier; a merged candidate's line runs along the bottom into validation
+    const mY = 70 + fh + 32, mL = Math.max(mY + 100, 400) + 16;
     if (m.merge) {
-      node(20, 342, 190, 100, 'm', null, 'Merge', m.mg);
-      edge('M115 320 V342', vSec, 'dec', C, 'two frontier members are picked to merge', null);
+      node(20, mY, 190, 100, 'm', null, 'Merge', m.mg);
+      edge(`M115 ${70 + fh} V${mY}`, vSec, 'dec', C, 'two frontier members are picked to merge', null);
       // empty until a merge is accepted, as the return edge is until a proposal passes the gate
       const mergeDots = m.run && !m.merges ? 0 : 1;
-      edge('M210 392 H708 V382', vSec, 'data', P, `a merged candidate is validated${m.run && !m.merges ? '; no merge accepted yet' : ''}`, 'validation time', mergeDots);
+      edge(`M115 ${mY + 100} V${mL} H708 V382`, vSec, 'data', P, `a merged candidate that holds up on a subsample of validation ids is validated${m.run && !m.merges ? '; no merge accepted yet' : ''}`, 'validation time', mergeDots);
     }
     if (box) {
       add(s('circle', { cx: 262, cy: 145, r: 4, class: 'port' }));
-      if (sandboxAll) { add(s('circle', { cx: 262, cy: back, r: 4, class: 'port' })); if (m.merge) add(s('circle', { cx: 262, cy: 392, r: 4, class: 'port' })); }
-      else add(s('circle', { cx: 512, cy: 145, r: 4, class: 'port' }));
+      if (sandboxAll) { add(s('circle', { cx: 262, cy: back, r: 4, class: 'port' })); if (m.merge) add(s('circle', { cx: 708, cy: box.y + box.h, r: 4, class: 'port' })); }
+      else { add(s('circle', { cx: 512, cy: 145, r: 4, class: 'port' })); add(s('circle', { cx: 512, cy: 112, r: 4, class: 'port' })); }
     }
     // amber only for likely mistakes, on the boundary they concern
     const top = box ? box.y : 90, bottom = box ? box.y + box.h : 200;

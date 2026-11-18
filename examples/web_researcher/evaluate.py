@@ -204,19 +204,22 @@ def evaluate():
         with timed("ground_truth", example=q_id):
             expected, gt_source = resolve_ground_truth(qdata)
 
-        # Run the agent
+        # Run the agent. An exception scores 0 and is reported, so a failed
+        # model call (no API key, no credit) reads as an error, not a wrong answer.
+        error = None
         try:
             with timed("solve", example=q_id):
                 got = agent.solve(question_text)
             if not isinstance(got, str):
                 got = str(got) if got is not None else ""
-        except Exception:
+        except Exception as exc:
             got = ""
+            error = f"solve() raised {type(exc).__name__}: {exc}"[:500]
 
         # Score
         is_correct = answers_match(got, expected, match_mode)
         score = 1.0 if is_correct else 0.0
-        payload.append([score, {
+        info = {
             "question": question_text,
             "expected": expected,
             "expected_source": gt_source,
@@ -225,7 +228,10 @@ def evaluate():
             "match_mode": match_mode,
             "category": qdata.get("category", "unknown"),
             "scores": {"accuracy": score},
-        }])
+        }
+        if error:
+            info["error"] = error
+        payload.append([score, info])
 
     print("HELIX_RESULT=" + json.dumps(payload))
 

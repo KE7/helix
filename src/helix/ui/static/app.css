@@ -70,6 +70,8 @@ svg.map{width:100%;height:100%}
 .nd .t{font:600 13px system-ui;fill:var(--ink2)}.nd .v{font:600 26px system-ui;font-variant-numeric:tabular-nums;fill:var(--ink)}
 .nd .u{font:13px system-ui;fill:var(--ink2)}.nd .s{font:12px system-ui;fill:var(--ink3)}
 .nd.m rect{stroke:var(--mag)}.nd.m .v{fill:var(--mag)}.nd.e rect{stroke:var(--pur)}.nd.e .v{fill:var(--pur)}.nd.f rect{stroke:var(--cyan)}.nd.f .v{fill:var(--cyan)}
+svg.map text.fx{font:12px system-ui;fill:var(--ink3)}
+.nd.wk .h{font:600 11.5px system-ui;fill:var(--ink2)}.nd.wk .n{font-weight:400;fill:var(--ink3)}.nd.wk .f{font:11px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink2)}
 .nd.busy rect{stroke-width:1.8;animation:glow 2.6s ease-in-out infinite}@keyframes glow{50%{filter:drop-shadow(0 0 8px var(--mag))}}
 .nd.e.busy rect{animation-name:glowe}@keyframes glowe{50%{filter:drop-shadow(0 0 8px var(--pur))}}
 .ed{fill:none;stroke-width:1.5;opacity:.4}.ed.dec{opacity:.9;stroke-dasharray:1.5 7;stroke-linecap:round;animation:march var(--d) linear infinite}
