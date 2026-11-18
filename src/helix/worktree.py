@@ -13,6 +13,11 @@ import threading
 from collections.abc import Iterable
 from pathlib import Path
 
+from helix.artifacts import (
+    ARTIFACT_EXCLUDE_PATHSPECS,
+    ARTIFACT_IGNORE_RULES,
+    ARTIFACT_PATHSPECS,
+)
 from helix.exceptions import GitError, HelixError, print_helix_error
 from helix.population import Candidate
 from helix.timing import traced
@@ -118,6 +123,7 @@ def _run(
     check: bool = True,
     operation: str = "",
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning the CompletedProcess.
 
@@ -131,6 +137,8 @@ def _run(
         Optional environment dict for the subprocess.  Pass
         ``{**os.environ, **helix_git_env()}`` to stamp a commit with the
         HELIX author/committer identity without modifying any config file.
+    input_text:
+        Optional text to send to Git on standard input.
     """
     try:
         return subprocess.run(
@@ -140,6 +148,7 @@ def _run(
             capture_output=True,
             text=True,
             env=env,
+            input=input_text,
         )
     except subprocess.CalledProcessError as exc:
         cmd_str = " ".join(args)
@@ -168,6 +177,60 @@ def _is_git_repo(path: Path) -> bool:
     worktree operations are scoped to the fixture root, not the outer repo.
     """
     return (path / ".git").exists()
+
+
+def _ignore_helix_artifacts(worktree: Path) -> None:
+    """Install convenience ignore rules outside candidate files."""
+    if not _is_git_repo(worktree):
+        return
+    with _worktree_metadata_lock:
+        common = _run(["git", "rev-parse", "--git-common-dir"], cwd=worktree).stdout.strip()
+        exclude = (worktree / common).resolve() / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text() if exclude.exists() else ""
+        rules = (
+            "# HELIX per-invocation artifacts (never commit to candidate tree)",
+            *ARTIFACT_IGNORE_RULES,
+        )
+        existing_rules = set(existing.splitlines())
+        to_append = [rule for rule in rules if rule not in existing_rules]
+        if to_append:
+            separator = "" if existing.endswith("\n") or not existing else "\n"
+            with exclude.open("a") as stream:
+                stream.write(separator + "\n".join(to_append) + "\n")
+
+
+def retire_tracked_artifacts(worktree: Path) -> None:
+    """Remove inherited artifacts before a mutation writes its own files."""
+    if _is_git_repo(worktree):
+        _run(
+            ["git", "rm", "-q", "-f", "-r", "--ignore-unmatch", "--", *ARTIFACT_PATHSPECS],
+            cwd=worktree,
+        )
+
+
+def stage_candidate_files(
+    worktree: Path, *, env: dict[str, str] | None = None, operation: str = ""
+) -> None:
+    """Stage candidate content, leaving invocation artifacts on disk."""
+    # Git add rejects explicit exclusion pathspecs that match ignored files.
+    # Ask ls-files for candidate changes first, then stage its quoted paths.
+    paths = _run(
+        ["git", "-c", "core.quotePath=true", "ls-files", "--modified", "--others",
+         "--exclude-standard", "--", ".", *ARTIFACT_EXCLUDE_PATHSPECS],
+        cwd=worktree, env=env, operation=operation,
+    ).stdout
+    if paths:
+        _run(
+            ["git", "--literal-pathspecs", "add", "-A", "--pathspec-from-file=-"],
+            cwd=worktree, env=env, operation=operation, input_text=paths,
+        )
+    # Ignore rules also cannot remove artifacts an agent already staged.
+    _run(
+        ["git", "rm", "-q", "-f", "-r", "--cached", "--ignore-unmatch",
+         "--", *ARTIFACT_PATHSPECS],
+        cwd=worktree, env=env, operation=operation,
+    )
 
 
 def _create_initial_gitignore(repo_root: Path) -> None:
@@ -502,11 +565,8 @@ def create_seed_worktree(repo_root: Path, base_dir: Path) -> Candidate:
         operation="seed",
     )
     dirty = _snapshot_dirty_working_tree(repo_root, worktree_path)
-    # Set shared artifact exclusions and retire copies tracked by older runs
-    # before snapshotting the seed. Imported here to avoid a module cycle.
-    from helix.mutator import _ignore_helix_artifacts
-
     _ignore_helix_artifacts(worktree_path)
+    retire_tracked_artifacts(worktree_path)
     snapshot_candidate(
         candidate,
         "helix: snapshot dirty seed" if dirty else "helix: retire tracked HELIX artifacts",
@@ -619,11 +679,9 @@ def clone_candidate(parent: Candidate, new_id: str, base_dir: Path) -> Candidate
 def changed_files(candidate: Candidate, parent: Candidate) -> list[str]:
     """Paths *candidate* changed relative to *parent*'s commit, sorted.
 
-    Covers what the agent committed itself and what is still staged,
-    unstaged or untracked, so it matches what :func:`snapshot_candidate`
-    will commit (``git add -A`` honours ``.gitignore`` the same way
-    ``ls-files --exclude-standard`` does).  Returns ``[]`` when git cannot
-    say; this only feeds ``lineage.json`` and ``helix log``.
+    Covers committed, staged, unstaged and untracked candidate files.
+    Returns ``[]`` when git cannot say; this only feeds ``lineage.json``
+    and ``helix log``.
     """
     wt = Path(candidate.worktree_path)
     try:
@@ -633,12 +691,14 @@ def changed_files(candidate: Candidate, parent: Candidate) -> list[str]:
         # --no-renames lists both sides of a rename; -z keeps non-ASCII
         # names verbatim instead of C-quoting them.
         tracked = _run(
-            ["git", "diff", "--name-only", "--no-renames", "-z", base.stdout.strip(), "--"],
+            ["git", "diff", "--name-only", "--no-renames", "-z", base.stdout.strip(),
+             "--", ".", *ARTIFACT_EXCLUDE_PATHSPECS],
             cwd=wt,
             check=False,
         )
         untracked = _run(
-            ["git", "ls-files", "-z", "--others", "--exclude-standard"], cwd=wt, check=False
+            ["git", "ls-files", "-z", "--others", "--exclude-standard",
+             "--", ".", *ARTIFACT_EXCLUDE_PATHSPECS], cwd=wt, check=False
         )
     except OSError:  # a missing worktree directory
         return []
@@ -664,11 +724,7 @@ def snapshot_candidate(candidate: Candidate, message: str) -> str:
         The full SHA of the newly created commit.
     """
     wt = Path(candidate.worktree_path)
-    _run(
-        ["git", "add", "-A"],
-        cwd=wt,
-        operation=f"snapshot {candidate.id}: git add",
-    )
+    stage_candidate_files(wt, operation=f"stage candidate {candidate.id}")
     # Check if there is anything to commit — skip if worktree is clean
     diff_check = _run(
         ["git", "diff", "--cached", "--quiet"],
@@ -756,6 +812,7 @@ def get_diff(
     Each side is the ``HEAD`` commit of that candidate's worktree, the same
     commit :func:`clone_candidate` branches from.  Not ``branch_name``: the
     seed's worktree is detached, so its ``helix/g0-s0`` branch never exists.
+    Reserved invocation paths are excluded even in older commits.
 
     Parameters
     ----------
@@ -788,7 +845,7 @@ def get_diff(
     ]
     pathspec = [f":(exclude,literal){os.path.normpath(p)}" for p in exclude]
     result = _run(
-        ["git", "diff", *commits, "--", ".", *pathspec],
+        ["git", "diff", *commits, "--", ".", *ARTIFACT_EXCLUDE_PATHSPECS, *pathspec],
         cwd=Path(candidate_a.worktree_path),
         operation=f"diff {candidate_a.id} vs {candidate_b.id}",
     )

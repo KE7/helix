@@ -14,6 +14,19 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from helix.artifacts import (
+    ARTIFACT_EXCLUDE_PATHSPECS,
+    BACKEND_RESULT_ARTIFACT_NAME as BACKEND_RESULT_ARTIFACT_NAME,
+    BACKEND_STDERR_ARTIFACT_NAME as BACKEND_STDERR_ARTIFACT_NAME,
+    BACKEND_STDOUT_ARTIFACT_NAME as BACKEND_STDOUT_ARTIFACT_NAME,
+    BACKEND_TRANSCRIPT_ARTIFACT_DIR,
+    MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME as MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
+    MUTATION_PROMPT_ARTIFACT_NAME as MUTATION_PROMPT_ARTIFACT_NAME,
+    SUMMARY_BACKEND_ARTIFACT_INFIX as SUMMARY_BACKEND_ARTIFACT_INFIX,
+    SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME as SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME,
+    SUMMARY_PROMPT_ARTIFACT_NAME as SUMMARY_PROMPT_ARTIFACT_NAME,
+    backend_artifact_names as _backend_artifact_names,
+)
 from helix.backends import (
     BACKEND_AUTH_ENV,
     BACKEND_TRANSCRIPT_SOURCES,
@@ -37,7 +50,7 @@ from helix.sandbox import (
     subprocess_output_text,
 )
 from helix.sibling_history import (
-    SUMMARY_ARTIFACT_NAME,
+    SUMMARY_ARTIFACT_NAME as SUMMARY_ARTIFACT_NAME,
     capture_summary,
     history_instruction,
     summary_prompt,
@@ -52,11 +65,12 @@ from helix.timing import (
     traced,
 )
 from helix.worktree import (
-    _run,
-    _worktree_metadata_lock,
+    _ignore_helix_artifacts,
     clone_candidate,
     snapshot_candidate,  # noqa: F401
     remove_worktree,  # noqa: F401
+    retire_tracked_artifacts,
+    stage_candidate_files,
 )
 
 logger = logging.getLogger(__name__)
@@ -640,110 +654,11 @@ def build_mutation_prompt(
 # ---------------------------------------------------------------------------
 
 
-#: Filename of the post-hoc mutation-prompt artifact persisted in each
-#: candidate's worktree root alongside ``helix_batch.json``.  The leading
-#: dot + shared ``info/exclude`` entry keep it out of the candidate git tree.
-MUTATION_PROMPT_ARTIFACT_NAME = ".agent_task_prompt.md"
-MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/task_prompt.md"
-#: Prompt artifact for the separate change-summary call.  Kept distinct from
-#: the mutation prompt so both survive for post-hoc inspection.
-SUMMARY_PROMPT_ARTIFACT_NAME = ".agent_summary_prompt.md"
-SUMMARY_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/summary_prompt.md"
-BACKEND_RESULT_ARTIFACT_NAME = ".helix_backend_result.json"
-BACKEND_STDOUT_ARTIFACT_NAME = ".helix_backend_stdout.txt"
-BACKEND_STDERR_ARTIFACT_NAME = ".helix_backend_stderr.txt"
-
-#: Artifact infix for the change-summary invocation.  A worktree can host more
-#: than one backend call, and these files exist for post-hoc inspection: with a
-#: single set of names the second call silently overwrites the first, so a run
-#: with sibling tracking on would lose every mutation's usage, stop reason and
-#: transcript pointers to a 3-turn summary call.  The infix gives that call its
-#: own files and leaves the mutation's exactly where they were.
-SUMMARY_BACKEND_ARTIFACT_INFIX = "_summary"
-
-
-def _backend_artifact_names(infix: str = "") -> tuple[str, str, str]:
-    """Return the ``(result, stdout, stderr)`` artifact names for one call.
-
-    The empty default reproduces the historical names byte for byte, so a run
-    that never invokes a second backend call is unaffected.
-    """
-    return (
-        f".helix_backend{infix}_result.json",
-        f".helix_backend{infix}_stdout.txt",
-        f".helix_backend{infix}_stderr.txt",
-    )
-BACKEND_TRANSCRIPT_ARTIFACT_DIR = ".helix_artifacts/backend_transcripts"
-
-
 def _prompt_file_instruction(prompt_artifact_name: str) -> str:
     return (
         f"Read {prompt_artifact_name} in the current workspace and follow "
         "those instructions exactly."
     )
-
-
-def _ignore_helix_artifacts(worktree_path: Path) -> None:
-    """Exclude invocation artifacts in shared Git metadata and retire tracked copies.
-
-    HELIX owns these reserved paths. Older runs could commit them after a
-    protected-file refresh erased HELIX's .gitignore additions. Untrack and
-    remove inherited copies before writing new prompts, including the fallback
-    and summary files. Untracked prompt collisions still belong to the user.
-    """
-    if not (worktree_path / ".git").exists():
-        return
-    patterns = [
-        "# HELIX per-invocation artifacts (never commit to candidate tree)",
-        MUTATION_PROMPT_ARTIFACT_NAME,
-        ".agent_internal/",
-        BACKEND_RESULT_ARTIFACT_NAME,
-        BACKEND_STDOUT_ARTIFACT_NAME,
-        BACKEND_STDERR_ARTIFACT_NAME,
-        # The change-summary call's own copies of the three above.
-        *_backend_artifact_names(SUMMARY_BACKEND_ARTIFACT_INFIX),
-        ".helix_artifacts/",
-        "helix_batch.json",
-        # ``helix.timed`` logs from scripts the agent runs; read and removed
-        # after each call, ignored in case a crash leaves one behind.
-        ".helix_timing_*.jsonl",
-        # The change summary and its prompt are notes about the diff, not part
-        # of it.  Ignored unconditionally: HELIX reads them straight out of the
-        # worktree and never wants them committed, whichever way the feature is
-        # toggled.
-        SUMMARY_ARTIFACT_NAME,
-        SUMMARY_PROMPT_ARTIFACT_NAME,
-        # Per-candidate OpenCode data directory (``_prepare_opencode_state``):
-        # its database and a link to the operator's ``auth.json``.
-        ".helix_opencode_state/",
-    ]
-    # Every linked worktree reads the common info/exclude. Keep rules out of
-    # user files (especially protected .gitignore), and serialize shared edits
-    # with worktree creation/removal and other proposal threads.
-    with _worktree_metadata_lock:
-        common = _run(
-            ["git", "rev-parse", "--git-common-dir"], cwd=worktree_path
-        ).stdout.strip()
-        exclude = (worktree_path / common).resolve() / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        existing = exclude.read_text() if exclude.exists() else ""
-        to_append = [p for p in patterns if p not in existing.splitlines()]
-        if to_append:
-            sep = "" if existing.endswith("\n") or not existing else "\n"
-            with exclude.open("a") as stream:
-                stream.write(sep + "\n".join(to_append) + "\n")
-
-        tracked = _run(
-            ["git", "ls-files", "-z", "--", *patterns[1:]], cwd=worktree_path
-        ).stdout.split("\0")
-        tracked = [name for name in tracked if name]
-        if tracked:
-            _run(
-                ["git", "rm", "-q", "-f", "--cached", "--", *tracked],
-                cwd=worktree_path,
-            )
-            for name in tracked:
-                (worktree_path / name).unlink(missing_ok=True)
 
 
 def _write_mutation_prompt_artifact(
@@ -757,8 +672,8 @@ def _write_mutation_prompt_artifact(
 
     Writes to a reserved stable path (``<worktree>/.agent_task_prompt.md``)
     with deterministic fallback (``<worktree>/.agent_internal/task_prompt.md``)
-    and excludes the file via shared ``info/exclude``. Inherited tracked
-    artifacts are retired; untracked files retain collision protection.
+    and installs shared Git ignore rules. A mutation retires inherited tracked
+    artifacts before creating its own; untracked files retain collision protection.
     Returns the artifact filename chosen for this invocation.
     """
 
@@ -787,6 +702,8 @@ def _write_mutation_prompt_artifact(
     try:
         wt = Path(worktree_path)
         _ignore_helix_artifacts(wt)
+        if primary_name == MUTATION_PROMPT_ARTIFACT_NAME:
+            retire_tracked_artifacts(wt)
         primary_path = wt / primary_name
         fallback_path = wt / fallback_name
         if _try_write(primary_path):
@@ -2498,13 +2415,14 @@ def _child_diff(worktree_path: str, base_sha: str | None) -> str:
     builds a diff-less prompt rather than failing the mutation.
     """
     ref = base_sha or "HEAD"
-    patch = _git_stdout(worktree_path, "diff", "--no-color", ref).strip()
+    paths = ("--", ".", *ARTIFACT_EXCLUDE_PATHSPECS)
+    patch = _git_stdout(worktree_path, "diff", "--no-color", ref, *paths).strip()
     if not patch:
         return ""
     if len(patch) > _MAX_DIFF_CHARS:
         patch = patch[:_MAX_DIFF_CHARS] + _DIFF_TRUNCATION_MARKER
 
-    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref).strip()
+    diffstat = _git_stdout(worktree_path, "diff", "--stat", ref, *paths).strip()
     return f"{diffstat}\n\n{patch}" if diffstat else patch
 
 
@@ -2514,7 +2432,8 @@ def _untracked_files(worktree_path: str) -> list[str]:
     ``-z`` keeps unusual filenames intact; without it git C-quotes them.
     """
     listing = _git_stdout(
-        worktree_path, "ls-files", "-z", "--others", "--exclude-standard"
+        worktree_path, "ls-files", "-z", "--others", "--exclude-standard",
+        "--", ".", *ARTIFACT_EXCLUDE_PATHSPECS,
     )
     return sorted(name for name in listing.split("\0") if name)
 
@@ -2638,8 +2557,7 @@ def _content_tree_hash(worktree_path: str) -> str | None:
     mutation and to ``snapshot_candidate`` afterwards, and must not be
     disturbed by a read-only integrity check.
 
-    Ignored files are excluded by construction, so the change summary and the
-    backend artifacts -- all gitignored -- never register as changes.
+    The candidate staging rules exclude the summary and backend artifacts.
     """
     fd, tmp_index = tempfile.mkstemp(prefix="helix-idx-")
     os.close(fd)
@@ -2649,12 +2567,7 @@ def _content_tree_hash(worktree_path: str) -> str | None:
         pass
     env = {**os.environ, "GIT_INDEX_FILE": tmp_index}
     try:
-        add = subprocess.run(
-            ["git", "add", "-A"],
-            cwd=worktree_path, capture_output=True, text=True, env=env, check=False,
-        )
-        if add.returncode != 0:
-            return None
+        stage_candidate_files(Path(worktree_path), env=env)
         wrote = subprocess.run(
             ["git", "write-tree"],
             cwd=worktree_path, capture_output=True, text=True, env=env, check=False,
@@ -2662,7 +2575,7 @@ def _content_tree_hash(worktree_path: str) -> str | None:
         if wrote.returncode != 0:
             return None
         return wrote.stdout.strip() or None
-    except OSError:
+    except (OSError, HelixError):
         return None
     finally:
         try:
@@ -2774,11 +2687,6 @@ def generate_change_summary(
     agent_config = config.agent.model_copy(update={"max_turns": SUMMARY_MAX_TURNS})
     before_tree: str | None = None  # the handlers below revert with it
     try:
-        # Settle the ignore rules first (the mutation's call already did,
-        # unless this runs on its own), so only the summary call's own doing
-        # can move this hash; the prompt file invoke_claude_code writes is
-        # ignored by it.
-        _ignore_helix_artifacts(Path(worktree_path))
         before_tree = _content_tree_hash(worktree_path)
         _, usage = invoke_claude_code(
             worktree_path,

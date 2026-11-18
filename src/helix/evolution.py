@@ -112,6 +112,7 @@ from helix.worktree import (
     create_empty_seed_worktree,
     remove_worktree,
     snapshot_candidate,
+    stage_candidate_files,
 )
 from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatibility symbols)
     # 14 moved symbols — re-exported for backward compatibility and internal use
@@ -969,8 +970,8 @@ def _candidate_content_key(
 ) -> str:
     """Return a stable content key for cache reuse across equivalent candidates.
 
-    The key is the tree ``snapshot_candidate`` would commit: ``git add -A``
-    into a throwaway copy of the worktree's index, then ``git write-tree``.
+    The key is the tree ``snapshot_candidate`` would commit: stage candidate
+    files in a throwaway copy of the worktree's index, then ``git write-tree``.
     It therefore covers uncommitted edits and untracked (non-ignored) files,
     leaves the worktree, its real index and its history untouched, and equals
     ``HEAD^{tree}`` once the candidate is snapshotted.  This matters because
@@ -1004,13 +1005,7 @@ def _candidate_content_key(
             if real_index.exists():
                 shutil.copyfile(real_index, temp_index)
             env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=worktree,
-                env=env,
-                check=True,
-                capture_output=True,
-            )
+            stage_candidate_files(worktree, env=env)
             pathspec = [f":(literal){os.path.normpath(p)}" for p in exclude]
             if pathspec:
                 subprocess.run(

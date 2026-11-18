@@ -6,15 +6,20 @@ import subprocess
 import pytest
 
 from helix.config import EvaluatorConfig, HelixConfig
+from helix.display import UsageStats
+from helix.evolution import _candidate_content_key
 from helix.evaluator_manifest import (
     _build_evaluator_integrity_manifest,
     _detect_evaluator_tamper,
     _refresh_protected_evaluator_files,
 )
+from helix.merger import merge
 from helix.mutator import (
     _backend_artifact_names,
     _ignore_helix_artifacts,
     _write_mutation_prompt_artifact,
+    capture_base_commit,
+    generate_change_summary,
     MUTATION_PROMPT_ARTIFACT_NAME,
     MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME,
     SUMMARY_PROMPT_ARTIFACT_NAME,
@@ -23,7 +28,7 @@ from helix.mutator import (
 )
 from helix.population import Candidate
 from helix.sibling_history import SUMMARY_ARTIFACT_NAME
-from helix.worktree import _ensure_git_repo, clone_candidate, snapshot_candidate
+from helix.worktree import _ensure_git_repo, changed_files, clone_candidate, snapshot_candidate
 
 
 ARTIFACTS = (
@@ -45,6 +50,116 @@ def git(path, *args):
     return subprocess.run(
         ["git", *args], cwd=path, check=True, capture_output=True, text=True
     ).stdout
+
+
+def affected_project(project: Path) -> Candidate:
+    project.mkdir()
+    (project / ".gitignore").write_text(
+        "*\n!*/\n!*.py\n!*.json\n!*.md\n!.gitignore\n.helix/\n"
+    )
+    (project / "solver.py").write_text("value = 1\n")
+    _ensure_git_repo(project)
+    (project / "helix_batch.json").write_text('["old-synthetic-batch-id"]\n')
+    git(project, "add", "-f", "helix_batch.json")
+    git(
+        project, "-c", "user.name=HELIX", "-c", "user.email=helix@noreply",
+        "commit", "-qm", "affected parent",
+    )
+    return Candidate(
+        id="g0-s0",
+        worktree_path=str(project),
+        branch_name="main",
+        generation=0,
+        parent_id=None,
+        parent_ids=[],
+        operation="seed",
+    )
+
+
+def test_snapshot_and_cache_exclude_artifacts_under_a_gitignore_allowlist(tmp_path):
+    project = tmp_path / "project"
+    parent = affected_project(project)
+    child = clone_candidate(parent, "g1-s0", tmp_path / "worktrees")
+    wt = Path(child.worktree_path)
+    _write_mutation_prompt_artifact(str(wt), "new mutation prompt")
+    (wt / "helix_batch.json").write_text('["current-synthetic-batch-id"]\n')
+    (wt / ".helix_backend_result.json").write_text("{}\n")
+    (wt / "solver.py").write_text("value = 2\n")
+    (wt / "fixtures").mkdir()
+    (wt / "fixtures/helix_batch.json").write_text('["solver-fixture"]\n')
+    git(wt, "add", "-f", MUTATION_PROMPT_ARTIFACT_NAME)
+
+    content_key = _candidate_content_key(child)
+    (wt / ".helix_backend_result.json").write_text('{"changed": true}\n')
+    assert _candidate_content_key(child) == content_key
+    assert changed_files(child, parent) == ["fixtures/helix_batch.json", "solver.py"]
+    snapshot_candidate(child, "test snapshot")
+    assert git(wt, "rev-parse", "HEAD^{tree}").strip() == content_key
+    assert set(git(wt, "ls-tree", "-r", "--name-only", "HEAD").splitlines()) == {
+        ".gitignore", "fixtures/helix_batch.json", "solver.py",
+    }
+    assert git(wt, "show", "HEAD:solver.py") == "value = 2\n"
+    assert (wt / MUTATION_PROMPT_ARTIFACT_NAME).read_text() == "new mutation prompt"
+    assert (wt / "helix_batch.json").is_file()
+    assert (wt / ".helix_backend_result.json").is_file()
+
+
+@pytest.mark.parametrize("edit_solver", [False, True])
+def test_summary_ignores_artifact_retirement_and_allowlisted_artifacts(
+    tmp_path, mocker, edit_solver
+):
+    parent = affected_project(tmp_path / "project")
+    child = clone_candidate(parent, "g1-s0", tmp_path / "worktrees")
+    wt = Path(child.worktree_path)
+    base_sha = capture_base_commit(str(wt))
+    _write_mutation_prompt_artifact(str(wt), "new mutation prompt")
+    (wt / ".helix_backend_result.json").write_text('{"private": "invocation-only"}\n')
+    if edit_solver:
+        (wt / "solver.py").write_text("value = 2\n")
+
+    def summarize(*args, **kwargs):
+        (wt / SUMMARY_ARTIFACT_NAME).write_text("Changed the solver value.")
+        return {}, UsageStats()
+
+    backend = mocker.patch("helix.mutator.invoke_claude_code", side_effect=summarize)
+    config = HelixConfig(objective="Improve solver", evaluator=EvaluatorConfig(command="true"))
+    summary, _ = generate_change_summary(str(wt), config, base_sha)
+    if edit_solver:
+        backend.assert_called_once()
+        prompt = backend.call_args.args[1]
+        assert "+value = 2" in prompt
+        assert "old-synthetic-batch-id" not in prompt
+        assert "invocation-only" not in prompt
+        assert "new mutation prompt" not in prompt
+        assert summary == "Changed the solver value."
+    else:
+        backend.assert_not_called()
+
+
+@pytest.mark.parametrize("with_ancestor", [False, True])
+def test_merge_prompt_excludes_artifacts_from_affected_history(
+    tmp_path, mocker, with_ancestor
+):
+    project = tmp_path / "project"
+    parent = affected_project(project)
+    worktrees = tmp_path / "worktrees"
+    child = clone_candidate(parent, "g1-s0", worktrees)
+    wt = Path(child.worktree_path)
+    _write_mutation_prompt_artifact(str(wt), "new mutation prompt")
+    (wt / "solver.py").write_text("value = 2\n")
+    snapshot_candidate(child, "test snapshot")
+    backend = mocker.patch("helix.merger.invoke_claude_code", return_value=({}, UsageStats()))
+    config = HelixConfig(objective="Improve solver", evaluator=EvaluatorConfig(command="true"))
+
+    assert merge(
+        parent, child, "g2-m0", config, worktrees,
+        project_root=project,
+        ancestor=parent if with_ancestor else None,
+    ) is not None
+    prompt = backend.call_args.args[1]
+    assert "+value = 2" in prompt
+    assert "helix_batch.json" not in prompt
+    assert "old-synthetic-batch-id" not in prompt
 
 
 def test_protected_gitignore_with_inherited_artifacts_two_generations(
@@ -128,7 +243,7 @@ def test_shared_exclude_preserves_user_files_and_is_idempotent(tmp_path, gitigno
     _ignore_helix_artifacts(project)
     assert exclude.read_text() == once
     assert once.startswith("# keep .agent_task_prompt.md out\nuser-pattern\n")
-    assert MUTATION_PROMPT_ARTIFACT_NAME in once.splitlines()
+    assert f"/{MUTATION_PROMPT_ARTIFACT_NAME}" in once.splitlines()
     if gitignore is None:
         assert not (project / ".gitignore").exists()
     else:
