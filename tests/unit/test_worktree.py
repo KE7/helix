@@ -837,6 +837,6 @@ def test_export_copies_the_candidate_without_helix_artifacts(
     exported = sorted(
         str(p.relative_to(dest)) for p in dest.rglob("*") if not p.is_dir()
     )
-    # .gitignore holds the HELIX artifact names the seed commits.
-    assert exported == [".gitignore", "README.md", "link.py", "pkg/solve.py"]
+    # Artifact exclusions live in Git metadata, outside the exported tree.
+    assert exported == ["README.md", "link.py", "pkg/solve.py"]
     assert os.readlink(dest / "link.py") == "pkg/solve.py"

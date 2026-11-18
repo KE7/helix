@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HELIX now excludes invocation artifacts through shared Git `info/exclude`
+  instead of editing `.gitignore`. Protecting `.gitignore` no longer lets
+  prompts and summaries enter candidate commits or triggers false tamper
+  rejections. Tracked artifacts inherited from affected runs are retired
+  automatically, so those runs can continue without prompt collisions.
+
 - `examples/web_researcher`: when `solve()` raises, the question's feedback now
   says so under `error`. Before, a failed model call (a missing key, or one
   with no credit) was recorded only as an empty answer, so a run could stall

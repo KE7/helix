@@ -51,7 +51,13 @@ from helix.timing import (
     timed_totals,
     traced,
 )
-from helix.worktree import clone_candidate, snapshot_candidate, remove_worktree  # noqa: F401
+from helix.worktree import (
+    _run,
+    _worktree_metadata_lock,
+    clone_candidate,
+    snapshot_candidate,  # noqa: F401
+    remove_worktree,  # noqa: F401
+)
 
 logger = logging.getLogger(__name__)
 
@@ -636,8 +642,7 @@ def build_mutation_prompt(
 
 #: Filename of the post-hoc mutation-prompt artifact persisted in each
 #: candidate's worktree root alongside ``helix_batch.json``.  The leading
-#: dot + per-worktree ``.gitignore`` entry keep it out of the candidate
-#: git tree.
+#: dot + shared ``info/exclude`` entry keep it out of the candidate git tree.
 MUTATION_PROMPT_ARTIFACT_NAME = ".agent_task_prompt.md"
 MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME = ".agent_internal/task_prompt.md"
 #: Prompt artifact for the separate change-summary call.  Kept distinct from
@@ -679,20 +684,18 @@ def _prompt_file_instruction(prompt_artifact_name: str) -> str:
 
 
 def _ignore_helix_artifacts(worktree_path: Path) -> None:
-    """Append HELIX artifact names to ``<worktree>/.gitignore``.
+    """Exclude invocation artifacts in shared Git metadata and retire tracked copies.
 
-    The candidate worktree is a real git tree; anything committed there
-    bakes into the candidate's evolutionary history.  HELIX writes
-    a handful of per-invocation metadata files (``helix_batch.json``,
-    ``.agent_task_prompt.md``) that must NOT flow into those
-    diffs — otherwise the next generation's mutator sees the prior
-    artifact as part of the codebase and the lineage grows a
-    meaningless file-rename trail.
+    HELIX owns these reserved paths. Older runs could commit them after a
+    protected-file refresh erased HELIX's .gitignore additions. Untrack and
+    remove inherited copies before writing new prompts, including the fallback
+    and summary files. Untracked prompt collisions still belong to the user.
 
-    Idempotent: only appends patterns that aren't already present.
-    Creates the ``.gitignore`` file if missing.
+    This is HELIX-specific repository bookkeeping: GEPA's in-memory candidates
+    do not need artifact exclusion. Selection and acceptance are unchanged.
     """
-    gitignore = worktree_path / ".gitignore"
+    if not (worktree_path / ".git").exists():
+        return
     patterns = [
         "# HELIX per-invocation artifacts (never commit to candidate tree)",
         MUTATION_PROMPT_ARTIFACT_NAME,
@@ -717,20 +720,33 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
         # its database and a link to the operator's ``auth.json``.
         ".helix_opencode_state/",
     ]
-    if gitignore.is_symlink():
-        # The candidate tree comes from an agent.  Write through the link only
-        # when it resolves to a regular file inside the worktree; any other
-        # link (possibly to a host file) is replaced by a regular file.
-        resolved = os.path.realpath(gitignore)
-        inside = resolved.startswith(os.path.realpath(worktree_path) + os.sep)
-        if not (inside and os.path.isfile(resolved)):
-            gitignore.unlink()
-    existing = gitignore.read_text() if gitignore.exists() else ""
-    to_append = [p for p in patterns if p not in existing]
-    if not to_append:
-        return
-    sep = "" if existing.endswith("\n") or not existing else "\n"
-    gitignore.write_text(existing + sep + "\n".join(to_append) + "\n")
+    # Every linked worktree reads the common info/exclude. Keep rules out of
+    # user files (especially protected .gitignore), and serialize shared edits
+    # with worktree creation/removal and other proposal threads.
+    with _worktree_metadata_lock:
+        common = _run(
+            ["git", "rev-parse", "--git-common-dir"], cwd=worktree_path
+        ).stdout.strip()
+        exclude = (worktree_path / common).resolve() / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text() if exclude.exists() else ""
+        to_append = [p for p in patterns if p not in existing.splitlines()]
+        if to_append:
+            sep = "" if existing.endswith("\n") or not existing else "\n"
+            with exclude.open("a") as stream:
+                stream.write(sep + "\n".join(to_append) + "\n")
+
+        tracked = _run(
+            ["git", "ls-files", "-z", "--", *patterns[1:]], cwd=worktree_path
+        ).stdout.split("\0")
+        tracked = [name for name in tracked if name]
+        if tracked:
+            _run(
+                ["git", "rm", "-q", "-f", "--cached", "--", *tracked],
+                cwd=worktree_path,
+            )
+            for name in tracked:
+                (worktree_path / name).unlink(missing_ok=True)
 
 
 def _write_mutation_prompt_artifact(
@@ -744,8 +760,8 @@ def _write_mutation_prompt_artifact(
 
     Writes to a reserved stable path (``<worktree>/.agent_task_prompt.md``)
     with deterministic fallback (``<worktree>/.agent_internal/task_prompt.md``)
-    and ensures the per-worktree ``.gitignore`` excludes the file.  Existing
-    files are treated as user-owned collisions and are never overwritten.
+    and excludes the file via shared ``info/exclude``. Inherited tracked
+    artifacts are retired; untracked files retain collision protection.
     Returns the artifact filename chosen for this invocation.
     """
 

@@ -172,6 +172,17 @@ base_dir = ".helix/worktrees"
 # cleanup_dominated = false      # deprecated and ignored; still accepted so old configs load
 ```
 
+HELIX keeps its per-invocation prompts, summaries, batch files and backend
+artifacts out of candidate commits using the repository's shared Git
+`info/exclude` (under `git rev-parse --git-common-dir`). It does not append
+artifact rules to your `.gitignore`, so `.gitignore` can be protected too.
+These paths are reserved for HELIX: tracked copies inherited from older runs
+are removed from the candidate's index and replaced as needed. Untracked
+prompt files with different content still use the fallback path; if both
+paths collide, HELIX reports `PromptArtifactCollisionError` rather than
+overwriting them. Existing artifact rules in `.gitignore` can be removed;
+no configuration change is required to resume an affected run.
+
 ## Backend notes
 
 **opencode** (`backend = "opencode"`), without the Docker sandbox:
