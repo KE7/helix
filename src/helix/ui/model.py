@@ -79,20 +79,29 @@ def agent_files(config: HelixConfig, project_root: Path) -> dict[str, Any]:
     listing = _git(project_root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     files = sorted({f for f in (listing or "").split("\0") if f and not under(f, [".helix"])})
 
-    def entry(path: str, **extra: Any) -> dict[str, Any]:
-        inside = sum(1 for f in files if f != path and under(f, [path]))
+    builtin = [f for f in files if _ignore_for_copy(Path(f))] if config.sandbox.enabled else []
+    builtin_set = set(builtin)
+
+    def is_hidden(f: str) -> bool:
+        return under(f, hidden) or f in builtin_set
+
+    def entry(path: str, hide: bool = False, **extra: Any) -> dict[str, Any]:
+        # a protected folder counts only the files the agent can see; a hidden one counts all of its files
+        inside = sum(1 for f in files if f != path and under(f, [path]) and (hide or not is_hidden(f)))
         return {"path": path, "files": inside or None, **extra}
 
-    builtin = [f for f in files if _ignore_for_copy(Path(f))] if config.sandbox.enabled else []
-    mutable = [f for f in files if not under(f, hidden) and not under(f, protected) and f not in builtin]
+    mutable = [f for f in files if not is_hidden(f) and not under(f, protected)]
     return {
         "known": listing is not None,
         "sandboxed": config.sandbox.enabled,
-        "hidden": [entry(p, protected=under(p, protected)) for p in hidden]
+        "hidden": [entry(p, protected=under(p, protected), hide=True) for p in hidden]
         + [entry(f, protected=under(f, protected), builtin=True) for f in builtin if not under(f, hidden)],
-        "protected": [entry(p) for p in protected if not under(p, hidden)],
+        "protected": [entry(p) for p in protected if not under(p, hidden) and p not in builtin],
         "mutable": mutable[:_FILES_LISTED],
         "mutable_total": len(mutable),
+        # distinct files in each group, hidden first, so a file is never counted twice
+        "hidden_total": sum(1 for f in files if is_hidden(f)),
+        "protected_total": sum(1 for f in files if not is_hidden(f) and under(f, protected)),
     }
 
 

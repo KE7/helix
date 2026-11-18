@@ -291,6 +291,27 @@ def test_agent_files_split_hidden_protected_and_mutable(tmp_path: Path) -> None:
     assert files["mutable"] == ["README.md", "src/solver.py", "untracked.py"] and files["mutable_total"] == 3
 
 
+def test_a_protected_file_the_sandbox_leaves_out_is_listed_once_as_hidden(tmp_path: Path) -> None:
+    _repo(tmp_path, ["evaluate.py", "solver.py", "helix.toml"])
+    config = _config(evaluator={"command": "python evaluate.py", "protected_files": ["helix.toml"]},
+                     sandbox={"enabled": True})
+    files = agent_files(config, tmp_path)
+    assert files["hidden"] == [{"path": "helix.toml", "files": None, "protected": True, "builtin": True}]
+    assert [e["path"] for e in files["protected"]] == ["evaluate.py"]
+
+
+def test_the_totals_count_each_file_once_hidden_first(tmp_path: Path) -> None:
+    # a protected folder with a hidden subfolder, and the evaluator script inside the protected folder
+    _repo(tmp_path, ["eval/evaluate.py", "eval/heldout/a.json", "eval/heldout/b.json", "solver.py", "helix.toml"])
+    config = _config(evaluator={"command": "python eval/evaluate.py", "protected_files": ["eval"]},
+                     sandbox={"enabled": True, "omit_from_agent": ["eval/heldout"]})
+    files = agent_files(config, tmp_path)
+    assert files["protected_total"] == 1  # eval/evaluate.py only: the hidden files are not counted again
+    assert files["hidden_total"] == 3  # eval/heldout's two files and helix.toml
+    assert {e["path"]: e["files"] for e in files["protected"]}.get("eval") == 1
+    assert files["mutable"] == ["solver.py"]
+
+
 def test_agent_files_without_the_sandbox_hide_nothing(tmp_path: Path) -> None:
     _repo(tmp_path, ["evaluate.py", "val/b.json", "solver.py"])
     files = agent_files(_config(sandbox={"enabled": False, "omit_from_agent": ["val"]}), tmp_path)
