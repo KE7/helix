@@ -47,7 +47,7 @@ Unlike a single coding-agent session, HELIX keeps going: it runs many attempts a
 <p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-dark.gif">
-  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-light.gif" width="900" alt="helix ui on a live run of the eterna100 RNA design example: Codex agents improve an RNA sequence designer in parallel with a live transcript, the best score winds up a helix from 5 to 21 of 30 puzzles, the lineage shows the path to the best candidate with rejected proposals counted, and the Path view lists its steps from the seed">
+  <img src="https://raw.githubusercontent.com/KE7/helix/main/docs/assets/ui/helix-ui-tour-light.gif" width="900" alt="helix ui on a live run of the eterna100 RNA design example: Codex agents improve an RNA sequence designer in parallel with a live transcript, the loop shows what the agent may change and the evaluator's feedback flowing back to it, the best score winds up a helix from 5 to 17 of 30 puzzles, the lineage shows the path to the best candidate with rejected proposals counted, and the Path view lists its steps from the seed">
 </picture>
 </p>
 
