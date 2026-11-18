@@ -690,9 +690,6 @@ def _ignore_helix_artifacts(worktree_path: Path) -> None:
     protected-file refresh erased HELIX's .gitignore additions. Untrack and
     remove inherited copies before writing new prompts, including the fallback
     and summary files. Untracked prompt collisions still belong to the user.
-
-    This is HELIX-specific repository bookkeeping: GEPA's in-memory candidates
-    do not need artifact exclusion. Selection and acceptance are unchanged.
     """
     if not (worktree_path / ".git").exists():
         return
