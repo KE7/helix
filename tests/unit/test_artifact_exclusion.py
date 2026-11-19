@@ -317,3 +317,83 @@ def test_evolution_recovers_an_affected_history(tmp_path, monkeypatch):
             git(wt, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
         )
         assert (wt / ".gitignore").read_bytes() == (project / ".gitignore").read_bytes()
+
+
+def test_resume_retires_inherited_artifacts_before_starting_agent(tmp_path, monkeypatch):
+    import json
+    import shlex
+    import sys
+
+    from click.testing import CliRunner
+
+    from helix.cli import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".gitignore").write_text(".helix/\n")
+    (project / "value.txt").write_text("0\n")
+    evaluator = tmp_path / "evaluate.py"
+    evaluator.write_text(
+        "from pathlib import Path\n"
+        'print("HELIX_RESULT=[[" + Path("value.txt").read_text().strip() + ", {}]]")\n'
+    )
+    config = project / "helix.toml"
+    command = json.dumps(shlex.join([sys.executable, str(evaluator)]))
+    config.write_text(f"""objective = "Increment value.txt"
+[evaluator]
+command = {command}
+protected_files = [".gitignore"]
+[evolution]
+max_generations = 1
+max_evaluations = 10
+max_workers = 1
+candidate_selection_strategy = "current_best"
+[agent]
+backend = "codex"
+""")
+    _ensure_git_repo(project)
+    real_run = subprocess.run
+    calls: list[Path] = []
+
+    def backend_only(args, **kwargs):
+        if args[0] != "codex":
+            return real_run(args, **kwargs)
+        wt = Path(kwargs["cwd"])
+        assert not (wt / "helix_batch.json").exists()
+        assert not (wt / MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME).exists()
+        assert "stale synthetic prompt" not in (wt / MUTATION_PROMPT_ARTIFACT_NAME).read_text()
+        calls.append(wt)
+        value = wt / "value.txt"
+        value.write_text(f"{int(value.read_text()) + 1}\n")
+        return subprocess.CompletedProcess(
+            args, 0, stdout='{"type":"turn.completed","usage":{}}\n', stderr="",
+        )
+
+    monkeypatch.setattr("helix.mutator.subprocess.run", backend_only)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["evolve", "--dir", str(project)], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    (parent,) = calls
+    assert git(parent, "show", "HEAD:value.txt").strip() == "1"
+    stale = (
+        MUTATION_PROMPT_ARTIFACT_NAME, MUTATION_PROMPT_ARTIFACT_FALLBACK_NAME, "helix_batch.json",
+    )
+    for name in stale:
+        path = parent / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(
+            '["stale-synthetic-batch-id"]\n' if name == "helix_batch.json"
+            else "stale synthetic prompt\n"
+        )
+    git(parent, "add", "-f", "--", *stale)
+    git(parent, "-c", "user.name=HELIX", "-c", "user.email=helix@noreply",
+        "commit", "-qm", "Simulate a saved candidate from the affected version")
+
+    config.write_text(config.read_text().replace("max_generations = 1", "max_generations = 2"))
+    result = runner.invoke(cli, ["resume", "--dir", str(project)], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert "Resuming from generation 1" in result.output
+    assert len(calls) == 2
+    child = calls[-1]
+    assert git(child, "show", "HEAD:value.txt").strip() == "2"
+    assert not set(stale) & set(git(child, "ls-tree", "-r", "--name-only", "HEAD").splitlines())

@@ -179,7 +179,8 @@ Candidate snapshots and cache keys exclude those paths even when your
 `.gitignore` allows them. Summary and merge diffs also omit these paths,
 including the contents of tracked artifacts inherited from older runs.
 
-HELIX removes inherited tracked copies before writing new invocation artifacts.
+HELIX removes inherited tracked copies before the pre-agent snapshot can untrack
+them. This keeps stale prompts and batch files out of the agent workspace.
 An untracked prompt with different content uses the fallback path. When both
 paths collide, HELIX preserves both and reports `PromptArtifactCollisionError`.
 You can remove HELIX's old artifact rules from `.gitignore` and resume an
