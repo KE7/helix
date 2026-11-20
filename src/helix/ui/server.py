@@ -2,16 +2,16 @@
 
 Why the gate: with ``sandbox.add_host_gateway`` (and on Docker Desktop) a
 sandboxed mutation agent can reach host ports, and this API serves validation
-scores and evaluator feedback.  Every request needs the per-launch token
-(cookie or ``?token=``), the ``Host`` header must name the bound host (a
-DNS-rebinding guard), and anything but GET gets 405.
+scores and evaluator feedback.  Data requests need the per-launch token in
+``Authorization``, the ``Host`` header must name the bound host (a DNS-rebinding
+guard), and anything but GET gets 405.  The browser loads the public page and
+assets before making authenticated data requests.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
-import hashlib
 import ipaddress
 import json
 import os
@@ -34,7 +34,6 @@ from starlette.responses import (
     FileResponse,
     JSONResponse,
     PlainTextResponse,
-    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -90,7 +89,7 @@ def _allowed_hosts(host: str) -> frozenset[str] | None:
     """Host names the guard accepts for a server bound to *host*; None accepts any."""
     if host in _WILDCARD_HOSTS:
         # Bound to every interface: no single name to check against; the
-        # token (sent only to the origin that set the cookie) still gates access.
+        # bearer token still gates access.
         return None
     names = {host.lower().strip("[]")}
     if is_loopback(host):
@@ -98,21 +97,14 @@ def _allowed_hosts(host: str) -> frozenset[str] | None:
     return frozenset(names)
 
 
-def _token_matches(supplied: str | None, token: str) -> bool:
-    return supplied is not None and secrets.compare_digest(
-        supplied.encode(), token.encode()
-    )
-
-
 class _Guard:
-    """ASGI middleware: Host check, GET only, token on everything but ``/``."""
+    """ASGI middleware: Host check, GET only, and authentication for run data."""
 
     def __init__(
-        self, app: ASGIApp, *, token: str, cookie: str, hosts: frozenset[str] | None
+        self, app: ASGIApp, *, token: str, hosts: frozenset[str] | None
     ) -> None:
         self.app = app
         self.token = token
-        self.cookie = cookie
         self.hosts = hosts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -138,13 +130,14 @@ class _Guard:
             return PlainTextResponse(
                 "Method not allowed.\n", status_code=405, headers={"Allow": "GET"}
             )
-        if request.url.path == "/":
-            return None  # the index route sets or checks the cookie itself
-        if _token_matches(
-            request.cookies.get(self.cookie), self.token
-        ) or _token_matches(request.query_params.get("token"), self.token):
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
             return None
-        return PlainTextResponse(_NO_TOKEN, status_code=401)
+        scheme, _, supplied = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer" and secrets.compare_digest(supplied.encode(), self.token.encode()):
+            return None
+        return PlainTextResponse(
+            _NO_TOKEN, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+        )
 
 
 def _with_headers(send: Send) -> Send:
@@ -232,8 +225,6 @@ def create_app(
     stopping = threading.Event()
     # Readers keep caches; uvicorn serves sync endpoints from a thread pool.
     lock = threading.Lock()
-    # One cookie per launch, so two dashboards on one machine do not clash.
-    cookie = "helix_ui_" + hashlib.sha256(token.encode()).hexdigest()[:12]
 
     def locked(fn: Callable[[], _T]) -> _T:
         with lock:
@@ -247,17 +238,6 @@ def create_app(
         return locked(reader.snapshot)
 
     def index(request: Request) -> Response:
-        supplied = request.query_params.get("token")
-        if supplied is not None:
-            if not _token_matches(supplied, token):
-                return PlainTextResponse(_NO_TOKEN, status_code=401)
-            response = RedirectResponse("/", status_code=303)
-            response.set_cookie(
-                cookie, token, path="/", httponly=True, samesite="strict"
-            )
-            return response
-        if not _token_matches(request.cookies.get(cookie), token):
-            return PlainTextResponse(_NO_TOKEN, status_code=401)
         return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
 
     def api_static(request: Request) -> Response:
@@ -351,7 +331,7 @@ def create_app(
         Mount("/static", app=StaticFiles(directory=STATIC_DIR, check_dir=False)),
     ]
     app = Starlette(routes=routes)
-    app.add_middleware(_Guard, token=token, cookie=cookie, hosts=_allowed_hosts(host))
+    app.add_middleware(_Guard, token=token, hosts=_allowed_hosts(host))
     app.state.stopping = stopping
     return app
 
@@ -393,7 +373,7 @@ def launch_url(host: str, port: int, token: str) -> str:
     shown = "127.0.0.1" if host in _WILDCARD_HOSTS else host.strip("[]")
     if ":" in shown:
         shown = f"[{shown}]"
-    return f"http://{shown}:{port}/?token={token}"
+    return f"http://{shown}:{port}/#token={token}"
 
 
 def serve(

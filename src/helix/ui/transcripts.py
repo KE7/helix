@@ -131,7 +131,9 @@ class TranscriptReader:
             data, start, size = _read_local(path, cursor)
         except OSError:
             return self._reply("none", cursor, note="transcript unreadable")
-        events, new_cursor = _consume(self._backend, data, start, complete=start + len(data) >= size)
+        events, new_cursor = _consume(
+            self._backend, data, start, complete=start + len(data) - int(start > 0) >= size
+        )
         return self._reply(
             "finished", new_cursor, session=_session_id(path.name), events=events, note=_tail_note(cursor, start)
         )
@@ -403,12 +405,13 @@ def _session_id(name: str) -> str:
 
 
 def _read_local(path: Path, cursor: int) -> tuple[bytes, int, int]:
-    """Up to ``_MAX_READ`` bytes from *cursor* (or the last ``_MAX_READ`` on a first read)."""
+    """A bounded chunk at the cursor or tail, with one lookbehind byte when available."""
     size = path.stat().st_size
     start = cursor if 0 < cursor <= size else max(size - _MAX_READ, 0)
+    lookbehind = int(start > 0)
     with path.open("rb") as f:
-        f.seek(start)
-        return f.read(_MAX_READ), start, size
+        f.seek(start - lookbehind)
+        return f.read(_MAX_READ + lookbehind), start, size
 
 
 def _tail_note(cursor: int, start: int) -> str | None:
@@ -430,6 +433,7 @@ def docker_argv(image: str, volume: str, script: str) -> list[str]:
 def _volume_script(listing: str, cursor: int) -> str:
     """Shell that, for each file *listing* prints, emits a header, then its bytes from the cursor.
 
+    Include the byte before a nonzero start, as in :func:`_read_local`.
     The header carries the start offset, the path, the first ``timestamp``
     in the first five lines (codex ``session_meta``; claude's first timed entry,
     since current Claude Code opens with an untimed ``session-owner`` line), and
@@ -445,7 +449,8 @@ def _volume_script(listing: str, cursor: int) -> str:
         "ts=$(head -n 5 \"$f\" | head -c 1048576 | grep -o '\"timestamp\": *\"[^\"]*\"' | head -n 1); "
         "mk=$(head -n 40 \"$f\" | head -c 4194304 | grep -o 'HELIX candidate g[0-9][0-9]*-[sm][0-9][0-9]*' | head -n 1); "
         "printf '\\n@@HELIX_UI_FILE@@\\t%s\\t%s\\t%s\\t%s\\n' \"$st\" \"$f\" \"$ts\" \"${mk##* }\"; "
-        f'tail -c +$((st + 1)) "$f" | head -c {_MAX_READ}; '
+        'lookbehind=$((st > 0)); '
+        f'tail -c +$((st + 1 - lookbehind)) "$f" | head -c $(({_MAX_READ} + lookbehind)); '
         "printf '\\n@@HELIX_UI_END@@\\n'; "
         "done"
     )
@@ -468,8 +473,19 @@ def _split_volume_output(out: bytes) -> Iterable[tuple[str, int, str, str, bytes
 
 
 def _consume(backend: str, data: bytes, start: int, *, complete: bool) -> tuple[list[dict[str, Any]], int]:
-    """Events from the whole lines in *data*, and the cursor just past the last one parsed."""
+    """Consume whole JSONL records, advancing over fragments of oversized records."""
+    if start:
+        preceding, data = data[:1], data[1:]
+        if preceding != b"\n":
+            # The cursor is inside a record after a tail read or a bounded skip.
+            end = data.find(b"\n") + 1
+            if not end:
+                return [], start + len(data)
+            start, data = start + end, data[end:]
     end = len(data) if complete else data.rfind(b"\n") + 1
+    if not end and len(data) == _MAX_READ:
+        # This record cannot fit in one read. The next chunk discards its suffix.
+        return [], start + len(data)
     rows = []
     for line in data[:end].splitlines():
         try:

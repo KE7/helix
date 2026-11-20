@@ -18,6 +18,7 @@ from helix.evaluator_manifest import _to_repo_relative
 from helix.evolution import _config_hash, _load_dataset_ids
 from helix.sandbox import _ignore_for_copy, sandbox_auth_volume_name
 from helix.ui.candidate import _git, protected_paths, under
+from helix.ui.redact import redact
 
 _OBJECTIVE_CHARS = 300
 _MAX_MODULE_FILES = 200
@@ -36,6 +37,7 @@ def build_static(config: HelixConfig, project_root: Path, config_path: Path) -> 
     agent_zone = "sandbox" if config.sandbox.enabled else "host"
     evaluator_zone = _evaluator_zone(config)
     sizes = dataset_sizes(config, project_root)
+    evaluator_command = redact(config.evaluator.command, extra_values=config.env.values())
     return {
         "project": {
             "name": project_root.name,
@@ -43,14 +45,14 @@ def build_static(config: HelixConfig, project_root: Path, config_path: Path) -> 
             "config_path": str(config_path),
             "helix_version": helix.__version__,
         },
-        "config": _config_facts(config),
+        "config": _config_facts(config, evaluator_command),
         "loop": _loop(config, agent_zone, evaluator_zone, sizes),
         "isolation": {
             "agent": agent_zone,
             "evaluator": evaluator_zone,
             "warnings": isolation_warnings(config, sizes["train"]),
         },
-        "repro": _repro(config, project_root, config_path, evaluator_zone),
+        "repro": _repro(config, project_root, config_path, evaluator_zone, evaluator_command),
         "evaluator_modules": evaluator_modules(config, project_root),
         "sizes": sizes,
         "files": agent_files(config, project_root),
@@ -124,7 +126,7 @@ def _auth_volume(config: HelixConfig) -> str | None:
         return None
 
 
-def _config_facts(config: HelixConfig) -> dict[str, Any]:
+def _config_facts(config: HelixConfig, evaluator_command: str) -> dict[str, Any]:
     evo = config.evolution
     agent = config.agent
     sandbox = config.sandbox
@@ -172,7 +174,7 @@ def _config_facts(config: HelixConfig) -> dict[str, Any]:
             "memory": sandbox.memory,
         },
         "evaluator": {
-            "command": evaluator.command,
+            "command": evaluator_command,
             "sidecar": evaluator.sidecar is not None,
             "protected_files": len(evaluator.protected_files),
             "extra_commands": len(evaluator.extra_commands),
@@ -285,7 +287,8 @@ def isolation_warnings(config: HelixConfig, train_size: int | None) -> list[dict
 
 
 def _repro(
-    config: HelixConfig, project_root: Path, config_path: Path, evaluator_zone: str
+    config: HelixConfig, project_root: Path, config_path: Path, evaluator_zone: str,
+    evaluator_command: str,
 ) -> list[list[str]]:
     try:
         shown_path = config_path.relative_to(project_root).as_posix()
@@ -308,7 +311,7 @@ def _repro(
         ["frontier", config.evolution.frontier_type],
         ["rng_seed", str(config.rng_seed)],
         ["agent", " · ".join(part for part in agent_parts if part)],
-        ["evaluator", config.evaluator.command],
+        ["evaluator", evaluator_command],
         ["sandbox", sandbox_text],
         ["seed", "generated (seedless)" if config.seedless.enabled else "repository"],
         # A15: no .helix file records the version that ran; this is the viewer's.

@@ -20,7 +20,7 @@
       open: new Set(), groups: new Map(), groupOf: new Map(), scroll: null },
     path: { id: null },
     prop: { data: null, key: null, loading: null, byId: {}, filter: 'all', sort: 'gen', dir: 1, sel: null, rows: [], bodyKey: null },
-    candVs: 'parent', kids: {}, inst: null, ci: null, pobj: null, pobjKey: null, opop: { pin: false, timer: 0 },
+    candVs: 'parent', candRequest: null, kids: {}, inst: null, ci: null, pobj: null, pobjKey: null, opop: { pin: false, timer: 0 },
   };
 
   // ---------------- DOM helpers (no innerHTML anywhere) ----------------
@@ -119,12 +119,30 @@
   const frontierType = () => (S.run && S.run.frontier && S.run.frontier.type) || S.static.config.frontier_type;
 
   // ---------------- API ----------------
-  class HttpError extends Error { constructor(status) { super('HTTP ' + status); this.status = status; } }
-  async function get(path) {
-    const r = await fetch(path, { credentials: 'same-origin', cache: 'no-store' });
-    if (!r.ok) throw new HttpError(r.status);
-    return r.json();
+  let token = null;
+  function loadToken() {
+    const key = 'helix-ui-token';
+    if (location.hash.startsWith('#token=')) {
+      const launch = new URLSearchParams(location.hash.slice(1)).get('token');
+      history.replaceState(null, '', location.pathname + location.search);
+      if (launch) {
+        try { sessionStorage.setItem(key, launch); } catch (e) { /* keep the token in memory */ }
+        return launch;
+      }
+    }
+    try { return sessionStorage.getItem(key); } catch (e) { return null; }
   }
+  class HttpError extends Error { constructor(status) { super('HTTP ' + status); this.status = status; } }
+  async function request(path) {
+    if (!token) throw new HttpError(401);
+    const r = await fetch(path, {
+      headers: { Authorization: 'Bearer ' + token },
+      mode: 'same-origin', credentials: 'omit', redirect: 'error', cache: 'no-store',
+    });
+    if (!r.ok) throw new HttpError(r.status);
+    return r;
+  }
+  async function get(path) { return (await request(path)).json(); }
 
   // ---------------- state indexing ----------------
   function index() {
@@ -895,13 +913,15 @@
   function renderView(force) {
     // redraw a view only when its inputs changed, so hover, scroll and selects survive live updates
     const r = S.run;
-    const key = S.view === 'lineage' ? ['lineage', lineageKey(), dark.matches, innerWidth, innerHeight].join('|')
+    const key = S.view === 'candidate' ? candidateKey()
+      : S.view === 'lineage' ? ['lineage', lineageKey(), dark.matches, innerWidth, innerHeight].join('|')
       : S.view === 'path' ? ['path', S.path.id, proposalsKey(), dark.matches].join('|')
       : S.view === 'proposals' ? ['proposals', proposalsKey(), dark.matches].join('|')
         : [S.view, frontierKey(), dark.matches, innerWidth, r ? JSON.stringify([r.loop, r.health && r.health.failures, r.details, (r.candidates || []).length]) : ''].join('|');
     if (!force && key === S.viewKey) return;
     S.viewKey = key;
-    if (S.view === 'frontier') drawFrontier();
+    if (S.view === 'candidate' && S.cand) drawCandidate(S.cand, S.candVs);
+    else if (S.view === 'frontier') drawFrontier();
     else if (S.view === 'mutation') drawMutation();
     else if (S.view === 'validation') drawValidation();
     else if (S.view === 'lineage') drawLineage();
@@ -1107,19 +1127,28 @@
 
   // candidate
   // vs: 'seed' asks for the diff against the seed's worktree instead of the parent's (only the switch passes it)
-  async function openCand(id, vs) {
+  function candidateKey() {
+    const row = S.byId[S.cand];
+    const lane = S.run?.now?.lanes?.find((l) => l.id === S.cand);
+    const outcome = row ? (row.front ? 'frontier' : 'accepted') : lane && (lane.result?.status || 'running');
+    return ['candidate', S.cand, S.candVs, outcome, S.run?.status?.state].join('|');
+  }
+  function openCand(id, vs) {
     if (!ID_RE.test(id)) return;
-    const same = S.view === 'candidate' && S.cand === id;
     if (S.view !== 'candidate') S.from = S.view;
     S.cand = id;
     S.candVs = vs === 'seed' ? 'seed' : 'parent';
-    const V = $('v-candidate'), top = V.scrollTop;
-    if (!same) fill(V, candCrumbs(id), h('div', { class: 'ch' }, h('h2', { text: id })));
     go('candidate');
-    const want = S.candVs;
+  }
+  async function drawCandidate(id, vs) {
+    const V = $('v-candidate'), top = V.scrollTop;
+    const same = S.candData?.id === id;
+    if (!same) fill(V, candCrumbs(id), h('div', { class: 'ch' }, h('h2', { text: id })));
+    const pending = get('/api/candidate/' + encodeURIComponent(id) + (vs === 'seed' ? '?vs=seed' : ''));
+    S.candRequest = pending;
     let d = null, err = null;
-    try { d = await get('/api/candidate/' + encodeURIComponent(id) + (want === 'seed' ? '?vs=seed' : '')); } catch (e) { err = e; }
-    if (S.cand !== id || S.candVs !== want) return;
+    try { d = await pending; } catch (e) { err = e; }
+    if (S.cand !== id || S.candRequest !== pending) return;
     S.candData = d;
     if (!d) { fill(V, candCrumbs(id), h('div', { class: 'ch' }, h('h2', { text: id }), h('span', { text: err && err.status === 404 ? 'not found' : 'could not load' }))); return; }
     fill(V, candidateView(d));
@@ -2274,18 +2303,45 @@
   let pollTimer = null;
   function startPoll() {
     if (pollTimer) return;
-    pollTimer = setInterval(async () => {
-      try { setRun(await get('/api/run')); } catch (e) { if (e.status === 401 || e.status === 403) { S.error = 'Not authorised: open the link helix ui printed.'; renderHeader(); } }
+    const timer = pollTimer = setInterval(async () => {
+      try {
+        const run = await get('/api/run');
+        if (pollTimer === timer) setRun(run);
+      } catch (e) {
+        if (pollTimer === timer && (e.status === 401 || e.status === 403)) { S.error = 'Not authorised: open the link helix ui printed.'; renderHeader(); }
+      }
     }, 3000);
   }
   function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
-  function connect() {
-    if (!window.EventSource) { startPoll(); return; }
-    const es = new EventSource('/api/events');
-    es.addEventListener('static', (e) => { try { S.static = JSON.parse(e.data); S.mapKey = null; S.viewKey = null; render(); } catch (err) { /* keep the last good copy */ } });
-    es.addEventListener('run', (e) => { try { setRun(JSON.parse(e.data)); } catch (err) { /* keep the last good copy */ } });
-    es.onopen = stopPoll;
-    es.onerror = () => { startPoll(); };
+  async function connect() {
+    if (!window.ReadableStream || !window.TextDecoder) { startPoll(); return; }
+    try {
+      // EventSource cannot set Authorization. The server emits single-line JSON data in LF-delimited frames.
+      const response = await request('/api/events');
+      const stream = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      stopPoll();
+      for (;;) {
+        const { done, value } = await stream.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let end;
+        while ((end = buffer.indexOf('\n\n')) >= 0) {
+          const frame = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const data = frame.indexOf('\ndata: ');
+          if (!frame.startsWith('event: ') || data < 0) continue;
+          try {
+            const type = frame.slice(7, data), payload = JSON.parse(frame.slice(data + 7));
+            if (type === 'static') { S.static = payload; S.mapKey = null; S.viewKey = null; render(); }
+            else if (type === 'run') setRun(payload);
+          } catch (e) { /* keep the last good copy */ }
+        }
+      }
+    } catch (e) { /* fall back to polling until the stream reconnects */ }
+    startPoll();
+    setTimeout(connect, 3000);
   }
   function tick() {
     if (!S.static || !running()) return;
@@ -2293,6 +2349,11 @@
     renderRail();
   }
   function fromHash() {
+    if (location.hash.startsWith('#token=')) {
+      // Opening a fresh launch URL in an existing tab can be a fragment-only navigation.
+      location.reload();
+      return;
+    }
     const hs = decodeURIComponent(location.hash.slice(1));
     if (hs.startsWith('candidate/') && ID_RE.test(hs.slice(10))) openCand(hs.slice(10));
     else if (hs === 'proposals' || hs.startsWith('proposals/') || hs.startsWith('lineage/') || hs.startsWith('path/')) go(hs);
@@ -2375,6 +2436,7 @@
     addEventListener('hashchange', fromHash);
   }
   async function boot() {
+    token = loadToken();
     bind();
     try {
       const [st, run] = await Promise.all([get('/api/static'), get('/api/run')]);

@@ -406,7 +406,50 @@ def test_volume_script_runs_under_sh(tmp_path: Path) -> None:
 
     out = subprocess.run(["sh", "-c", tmod._volume_script(listing, 10)], capture_output=True, check=True).stdout
     [(_, offset, _, _, content)] = list(tmod._split_volume_output(out))
-    assert offset == 10 and content == data[10:]
+    assert offset == 10 and content == data[9:]  # includes the preceding byte
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_transcript_advances_past_an_oversized_live_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandboxed: bool
+) -> None:
+    limit = 256
+    monkeypatch.setattr(tmod, "_MAX_READ", limit)
+    path = tmp_path / "s.jsonl"
+    listing = f"printf '%s\\n' {shlex.quote(str(path))}"
+
+    def poll(cursor: int) -> tuple[list[str], int]:
+        if sandboxed:
+            out = subprocess.run(
+                ["sh", "-c", tmod._volume_script(listing, cursor)], capture_output=True, check=True
+            ).stdout
+            [(_, start, _, _, chunk)] = list(tmod._split_volume_output(out))
+        else:
+            chunk, start, _ = tmod._read_local(path, cursor)
+        events, new_cursor = tmod._consume("codex", chunk, start, complete=False)
+        return [event["text"] for event in events], new_cursor
+
+    def output(text: str) -> bytes:
+        return _jsonl([{"type": "response_item", "payload": {"type": "function_call_output", "output": text}}])
+
+    path.write_bytes(output("before"))
+    events, cursor = poll(0)
+    assert events == ["before"]
+
+    first = path.read_bytes() + output("x" * (limit * 2)) + output("after")
+    partial = output("still writing")
+    path.write_bytes(first + partial[:20])
+    received = []
+    while cursor < len(first):
+        events, new_cursor = poll(cursor)
+        assert cursor < new_cursor <= len(first)
+        received.extend(events)
+        cursor = new_cursor
+    assert received == ["after"]
+    assert poll(cursor) == ([], cursor)
+
+    path.write_bytes(first + partial)
+    assert poll(cursor) == (["still writing"], len(first + partial))
 
 
 def test_volume_script_finds_claude_start_after_an_untimed_first_line(tmp_path: Path) -> None:

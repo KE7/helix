@@ -44,9 +44,10 @@ def add_env_names(names: Iterable[str]) -> None:
     _env_names.update(names)
 
 
-def redact(text: str) -> str:
-    """Return *text* with secrets replaced by ``••••``."""
-    values = {os.environ.get(name, "") for name in _env_names}
+def redact(text: str, *, extra_values: Iterable[str] = ()) -> str:
+    """Return *text* with secrets and any supplied environment values masked."""
+    values = set(extra_values)
+    values.update(os.environ.get(name, "") for name in _env_names)
     for value in sorted((v for v in values if len(v) >= _MIN_ENV_VALUE), key=len, reverse=True):
         text = text.replace(value, MASK)
     for pattern in _TOKEN_PATTERNS:

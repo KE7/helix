@@ -2,8 +2,8 @@
 
 Point it at a dashboard serving a real run, during or after `helix evolve`::
 
-    helix ui --no-browser        # prints http://127.0.0.1:8790/?token=...
-    uv run --with playwright python scripts/docs_screenshots.py "http://127.0.0.1:8790/?token=..."
+    helix ui --no-browser        # prints http://127.0.0.1:8790/#token=...
+    uv run --with playwright python scripts/docs_screenshots.py "http://127.0.0.1:8790/#token=..."
 
 It writes, in light and dark, to ``docs/assets/ui/``:
 
