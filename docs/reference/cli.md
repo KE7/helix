@@ -16,6 +16,20 @@
 | `helix log` | Show every candidate in order: parent, outcome (frontier, dominated or rejected and why), score change against its parent, files changed, and the agent's change summary when `evolution.sibling_history` is on |
 | `helix attempts` | Surface rejected attempt records and perfect-skip events from `.helix/attempts/` and `.helix/skips/` |
 | `helix timing` | Show where the run's time went (work by kind and candidate fate, wall time per generation); `--perfetto FILE` exports a timeline |
+| `helix ui` | Open a read-only live dashboard of the project in the browser ([guide](../guides/ui.md)) |
+
+## `helix ui` Options
+
+```
+--dir PATH        Project directory containing helix.toml (default: .)
+--config PATH     Path to the config file (default: helix.toml)
+--port INT        Port to listen on (default: 8790; the next 10 are tried when it is taken)
+--host HOST       Interface to listen on (default: 127.0.0.1)
+--no-browser      Print the address without opening a browser
+```
+
+Open the printed address with its `#token=…` fragment to authorize the browser tab. API clients send the token in
+the `Authorization: Bearer` header.
 
 ## `helix evolve` Options
 
@@ -33,7 +47,7 @@
 ```
 
 Every command that reads or writes a run (`evolve`, `resume`, `frontier`,
-`best`, `history`, `log`, `attempts`, `timing`, `clean`) takes `--dir` for
+`best`, `history`, `log`, `attempts`, `timing`, `ui`, `clean`) takes `--dir` for
 the project directory; a relative path is resolved against the current
 directory. Every command takes `--help` for its full options, for example
 `helix best --help`.

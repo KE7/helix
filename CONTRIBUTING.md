@@ -54,6 +54,7 @@ When a design question comes up, check here first; when a review settles one, ad
     uv run --all-extras mypy --strict src/helix/
     uv run --all-extras ruff check src/
     uv run --only-group docs mkdocs build --strict
+    node --test tests/unit/test_ui_browser.cjs
     ```
 
     A change under `docker/` or to `src/helix/backends.py` also builds the affected runner image and probes its CLI as the unprivileged `node` user, as `runner-images.yml` does:

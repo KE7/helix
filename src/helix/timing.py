@@ -181,24 +181,29 @@ def span(name: str, **attrs: Any) -> Iterator[None]:
         _write(record)
 
 
-def decision(candidate_id: str, *, accepted: bool, reason: str) -> None:
-    """Record a candidate's fate: kept on the frontier, or discarded and why."""
+def decision(candidate_id: str, *, accepted: bool, reason: str, paths: list[str] | None = None) -> None:
+    """Record a candidate's fate: kept on the frontier, or discarded and why.
+
+    *paths* names the files behind the decision, such as the protected files a
+    rejected proposal changed; the record carries them only when given.
+    """
     if _sink is None:
         return
     parent, generation, _ = _context.get()
-    _write(
-        {
-            "event": "decision",
-            "candidate": candidate_id,
-            "accepted": accepted,
-            "reason": reason,
-            "parent_span_id": parent,
-            "run_id": _run_id,
-            "generation": generation,
-            "wall_time": time.time(),
-            "thread_id": threading.get_ident(),
-        }
-    )
+    record: dict[str, Any] = {
+        "event": "decision",
+        "candidate": candidate_id,
+        "accepted": accepted,
+        "reason": reason,
+        "parent_span_id": parent,
+        "run_id": _run_id,
+        "generation": generation,
+        "wall_time": time.time(),
+        "thread_id": threading.get_ident(),
+    }
+    if paths:
+        record["paths"] = sorted(paths)
+    _write(record)
 
 
 #: The token counters of :class:`helix.display.UsageStats` a ``usage`` record

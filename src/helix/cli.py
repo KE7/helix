@@ -1535,3 +1535,67 @@ def clean(project_dir: Path | None) -> None:
         print_success("Cleaned up .helix/ directory.")
     elif branch_result.returncode == 0 and branch_result.stdout.strip():
         print_success("Pruned stale HELIX git state.")
+
+
+# ---------------------------------------------------------------------------
+# ui
+# ---------------------------------------------------------------------------
+
+
+@cli.command("ui")
+@click.option(
+    "--config",
+    "config_path",
+    default="helix.toml",
+    show_default=True,
+    help="Path to helix.toml config file.",
+)
+@click.option(
+    "--dir",
+    "project_dir",
+    default=None,
+    type=_PROJECT_DIR,
+    help="Project root directory (defaults to current working directory).",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Interface to listen on. Anything but loopback exposes scores to the network.",
+)
+@click.option(
+    "--port",
+    default=8790,
+    show_default=True,
+    type=int,
+    help="Port to listen on; the next 10 are tried when it is taken.",
+)
+@click.option(
+    "--no-browser",
+    "no_browser",
+    is_flag=True,
+    default=False,
+    help="Print the address without opening a browser.",
+)
+def ui_cmd(
+    config_path: str,
+    project_dir: Path | None,
+    host: str,
+    port: int,
+    no_browser: bool,
+) -> None:
+    """Open a read-only live dashboard of this project's run in the browser."""
+    from helix.ui.server import serve
+
+    project_root = project_dir if project_dir is not None else Path.cwd()
+    cfg_file = Path(config_path)
+    if not cfg_file.is_absolute():
+        cfg_file = project_root / cfg_file
+    if not cfg_file.is_file():
+        print_error(f"Config file not found: {cfg_file}")
+        raise SystemExit(1)
+    try:
+        serve(project_root, cfg_file, host, port, open_browser=not no_browser)
+    except OSError as exc:
+        print_error(str(exc))
+        raise SystemExit(1)

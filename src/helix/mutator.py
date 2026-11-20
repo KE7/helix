@@ -654,11 +654,25 @@ def build_mutation_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _prompt_file_instruction(prompt_artifact_name: str) -> str:
-    return (
+#: A candidate worktree is named after its candidate (``.helix/worktrees/g3-s12``).
+_CANDIDATE_WORKTREE_NAME = re.compile(r"^g\d+-[sm]\d+$")
+
+
+def _prompt_file_instruction(prompt_artifact_name: str, candidate_id: str | None = None) -> str:
+    """The one-line prompt a backend is launched with.
+
+    It names the candidate when there is one.  That line is the first user
+    message of the backend's session file, and sandboxed agents share one
+    login volume and one ``/workspace`` path, so it is the only thing on disk
+    that ties a live session to its candidate (``helix ui`` matches on it).
+    """
+    instruction = (
         f"Read {prompt_artifact_name} in the current workspace and follow "
         "those instructions exactly."
     )
+    if candidate_id and _CANDIDATE_WORKTREE_NAME.match(candidate_id):
+        instruction += f" This is HELIX candidate {candidate_id}."
+    return instruction
 
 
 def _write_mutation_prompt_artifact(
@@ -760,6 +774,7 @@ def _build_backend_args(
     worktree_path: str,
     config: AgentConfig,
     prompt_artifact_name: str,
+    candidate_id: str | None = None,
 ) -> list[str]:
     backend = config.backend
     if backend == "agy":
@@ -783,7 +798,7 @@ def _build_backend_args(
         # ``--print <prompt>`` is the final argv pair; Go's flag parser accepts
         # the space-separated form, and the instruction text never starts
         # with ``-``.  ``test_agy_cli_args_include_required_flags`` pins this.
-        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name)])
+        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name, candidate_id)])
         return args
 
     if backend == "claude":
@@ -807,7 +822,7 @@ def _build_backend_args(
         if not config.web_access:
             # The ``=`` form stops the variadic flag swallowing the prompt.
             args.append("--disallowedTools=WebSearch,WebFetch")
-        args.append(_prompt_file_instruction(prompt_artifact_name))
+        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
         return args
 
     if backend == "codex":
@@ -832,7 +847,7 @@ def _build_backend_args(
         if not config.web_access:
             # ``codex_apps`` searches the web even with ``web_search`` off.
             args.extend(["-c", 'web_search="disabled"', "-c", "features.apps=false"])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
+        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
         return args
 
     if backend == "cursor":
@@ -850,7 +865,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
+        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
         return args
 
     if backend == "opencode":
@@ -868,7 +883,7 @@ def _build_backend_args(
         # for the source of truth on which backends propagate the field.
         if config.effort:
             args.extend(["--variant", config.effort])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
+        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
         return args
 
     if backend == "pi":
@@ -880,7 +895,7 @@ def _build_backend_args(
             args.extend(["--model", config.model])
         if config.effort:
             args.extend(["--thinking", config.effort])
-        args.append(_prompt_file_instruction(prompt_artifact_name))
+        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
         return args
 
     raise ValueError(f"Unsupported backend: {backend}")
@@ -2175,6 +2190,8 @@ def invoke_claude_code(
         backend_worktree_path,
         config,
         prompt_artifact_name,
+        # Named after the host worktree: in the sandbox the agent sees /workspace.
+        candidate_id=Path(worktree_path).name,
     )
     cmd_str = shlex.join(args)
     backend_env = _scrub_environment(

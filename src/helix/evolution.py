@@ -665,7 +665,7 @@ def _reconcile_incomplete_attempts_on_resume(
     return True
 
 
-def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
+def _safe_remove_worktree(candidate: Candidate, *, label: str, paths: list[str] | None = None) -> None:
     """Remove ``candidate``'s worktree, warning on failure rather than raising.
 
     The nine rejection / cleanup paths in :func:`_run_evolution_impl` and
@@ -674,9 +674,11 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
     of the same try/except.
 
     Being the one exit for a discarded candidate, it also records that
-    candidate's fate in the timing trace, with *label* as the reason.
+    candidate's fate in the timing trace, with *label* as the reason and
+    *paths* (the protected files a tamper-rejected candidate changed) when
+    given.
     """
-    decision(candidate.id, accepted=False, reason=label)
+    decision(candidate.id, accepted=False, reason=label, paths=paths)
     try:
         remove_worktree(candidate)
     except Exception as exc:
@@ -686,7 +688,12 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
 
 
 def _discard_rejected(
-    candidate: Candidate, *, label: str, retain: bool, commit: bool = False
+    candidate: Candidate,
+    *,
+    label: str,
+    retain: bool,
+    commit: bool = False,
+    paths: list[str] | None = None,
 ) -> None:
     """Remove a rejected candidate, or keep it when *retain* is set.
 
@@ -696,12 +703,13 @@ def _discard_rejected(
     written the candidate's ``attempts/`` record with ``retained=True``, which
     tells resume the worktree is finished, not an interrupted attempt.
     *commit* snapshots a candidate rejected before its usual snapshot, so its
-    ref holds what the agent wrote.
+    ref holds what the agent wrote.  *paths* are the protected files a
+    tamper-rejected candidate changed, recorded with the decision either way.
     """
     if not retain:
-        _safe_remove_worktree(candidate, label=label)
+        _safe_remove_worktree(candidate, label=label, paths=paths)
         return
-    decision(candidate.id, accepted=False, reason=label)
+    decision(candidate.id, accepted=False, reason=label, paths=paths)
     if commit:
         try:
             snapshot_candidate(candidate, f"helix: rejected {candidate.id} ({label})")
@@ -2735,6 +2743,7 @@ def _run_evolution_impl(
                                 label="tamper-rejected merge candidate",
                                 retain=retain_rejected,
                                 commit=True,
+                                paths=merge_tamper,
                             )
                         elif _candidate_content_key(merged, merge_hidden) in {
                             _candidate_content_key(a, merge_hidden),
@@ -3280,6 +3289,7 @@ def _run_evolution_impl(
                         label="tamper-rejected mutation candidate",
                         retain=retain_rejected,
                         commit=True,
+                        paths=wr.tampered_paths,
                     )
                     return None
 

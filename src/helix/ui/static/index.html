@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HELIX</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <picture><source srcset="/static/helix-wordmark-dark.svg" media="(prefers-color-scheme: dark)"><img src="/static/helix-wordmark-light.svg" alt="HELIX"></picture>
+  <button class="name" id="name" type="button" aria-expanded="false" aria-controls="pop"></button>
+  <div class="stats" id="stats"></div>
+  <button class="vbtn" id="vbtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="menu">Views<i></i></button>
+  <div class="pop" id="pop"></div>
+  <div class="pop opop" id="opop"></div>
+  <div class="menu" id="menu" role="menu" aria-label="Views"></div>
+</header>
+<section class="prog"><svg class="pc" id="pc" aria-label="Best score by generation"></svg><div class="xh" id="xh"></div><select class="psel" id="psel" aria-label="Progress line" hidden></select></section>
+<main>
+  <section class="stage">
+    <div class="view" id="v-map"><svg class="map" id="map" viewBox="0 0 860 470" preserveAspectRatio="xMidYMin meet" aria-label="The loop"></svg></div>
+    <div class="view hide" id="v-frontier"></div>
+    <div class="view hide" id="v-candidate"></div>
+    <div class="view hide" id="v-mutation"></div>
+    <div class="view hide" id="v-validation"></div>
+    <div class="view hide" id="v-lineage"></div>
+    <div class="view hide" id="v-path"></div>
+    <div class="view hide" id="v-proposals"></div>
+    <div class="band" id="band"></div>
+  </section>
+  <aside class="rail">
+    <div class="rh"><b id="gt"></b><span id="gs"></span></div>
+    <div class="lanes" id="lanes"></div>
+    <div class="txh" id="txh"><span id="txw"></span><button class="tog" id="tog" type="button" aria-pressed="false">commands</button></div>
+    <div class="tx nocmd" id="tx"></div>
+  </aside>
+</main>
+<div class="card" id="card"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
