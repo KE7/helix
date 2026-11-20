@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parent or the seed), task prompt, children and per-instance scores against
   its parent, the current generation with the agent's live transcript (Codex
   and Claude), run health with cost per generation and the share spent on
-  rejected proposals, and where the agent and evaluator run. It never writes
-  to the run and every request needs the token it prints. See the
+  rejected proposals, and where the agent and evaluator run. Candidate pages
+  update when their proposal finishes. The dashboard never writes to the run.
+  Data requests use a bearer token, evaluator commands are redacted, and live
+  transcripts continue after oversized records. See the
   [Live dashboard](https://ke7.github.io/helix/guides/ui.html) guide.
 - `.helix/timing.jsonl` now has a `usage` record for every agent charge:
   tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
@@ -47,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes.
 
 ### Fixed
+
+- HELIX leaves `.gitignore` untouched when excluding invocation artifacts, so
+  protecting it no longer triggers false tamper rejections. Candidate commits
+  and cache keys exclude reserved artifacts even with a `.gitignore` allowlist.
+  On resume, HELIX removes inherited tracked artifacts from the agent workspace
+  before snapshotting and omits their contents from summary and merge diffs.
 
 - `examples/web_researcher`: when `solve()` raises, the question's feedback now
   says so under `error`. Before, a failed model call (a missing key, or one

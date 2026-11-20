@@ -36,7 +36,7 @@ from pathlib import Path
 from helix.config import HelixConfig
 from helix.exceptions import HelixError
 from helix.population import Candidate
-from helix.worktree import snapshot_candidate
+from helix.worktree import retire_tracked_artifacts, snapshot_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +215,8 @@ def _refresh_and_snapshot_protected_evaluator_files(
 ) -> None:
     """Normalize HELIX-owned protected-file refresh before backend mutation."""
     _refresh_protected_evaluator_files(candidate, config, project_root)
+    # The snapshot drops artifact index entries but leaves their files on disk.
+    retire_tracked_artifacts(Path(candidate.worktree_path))
     snapshot_candidate(candidate, "helix: refresh protected evaluator files")
 
 

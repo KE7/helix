@@ -8,7 +8,7 @@ them.
 
 ```console
 $ helix ui
-HELIX UI for my-project: http://127.0.0.1:8790/?token=Ux3kQ9vN2pLm7RtA5yWc8dEf1HgJ4sZb
+HELIX UI for my-project: http://127.0.0.1:8790/#token=Ux3kQ9vN2pLm7RtA5yWc8dEf1HgJ4sZb
 Read-only. Press Ctrl+C to stop.
 ```
 
@@ -105,8 +105,8 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   how many validation instances it solved (`improved` when scores are not 0 or 1) or regressed against its parent. Then
   its worktree and commit, the files changed and the diff against its parent, or against the seed with the `vs seed`
   switch; the agent's change summary; its time in mutation, gate and validation and what it cost (tokens for Codex);
-  its children with their outcome and score; and, under **Task prompt**, the prompt the mutation agent was given. A
-  rejected candidate also shows why and where it stopped.
+  its children with their outcome and score; and, under **Task prompt**, the prompt the mutation agent was given. An
+  open candidate page updates when the proposal finishes. A rejected candidate also shows why and where it stopped.
 - **Instances** (on the Candidate): every scored instance, in three tabs. **Changed** holds the instances whose score
   differs from the parent's, improved first; the solved and regressed counts open it in that direction. **All** keeps
   the evaluation order and **Lowest** puts the lowest first. Click a row for the evaluator's side information on that
@@ -158,16 +158,18 @@ a new agent's transcript appears then. Runs made with a HELIX older than that li
 sessions are 20 seconds old: parallel agents that start within the same second can then show each other's live transcript until they finish,
 and the panel says "session matched to this agent by start time". After a call ends the dashboard shows the copy HELIX
 keeps in the candidate's worktree; rejected candidates' worktrees are removed, and their transcripts with them. Transcripts are shown for the `codex` and `claude`
-backends; other backends show none.
+backends; other backends show none. A transcript record larger than 1 MiB is skipped so subsequent events can still
+appear.
 
 ## Safety
 
 - The dashboard only reads: it never writes to the project, `.helix/`, worktrees, git refs or Docker volumes, and it
   never reads credential files.
-- Secrets that look like API keys or tokens are masked everywhere they could appear, and environment variables are shown
-  by name only.
-- Every request needs the token from the printed address. A sandboxed agent with `add_host_gateway` can reach ports on
-  the host, and the token keeps it from reading scores or evaluator feedback from the dashboard.
+- The dashboard masks known token formats and secret-like assignments in evaluator commands, transcripts, diffs and
+  feedback. Environment variables in the configuration summary are shown by name only.
+- The page and its static assets are public. All run data requires the token from the printed address. The browser
+  removes the token from the URL and keeps it for the current tab and origin. Data requests, including live updates,
+  send it in an `Authorization: Bearer` header.
 
 ## Limits
 

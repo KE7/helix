@@ -18,6 +18,7 @@ from helix.cli import cli
 from helix.ui import server
 
 TOKEN = "test-token-abc"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
 SNAPSHOT = {"status": {"state": "running"}, "generation": {"current": 1, "max": 3}}
 STATIC = {"project": {"name": "proj"}}
 DETAIL = {"id": "g1-s1", "mean": 0.5}
@@ -114,12 +115,6 @@ def client(fake_modules: None, project: Path, static_dir: Path) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1:8790", follow_redirects=False)
 
 
-def _cookie_name() -> str:
-    import hashlib
-
-    return "helix_ui_" + hashlib.sha256(TOKEN.encode()).hexdigest()[:12]
-
-
 API_ROUTES = [
     "/api/static",
     "/api/run",
@@ -132,7 +127,6 @@ API_ROUTES = [
     "/api/instance/lift__seed101",
     "/api/transcript/g1-s1",
     "/api/events",
-    "/static/app.js",
 ]
 
 
@@ -140,38 +134,37 @@ API_ROUTES = [
 def test_every_route_needs_the_token(client: TestClient, path: str) -> None:
     response = client.get(path)
     assert response.status_code == 401
-    assert client.get(path, params={"token": "wrong"}).status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
 
 
-def test_index_sets_cookie_and_redirects(client: TestClient) -> None:
-    assert client.get("/").status_code == 401
-    assert client.get("/", params={"token": "wrong"}).status_code == 401
-
-    response = client.get("/", params={"token": TOKEN})
-    assert response.status_code == 303
-    assert response.headers["location"] == "/"
-    set_cookie = response.headers["set-cookie"].lower()
-    assert _cookie_name() in set_cookie
-    assert "httponly" in set_cookie and "samesite=strict" in set_cookie
-
-    page = client.get("/")
-    assert page.status_code == 200
-    assert "HELIX" in page.text
-    assert client.get("/api/run").status_code == 200
+def test_public_shell_never_sets_a_dashboard_cookie(client: TestClient) -> None:
+    for url in ("/", f"/?token={TOKEN}", f"/#token={TOKEN}"):
+        page = client.get(url)
+        assert page.status_code == 200 and "HELIX" in page.text
+        assert "set-cookie" not in page.headers and TOKEN not in page.text
     assert client.get("/static/app.js").text == "console.log('ok')"
+    assert client.get("/api/run").status_code == 401
+
+
+def test_api_rejects_tokens_in_urls_and_cookies(client: TestClient) -> None:
+    import hashlib
+
+    old_cookie = "helix_ui_" + hashlib.sha256(TOKEN.encode()).hexdigest()[:12]
+    assert client.get("/api/run", params={"token": TOKEN}).status_code == 401
+    assert client.get("/api/run", headers={"Cookie": f"{old_cookie}={TOKEN}"}).status_code == 401
 
 
 def test_api_routes_with_token(client: TestClient) -> None:
-    params = {"token": TOKEN}
-    run = client.get("/api/run", params=params)
+    run = client.get("/api/run", headers=AUTH)
     assert run.json() == SNAPSHOT
     assert run.headers["cache-control"] == "no-store"
     assert run.headers["x-content-type-options"] == "nosniff"
-    assert client.get("/api/static", params=params).json() == STATIC
-    assert client.get("/api/frontier", params=params).json()["ids"] == ["g1-s1"]
-    assert client.get("/api/candidate/g1-s1", params=params).json() == {**DETAIL, "diff_base": "parent"}
+    assert client.get("/api/static", headers=AUTH).json() == STATIC
+    assert client.get("/api/frontier", headers=AUTH).json()["ids"] == ["g1-s1"]
+    assert client.get("/api/candidate/g1-s1", headers=AUTH).json() == {**DETAIL, "diff_base": "parent"}
     transcript = client.get(
-        "/api/transcript/g1-s1", params={**params, "cursor": "42"}
+        "/api/transcript/g1-s1", headers=AUTH, params={"cursor": "42"}
     ).json()
     assert transcript["cursor"] == 42
 
@@ -180,30 +173,29 @@ def test_run_is_null_without_a_run(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(FakeRunReader, "snapshot", lambda self, now=None: None)
-    response = client.get("/api/run", params={"token": TOKEN})
+    response = client.get("/api/run", headers=AUTH)
     assert response.status_code == 200
     assert response.json() is None
 
 
 @pytest.mark.parametrize("cid", ["g9-s9", "../state", "g1-s1x", "seed"])
 def test_unknown_or_bad_candidate_is_404(client: TestClient, cid: str) -> None:
-    response = client.get(f"/api/candidate/{cid}", params={"token": TOKEN})
+    response = client.get(f"/api/candidate/{cid}", headers=AUTH)
     assert response.status_code == 404
 
 
 def test_transcript_bad_id_and_cursor(client: TestClient) -> None:
-    params = {"token": TOKEN}
-    assert client.get("/api/transcript/nope", params=params).status_code == 404
+    assert client.get("/api/transcript/nope", headers=AUTH).status_code == 404
     for cursor in ("-1", "abc"):
         response = client.get(
-            "/api/transcript/g1-s1", params={**params, "cursor": cursor}
+            "/api/transcript/g1-s1", headers=AUTH, params={"cursor": cursor}
         )
         assert response.status_code == 400
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
 def test_non_get_is_405(client: TestClient, method: str) -> None:
-    response = client.request(method, "/api/run", params={"token": TOKEN})
+    response = client.request(method, "/api/run", headers=AUTH)
     assert response.status_code == 405
     assert client.request(method, "/").status_code == 405
 
@@ -212,13 +204,13 @@ def test_non_get_is_405(client: TestClient, method: str) -> None:
     "host", ["evil.example:8790", "attacker.test", "127.0.0.2.nip.io:8790"]
 )
 def test_host_guard_rejects_rebinding(client: TestClient, host: str) -> None:
-    response = client.get("/api/run", params={"token": TOKEN}, headers={"host": host})
+    response = client.get("/api/run", headers={**AUTH, "host": host})
     assert response.status_code == 400
 
 
 @pytest.mark.parametrize("host", ["localhost:8790", "127.0.0.1", "[::1]:8790"])
 def test_host_guard_accepts_loopback_names(client: TestClient, host: str) -> None:
-    response = client.get("/api/run", params={"token": TOKEN}, headers={"host": host})
+    response = client.get("/api/run", headers={**AUTH, "host": host})
     assert response.status_code == 200
 
 
@@ -227,9 +219,9 @@ def test_host_guard_uses_bound_host(
 ) -> None:
     app = server.create_app(project, project / "helix.toml", TOKEN, host="10.0.0.5")
     client = TestClient(app, base_url="http://10.0.0.5:8790")
-    assert client.get("/api/run", params={"token": TOKEN}).status_code == 200
+    assert client.get("/api/run", headers=AUTH).status_code == 200
     response = client.get(
-        "/api/run", params={"token": TOKEN}, headers={"host": "localhost:8790"}
+        "/api/run", headers={**AUTH, "host": "localhost:8790"}
     )
     assert response.status_code == 400
 
@@ -272,8 +264,13 @@ def test_run_signature_tracks_run_files(tmp_path: Path) -> None:
     assert server.run_signature(helix_dir) != first
 
 
-def test_events_route_rejects_without_token(client: TestClient) -> None:
-    assert client.get("/api/events").status_code == 401
+def test_events_require_bearer_authentication(client: TestClient) -> None:
+    assert client.get("/api/events", params={"token": TOKEN}).status_code == 401
+    client.app.state.stopping.set()
+    response = client.get("/api/events", headers=AUTH)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.text.startswith("event: static\ndata: ")
 
 
 def test_bind_socket_skips_a_taken_port() -> None:
@@ -292,9 +289,9 @@ def test_bind_socket_skips_a_taken_port() -> None:
 
 
 def test_launch_url() -> None:
-    assert server.launch_url("127.0.0.1", 8790, "t") == "http://127.0.0.1:8790/?token=t"
-    assert server.launch_url("0.0.0.0", 8791, "t") == "http://127.0.0.1:8791/?token=t"
-    assert server.launch_url("::1", 8790, "t") == "http://[::1]:8790/?token=t"
+    assert server.launch_url("127.0.0.1", 8790, "t") == "http://127.0.0.1:8790/#token=t"
+    assert server.launch_url("0.0.0.0", 8791, "t") == "http://127.0.0.1:8791/#token=t"
+    assert server.launch_url("::1", 8790, "t") == "http://[::1]:8790/#token=t"
 
 
 def test_serve_prints_url_and_warns_off_loopback(
@@ -323,9 +320,9 @@ def test_serve_prints_url_and_warns_off_loopback(
     server.serve(project, project / "helix.toml", "0.0.0.0", 8790, open_browser=True)
 
     out = capsys.readouterr().out
-    assert "http://127.0.0.1:8791/?token=" in out
+    assert "http://127.0.0.1:8791/#token=" in out
     assert "not loopback" in out
-    assert calls["opened"].startswith("http://127.0.0.1:8791/?token=")
+    assert calls["opened"].startswith("http://127.0.0.1:8791/#token=")
     assert calls["log_level"] == "warning"
     assert len(calls["sockets"]) == 1
 
@@ -400,32 +397,54 @@ def test_event_stream_ends_when_stopping() -> None:
 
 
 def test_lineage_proposals_and_instance_routes(client: TestClient) -> None:
-    params = {"token": TOKEN}
-    assert client.get("/api/lineage", params=params).json() == LINEAGE
-    assert client.get("/api/proposals", params=params).json() == PROPOSALS
-    history = client.get("/api/instance/lift__seed101", params=params)
+    assert client.get("/api/lineage", headers=AUTH).json() == LINEAGE
+    assert client.get("/api/proposals", headers=AUTH).json() == PROPOSALS
+    history = client.get("/api/instance/lift__seed101", headers=AUTH)
     assert history.status_code == 200 and history.json()["instance"] == "lift__seed101"
     # An id with "/" and a space, URL-encoded by the page.
-    assert client.get("/api/instance/tasks%2Fa%20b", params=params).json()["instance"] == "tasks/a b"
+    assert client.get("/api/instance/tasks%2Fa%20b", headers=AUTH).json()["instance"] == "tasks/a b"
     for iid in ("nope", "..%2Fstate.json", "lift__seed101%00"):
-        assert client.get(f"/api/instance/{iid}", params=params).status_code == 404
+        assert client.get(f"/api/instance/{iid}", headers=AUTH).status_code == 404
 
 
 def test_candidate_instance_route(client: TestClient) -> None:
-    params = {"token": TOKEN}
-    got = client.get("/api/candidate/g1-s1/instance/tasks%2Fa%20b", params=params)
+    got = client.get("/api/candidate/g1-s1/instance/tasks%2Fa%20b", headers=AUTH)
     assert got.status_code == 200 and got.json()["instance"] == "tasks/a b"
     for path in ("g1-s1/instance/nope", "g1-s1/instance/..%2Fstate.json", "g9-s9/instance/lift__seed101",
                  "bad/instance/lift__seed101"):
-        assert client.get(f"/api/candidate/{path}", params=params).status_code == 404
+        assert client.get(f"/api/candidate/{path}", headers=AUTH).status_code == 404
 
 
 def test_candidate_vs_query(client: TestClient) -> None:
-    params = {"token": TOKEN}
-    assert client.get("/api/candidate/g1-s1", params={**params, "vs": "seed"}).json()["diff_base"] == "seed"
-    assert client.get("/api/candidate/g1-s1", params={**params, "vs": "parent"}).json()["diff_base"] == "parent"
+    assert client.get("/api/candidate/g1-s1", headers=AUTH, params={"vs": "seed"}).json()["diff_base"] == "seed"
+    assert client.get("/api/candidate/g1-s1", headers=AUTH, params={"vs": "parent"}).json()["diff_base"] == "parent"
     for vs in ("", "SEED", "g0-s0", "../x"):
-        assert client.get("/api/candidate/g1-s1", params={**params, "vs": vs}).status_code == 400
+        assert client.get("/api/candidate/g1-s1", headers=AUTH, params={"vs": vs}).status_code == 400
+
+
+def test_static_redacts_evaluator_commands(project: Path) -> None:
+    from helix.ui.redact import MASK
+
+    config = project / "helix.toml"
+    config.write_text(
+        'objective = "test"\n'
+        '[evaluator]\ncommand = "echo DEMO_TOKEN=assignment-fixture-value fixed-env-fixture"\n'
+        '[env]\nENDPOINT = "fixed-env-fixture"\n'
+    )
+    client = TestClient(server.create_app(project, config, TOKEN), base_url="http://127.0.0.1:8790")
+    response = client.get("/api/static", headers=AUTH)
+    assert response.status_code == 200
+    assert "assignment-fixture-value" not in response.text
+    assert "fixed-env-fixture" not in response.text
+    payload = response.json()
+    command = f"echo DEMO_TOKEN={MASK} {MASK}"
+    assert payload["config"]["evaluator"]["command"] == command
+    assert dict(payload["repro"])["evaluator"] == command
+
+    client.app.state.stopping.set()
+    events = client.get("/api/events", headers=AUTH)
+    assert "assignment-fixture-value" not in events.text
+    assert "fixed-env-fixture" not in events.text
 
 
 def test_new_routes_with_the_real_readers(project: Path) -> None:
@@ -445,25 +464,24 @@ def test_new_routes_with_the_real_readers(project: Path) -> None:
                               config_hash="x"), project)
     app = server.create_app(project, project / "helix.toml", TOKEN)
     client = TestClient(app, base_url="http://127.0.0.1:8790")
-    params = {"token": TOKEN}
 
     for path in ("/api/lineage", "/api/proposals", "/api/instance/lift__1"):
         assert client.get(path).status_code == 401
-    lineage = client.get("/api/lineage", params=params).json()
+    lineage = client.get("/api/lineage", headers=AUTH).json()
     assert [(n["id"], n["best_path"]) for n in lineage["nodes"]] == [("g0-s0", True)]
-    proposals = client.get("/api/proposals", params=params).json()
+    proposals = client.get("/api/proposals", headers=AUTH).json()
     assert [(r["id"], r["outcome"]) for r in proposals["rows"]] == [("g0-s0", "frontier")]
-    history = client.get("/api/instance/lift__1", params=params).json()
+    history = client.get("/api/instance/lift__1", headers=AUTH).json()
     assert history == {"instance": "lift__1", "points": [{"id": "g0-s0", "generation": 0, "score": 1.0}],
                        "best": 1.0, "holders": ["g0-s0"]}
-    assert client.get("/api/instance/train__9", params=params).status_code == 404
-    detail = client.get("/api/candidate/g0-s0", params={**params, "vs": "seed"}).json()
+    assert client.get("/api/instance/train__9", headers=AUTH).status_code == 404
+    detail = client.get("/api/candidate/g0-s0", headers=AUTH, params={"vs": "seed"}).json()
     assert detail["diff_base"] == "seed" and detail["children"] == [] and detail["prompt"] is None
-    assert client.get("/api/candidate/g0-s0", params={**params, "vs": "x"}).status_code == 400
+    assert client.get("/api/candidate/g0-s0", headers=AUTH, params={"vs": "x"}).status_code == 400
     assert client.get("/api/candidate/g0-s0/instance/lift__1").status_code == 401
-    one = client.get("/api/candidate/g0-s0/instance/lift__1", params=params).json()
+    one = client.get("/api/candidate/g0-s0/instance/lift__1", headers=AUTH).json()
     assert one == {"instance": "lift__1", "basis": "val", "score": 1.0, "side_info": None, "parent": None}
-    assert client.get("/api/candidate/g0-s0/instance/train__9", params=params).status_code == 404
+    assert client.get("/api/candidate/g0-s0/instance/train__9", headers=AUTH).status_code == 404
 
 
 def test_usage_reaches_run_proposals_and_candidate(project: Path) -> None:
@@ -485,13 +503,12 @@ def test_usage_reaches_run_proposals_and_candidate(project: Path) -> None:
              "run_id": "r1", "generation": 0, "wall_time": 1.0, "thread_id": 1}
     (helix / "timing.jsonl").write_text(json.dumps(usage) + "\n")
     client = TestClient(server.create_app(project, project / "helix.toml", TOKEN), base_url="http://127.0.0.1:8790")
-    params = {"token": TOKEN}
     expected = {"cost_usd": 0.2, "input_tokens": 30, "output_tokens": 3, "cached_input_tokens": 0}
 
-    spend = client.get("/api/run", params=params).json()["spend"]
+    spend = client.get("/api/run", headers=AUTH).json()["spend"]
     assert spend["per_record"] is True and spend["by_generation"] == [{"generation": 0, **expected}]
     assert spend["by_outcome"]["accepted"] == expected
-    row = client.get("/api/proposals", params=params).json()["rows"][0]
+    row = client.get("/api/proposals", headers=AUTH).json()["rows"][0]
     assert row["id"] == "g0-s0" and row["usage"] == expected
-    detail = client.get("/api/candidate/g0-s0", params=params).json()
+    detail = client.get("/api/candidate/g0-s0", headers=AUTH).json()
     assert (detail["usage"], detail["usage_source"]) == (expected, "timing")

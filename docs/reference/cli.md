@@ -28,6 +28,9 @@
 --no-browser      Print the address without opening a browser
 ```
 
+Open the printed address with its `#token=…` fragment to authorize the browser tab. API clients send the token in
+the `Authorization: Bearer` header.
+
 ## `helix evolve` Options
 
 ```

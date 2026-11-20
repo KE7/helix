@@ -8,7 +8,7 @@ Follow [CONTRIBUTING.md](CONTRIBUTING.md). Its rules apply to humans and agents 
 - **Before opening a PR, run CI locally and review your own diff** (rule 10): the rule 14 commands, then `/code-review`, `/review` or the review prompt in rule 10, plus a check for docs, tests or changelog entries that should have changed but didn't. Fix only what matters in real use (below), with the smallest change, and say in the PR what the review found.
 - **Fix only review findings that matter in real use** (rule 10): a bug a typical run hits, a leak, or wasted money in a typical setup. Drop edge cases nobody runs into.
 - **Keep the evaluator protected.** Nothing may leak scoring code, held-out ids or answers to the mutation agent.
-- **Say where a change follows GEPA and where it departs**, citing the GEPA symbol or the reason.
+- **For changes to the core search algorithm** (selection, acceptance, minibatching, budgets, stopping), **say where HELIX follows GEPA and where it departs**, citing the GEPA symbol or the reason.
 - **Update the docs page and `CHANGELOG.md` `[Unreleased]`** with any user-facing change.
 
 Working here:
