@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HELIX leaves `.gitignore` untouched when excluding invocation artifacts, so
+  protecting it no longer triggers false tamper rejections. Candidate commits
+  and cache keys exclude reserved artifacts even with a `.gitignore` allowlist.
+  On resume, HELIX removes inherited tracked artifacts from the agent workspace
+  before snapshotting and omits their contents from summary and merge diffs.
+
 - `examples/web_researcher`: when `solve()` raises, the question's feedback now
   says so under `error`. Before, a failed model call (a missing key, or one
   with no credit) was recorded only as an empty answer, so a run could stall

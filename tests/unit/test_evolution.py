@@ -1555,8 +1555,9 @@ class TestMergeBehavior:
         assert _candidate_content_key(merged, hidden) == _candidate_content_key(
             parent, hidden
         )
-        # A real edit still counts.
-        (Path(merged.worktree_path) / "solve.py").write_text("ANSWER = 42\n")
+        # A real edit still counts. Change the size too, so a fast rewrite
+        # cannot reuse Git's cached stat on filesystems with coarse timestamps.
+        (Path(merged.worktree_path) / "solve.py").write_text("ANSWER = 420\n")
         assert _candidate_content_key(merged, hidden) != _candidate_content_key(
             parent, hidden
         )
