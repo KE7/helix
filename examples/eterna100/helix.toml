@@ -1,0 +1,56 @@
+[project]
+objective = """Maximize the number of Eterna100-V2 RNA design puzzles that design() in \
+designer.py solves: for a target secondary structure, return an RNA sequence whose \
+minimum-free-energy structure under ViennaRNA 2 is exactly that target."""
+
+[evaluator]
+# ViennaRNA 2.8.0 folds all 99 published Eterna100-V2 sample solutions to
+# their targets, as 2.1.9 and 2.6.4 do. evaluate.py imports helix.timed,
+# added in helix-evo 0.3.0.
+command = "uv run --no-project --python 3.12 --with ViennaRNA==2.8.0 --with 'helix-evo>=0.3.0' python evaluate.py"
+# A candidate that modifies a protected file is rejected.
+protected_files = ["evaluate.py", "train", "val", "test"]
+
+[dataset]
+# 20 training and 30 validation puzzles; test/ holds 50 more that no run
+# scores. See README.md.
+train_size = 20
+val_size = 30
+
+[evolution]
+max_generations = 12
+num_parallel_proposals = 6
+merge_enabled = true
+
+[agent]
+backend = "codex"
+model = "gpt-6-luna"
+web_access = false
+background = """
+Task: designer.py defines design(target, budget_s, seed) -> str. target is an
+RNA secondary structure in dot-bracket notation ("(" pairs with ")", "." is
+unpaired), 12 to 400 characters. Return a sequence over A, C, G, U of the same
+length. A puzzle is solved when ViennaRNA's minimum-free-energy structure of
+that sequence is exactly the target: RNA.fold(sequence)[0] == target, with
+ViennaRNA 2.8.0 defaults (37 C, Turner 2004, dangles=2). The puzzles are the
+Eterna100-V2 benchmark.
+
+Evaluation: each puzzle runs design() in a fresh Python 3.12 process with
+budget_s = 8 and seed = 0, and kills it after 12 seconds. It may import RNA
+(ViennaRNA 2.8.0) and the standard library. Each puzzle scores 1 when solved,
+else 0, and its feedback gives the folded structure and where it differs from
+the target. train/puzzles.tsv has the training puzzles; test your designer on
+them with: uv run --python 3.12 --with ViennaRNA==2.8.0 python <your script>
+
+Rules: designs must be computed. A repository file that stores an RNA sequence
+of 40 or more letters makes every puzzle score 0, and solutions must not be
+fetched from the network.
+
+Change designer.py and add new modules as needed.
+"""
+
+[sandbox]
+# Mutation agents run in Docker workspace copies that leave out the evaluator
+# and the validation and test puzzles. Evaluation runs on the host.
+enabled = true
+omit_from_agent = ["evaluate.py", "val", "test"]
