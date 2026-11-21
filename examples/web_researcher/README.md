@@ -88,7 +88,9 @@ The seed agent calls the Anthropic API, so set `ANTHROPIC_API_KEY`. HELIX scrubs
 the environment of evaluator and agent subprocesses, and `helix.toml` lists
 `ANTHROPIC_API_KEY` in `passthrough_env` so the evaluator receives it. HELIX
 also passes `ANTHROPIC_API_KEY` to the `claude` mutation backend, so mutation
-sessions authenticate with this API key.
+sessions authenticate with this API key. The key needs credit: when `solve()`
+raises, for example because the key is missing or out of credit, the question
+scores 0 and its feedback carries the exception under `error`.
 
 Mutation agents run in the Docker sandbox. Install and start Docker, then log
 in to the backend's sandbox auth volume once:

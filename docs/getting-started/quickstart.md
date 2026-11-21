@@ -136,4 +136,7 @@ helix best --export ./best-solution
 
 # Every candidate in order: parent, outcome, score, files and what changed
 helix log
+
+# A live dashboard of the run in the browser, during or after it
+helix ui
 ```

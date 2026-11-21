@@ -128,7 +128,8 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
   `seconds` and `max_seconds`.
 - Each candidate gets one `decision` record. A candidate with none was still
   undecided when the run stopped, and a `start` with no `end` was in flight
-  when the process died.
+  when the process died. A proposal rejected for changing protected evaluator
+  files has a `paths` list naming them.
 - Each time the budget is charged for an agent call, a `usage` record holds
   exactly what was charged: the tokens and `cost_usd`, the `candidate` it was
   for, and `source` (`seed_generation`, `mutation`, `mutation_failed`, `merge`

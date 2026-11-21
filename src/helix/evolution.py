@@ -112,6 +112,7 @@ from helix.worktree import (
     create_empty_seed_worktree,
     remove_worktree,
     snapshot_candidate,
+    stage_candidate_files,
 )
 from helix.evaluator_manifest import (  # noqa: E402, F401 (re-exported compatibility symbols)
     # 14 moved symbols — re-exported for backward compatibility and internal use
@@ -664,7 +665,7 @@ def _reconcile_incomplete_attempts_on_resume(
     return True
 
 
-def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
+def _safe_remove_worktree(candidate: Candidate, *, label: str, paths: list[str] | None = None) -> None:
     """Remove ``candidate``'s worktree, warning on failure rather than raising.
 
     The nine rejection / cleanup paths in :func:`_run_evolution_impl` and
@@ -673,9 +674,11 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
     of the same try/except.
 
     Being the one exit for a discarded candidate, it also records that
-    candidate's fate in the timing trace, with *label* as the reason.
+    candidate's fate in the timing trace, with *label* as the reason and
+    *paths* (the protected files a tamper-rejected candidate changed) when
+    given.
     """
-    decision(candidate.id, accepted=False, reason=label)
+    decision(candidate.id, accepted=False, reason=label, paths=paths)
     try:
         remove_worktree(candidate)
     except Exception as exc:
@@ -685,7 +688,12 @@ def _safe_remove_worktree(candidate: Candidate, *, label: str) -> None:
 
 
 def _discard_rejected(
-    candidate: Candidate, *, label: str, retain: bool, commit: bool = False
+    candidate: Candidate,
+    *,
+    label: str,
+    retain: bool,
+    commit: bool = False,
+    paths: list[str] | None = None,
 ) -> None:
     """Remove a rejected candidate, or keep it when *retain* is set.
 
@@ -695,12 +703,13 @@ def _discard_rejected(
     written the candidate's ``attempts/`` record with ``retained=True``, which
     tells resume the worktree is finished, not an interrupted attempt.
     *commit* snapshots a candidate rejected before its usual snapshot, so its
-    ref holds what the agent wrote.
+    ref holds what the agent wrote.  *paths* are the protected files a
+    tamper-rejected candidate changed, recorded with the decision either way.
     """
     if not retain:
-        _safe_remove_worktree(candidate, label=label)
+        _safe_remove_worktree(candidate, label=label, paths=paths)
         return
-    decision(candidate.id, accepted=False, reason=label)
+    decision(candidate.id, accepted=False, reason=label, paths=paths)
     if commit:
         try:
             snapshot_candidate(candidate, f"helix: rejected {candidate.id} ({label})")
@@ -969,8 +978,8 @@ def _candidate_content_key(
 ) -> str:
     """Return a stable content key for cache reuse across equivalent candidates.
 
-    The key is the tree ``snapshot_candidate`` would commit: ``git add -A``
-    into a throwaway copy of the worktree's index, then ``git write-tree``.
+    The key is the tree ``snapshot_candidate`` would commit: stage candidate
+    files in a throwaway copy of the worktree's index, then ``git write-tree``.
     It therefore covers uncommitted edits and untracked (non-ignored) files,
     leaves the worktree, its real index and its history untouched, and equals
     ``HEAD^{tree}`` once the candidate is snapshotted.  This matters because
@@ -1004,13 +1013,7 @@ def _candidate_content_key(
             if real_index.exists():
                 shutil.copyfile(real_index, temp_index)
             env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=worktree,
-                env=env,
-                check=True,
-                capture_output=True,
-            )
+            stage_candidate_files(worktree, env=env)
             pathspec = [f":(literal){os.path.normpath(p)}" for p in exclude]
             if pathspec:
                 subprocess.run(
@@ -2740,6 +2743,7 @@ def _run_evolution_impl(
                                 label="tamper-rejected merge candidate",
                                 retain=retain_rejected,
                                 commit=True,
+                                paths=merge_tamper,
                             )
                         elif _candidate_content_key(merged, merge_hidden) in {
                             _candidate_content_key(a, merge_hidden),
@@ -3285,6 +3289,7 @@ def _run_evolution_impl(
                         label="tamper-rejected mutation candidate",
                         retain=retain_rejected,
                         commit=True,
+                        paths=wr.tampered_paths,
                     )
                     return None
 

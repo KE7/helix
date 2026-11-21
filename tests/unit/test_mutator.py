@@ -666,8 +666,7 @@ class TestPerExampleDiagnostics:
 class TestMutationPromptArtifact:
     """``mutate()``'s backend call writes the rendered prompt to
     ``<worktree>/.agent_task_prompt.md`` (or reserved fallback)
-    and adds the artifact + ``helix_batch.json`` to the worktree's
-    ``.gitignore`` so neither leaks into the candidate git tree.  That the
+    and excludes invocation artifacts via shared ``info/exclude``.  That the
     file exists when the backend starts is pinned for every call site by
     ``test_backend_argv_names_a_prompt_file_that_exists``."""
 
@@ -705,45 +704,6 @@ class TestMutationPromptArtifact:
         assert config.objective in content
         assert "Task instructions:" in content
 
-    def test_gitignore_excludes_helix_artifacts(self, tmp_path: Path, mocker):
-        """``.gitignore`` in the worktree gains entries for the prompt
-        file AND ``helix_batch.json`` so neither file enters the
-        candidate diff on the next generation."""
-        parent, er, config, wt = self._build(tmp_path, mocker)
-        mutate(parent, er, "g1-s0", config, tmp_path)
-
-        gi = (wt / ".gitignore").read_text()
-        assert ".agent_task_prompt.md" in gi
-        assert ".agent_internal/" in gi
-        assert "helix_batch.json" in gi
-
-    def test_gitignore_append_is_idempotent(self, tmp_path: Path, mocker):
-        """A pre-existing ``.gitignore`` with HELIX patterns already
-        present must not grow duplicate entries on subsequent mutate()
-        calls — otherwise long runs balloon the gitignore."""
-        parent, er, config, wt = self._build(tmp_path, mocker)
-        # Seed a gitignore with the patterns already present + other lines.
-        (wt / ".gitignore").write_text(
-            "*.pyc\n"
-            "# HELIX per-invocation artifacts (never commit to candidate tree)\n"
-            ".agent_task_prompt.md\n"
-            ".agent_internal/\n"
-            "helix_batch.json\n"
-        )
-        mutate(parent, er, "g1-s0", config, tmp_path)
-
-        gi = (wt / ".gitignore").read_text()
-        assert gi.count(".agent_task_prompt.md") == 1
-        assert gi.count(".agent_internal/") == 1
-        assert gi.count("helix_batch.json") == 1
-        assert "*.pyc" in gi  # existing content preserved
-
-    def test_gitignore_created_when_absent(self, tmp_path: Path, mocker):
-        parent, er, config, wt = self._build(tmp_path, mocker)
-        # Ensure no pre-existing gitignore.
-        assert not (wt / ".gitignore").exists()
-        mutate(parent, er, "g1-s0", config, tmp_path)
-        assert (wt / ".gitignore").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -2171,9 +2131,10 @@ class TestMutateGeneratesChangeSummary:
             _ignore_helix_artifacts,
         )
 
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
         _ignore_helix_artifacts(tmp_path)
 
-        text = (tmp_path / ".gitignore").read_text()
+        text = (tmp_path / ".git/info/exclude").read_text()
         assert SUMMARY_ARTIFACT_NAME in text
         assert SUMMARY_PROMPT_ARTIFACT_NAME in text
 
@@ -2763,25 +2724,13 @@ class TestOpenCodeSubprocessIsolation:
                 f"XDG_DATA_HOME must not be injected for {backend} backend"
             )
 
-    def test_opencode_isolation_dir_gitignored(self, tmp_path: Path, mocker):
-        """The per-candidate opencode state directory is added to .gitignore."""
-        mock_run = mocker.patch("helix.mutator.subprocess.run")
-        mock_run.return_value = MagicMock(
-            stdout='{"type":"result","sessionID":"ses_abc"}\n',
-            stderr="",
-            returncode=0,
-        )
+    def test_opencode_isolation_dir_gitignored(self, tmp_path: Path):
+        """The per-candidate state directory is excluded via Git metadata."""
+        from helix.mutator import _ignore_helix_artifacts
 
-        invoke_claude_code(
-            str(tmp_path), "prompt", AgentConfig(backend="opencode")
-        )
-
-        gitignore_path = tmp_path / ".gitignore"
-        assert gitignore_path.exists(), ".gitignore must be created in the worktree"
-        gitignore_text = gitignore_path.read_text()
-        assert ".helix_opencode_state/" in gitignore_text, (
-            ".helix_opencode_state/ must be gitignored to keep it out of candidate history"
-        )
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        _ignore_helix_artifacts(tmp_path)
+        assert ".helix_opencode_state/" in (tmp_path / ".git/info/exclude").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -3338,11 +3287,11 @@ class TestToolCountsFromNativeTranscript:
 
 
 # ---------------------------------------------------------------------------
-# .gitignore handling never writes through a symlink that leaves the worktree
+# Artifact exclusion leaves .gitignore symlinks and their targets untouched
 # ---------------------------------------------------------------------------
 
 
-def test_ignore_helix_artifacts_replaces_a_symlink_to_a_host_file(tmp_path: Path) -> None:
+def test_ignore_helix_artifacts_preserves_a_symlink_to_a_host_file(tmp_path: Path) -> None:
     import os
 
     from helix.mutator import _ignore_helix_artifacts
@@ -3354,17 +3303,17 @@ def test_ignore_helix_artifacts_replaces_a_symlink_to_a_host_file(tmp_path: Path
     worktree = tmp_path / "wt"
     worktree.mkdir()
     os.symlink(str(victim), worktree / ".gitignore")
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
 
     _ignore_helix_artifacts(worktree)
 
     assert victim.read_text() == "do not touch\n"
     gitignore = worktree / ".gitignore"
-    assert not gitignore.is_symlink()
-    text = gitignore.read_text()
-    assert "helix_batch.json" in text and "do not touch" not in text
+    assert gitignore.is_symlink()
+    assert "helix_batch.json" in (worktree / ".git/info/exclude").read_text()
 
 
-def test_ignore_helix_artifacts_writes_through_an_in_tree_link(tmp_path: Path) -> None:
+def test_ignore_helix_artifacts_preserves_an_in_tree_link(tmp_path: Path) -> None:
     import os
 
     from helix.mutator import _ignore_helix_artifacts
@@ -3373,13 +3322,15 @@ def test_ignore_helix_artifacts_writes_through_an_in_tree_link(tmp_path: Path) -
     worktree.mkdir()
     (worktree / "ignore_rules").write_text("__pycache__/\n")
     os.symlink("ignore_rules", worktree / ".gitignore")
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
 
     _ignore_helix_artifacts(worktree)
 
-    # The tracked link stays a link; its in-tree target gains the patterns.
+    # Neither the link nor its target is HELIX metadata.
     assert (worktree / ".gitignore").is_symlink()
     rules = (worktree / "ignore_rules").read_text()
-    assert rules.startswith("__pycache__/\n") and "helix_batch.json" in rules
+    assert rules == "__pycache__/\n"
+    assert "helix_batch.json" in (worktree / ".git/info/exclude").read_text()
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3410 768" role="img" aria-label="HELIX">
+<title>HELIX</title>
+<path transform="translate(40 728) scale(1 -1)" d="M538 0V261H295V0H74V688H295V437H538V688H759V0Z" fill="#e6edf3"/>
+<path transform="translate(863 728) scale(1 -1)" d="M74 688H669V523H295V428H615V270H295V165H676V0H74Z" fill="#e6edf3"/>
+<path transform="translate(1575 728) scale(1 -1)" d="M74 688H295V176H648V0H74Z" fill="#e6edf3"/>
+<path transform="translate(2232 728) scale(1 -1)" d="M84 0V688H305V0Z" fill="#e6edf3"/>
+<path transform="translate(2891.38 183.48) scale(0.2123 -0.2123)" d="M233 260 592 129V-13L67 189V332L592 535V392Z" fill="#a982e8"/>
+<path transform="translate(3023.54 183.48) scale(0.2123 -0.2123)" d="M593 189 68 -13V129L427 260L68 392V535L593 332Z" fill="#a982e8"/>
+<path transform="translate(2949.55 672.45) scale(0.1814 -0.1814)" d="M273 598 263 397Q258 294 162 294V285Q258 285 263 182L273 -20Q275 -62 349 -62V-160H258Q201 -160 159.0 -131.0Q117 -102 117 -48V195Q117 223 92.0 236.5Q67 250 30 250V329Q64 329 90.5 343.5Q117 358 117 386V625Q117 679 159.0 708.0Q201 737 258 737H349V639Q275 639 273 598Z" fill="#a982e8"/>
+<path transform="translate(3034.89 672.45) scale(0.1814 -0.1814)" d="M272 625V386Q272 358 298.5 343.5Q325 329 359 329V250Q322 250 297.0 236.5Q272 223 272 195V-48Q272 -102 230.0 -131.0Q188 -160 131 -160H40V-62Q114 -62 116 -20L126 182Q131 285 227 285V294Q131 294 126 397L116 598Q114 639 40 639V737H131Q188 737 230.0 708.0Q272 679 272 625Z" fill="#a982e8"/>
+<mask id="mwdark" maskUnits="userSpaceOnUse"><rect x="2540.52" y="-104.47999999999999" width="973.96" height="976.96" fill="#fff"/><path d="M3297.8 40.0 C3297.8 418.4 2757.2 349.6 2757.2 728.0" stroke="#000" stroke-width="236.9" fill="none"/></mask>
+<path d="M2757.2 40.0 C2757.2 418.4 3297.8 349.6 3297.8 728.0" stroke="#3fc1da" stroke-width="144.5" fill="none" mask="url(#mwdark)"/>
+<path d="M3297.8 40.0 C3297.8 418.4 2757.2 349.6 2757.2 728.0" stroke="#e25ad8" stroke-width="144.5" fill="none"/>
+</svg>

@@ -74,6 +74,7 @@ nav:
       - Datasets and evaluator integrity: guides/datasets.md
       - Parallelism and resume: guides/parallelism.md
       - Timing trace: guides/timing.md
+      - Live dashboard: guides/ui.md
   - Reference:
       - CLI: reference/cli.md
       - Architecture: reference/architecture.md

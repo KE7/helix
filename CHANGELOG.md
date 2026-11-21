@@ -9,16 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `helix ui` opens a read-only live dashboard of a project in the browser: run
+  progress, the frontier, the lineage of every proposal (with a minimap for
+  long runs), the path from the seed to the best candidate step by step, a
+  table of all proposals with outcome filters, every candidate with its diff (against its
+  parent or the seed), task prompt, children and per-instance scores against
+  its parent, the current generation with the agent's live transcript (Codex
+  and Claude), run health with cost per generation and the share spent on
+  rejected proposals, and where the agent and evaluator run. Candidate pages
+  update when their proposal finishes. The dashboard never writes to the run.
+  Data requests use a bearer token, evaluator commands are redacted, and live
+  transcripts continue after oversized records. See the
+  [Live dashboard](https://ke7.github.io/helix/guides/ui.html) guide.
 - `.helix/timing.jsonl` now has a `usage` record for every agent charge:
   tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
   `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
   per generation and per proposal is exact, rejected proposals included.
   `helix timing` and the Perfetto export are unchanged.
+- Agents are launched with a line that names their candidate ("Read
+  .agent_task_prompt.md … This is HELIX candidate g3-s12."), so a session file
+  can be tied to its candidate even when parallel sandboxed agents share one
+  login volume. `helix ui` uses it to show each agent's own live transcript.
+- A proposal rejected for changing protected evaluator files now records them:
+  its `decision` record in `.helix/timing.jsonl` has a `paths` list.
 - `examples/eterna100`: HELIX evolves an RNA sequence designer on the
   Eterna100-V2 benchmark. Each puzzle is a target secondary structure; a
   design solves it when its ViennaRNA 2 minimum-free-energy fold matches the
   target. 20 training, 30 validation and 50 held-out puzzles, stratified by how
   many published algorithms solve each one; the agent is Codex.
+
+### Packaging
+
+- New dependencies `starlette` and `uvicorn`, for `helix ui`'s local server.
 
 ### Changed
 
@@ -30,6 +52,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transcript, and a record in `helix attempts`. A run that already set it
   keeps more worktrees; `helix clean` removes them. Off (the default), nothing
   changes.
+
+### Fixed
+
+- HELIX leaves `.gitignore` untouched when excluding invocation artifacts, so
+  protecting it no longer triggers false tamper rejections. Candidate commits
+  and cache keys exclude reserved artifacts even with a `.gitignore` allowlist.
+  On resume, HELIX removes inherited tracked artifacts from the agent workspace
+  before snapshotting and omits their contents from summary and merge diffs.
+
+- `examples/web_researcher`: when `solve()` raises, the question's feedback now
+  says so under `error`. Before, a failed model call (a missing key, or one
+  with no credit) was recorded only as an empty answer, so a run could stall
+  at the questions only the model can answer with nothing pointing at the key.
 
 ## [0.3.0] - 2026-11-09
 
