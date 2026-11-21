@@ -11,8 +11,10 @@ on par with the published SentRNA (33) and LEARNA (34). See
 An RNA molecule folds into a secondary structure: some bases pair up into
 stems, the rest form loops. Inverse folding asks the reverse question. Given a
 target structure, find a sequence that folds into exactly that structure.
-Designed RNAs such as riboswitches, aptamers and mRNA therapeutics start from
-this step.
+It is NP-hard even in the simplest energy model
+([Bonnet et al.](https://arxiv.org/abs/1710.11513)), so practical designers are heuristic
+searches. Designed RNAs such as riboswitches, aptamers and mRNA therapeutics
+start from this step.
 
 [Eterna100](https://github.com/eternagame/eterna100-benchmarking) is the
 standard benchmark for it: 100 target structures from the
@@ -102,7 +104,7 @@ puzzle; the scores add up to the number solved.
 
 ## Results
 
-One run with Codex and `gpt-6-luna` on a ChatGPT subscription: 12 generations,
+One run with Codex and `gpt-6-luna`: 12 generations,
 6 mutations in each of the first 11 and a merge in the last
 ([write-up](https://ke7.github.io/helix/experiments/eterna100.html)).
 
@@ -117,8 +119,8 @@ reached 21 in generation 11. The evolved designer restarts ViennaRNA's
 with simulated annealing. On the held-out puzzles it solves about as many as
 SentRNA (33) and LEARNA (34) in the benchmark's published runs, where the
 median time per puzzle is 73 minutes for SentRNA and 30 seconds for LEARNA;
-DesiRNA solves 45 and NEMO 44. The run took 49 minutes, and its tokens would
-cost about $0.42 at OpenAI's API list prices.
+DesiRNA solves 45 and NEMO 44. The run took 49 minutes, and its API cost was
+$0.42.
 
 The 8-second limit is `BUDGET_S` in `evaluate.py`. Every held-out failure with
 an error was a timeout on a long target, so a longer limit is the obvious next

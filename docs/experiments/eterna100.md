@@ -5,8 +5,8 @@ model, evolved an RNA sequence designer from 6 to 32–33 of 50 held-out
 Eterna100-V2 puzzles, with 8 seconds per puzzle. That is on par with two
 published learned designers, SentRNA (33) and LEARNA (34). The agents built it
 on ViennaRNA's own `RNAinverse`, which solves 8 of the 50 alone, by restarting
-it and refining its output with simulated annealing. The agent's tokens would
-cost about $0.42 at OpenAI's API list prices.
+it and refining its output with simulated annealing. The run's API cost was
+$0.42.
 
 The 50 held-out puzzles were never shown to the agents. The strongest
 published designers, DesiRNA and NEMO, solve 45 and 44 of them.
@@ -17,8 +17,11 @@ The example is [`examples/eterna100`](https://github.com/KE7/helix/tree/main/exa
 
 An RNA molecule folds into a secondary structure: some bases pair into stems,
 the rest form loops. Inverse folding runs the other way: given a target
-structure, find a sequence that folds into exactly that structure. Designed
-RNAs such as riboswitches, aptamers and mRNA therapeutics start from this step.
+structure, find a sequence that folds into exactly that structure. It is
+NP-hard even in the simplest energy model
+([Bonnet et al.](https://arxiv.org/abs/1710.11513)), so practical designers are heuristic
+searches. Designed RNAs such as riboswitches, aptamers and mRNA therapeutics
+start from this step.
 
 [Eterna100](https://github.com/eternagame/eterna100-benchmarking) is the
 standard benchmark for it: 100 targets from the Eterna citizen-science game,
@@ -41,7 +44,7 @@ their feedback only.
 
 | | |
 |---|---|
-| Agent | Codex CLI 0.167.0, model `gpt-6-luna`, in HELIX's Docker sandbox with web tools off, signed in with a ChatGPT subscription |
+| Agent | Codex CLI 0.167.0, model `gpt-6-luna`, in HELIX's Docker sandbox with web tools off |
 | Search | 12 generations: 6 mutations in each of generations 1–11 and one merge in generation 12; a minibatch of 3 training puzzles |
 | Evaluator | on the host, ViennaRNA 2.8.0, 4 puzzles at a time |
 | Machine | Apple M4 Pro, 14 cores |
@@ -91,9 +94,8 @@ well as strong: 32 of its 44 solves took 8 seconds or less.
 
 ### Cost
 
-The run was on a ChatGPT subscription, so it was not billed per token. At
-OpenAI's [API list prices](https://developers.openai.com/api/docs/pricing) for
-`gpt-6-luna` (checked 2026-11-16), the same tokens cost $0.42.
+At OpenAI's [API prices](https://developers.openai.com/api/docs/pricing) for
+`gpt-6-luna` (checked 2026-11-16), the run cost $0.42.
 
 | | Tokens | Per 1M tokens | Cost |
 |---|---|---|---|
@@ -148,6 +150,6 @@ A single `inverse_fold` call on a long target cannot be interrupted. All 7 of
   search as well as on the held-out puzzles, to see how far more time takes
   the designer the agents evolve.
 - **A stronger model**, such as `gpt-6.1-sol` (`agent.model` in
-  `helix.toml`). Its list prices are 20 times `gpt-6-luna`'s for input and
-  output and 10 times for cached input: this run's tokens would cost about
-  $6.88 with it.
+  `helix.toml`). Its API prices are 20 times `gpt-6-luna`'s for input and
+  output and 10 times for cached input: this run would have cost about $6.88
+  with it.
