@@ -8,7 +8,7 @@ Two settings decide how many proposals a generation makes:
   replacement, so a strong parent can be picked more than once.
 - `evolution.mutations_per_parent` (`N`): how many children each picked parent gets.
 
-A generation makes `P × N` proposals, as in GEPA's `PxNSampling`. Each proposal is gated on its own training
+A generation makes up to `P × N` proposals, as in GEPA's `PxNSampling`. Each proposal is gated on its own training
 minibatch, so siblings are not all judged on the same easy or hard batch.
 
 `evolution.max_workers` caps how many proposals run at once (default: the number of CPUs). Proposals beyond it wait
@@ -37,6 +37,8 @@ can use:
 For example, with `P = 2`, `N = 2`, a minibatch of 10, `proposal_selection = "all_improvements"` and 100 validation
 instances, a generation can use up to 2 × 4 × 10 + 4 × 100 = 480 evaluations. Cached results, failed mutations and
 proposals that fail the gate all use fewer.
+
+One evaluation is one uncached instance. A cached result costs nothing, and a single-task evaluation counts as one.
 
 A merge that passes its check on a sample of validation instances is scored on the full validation set even if that
 goes past the cap, as in GEPA.

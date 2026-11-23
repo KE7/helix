@@ -2,7 +2,7 @@
 
 ## Where instance ids come from
 
-HELIX never loads your data. It hands your evaluator a list of instance ids in `helix_batch.json` and sets
+Your evaluator loads and scores the examples. HELIX hands it a list of instance ids in `helix_batch.json` and sets
 `HELIX_SPLIT` to `train` or `val`; your evaluator maps each id to an example. The ids come from one of three setups:
 
 | Setup | Config | Ids |
@@ -30,7 +30,7 @@ Only named ids have groups. Put one JSON file per instance in a directory, named
 point `seedless.train_path` (and `val_path`) at it; `seedless.enabled` can stay `false`.
 [`examples/maniskill_pick_place`](../experiments/maniskill-pick-place.md) does this with
 `splits/train/pushcube__0.json` and so on. Numbered ids such as `"7"` have no separator, so each is a group of one and
-stratifying does nothing.
+there are no groups to balance.
 
 ## Checking a first part of validation before the rest
 

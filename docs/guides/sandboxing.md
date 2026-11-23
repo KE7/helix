@@ -7,8 +7,9 @@ worktree. The evaluator still runs on your machine, in the candidate's worktree,
 
 ## What the agent's container holds
 
-- `/workspace`: a copy of the candidate, without `helix.toml`, `.env` and `.env.*` files, `.git`, HELIX's own run
-  files, and anything you list in `[sandbox].omit_from_agent`. FIFOs, sockets and device files are skipped (set
+- `/workspace`: a copy of the candidate and the agent's task prompt, without `helix.toml`, `.env` and `.env.*` files,
+  your `.git` (it gets a fresh one), HELIX's own run files, and anything you list in `[sandbox].omit_from_agent`.
+  None of those paths is copied back from the container either. FIFOs, sockets and device files are skipped (set
   `skip_special_files = false` to make them an error instead).
 - `/home/node`: the backend's login volume (see [Logging in](#logging-in)).
 
@@ -40,8 +41,9 @@ How each backend signs in:
 HELIX logs in inside the container instead of copying your machine's login, because desktop logins often live in the
 macOS Keychain or a Linux keyring, which a Linux container cannot use.
 
-If your evaluator calls a service on your machine, Docker Desktop provides `host.docker.internal`. On Linux, set
-`add_host_gateway = true`.
+For an agent or evaluator-runner container to reach a service on your machine, use `host.docker.internal`: Docker
+Desktop provides it, and on Linux you set `add_host_gateway = true`. An evaluator that runs on your machine needs
+neither.
 
 ## Agent timeouts
 
@@ -57,7 +59,7 @@ With `[sandbox].evaluator = true` as well, the evaluator runs in Docker too, and
 
 - The sidecar (`[evaluator.sidecar].image`) is a long-running container that holds your private benchmark data and
   scoring code. HELIX starts it once per `helix evolve`, on a private Docker network that agent containers cannot
-  reach. It does not see the candidate's files.
+  reach (unless you set `sandbox.network = "host"`, which on Linux shares your machine's network with them). It has no copy of the candidate; it sees only what the runner sends it.
 - For each evaluation, HELIX starts a short-lived runner container (`runner_image`) with a copy of the candidate. It
   runs `[evaluator].command`, which calls the sidecar over that network, prints the result and exits. Files the
   runner changes are discarded.

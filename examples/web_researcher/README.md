@@ -16,7 +16,7 @@ The seed agent, `solve()` in `agent.py`, asks Claude Haiku with no web access. I
 data, so its version answers go stale as new releases ship. To do better, a mutation has to make the agent look the
 answer up. The candidate is the whole directory, so the agent may add modules, for example one that fetches and
 retries URLs or one that caches answers, and it can run `agent.py` on a question to check an answer before HELIX
-scores it.
+scores it. With a backend that has web tools, the mutation agent itself can also look things up while it edits.
 
 ## How answers are scored
 

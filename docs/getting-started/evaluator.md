@@ -71,8 +71,8 @@ has everything your evaluator imports.
 
 ## Write feedback the agent can act on
 
-The next mutation reads `side_info` before it sees a score: HELIX puts it in the Diagnostics section of the agent's
-task prompt. A score alone tells the agent only that a case failed. Say why:
+The next mutation reads `side_info`: HELIX puts it in the Diagnostics section of the agent's task prompt, after the
+scores. A score alone tells the agent only that a case failed. Say why:
 
 ```python
 # Not much to act on
@@ -88,8 +88,8 @@ are worked examples.
 To score several objectives, put them in `side_info["scores"]` as named numbers, as above; an `objective`, `hybrid` or
 `cartesian` frontier uses them.
 
-For notes that belong to the whole run rather than one instance, call `from helix import log` and
+For notes about the whole evaluation rather than one instance, call `from helix import log` and
 `log("what happened", key=value)` in your evaluator. They appear as Evaluator Notes in the next task prompt.
 
-The agent never sees the raw `HELIX_RESULT=` line. It sees your evaluator's stdout and stderr only when an
-evaluation fails, or when the evaluator returned no `side_info` and logged no notes.
+The agent never sees the raw `HELIX_RESULT=` line. HELIX saves your evaluator's stdout and stderr with each
+evaluation for debugging; the agent gets them when an evaluation fails (see the contract above).

@@ -47,20 +47,24 @@ GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335
 ![The HELIX search loop](../assets/helix-loop-dark.svg#only-dark)
 
 Before the first generation, HELIX copies your repository into a worktree as the seed and scores it on the
-validation set. Then each generation:
+validation set. Then each generation runs these steps:
 
-1. **Select.** HELIX picks a parent from the Pareto frontier, favouring candidates that are the best on more
-   instances.
+1. **Select.** HELIX picks a parent from the Pareto frontier, by default favouring candidates that are the best on
+   more instances (`evolution.candidate_selection_strategy` offers other rules).
 2. **Mutate.** The agent edits a copy of the parent in its own worktree. Its task prompt holds your objective, the
-   parent's scores and the evaluator's feedback on a training minibatch.
-3. **Gate.** HELIX scores the child on the same minibatch. A child that does not beat its parent there is rejected.
-4. **Validate.** A child that passes is scored on the validation set and joins the frontier if it is the best on at
-   least one instance.
-5. **Merge** (when `evolution.merge_enabled` is on). An agent combines two frontier candidates that do well on
-   different instances. The merge agent sees each parent's diff, without protected files, scores or validation ids. A
-   merge that changes nothing, or fails a check on a sample of validation instances, is rejected. One that passes is
-   scored on the full validation set even if that goes past `max_evaluations`, as in GEPA.
+   parent's scores and the evaluator's feedback on a training minibatch. If the parent already reaches
+   `evolution.perfect_score_threshold` on every instance of the minibatch, HELIX skips the mutation, as GEPA does.
+3. **Gate.** HELIX scores the child on the same minibatch. A child that does not beat its parent there is rejected
+   (`evolution.acceptance_criterion = "improvement_or_equal"` also accepts ties).
+4. **Validate.** Children that pass, or the best of them under `evolution.proposal_selection`, are scored on the
+   validation set and saved. The frontier keeps those that are the best on at least one instance.
+
+With `evolution.merge_enabled` on, some generations try a merge in place of mutation: an agent combines two frontier
+candidates that do well on different instances. The merge agent starts from one parent and sees each parent's diff,
+without protected files, scores or validation ids. A merge identical to either parent, or one that fails a check on a
+sample of validation instances, is rejected. One that passes is scored on the full validation set even if that goes
+past `max_evaluations`, as in GEPA.
 
 HELIX saves its state after each accepted candidate, so `helix resume` continues an interrupted run. Rejected
-candidates' worktrees are removed (`evolution.retain_rejected_worktrees` keeps them), and `helix log` lists every
-proposal with its parent, outcome, score and what the agent changed.
+candidates' worktrees are removed (`evolution.retain_rejected_worktrees` keeps them), and `helix log` lists the
+accepted and rejected candidates with their parent, outcome, score and what the agent changed.

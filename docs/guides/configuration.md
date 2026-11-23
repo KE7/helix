@@ -2,7 +2,7 @@
 
 HELIX reads its settings from `helix.toml` in your project root. For a minimal one, see [Writing an evaluator](../getting-started/evaluator.md).
 
-## Every setting
+## A full helix.toml
 
 Every key below is optional except `objective` and `[evaluator].command`. The values are examples, not necessarily the defaults.
 
@@ -44,7 +44,7 @@ protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutab
 [dataset]
 # Split sizes. HELIX hands the evaluator ids "0".."n-1" in helix_batch.json;
 # the evaluator maps each id to an example. For named ids such as
-# "pushcube__0" (needed by batch_sampler = "stratified"), use
+# "pushcube__0", which batch_sampler = "stratified" groups by, use
 # [seedless].train_path / val_path instead; see the datasets guide.
 # Leave both unset, with no [seedless] paths, to score a single task.
 # train_size = 200
@@ -180,8 +180,8 @@ them.
 If an older run committed copies of these files, HELIX removes them before the
 agent starts, so the agent never sees a stale prompt or batch file. If an
 untracked file of yours has the prompt file's name and different content, HELIX
-writes the prompt to a fallback path; if that name is taken too, the mutation
-fails with `PromptArtifactCollisionError` and both files are left alone. HELIX no longer needs its rules in your `.gitignore`:
+writes the prompt to a fallback path; if that name is taken too, HELIX stops
+with `PromptArtifactCollisionError` and leaves both files alone. HELIX no longer needs its rules in your `.gitignore`:
 you can delete them and resume an affected run with your current configuration.
 
 ## opencode and pi

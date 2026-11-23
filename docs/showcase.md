@@ -36,7 +36,7 @@ HELIX evolves a multi-file `solver/` package that drives a Franka Panda through 
 
 ### Circle packing
 
-HELIX reruns optimize_anything's circle-packing experiment: pack 26 circles in a unit square to maximize the sum of their radii. It keeps GEPA's seed, fitness function and refiner, and changes only the proposer, a coding agent in place of GEPA's reflection LM.
+HELIX reruns optimize_anything's circle-packing experiment: pack 26 circles in a unit square to maximize the sum of their radii. It keeps GEPA's seed, fitness function and refiner, and uses a coding agent where GEPA uses a reflection LM.
 
 [Write-up](experiments/circle-packing.md) · [Example](https://github.com/KE7/helix/tree/main/examples/circle_packing)
 

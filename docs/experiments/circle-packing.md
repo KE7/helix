@@ -1,11 +1,12 @@
 # Circle packing
 
 Pack 26 non-overlapping circles in a unit square so that the sum of their radii is as large as possible. This is
-the experiment behind optimize_anything's published circle-packing result, run by HELIX with one change: the proposer.
-GEPA's reflection LM, GPT-5, proposes new text for the candidate; in HELIX, a coding agent (Claude Haiku 4.5 in
-Claude Code) edits the candidate's files. See [What the comparison can and cannot show](#what-the-comparison-can-and-cannot-show).
+the experiment behind optimize_anything's published circle-packing result, run by HELIX. The proposer is what
+differs: GEPA's reflection LM, GPT-5, proposes new text for the candidate, while HELIX's coding agent edits the
+candidate's files. The example configures Claude Haiku 4.5 in Claude Code; the recorded run used Codex `gpt-6-luna`.
+See [What the comparison can and cannot show](#what-the-comparison-can-and-cannot-show).
 
-Everything else is GEPA's, from
+Everything that decides a score is GEPA's, from
 [gepa-ai/gepa@133d185a `examples/circle_packing`](https://github.com/gepa-ai/gepa/tree/133d185a/examples/circle_packing):
 the seed, the validity rule and scoring, the GPT-5.1 refiner, the state tracker with its caches and warm start, the
 objective and background text, and the budget. The search algorithm is GEPA's, as HELIX implements it.
