@@ -114,6 +114,7 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 {"event": "end", "span": "evaluate", "span_id": "7d44…", …, "duration_seconds": 12.2, "outcome": "ok"}
 {"event": "decision", "candidate": "g3-s9", "accepted": false, "reason": "train-gate-rejected candidate", "generation": 3, …}
 {"event": "usage", "candidate": "g3-s9", "source": "mutation", "input_tokens": 48211, "output_tokens": 3920, "cached_input_tokens": 40960, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "reasoning_tokens": 1536, "cost_usd": 0.0871, "generation": 3, …}
+{"event": "session", "session_id": "019a7c3e-…", "candidate": "g3-s9", "parent_span_id": "5be1…", "generation": 3, …}
 ```
 
 - `generation` and `candidate` say what the work was for. The example is the
@@ -140,6 +141,11 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
   keeps only running totals of the reflection LM's cost and tokens
   (`gepa.lm.TrackingLM`, read by `MaxReflectionCostStopper`) and writes no
   per-call or per-candidate record.
+- A `session` record holds the session id of a `claude` or `codex` agent call
+  (its `parent_span_id` is the `agent` span), which names the CLI's session
+  file. HELIX picks Claude Code's with `--session-id` and reads Codex's from
+  its `thread.started` event; with the Docker sandbox, Codex's appears once
+  Codex prints it. `helix ui` uses it to show each agent's live transcript.
 
 | span | measures | `attrs` |
 | --- | --- | --- |
