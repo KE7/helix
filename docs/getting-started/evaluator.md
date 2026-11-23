@@ -56,56 +56,40 @@ HELIX_SPLIT=train uv run python evaluate.py | grep '^HELIX_RESULT='
 rm helix_batch.json
 ```
 
-## Minimal Example
+## Use your project's environment
+
+`[evaluator].command` runs without a shell, in a scrubbed environment. Point it at the interpreter that has your
+evaluator's dependencies, for example:
 
 ```toml
-objective = "Maximize test pass rate and code coverage"
-
 [evaluator]
-# evaluate.py must print one HELIX_RESULT=... line for HELIX to score it.
 command = "uv run python evaluate.py"
 ```
 
-When your evaluator needs project dependencies, make `evaluator.command` use the
-same environment those dependencies are installed in. Good patterns are
-`uv run python evaluate.py` or a wrapper like `bash run_eval.sh`. Avoid bare
-`python3 evaluate.py` unless that interpreter already has everything your
-evaluator imports.
+or a wrapper script such as `bash run_eval.sh`. A bare `python3 evaluate.py` works only if that interpreter already
+has everything your evaluator imports.
 
-## Score Parser
+## Write feedback the agent can act on
 
-HELIX has one score parser: `helix_result`. Evaluators read the positional ids
-from `helix_batch.json` and emit one `[score, side_info]` pair per id:
+The next mutation reads `side_info` before it sees a score: HELIX puts it in the Diagnostics section of the agent's
+task prompt. A score alone tells the agent only that a case failed. Say why:
 
 ```python
-print("HELIX_RESULT=" + json.dumps([
-    [2.63, {"scores": {"sum_radii": 2.63}, "feedback": "..."}],
-]))
+# Not much to act on
+[0.0, {"scores": {"accuracy": 0.0}}]
+# Something to fix
+[0.0, {"scores": {"accuracy": 0.0}, "feedback": "expected '3.13.2', got '3.12.0': used a cached version list"}]
 ```
 
-For a batch, the payload must have the same length and order as
-`helix_batch.json`. `side_info` is retained for reflection; its optional
-`scores` dictionary supplies named objective axes.
-
-`side_info` — not the score — is what the *next* mutation actually reasons
-from: HELIX renders it into the mutation prompt's Diagnostics section, which
-the agent reads before the number. `{"scores": {"accuracy": 0.0}}` alone
-tells the next mutation only that it failed, not why; `{"scores": {"accuracy":
-0.0}, "feedback": "expected '3.13.2', got '3.12.0' -- used a cached version
-list"}` gives it something to act on. See
-[`examples/web_researcher/evaluate.py`](https://github.com/KE7/helix/blob/main/examples/web_researcher/evaluate.py)
+Put in `feedback` what you would want to know when looking at a bad result. [`examples/web_researcher/evaluate.py`](https://github.com/KE7/helix/blob/main/examples/web_researcher/evaluate.py)
 and [`examples/circle_packing/evaluate.py`](https://github.com/KE7/helix/blob/main/examples/circle_packing/evaluate.py)
-for evaluators that emit this shape.
+are worked examples.
 
-For GEPA-style reflective feedback, prefer structured per-example
-`side_info` with the built-in result parser. For additional
-human-readable notes that are not tied to one example, evaluators may call
-`from helix import log` and then `log("what happened", key=value)`. HELIX
-captures these notes through `HELIX_ASI_LOG`, not stdout, and renders them as
-Evaluator Notes in mutation prompts.
+To score several objectives, put them in `side_info["scores"]` as named numbers, as above; an `objective`, `hybrid` or
+`cartesian` frontier uses them.
 
-Raw `HELIX_RESULT=...` JSON is only consumed by HELIX as a machine protocol and
-is not shown to mutators. Evaluator stdout/stderr remain stored for debugging,
-but successful mutation prompts omit them when structured diagnostics or
-`helix.log()` notes are available; failed evaluations still include stdout and
-stderr as fallback debug context.
+For notes that belong to the whole run rather than one instance, call `from helix import log` and
+`log("what happened", key=value)` in your evaluator. They appear as Evaluator Notes in the next task prompt.
+
+The agent never sees the raw `HELIX_RESULT=` line. It sees your evaluator's stdout and stderr only when an
+evaluation fails, or when the evaluator returned no `side_info` and logged no notes.

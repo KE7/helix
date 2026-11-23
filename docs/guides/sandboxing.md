@@ -1,91 +1,81 @@
 # Docker sandboxing
 
+With `[sandbox].enabled = true`, HELIX runs each mutation and merge agent in a Docker container that holds a copy of
+the candidate, not the candidate itself. When the agent exits, HELIX copies its changes back into the candidate's
+worktree. The evaluator still runs on your machine, in the candidate's worktree, unless you also run it in Docker
+(see [Running the evaluator in Docker](#running-the-evaluator-in-docker)).
 
-When `[sandbox].enabled = true`, HELIX runs mutation and merge agents in
-Docker containers with copied workspaces on the normal agent network. The
-evaluator command still runs on the host in the candidate worktree unless
-sandboxed evaluation is also enabled.
+## What the agent's container holds
 
-When `[sandbox].evaluator = true` is set as well, HELIX requires
-`[evaluator.sidecar]` and starts it once per `helix evolve` on a private
-internal Docker network that agent containers cannot reach.
-Evaluator-runner containers run only during evaluation, join the private
-network, call the sidecar, print evaluator output, and exit.
-The long-lived sidecar does not mount the candidate workspace; the runner must
-stream the needed candidate files/data over RPC, or execute candidate code
-itself and call the sidecar only for private judging/simulation.
-`[evaluator.sidecar].image` is the private service image; `runner_image` is the
-short-lived client image used for `[evaluator].command`. Keep private benchmark
-data in the service image, not in the runner image.
+- `/workspace`: a copy of the candidate, without `helix.toml`, `.env` and `.env.*` files, `.git`, HELIX's own run
+  files, and anything you list in `[sandbox].omit_from_agent`. FIFOs, sockets and device files are skipped (set
+  `skip_special_files = false` to make them an error instead).
+- `/home/node`: the backend's login volume (see [Logging in](#logging-in)).
 
-Agent changes are synced back to the real candidate worktree after the backend
-exits; evaluator-runner file changes are discarded.
-`[sandbox].timeout_seconds` (unset by default: no limit) caps each agent
-container's wall-clock time. An agent call that runs out of it is a failed
-mutation ("timed out after Ns (sandbox.timeout_seconds)"), whatever the
-backend printed before the kill, even a claude max-turns result: the
-container's edits are discarded, the candidate is dropped, and the tokens
-the backend reported before the kill are still charged to the budget. HELIX never mounts the host
-project root, parent directories, or home directory by default.
-`helix.toml`, `.env`, `.env.*`, `.git`, and HELIX runtime artifacts are also
-excluded from sandbox workspace copies/sync-back so agents cannot read sidecar
-configuration or mutate run settings.
-During copy and sync, HELIX skips unsupported special files such as FIFOs,
-sockets, and device nodes by default. Set `skip_special_files = false` only if
-you want unsupported workspace file types to raise instead of being ignored.
+Nothing else from your machine is mounted: not the project root, its parent directories, or your home directory.
+Because every agent works in `/workspace`, nothing it sees names its candidate. Without the sandbox, an agent works in
+`.helix/worktrees/<candidate>` (such as `g3-s12`), so its working directory names the candidate and generation.
 
-Every sandboxed agent works in `/workspace`, so nothing it sees names its
-candidate. Without the sandbox an agent runs in its candidate's worktree,
-`.helix/worktrees/<candidate>` (such as `g3-s12`), and its working directory
-names the candidate and generation.
+## Logging in
 
-Agent containers mount a persistent Docker auth volume at `/home/node`;
-evaluator sidecar and runner containers never receive it. Run
-`helix sandbox login <backend>` once per backend to complete that CLI's normal
-login flow inside the same Linux container environment HELIX will use later:
+Each backend has its own login volume, mounted at `/home/node` in agent containers: `helix-auth-agy`,
+`helix-auth-claude`, `helix-auth-codex`, `helix-auth-cursor`, `helix-auth-opencode` or `helix-auth-pi`. Log in once
+per backend, inside the same Linux container HELIX uses:
 
 ```bash
 helix sandbox login claude
 helix sandbox status claude
 ```
 
-For Claude, HELIX uses `claude setup-token` for sandbox login because that is
-the flow that works cleanly in browserless Docker/SSH-style environments; it
-prints a URL and then accepts the code from the browser in the terminal.
-Codex similarly uses `codex login --device-auth` so the callback does not depend
-on a localhost server inside the container. Antigravity CLI (`agy`) has no
-dedicated login subcommand, so HELIX starts its normal interactive CLI, same
-as OpenCode, which starts the normal TUI so you can choose the provider/model
-and complete provider login in one setup session. pi also signs in only from
-its TUI: `helix sandbox login pi` starts it, you run `/login`, pick a provider,
-and quit.
+How each backend signs in:
 
-The volume names are `helix-auth-agy`, `helix-auth-claude`, `helix-auth-codex`,
-`helix-auth-cursor`, `helix-auth-opencode`, and `helix-auth-pi`.
+| Backend | `helix sandbox login` runs | What you do |
+|---|---|---|
+| `claude` | `claude auth login --claudeai` | Open the printed URL, then paste the code back into the terminal. |
+| `codex` | `codex login --device-auth` | Open the printed URL and enter the code. |
+| `agy`, `opencode` | the CLI itself | Pick a provider and model and sign in. |
+| `pi` | the CLI itself | Run `/login`, pick a provider, then quit. |
+| `cursor` | `cursor-agent login` | Follow its prompts. |
 
-Logging in inside the container avoids copying host credential stores into Docker. On macOS, Claude/Cursor
-browser-login tokens may live in Keychain; on Linux they may live in
-Secret Service/libsecret, GNOME Keyring, KWallet, or another desktop keyring.
-Those stores are session- and OS-specific, so copying their databases into a
-Linux Docker image is not a reliable authentication mechanism. If your
-evaluator uses a local proxy, keep that endpoint in your evaluator code as
-usual. Docker Desktop supports `host.docker.internal`; Linux users can set
+HELIX logs in inside the container instead of copying your machine's login, because desktop logins often live in the
+macOS Keychain or a Linux keyring, which a Linux container cannot use.
+
+If your evaluator calls a service on your machine, Docker Desktop provides `host.docker.internal`. On Linux, set
 `add_host_gateway = true`.
 
-## What persists on the auth volume
+## Agent timeouts
 
-At the start of every generation HELIX deletes the backend CLI's session state
-from the auth volume: the paths listed for that backend in
-`helix.backends.BACKEND_STATE_PATHS` (transcripts, memories, shell snapshots,
-session indexes, prompt history; for OpenCode, only the session rows of
-`opencode.db`, which also holds the account's tokens). Credentials and
-operator configuration are never touched. Each invocation's native transcript
-(every backend) is copied out of the volume when the call ends and kept at
-`.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl` in the
-candidate worktree, where tool-call accounting also reads it.
+`[sandbox].timeout_seconds` caps each agent call's wall-clock time (no limit by default). A call that runs out of time
+is a failed mutation, reported as `timed out after Ns (sandbox.timeout_seconds)`, even if the backend had already
+printed a result such as Claude's max-turns message. The container's edits are discarded and the candidate is
+dropped. Tokens the backend reported before the kill still count against the budget.
 
-The reset is a list of paths, not a fresh home directory, so it does not keep
-candidates apart completely:
+## Running the evaluator in Docker
+
+With `[sandbox].evaluator = true` as well, the evaluator runs in Docker too, and you must configure
+`[evaluator.sidecar]`:
+
+- The sidecar (`[evaluator.sidecar].image`) is a long-running container that holds your private benchmark data and
+  scoring code. HELIX starts it once per `helix evolve`, on a private Docker network that agent containers cannot
+  reach. It does not see the candidate's files.
+- For each evaluation, HELIX starts a short-lived runner container (`runner_image`) with a copy of the candidate. It
+  runs `[evaluator].command`, which calls the sidecar over that network, prints the result and exits. Files the
+  runner changes are discarded.
+
+The runner either sends the sidecar the candidate files or data it needs, or runs the candidate's code itself and asks
+the sidecar only to judge or simulate. Keep private data in the sidecar image, not the runner image. Neither container
+gets the agents' login volume.
+
+## What carries over between agents on the login volume
+
+At the start of every generation, HELIX deletes the backend's session state from the login volume: its transcripts,
+memories, shell snapshots, session indexes and prompt history. For OpenCode it deletes only the session rows of
+`opencode.db`, which also holds the account's tokens. The full list per backend is
+`helix.backends.BACKEND_STATE_PATHS`. Logins and your CLI configuration are never touched. Each call's transcript is
+copied out of the volume when the call ends, to
+`.helix_artifacts/backend_transcripts/<backend>/<session_id>.jsonl` in the candidate's worktree.
+
+The reset deletes a list of paths; it does not give each agent a fresh home directory. So:
 
 - Anything an agent writes under `/home/node` outside those paths stays on the
   volume and reaches later candidates, later generations and later runs that
@@ -108,17 +98,13 @@ it, so the credential has to reach the agent another way: for example
 copying a logged-in volume into it with Docker before the run, or a gateway
 that holds the key, as in `examples/circle_packing_sandbox`.
 
-## Sync-back and symlinks
+## Symlinks the agent creates
 
-The agent's workspace is writable by the agent, so sync-back treats its
-symlinks with suspicion. Symlinks are copied back as symlinks and never
-followed, but after the copy HELIX removes every symlink that is new or
-changed and is absolute or resolves outside the candidate worktree, and logs a
-warning naming it (`dropping symlink ... it points outside the workspace`).
-Symlinks the candidate already had, pointing to the same place, are kept.
-Transcript artifacts are copied only from real directories and regular files,
-and a `.gitignore` symlink that leaves the worktree is replaced by a regular
-file instead of written through.
+When HELIX copies the agent's changes back, it copies symlinks as symlinks and never follows them. It then removes
+any new or changed symlink that is absolute or points outside the candidate's worktree, and logs a warning naming it
+(`dropping symlink ... it points outside the workspace`). Symlinks the candidate already had, pointing to the same
+place, are kept. Transcripts are copied only from real directories and regular files, and a `.gitignore` symlink
+that leads outside the worktree is replaced by a regular file instead of being written through.
 
 ## Resource limits and host names
 
@@ -135,7 +121,7 @@ These `[sandbox]` keys apply to agent and evaluator-runner containers:
 
 The evaluator sidecar gets only `extra_hosts` from this list.
 
-## Images
+## Agent container images
 
 By default HELIX chooses a published backend-specific mutator image from
 `agent.backend`: `ghcr.io/ke7/helix-evo-runner-agy`,

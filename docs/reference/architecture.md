@@ -19,7 +19,7 @@
 └── skips/               # Per-generation perfect-skip event lists (JSON)
 ```
 
-## Module Overview
+## Source modules
 
 | Module | Role |
 |---|---|

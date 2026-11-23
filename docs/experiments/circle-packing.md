@@ -1,20 +1,14 @@
-# 🔵 Circle Packing Experiment
+# Circle packing
 
-> **Objective:** Pack 26 non-overlapping circles in a unit square, maximizing the sum of radii.
+Pack 26 non-overlapping circles in a unit square so that the sum of their radii is as large as possible. This is
+the experiment behind optimize_anything's published circle-packing result, run by HELIX with one change: the proposer.
+GEPA's reflection LM, GPT-5, proposes new text for the candidate; in HELIX, a coding agent (Claude Haiku 4.5 in
+Claude Code) edits the candidate's files. See [What the comparison can and cannot show](#what-the-comparison-can-and-cannot-show).
 
----
-
-## Overview
-
-This is optimize_anything's circle-packing experiment, the one behind its
-published result, run by HELIX. Everything that decides a score comes from
+Everything else is GEPA's, from
 [gepa-ai/gepa@133d185a `examples/circle_packing`](https://github.com/gepa-ai/gepa/tree/133d185a/examples/circle_packing):
-the seed, the candidate interface, the validity rule, the scoring, the GPT-5.1
-refiner, the StateTracker with its caches and warm start, the objective and
-background text, and the budget. The search algorithm is GEPA's, as HELIX
-implements it. Only the proposer is different: HELIX's mutation agent, Claude
-Haiku 4.5 in Claude Code, edits the candidate where GEPA's reflection LM, GPT-5,
-proposes new text (see [Comparison limits](#comparison-limits)).
+the seed, the validity rule and scoring, the GPT-5.1 refiner, the state tracker with its caches and warm start, the
+objective and background text, and the budget. The search algorithm is GEPA's, as HELIX implements it.
 
 The experiment is [`examples/circle_packing/`](https://github.com/KE7/helix/tree/main/examples/circle_packing).
 Its mutation agent runs in HELIX's Docker sandbox with no web access, on the
@@ -29,7 +23,6 @@ call 63). optimize_anything's final 2.6359833626 is higher only through the
 validator's `1e-6` overlap tolerance; with no tolerance, this run's packing is
 the larger. See [Recorded run](#recorded-run).
 
----
 
 ## The experiment
 
@@ -111,7 +104,6 @@ code runs with exactly these packages, as GEPA's did, so the background's
 advice to use optuna, scipy or any other package refers to the same
 environment.
 
----
 
 ## Reference values
 
@@ -140,7 +132,6 @@ uv run --no-project --python 3.11 --with-requirements requirements.txt python3 -
 # True 2.6359815211
 ```
 
----
 
 ## Recorded run
 
@@ -223,7 +214,7 @@ its candidate's result. A generation's time outside its agent call is shown as
 evaluator time, so it includes a few seconds of HELIX's own work. Generation
 36, interrupted when the run was stopped, is left out (9.2 of 9.5 hours shown).
 
-### Checks
+### What the agents did and did not do
 
 - **No web, no files outside the candidate.** The 36 agent sessions made 298
   tool calls, all shell commands: no web search, no MCP calls, no network
@@ -235,7 +226,6 @@ evaluator time, so it includes a few seconds of HELIX's own work. Generation
   `solve.py` as a starting layout, which the loop allows: GEPA hands every
   candidate the same packing as `current_best_solution`.
 
----
 
 ## Agent sandbox
 
@@ -270,7 +260,7 @@ that the web and `api.anthropic.com` are unreachable and that the gateway
 refuses a web-search tool. `up.sh --capture` makes the gateway record and
 refuse every request instead, for trying the setup without a login.
 
-## Running it
+## Running it yourself
 
 ```bash
 helix sandbox login claude
@@ -292,7 +282,7 @@ best packing, the record to compare with optimize_anything's at metric calls
 token usage, never a body or a credential) in the `helix-circle-gateway-logs`
 volume. `examples/circle_packing_sandbox/down.sh` stops the gateway.
 
-### Comparison limits
+## What the comparison can and cannot show
 
 - **The proposer differs**, which is what the experiment compares. GEPA's GPT-5
   reflection LM proposes new text for one component per iteration (round
@@ -310,8 +300,3 @@ volume. `examples/circle_packing_sandbox/down.sh` stops the gateway.
   downloaded a packing would score it; `state_tracker_logs.json` keeps the
   code behind the best packing, so the result can be checked for that.
 
----
-
-<div align="center">
-<sub><a href="../../README.md">← Back to HELIX</a></sub>
-</div>

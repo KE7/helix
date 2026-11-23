@@ -1,10 +1,8 @@
 # Timing trace
 
-
 Every `helix evolve` and `helix resume` appends a timing trace to
-`.helix/timing.jsonl`, the same way it always records its budget; there is
-nothing to turn on. `helix timing` reads it. Here it is on a 10-generation
-run of the circle-packing example with one proposal per generation, so 11
+`.helix/timing.jsonl`; there is nothing to turn on. `helix timing` reads it.
+Here it is on a 10-generation run of the circle-packing example with one proposal per generation, so 11
 candidates counting the seed, and Codex `gpt-6-luna` as the mutation agent:
 
 ```console
@@ -162,8 +160,8 @@ it finished. Each operation is a *span* with a `start` and an `end` record:
 | `save_state` | one write of `state.json` and the eval-cache pickle (grows with the run) | |
 | `sandbox_reset` | the per-generation sandbox state wipe (sandboxed runs only) | `backend` |
 
-Because every record carries `generation` and `candidate`, your own questions
-are flat queries. For example, agent seconds per generation:
+Every record carries `generation` and `candidate`, so one `jq` call can group by
+either. For example, agent seconds per generation:
 
 ```console
 $ jq -s 'map(select(.event == "end" and .span == "agent")) | group_by(.generation) | map({gen: .[0].generation, seconds: (map(.duration_seconds) | add)})' .helix/timing.jsonl

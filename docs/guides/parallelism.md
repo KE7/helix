@@ -1,164 +1,72 @@
 # Parallelism and resume
 
-## Resume and parallel-batch boundaries
+## Running several proposals per generation
 
-Resume is generation-granular. HELIX saves `.helix/state.json` as soon as a
-candidate joins the frontier, so an accepted candidate survives an interrupt
-even when its generation does not finish. On resume, a candidate counts as
-finished only when the saved frontier lists it (accepted) or it has a record
-under `.helix/attempts/` (rejected). Every other mutation or merge left by the
-interrupt, including one whose evaluation reached `.helix/evaluations/` before
-the state save, is removed with its worktree, lineage entry and evaluation,
-and its generation runs again. HELIX does not resume a partially completed
-proposal batch slot-by-slot. A rejected candidate that
-`evolution.retain_rejected_worktrees` kept is finished too: resume leaves its
-worktree and `helix/<id>` ref in place and never evaluates it again. The random number generator is seeded again for
-each invocation, so a resumed search need not take the same path as an
-uninterrupted run.
+Two settings decide how many proposals a generation makes:
 
-`tests/unit/test_resume.py` covers saving state when a run is interrupted,
-resuming when candidate worktrees are missing, and the configuration checks a
-resume performs.
+- `evolution.num_parallel_proposals` (`P`): how many parents HELIX picks from the frontier. It picks them with
+  replacement, so a strong parent can be picked more than once.
+- `evolution.mutations_per_parent` (`N`): how many children each picked parent gets.
 
-Evaluation caps are dispatch boundaries rather than cancellation points. For
-an admitted evaluation phase, `U` is the bound on uncached evaluation units
-that the phase may still consume (`max_in_flight_evaluations`); HELIX records
-and checks the in-flight bound, and the maximum permitted overshoot is
-`max(0, U - 1)`. A merge is not cancelled either: one that passes its
-validation-subsample gate also gets its full validation and joins the
-frontier, as in GEPA, even when those evaluations cross the cap, which is
-checked again at the start of the next iteration.
+A generation makes `P × N` proposals, as in GEPA's `PxNSampling`. Each proposal is gated on its own training
+minibatch, so siblings are not all judged on the same easy or hard batch.
 
-For this bound, `P` = `evolution.num_parallel_proposals` is the number of parents
-sampled per iteration from HELIX's frequency-weighted Pareto list; HELIX samples
-them with replacement, so the same parent can occupy multiple `P` slots in one
-iteration. This parent-major, with-replacement `P*N` layout follows GEPA's
-`PxNSampling(p, n)`: each selected parent is reused across its `N` consecutive
-slots, where `N` = `evolution.mutations_per_parent` is the number of reflective
-mutations proposed per selected parent. Each slot draws its own minibatch, so siblings are gated on
-different examples rather than selecting whichever sibling got an easy batch.
-Thus `P*N` is the number of proposal slots (logical proposals) per
-iteration. For an admitted proposal batch, let `C` be the number
-of proposal contexts
-actually built (`C <= P*N`). Context construction checks the budget before
-each slot in the nested `P`-by-`N` loop, so budget exhaustion can stop it early
-and make `C < P*N`. As a consequence of that replacement policy, the frontier
-does not cap `C` by its number of distinct parents. For context `i`, let `m_i` be
-that slot's sampled minibatch of training example ids; in no-example mode,
-there is no minibatch, so use `|m_i| = 1` by convention and the slot
-contributes `2`. Let `s` be the
-selected capacity: at most `1` (`min(1, C)`) for
-`proposal_selection = "best_improvement"`, `min(proposal_top_k, C)` for
-`"top_k"`, and `C` for `"all_improvements"`. Finally, let
-`V_stage = len(stage_val_example_ids)`
-and let `V_full = len(full_val_example_ids)`, or `1` when there is no
-full-validation set. The exact conservative bound computed by HELIX is:
+`evolution.max_workers` caps how many proposals run at once (default: the number of CPUs). Proposals beyond it wait
+for a free worker. A proposal's worker runs the agent and both minibatch evaluations, so this is also how many
+evaluator processes can run at once.
 
-```
-U = 2 * sum(|m_i| for i in 1..C) + s * (V_stage + V_full)
-```
+`evolution.proposal_selection` decides which of the proposals that pass the gate go on to validation:
+`all_improvements` (the default) sends all of them, `best_improvement` the one that improved most, and `top_k` the
+`proposal_top_k` that improved most. Ties go to the earlier proposal, so the outcome does not depend on which worker
+finished first.
 
-`U` is not bounded by `P*N`: they have different units. `P*N` counts proposal
-slots, while `U` counts example-evaluation units. For the sharper comparison,
-the tempting closed form `2*(P*N)*m + s*(V_stage + V_full)`, where `m` is a common
-minibatch size, is looser than summing admitted slots: budget exhaustion can make
-`C < P*N`, and a slot's minibatch can be short. A batch admitted below the cap
-finishes at most `U` units later, so inflating `U` directly inflates the
-overshoot tolerated by the guard. `enforce_batch_budget_guard` raises when the
-batch's charged evaluations exceed `max_in_flight_evaluations`, so substituting
-`P*N` would break runs rather than merely record a rough estimate. Computing `U`
-from admitted work keeps the assertion strict. In short, `P` and `N` are configured
-widths; `U` is what was actually admitted at this dispatch boundary. Cache hits,
-failed mutations, short final minibatches, and `best_improvement` narrowing `s`
-to `1` all pull real consumption below a `P*N`-derived estimate, while the guard
-exists to catch accounting regressions.
+HELIX validates the chosen candidates one at a time. Raising `max_workers` makes the proposal stage faster, but not
+validation. The [GEPA analysis of parallel proposals](https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/)
+assumes validation runs in parallel too, so its speedups are an upper bound for HELIX.
 
-For example, with `P=2`, `N=2` (`k=4`), minibatch size `10`, `V_stage=20`,
-`V_full=100`, and the default `all_improvements` selection (`s=C=4`):
+## How far a run can go past `max_evaluations`
 
-```
-U = 2*(4*10) + 4*(20+100) = 80 + 480 = 560   versus   P*N = 4
-```
+HELIX checks `evolution.max_evaluations` before it starts a generation's proposals, and does not cancel work already
+started. A generation that starts just under the cap can finish over it, by at most the evaluations that generation
+can use:
 
-The ratio is not fixed: minibatch size, validation-set sizes, and selection mode
-all change it, and none appears in `P*N`. A bound of `4` against `560` real units
-would therefore fire the in-flight guard immediately.
+- two per training instance in each proposal's minibatch (the parent's score and the child's), and
+- for each candidate that goes on to validation, its validation set, plus the `evolution.val_stage_size` first stage if
+  you set one.
 
-When every example-bearing context has the same minibatch size `m`, where `m` is
-the common value of `|m_i|`, the first term is `2*C*m`. The factor `2` covers
-the worker's parent and child training
-minibatch evaluations; in no-example mode each context contributes two
-single-evaluation units. These are example-evaluation units, not proposals:
-`evaluation_budget_units` charges `0` for a cached result, one unit per uncached
-example in a minibatch, and `1` for a no-example evaluation. This is why
-`U` depends on the admitted contexts, sampled example counts, and validation
-sizes rather than only on `P` and `N`. Cache hits and failed mutations reduce
-observed use below the bound.
+For example, with `P = 2`, `N = 2`, a minibatch of 10, `proposal_selection = "all_improvements"` and 100 validation
+instances, a generation can use up to 2 × 4 × 10 + 4 × 100 = 480 evaluations. Cached results, failed mutations and
+proposals that fail the gate all use fewer.
 
-HELIX threads its `P*N` proposal slots through a single pool bounded by
-`evolution.max_workers`, because each HELIX proposal worker synchronously runs
-the evaluator subprocess. HELIX validates each accepted candidate sequentially,
-one at a time in sampled order. When `P*N > evolution.max_workers`, HELIX queues
-excess proposal work. The logical width `P*N` therefore does not guarantee that
-every evaluation runs at once; worker-pool capacity and the sequential apply
-phase still bound HELIX's wall-clock parallelism.
+A merge that passes its check on a sample of validation instances is scored on the full validation set even if that
+goes past the cap, as in GEPA.
 
-## Choosing P versus N
+## Resuming an interrupted run
 
-The [GEPA parallel proposals analysis](https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/)
-provides the underlying scaling model. In HELIX, the practical knobs are
-`evolution.num_parallel_proposals` (`P`), `evolution.mutations_per_parent`
-(`N`), `evolution.max_workers` (the proposal-pool cap), and
-`evolution.max_evaluations` (the evaluation-budget cap). Use their code-defined
-interactions to reason about a workload. Below, `V` is the validation-set size
-and `W` is the worker count:
+HELIX saves `.helix/state.json` as soon as a candidate joins the frontier, so an accepted candidate survives an
+interrupt even if its generation does not finish. `helix resume` keeps:
 
-- `P*N` proposal slots are submitted to one bounded pool. The pool uses
-  `max_workers = min(len(contexts), evolution.max_workers)`, so when `P*N` is
-  larger than `evolution.max_workers`, excess proposal work queues instead of
-  adding proposal-stage parallelism.
-- HELIX's proposal executor has no explicit round barrier: it submits all
-  admitted contexts and workers take queued tasks as they finish. For
-  similar-duration proposal workers, a full HELIX batch therefore behaves
-  roughly like `ceil(k / max_workers)` proposal waves, followed by `j`
-  sequential acceptance/full-validation passes, where `j` is the number of
-  candidates that clear acceptance. HELIX validates each accepted candidate
-  one at a time, so raising `evolution.max_workers` speeds proposal
-  generation but not the `j`-candidate validation cost.
-- The batch bound charges `2 * sum(|m_i|)` for the parent and child training
-  minibatches. With `C` admitted contexts sharing minibatch size `m`, that is
-  approximately `2*C*m`; increasing `P*N` therefore increases `U` and the
-  permitted `max(0, U - 1)` overshoot roughly linearly against the fixed
-  `evolution.max_evaluations` cap.
-- The blog's analytical `k*V <= W` model assumes a parallel full-validation
-  stage: up to `k` accepted candidates are each evaluated on all `V` validation
-  examples in parallel across `W` workers. HELIX validates accepted candidates
-  sequentially, one at a time in sampled order, so for HELIX the model's
-  speedup figures are an upper bound. HELIX's proposal-stage concurrency is
-  capped by `evolution.max_workers`.
+- candidates on the saved frontier, and
+- rejected candidates recorded under `.helix/attempts/`, including worktrees kept by
+  `evolution.retain_rejected_worktrees`, which are never scored again.
 
-## Per-example Parallelism Inside the Evaluator
+Every other proposal from the interrupted generation is removed, with its worktree, lineage entry and evaluation, and
+the generation runs again. HELIX reseeds its random number generator on each invocation, so a resumed run can take a
+different path than an uninterrupted one would have.
 
-HELIX parallelises across proposals (`num_parallel_proposals`) and across
-worktrees, but each evaluator invocation sees one candidate and a batch of
-instance ids as a single subprocess. Per-example parallelism — evaluating
-multiple ids of one candidate concurrently — lives **inside the evaluator**,
-not inside HELIX's engine.
+## Evaluating instances in parallel
 
-HELIX runs one evaluator subprocess per batch, so fanning out per example in
-HELIX would pay subprocess-startup cost for each example. If you want N-way
-parallelism per batch, your `evaluate.py` should do it directly:
+HELIX runs your evaluator once per batch of instance ids. To score the instances of one batch in parallel, do it
+inside your evaluator. Starting a process per instance from HELIX would pay the startup cost every time.
 
 ```python
+import json
 from concurrent.futures import ThreadPoolExecutor
 
-instance_ids = load_batch_from_helix()   # or argv / HELIX_SPLIT path
+ids = json.load(open("helix_batch.json"))
 with ThreadPoolExecutor(max_workers=4) as pool:
-    results = dict(zip(instance_ids, pool.map(evaluate_one, instance_ids)))
-payload = [[score, {"scores": {"accuracy": score}}] for score in results.values()]
-print("HELIX_RESULT=" + json.dumps(payload))
+    scores = list(pool.map(evaluate_one, ids))   # evaluate_one is your code
+print("HELIX_RESULT=" + json.dumps([[s, {"scores": {"accuracy": s}}] for s in scores]))
 ```
 
-Pick the worker count however you like (constant, CLI arg, derived from
-`os.cpu_count()`). HELIX remains agnostic — it just consumes the per-instance
-scores the evaluator returns.
+`pool.map` returns results in the order of `ids`, which is the order HELIX expects.

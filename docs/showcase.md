@@ -6,7 +6,7 @@ Using HELIX in a paper or project? [Open a pull request](https://github.com/KE7/
 
 ## Papers
 
-### RHO: 99.0% on Robosuite with a frozen, single-turn robot repository
+### RHO: 99.0% single-turn success on CaP-Bench Robosuite
 
 *RHO: Your Coding Agent is Secretly a Roboticist.* Elmaaroufi, Kalade, Wu, Svegliato, Schelle, Mehr, Seshia and Zaharia. Accepted at the [Sim2Real2Field Workshop @ CoRL 2026](https://sim2real2field-corl26.github.io/) and the [2nd Workshop on Lifelong Agents @ COLM 2026](https://lifelongagent.github.io/).
 
@@ -14,7 +14,7 @@ RHO uses HELIX to evolve multi-file robot-policy repositories in simulation, the
 
 **Key results** (from the [project page](https://rho-robotics.github.io/)):
 
-- 99.0% single-turn success on CaP-Bench Robosuite (693/700, GPT-6.1 Sol mutator, best of two searches, on evaluation seeds never seen in search), against CaP-Agent0's 68.29% with multi-turn correction.
+- 99.0% single-turn success on CaP-Bench Robosuite (693 of 700), against CaP-Agent0's 68.29% with multi-turn correction. The mutator was GPT-6.1 Sol; the score is the better of two searches, on evaluation seeds the search never saw.
 - 9.31 s per trial against CaP-Agent0's 113.6 s, 12.2× faster.
 - The best search reached 99.0% by generation 17, in 16.5 h, for $20.50 of mutator tokens.
 
@@ -36,7 +36,7 @@ HELIX evolves a multi-file `solver/` package that drives a Franka Panda through 
 
 ### Circle packing
 
-HELIX runs optimize_anything's circle-packing experiment: pack 26 circles in the unit square to maximize the sum of radii, with GEPA's own fitness function and refiner, evolving GEPA's seed code and refiner prompt.
+HELIX reruns optimize_anything's circle-packing experiment: pack 26 circles in a unit square to maximize the sum of their radii. It keeps GEPA's seed, fitness function and refiner, and changes only the proposer, a coding agent in place of GEPA's reflection LM.
 
 [Write-up](experiments/circle-packing.md) · [Example](https://github.com/KE7/helix/tree/main/examples/circle_packing)
 

@@ -1,8 +1,8 @@
 # Configuration
 
-HELIX is configured via `helix.toml` in your project root. A minimal config is on [Writing an evaluator](../getting-started/evaluator.md).
+HELIX reads its settings from `helix.toml` in your project root. For a minimal one, see [Writing an evaluator](../getting-started/evaluator.md).
 
-## Full Example
+## Every setting
 
 Every key below is optional except `objective` and `[evaluator].command`. The values are examples, not necessarily the defaults.
 
@@ -28,30 +28,25 @@ rng_seed = 0
 
 [evaluator]
 command = "uv run python evaluate.py"
-# The only supported parser is "helix_result".
-# "helix_result" takes a per-example list matching GEPA optimize_anything's
-# `tuple[float, SideInfo] | float` union — each entry is either a bare
-# score or a [score, side_info] pair, mixed allowed:
-#   HELIX_RESULT=[s_0, s_1, ...]                        # all bare
-#   HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ...]        # all rich
-#   HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]           # mixed
-# Positional to `helix_batch.json`. HELIX zips it into id-keyed
-# `instance_scores` and stores the side_info list for the reflection
-# prompt. `HELIX_RESULT` is a machine protocol; use `from helix import log`
-# for human-readable evaluator notes.
+# The evaluator prints one HELIX_RESULT= line: a JSON list with one entry
+# per id in helix_batch.json, in order. Each entry is a score or a
+# [score, side_info] pair, as in GEPA optimize_anything:
+#   HELIX_RESULT=[s_0, s_1, ...]
+#   HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ...]
+#   HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]
+# The next mutation reads side_info. For notes about the whole run, use
+# `from helix import log` in the evaluator.
 include_stdout = true
 include_stderr = true
 extra_commands = []               # additional commands to run for context
 protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutable
 
 [dataset]
-# Cardinality of the train / val splits.  HELIX samples the ids "0".."n-1"
-# from them and writes each batch to helix_batch.json (a JSON list[str]);
-# the evaluator (running in the worktree) filters its own dataset by those
-# ids.  For grouped ids such as "pushcube__0" (batch_sampler = "stratified"),
-# use [seedless].train_path / val_path instead; see the datasets guide.
-# Leave both unset, with no [seedless] paths, for GEPA O.A. Single-Task Search /
-# HELIX single-task-no-example mode (dataset=None, valset=None).
+# Split sizes. HELIX hands the evaluator ids "0".."n-1" in helix_batch.json;
+# the evaluator maps each id to an example. For named ids such as
+# "pushcube__0" (needed by batch_sampler = "stratified"), use
+# [seedless].train_path / val_path instead; see the datasets guide.
+# Leave both unset, with no [seedless] paths, to score a single task.
 # train_size = 200
 # val_size  = 200
 
@@ -172,6 +167,8 @@ base_dir = ".helix/worktrees"
 # cleanup_dominated = false      # deprecated and ignored; still accepted so old configs load
 ```
 
+## Files HELIX writes in each worktree
+
 HELIX writes its own files into each candidate worktree: the agent's prompt,
 change summaries, `helix_batch.json` and the backend's result files. It keeps
 them out of git with rules in the repository's `.git/info/exclude`, not in
@@ -187,12 +184,12 @@ writes the prompt to a fallback path; if that name is taken too, the mutation
 fails with `PromptArtifactCollisionError` and both files are left alone. HELIX no longer needs its rules in your `.gitignore`:
 you can delete them and resume an affected run with your current configuration.
 
-## Backend notes
+## opencode and pi
 
 **opencode** (`backend = "opencode"`), without the Docker sandbox:
 
 - Each candidate runs opencode with its own data directory, `<worktree>/.helix_opencode_state/.local/share/opencode` (via `XDG_DATA_HOME`), so parallel proposals never share one `opencode.db`.
-- Your stored logins still apply: HELIX links your `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`, by default `~/.local/share/opencode/auth.json`, where `opencode providers login` writes) into that directory. It is a link, so a token opencode refreshes is saved to your own file. API-key variables (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) work as before.
+- Your opencode login still works. HELIX links your `auth.json` into that directory: the file `opencode providers login` writes, `$XDG_DATA_HOME/opencode/auth.json` (by default `~/.local/share/opencode/auth.json`). Because it is a link, a token opencode refreshes is saved to your own file. API-key variables (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) work too.
 - HELIX never reads or copies your own `opencode.db`; the run's transcript comes from the candidate's database.
 
 **pi** (`backend = "pi"`):

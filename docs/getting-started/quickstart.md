@@ -15,7 +15,7 @@ helix --help
 
 To work on HELIX itself, clone the repo and run `pip install -e .` there instead.
 
-## Initialize a Project
+## Initialize a project
 
 ```bash
 cd your-project/
@@ -28,7 +28,14 @@ Then write the evaluator: see [Writing an evaluator](evaluator.md). Run it by ha
 
 ## What HELIX copies
 
-Each candidate is a git worktree of your repo at `HEAD`, plus your uncommitted and untracked changes. Files your `.gitignore` excludes are **not** copied: a virtualenv, downloaded data or a `.env` file the evaluator needs must be reachable from the worktree some other way (an absolute path, or `[env]` in `helix.toml`). The evaluator and agent run with a scrubbed environment, so list any variables they need, such as an API key, in `passthrough_env`. `[evaluator].command` runs without a shell, so pipes and `&&` don't work: wrap them in a script.
+Each candidate is a git worktree of your repo at `HEAD`, plus your uncommitted and untracked changes. Three things
+trip up a first run:
+
+- Files your `.gitignore` excludes are **not** copied. If the evaluator needs an ignored virtualenv, downloaded data
+  or a `.env` file, give it an absolute path or set the value under `[env]` in `helix.toml`.
+- The evaluator and the agent run with a scrubbed environment. List the variables they need, such as an API key, in
+  `passthrough_env`.
+- `[evaluator].command` runs without a shell, so pipes and `&&` don't work. Put them in a script.
 
 ## Recommended: sandbox the agent
 
@@ -53,7 +60,7 @@ helix sandbox status claude
 
 To keep benchmark data and scoring code off your machine's candidate copies entirely, run the evaluator in a private sidecar container as well: see [Docker sandboxing](../guides/sandboxing.md).
 
-## Connect The HELIX Agent Skill
+## Connect the HELIX agent skill
 
 This repository ships an agent skill at [`skills/helix/`](https://github.com/KE7/helix/tree/main/skills/helix) (if you installed from PyPI, clone the repo to get it) with detailed guidance
 for writing `helix.toml`, running and debugging HELIX, and migrating GEPA
@@ -87,9 +94,10 @@ mkdir -p ~/.claude/skills
 ln -sfn "$(pwd)/skills/helix" ~/.claude/skills/helix
 ```
 
-## Whole-repo-as-candidate Model
+## Which files the agent can change
 
-HELIX treats your **entire working tree** as the candidate. There is no `target_file` — the configured backend may read, edit, create, or delete any file in the project tree during each mutation. A minimal project layout looks like:
+The candidate is your whole working tree. There is no `target_file`: the agent may read, edit, create or delete any
+file in the project during a mutation. A minimal project looks like:
 
 ```
 my-project/
@@ -99,7 +107,8 @@ my-project/
 └── ...              # Any other files; the agent can read and edit them too
 ```
 
-To restrict what the backend touches, set `agent.background` in `helix.toml`:
+To steer what the agent changes, say so in `agent.background`. That is an instruction, not a guard: to reject any
+candidate that changes a file, list it in `evaluator.protected_files`.
 
 ```toml
 [agent]
@@ -108,7 +117,7 @@ backend = "claude"
 background = "Only modify files under src/. Do not edit tests/ or config/."
 ```
 
-## Run Evolution
+## Run evolution
 
 Start with a short run to check the setup end to end. Each generation runs one agent session plus your evaluator, so cost and time depend on your backend and benchmark:
 
@@ -122,7 +131,7 @@ Then run the full search (10 generations by default, or `[evolution].max_generat
 helix evolve
 ```
 
-## View Results
+## Look at the results
 
 ```bash
 # Show the Pareto frontier
