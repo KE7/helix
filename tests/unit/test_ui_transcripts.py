@@ -194,6 +194,21 @@ def test_finished_transcript_from_worktree(tmp_path: Path) -> None:
     assert again["events"] == [] and again["cursor"] == len(data)
 
 
+def test_the_backend_the_agent_ran_with_wins_over_helix_toml(tmp_path: Path) -> None:
+    """`helix evolve --backend codex` on a project whose helix.toml names claude."""
+    wt = _worktree(tmp_path, "g1-s1")
+    folder = wt / ".helix_artifacts" / "backend_transcripts" / "codex"
+    folder.mkdir(parents=True)
+    data = _jsonl(_codex_rows())
+    (folder / "sess-main.jsonl").write_bytes(data)
+    agent = {**_start("agent", "a1", T0, "g1-s1"), "attrs": {"backend": "codex", "model": "m"}}
+    reader = TranscriptReader(tmp_path, _config(backend="claude"), FakeReader([agent, _end(agent)]))
+
+    out = reader.read("g1-s1")
+    assert out["source"] == "finished" and out["backend"] == "codex" and out["session"] == "sess-main"
+    assert len(out["events"]) == 8
+
+
 def test_finished_without_result_file_skips_the_summary_call(tmp_path: Path) -> None:
     wt = _worktree(tmp_path, "g1-s1")
     folder = wt / ".helix_artifacts" / "backend_transcripts" / "claude"

@@ -58,7 +58,8 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   objectives, a selector on the chart switches the line from the aggregate to one objective's best so far; the browser
   remembers the choice. Click the chart's background to open the Lineage.
 - **Loop**: frontier, mutation, minibatch gate and validation, each with one live number, and merge when
-  `evolution.merge_enabled` is on. The frontier box shows each member as a dot, shaded by score, and is as tall as its
+  `evolution.merge_enabled` is on. Without a train set (no `[dataset]` or `seedless.train_path`) the gate scores the
+  single task once per proposal. The frontier box shows each member as a dot, shaded by score, and is as tall as its
   members need, up to a limit; past 200 members it shows the 200 best and counts the rest. Under mutation, a card lists
   what the agent may change (*Mutable*) and what it must not (*Protected*), with the first few of each, and how many
   files the sandbox hides from it; click it for the full lists. Dots carry data and dashes carry decisions along the
@@ -106,7 +107,8 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
   its worktree and commit, the files changed and the diff against its parent, or against the seed with the `vs seed`
   switch; the agent's change summary; its time in mutation, gate and validation and what it cost (tokens for Codex);
   its children with their outcome and score; and, under **Task prompt**, the prompt the mutation agent was given. An
-  open candidate page updates when the proposal finishes. A rejected candidate also shows why and where it stopped.
+  open candidate page updates when the proposal finishes, and a frontier member's rank and keys update as the frontier
+  changes. A rejected candidate also shows why and where it stopped.
 - **Instances** (on the Candidate): every scored instance, in three tabs. **Changed** holds the instances whose score
   differs from the parent's, improved first; the solved and regressed counts open it in that direction. **All** keeps
   the evaluation order and **Lowest** puts the lowest first. Click a row for the evaluator's side information on that
@@ -159,7 +161,8 @@ with a HELIX that recorded no session ids fall back to start order once all thei
 parallel agents that start within the same second can then show each other's live transcript until they finish, and
 the panel says "session matched to this agent by start time". After a call ends the dashboard shows the copy HELIX
 keeps in the candidate's worktree; rejected candidates' worktrees are removed, and their transcripts with them. Transcripts are shown for the `codex` and `claude`
-backends; other backends show none. A transcript record larger than 1 MiB is skipped so subsequent events can still
+backends, whichever one the agent ran with (`helix evolve --backend` included); other backends show none. With
+`evolution.sibling_history` on, the change-summary call's transcript follows the mutation's while it runs. A transcript record larger than 1 MiB is skipped so subsequent events can still
 appear.
 
 ## Safety

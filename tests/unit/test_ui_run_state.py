@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from helix.config import HelixConfig
+from helix.config import DatasetConfig, HelixConfig
 from helix.lineage import LineageEntry, record_entry
 from helix.population import EvalResult
 from helix.state import BudgetState, EvolutionState, save_state
@@ -187,6 +187,17 @@ def _seed_only_with_two_agents(root: Path, config: HelixConfig, *, upto: float) 
     trace.write(root)
 
 
+def test_a_dataset_runs_gate_size_before_any_gate_is_the_minibatch(tmp_path: Path) -> None:
+    config = _config(max_generations=8).model_copy(update={"dataset": DatasetConfig(train_size=20)})
+    _evaluation(tmp_path, "g0-s0", [1.0, 0.5, 0.0, 1.0])
+    _lineage(tmp_path, "g0-s0", None, 0)
+    _state(tmp_path, config, 0, ["g0-s0"], budget=BudgetState(evaluations=4, input_tokens=10),
+           active_frontier={v: ["g0-s0"] for v in VAL})
+    _seed_only_with_two_agents(tmp_path, config, upto=1401.0)
+    snap = RunReader(tmp_path, config).snapshot(now=1500.0)
+    assert snap is not None and snap["loop"]["gate"]["ids_each"] == 8
+
+
 def test_seed_only_with_two_agents_running(tmp_path: Path) -> None:
     config = _config(max_generations=8)
     _evaluation(tmp_path, "g0-s0", [1.0, 0.5, 0.0, 1.0])
@@ -220,7 +231,8 @@ def test_seed_only_with_two_agents_running(tmp_path: Path) -> None:
     loop = snap["loop"]
     assert loop["frontier"] == {"size": 1, "accepted": 1}
     assert loop["mutation"] == {"running": 2, "median_seconds": None, "finished": 0}
-    assert loop["gate"] == {"passed": 0, "tried": 0, "ids_each": 8}
+    # No train set: each gate scores the single task once, whatever minibatch_size says.
+    assert loop["gate"] == {"passed": 0, "tried": 0, "ids_each": 1}
     assert loop["validation"] == {"median_seconds": pytest.approx(20.0), "count": 1, "ids": 4, "running": 0}
 
     now = snap["now"]

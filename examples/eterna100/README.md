@@ -75,7 +75,8 @@ same range, from puzzles every method solves to ones none does.
 | `test/` | 50 | nobody during a run; score the best candidate on it afterwards |
 
 `val/`, `test/` and `evaluate.py` are protected and left out of the agent's
-sandbox copy.
+sandbox copy, and so is this README, which shows a validation puzzle's design
+and the recorded run's result.
 
 ## How to run
 

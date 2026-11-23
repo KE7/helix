@@ -797,6 +797,8 @@ class RunReader:
             elif d.get("reason") in _GATE_FAILED:
                 gate[g][1] += 1
         median_examples = _median(examples)
+        # evolution.py's train loader: without train ids each gate scores the single task once.
+        has_train = config.seedless.train_path is not None or bool(config.dataset.train_size)
         val_values = list(validation_seconds.values())
         instances = _instances(front) if front else []
         loop = {
@@ -804,7 +806,8 @@ class RunReader:
             "mutation": {"running": agents_running, "median_seconds": _median(agent_durations),
                          "finished": len(agent_durations)},
             "gate": {"passed": sum(p for p, _ in gate.values()), "tried": sum(t for _, t in gate.values()),
-                     "ids_each": int(median_examples) if median_examples is not None else ev.minibatch_size},
+                     "ids_each": int(median_examples) if median_examples is not None
+                     else ev.minibatch_size if has_train else 1},
             "validation": {"median_seconds": _median(val_values), "count": len(val_values),
                            "ids": len(instances) or None, "running": validations_running},
         }
