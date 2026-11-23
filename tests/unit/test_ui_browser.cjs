@@ -171,3 +171,18 @@ test('a transcript that moves on to a new session is read from its start', async
   assert.match(ui.candidate.text(), /summary from the start/);
   assert.doesNotMatch(ui.candidate.text(), /mutating/);
 });
+
+test('redrawing the same candidate keeps the sections the reader opened', async () => {
+  const ui = dashboard(async () => ({ ok: true, json: async () => ({ id: cid, accepted: true, mean: 0.5, prompt: 'p', worktree_exists: true }) }));
+  ui.authorize();
+  Object.assign(ui.state, { view: 'candidate', cand: cid, candVs: 'parent', run: { status: { state: 'running' } } });
+  ui.renderView(true);
+  await ui.state.candRequest;
+  const before = [{ open: true }, { open: false }], after = [{ open: false }, { open: false }];
+  let calls = 0;
+  ui.candidate.querySelectorAll = () => (calls++ === 0 ? before : after);
+  ui.renderView(true);
+  await ui.state.candRequest;
+  assert.equal(calls, 2);
+  assert.deepEqual(after.map((e) => e.open), [true, false]);
+});
