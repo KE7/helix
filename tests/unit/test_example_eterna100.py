@@ -56,3 +56,25 @@ def test_the_splits_cover_the_benchmark_once() -> None:
         assert all(set(r["structure"]) <= set("().") for r in rows)
         ids += [r["id"] for r in rows]
     assert sorted(ids) == [f"p{i:03d}" for i in range(1, 101)]
+
+
+def test_the_agents_copy_shows_no_validation_or_held_out_puzzle(tmp_path: Path) -> None:
+    """The workspace the sandbox copies for the agent holds no val/ or test/ target, README included."""
+    from helix.config import load_config
+    from helix.sandbox import _copy_tree_contents
+
+    def structures(split: str) -> set[str]:
+        rows = csv.DictReader(open(EXAMPLE / split / "puzzles.tsv", newline=""), delimiter="\t")
+        return {r["structure"] for r in rows}
+
+    hidden = {s for s in structures("val") | structures("test") if len(s) >= 20} - structures("train")
+    config = load_config(EXAMPLE / "helix.toml")
+    copy = tmp_path / "workspace"
+    _copy_tree_contents(EXAMPLE, copy, omit_paths={Path(p) for p in config.sandbox.omit_from_agent})
+    seen = [
+        f"{path.relative_to(copy)}: {s}"
+        for path in copy.rglob("*") if path.is_file()
+        for s in hidden if s in path.read_text(errors="replace")
+    ]
+    assert (copy / "designer.py").is_file() and (copy / "train" / "puzzles.tsv").is_file()
+    assert seen == []
