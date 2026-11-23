@@ -34,6 +34,11 @@ During copy and sync, HELIX skips unsupported special files such as FIFOs,
 sockets, and device nodes by default. Set `skip_special_files = false` only if
 you want unsupported workspace file types to raise instead of being ignored.
 
+Every sandboxed agent works in `/workspace`, so nothing it sees names its
+candidate. Without the sandbox an agent runs in its candidate's worktree,
+`.helix/worktrees/<candidate>` (such as `g3-s12`), and its working directory
+names the candidate and generation.
+
 Agent containers mount a persistent Docker auth volume at `/home/node`;
 evaluator sidecar and runner containers never receive it. Run
 `helix sandbox login <backend>` once per backend to complete that CLI's normal

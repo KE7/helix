@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the run. See the [Live dashboard](https://ke7.github.io/helix/guides/ui.html) guide.
 - `.helix/timing.jsonl` has a `usage` record for every agent charge (tokens,
   `cost_usd`, candidate, source, generation), rejected proposals included.
-- Agents are launched with a line that names their candidate ("This is HELIX
-  candidate g3-s12."), so each session file can be tied to its candidate.
+- `.helix/timing.jsonl` has a `session` record with the session id of each
+  `claude` and `codex` agent call, so `helix ui` shows each agent's own live
+  transcript even when parallel sandboxed agents share one login volume.
 - A proposal rejected for changing protected evaluator files lists them under
   `paths` in its `decision` record in `.helix/timing.jsonl`.
 - `examples/eterna100` evolves an RNA sequence designer on the Eterna100-V2

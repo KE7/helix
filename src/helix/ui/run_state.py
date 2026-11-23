@@ -174,6 +174,8 @@ def _valid_record(r: Any) -> bool:
         return all(k in r for k in ("within", "source", "name", "count", "seconds", "max_seconds"))
     if event == "usage":
         return _usage_record(r)
+    if event == "session":
+        return isinstance(r.get("session_id"), str)
     if event not in ("start", "end"):
         return False
     if not isinstance(r.get("span"), str) or not isinstance(r.get("span_id"), str):

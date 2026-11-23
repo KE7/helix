@@ -151,12 +151,13 @@ closes the open popover or panel, and otherwise returns to the Loop. Each view h
 The transcript comes from the agent CLI's own session file, which Codex and Claude Code write as they run. With the
 Docker sandbox on, that file is in the run's login volume, so the dashboard reads it with a short-lived container that
 mounts the volume read-only and has no network, at most once every 4 seconds and only while the transcript is on
-screen. Every agent is launched with a line that names its candidate ("This is HELIX candidate g3-s12"), the first
-message of its session file, so a live session is matched to its own agent exactly, however many agents run at once
-(`num_parallel_proposals` × `mutations_per_parent`); Codex writes that line a few seconds after it opens the file, so
-a new agent's transcript appears then. Runs made with a HELIX older than that line fall back to start order once all their
-sessions are 20 seconds old: parallel agents that start within the same second can then show each other's live transcript until they finish,
-and the panel says "session matched to this agent by start time". After a call ends the dashboard shows the copy HELIX
+screen. HELIX records each agent call's session id in `.helix/timing.jsonl` (a `session` record): it picks Claude
+Code's (`--session-id`) and reads Codex's from the first line Codex prints. The session file is named after that id, so a
+live session is matched to its own agent exactly, however many agents run at once
+(`num_parallel_proposals` × `mutations_per_parent`), and the agent is told nothing about its candidate. Runs made
+with a HELIX that recorded no session ids fall back to start order once all their sessions are 20 seconds old:
+parallel agents that start within the same second can then show each other's live transcript until they finish, and
+the panel says "session matched to this agent by start time". After a call ends the dashboard shows the copy HELIX
 keeps in the candidate's worktree; rejected candidates' worktrees are removed, and their transcripts with them. Transcripts are shown for the `codex` and `claude`
 backends; other backends show none. A transcript record larger than 1 MiB is skipped so subsequent events can still
 appear.
