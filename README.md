@@ -42,7 +42,7 @@ Unlike a single coding-agent session, HELIX keeps going: it runs many attempts a
 
 ## Watch the search live
 
-`helix ui` opens a live dashboard of a run in your browser: the best score generation by generation, each agent at work with its transcript streaming, the lineage of every proposal and the path from the seed to the best candidate, and every candidate's diff, weakest cases and evaluator feedback. The loop is drawn inside its isolation boundaries, so a sandbox setting you did not intend stands out. The dashboard only reads the run; for a run on another machine, forward one port over SSH. [Live dashboard guide](https://ke7.github.io/helix/guides/ui.html)
+`helix ui` shows a run in your browser, while it runs or after it ends. You can follow each agent's transcript as it works, see which proposals were kept and which were rejected, and open any candidate to read its diff and its score on each instance. It never writes to the run. [Live dashboard guide](https://ke7.github.io/helix/guides/ui.html)
 
 <p align="center">
 <picture>

@@ -13,7 +13,7 @@ published designers, DesiRNA and NEMO, solve 45 and 44 of them.
 
 The example is [`examples/eterna100`](https://github.com/KE7/helix/tree/main/examples/eterna100).
 
-## The task
+## Inverse folding and the benchmark
 
 An RNA molecule folds into a secondary structure: some bases pair into stems,
 the rest form loops. Inverse folding runs the other way: given a target
@@ -42,7 +42,7 @@ their feedback only. In the recorded run its workspace also held the example's
 README, which showed one validation target, p003, with a design; the seed
 designer already solves p003. The example now leaves the README out.
 
-## Setup
+## Run configuration
 
 | | |
 |---|---|
@@ -56,7 +56,7 @@ The run used the evaluator from before two later fixes: worker processes are
 now killed on timeout, and the stored-sequence check now skips only the
 top-level split folders. Neither changes a score in this run.
 
-## Results
+## Results against published designers
 
 The seed solves 6 of the 50 held-out puzzles. The best candidate, `g11-s62`,
 solves 32 in two of three scorings and 33 in the third. They differ by one
@@ -94,7 +94,7 @@ The published methods ran with their own time limits, up to 24 hours per
 puzzle, on other hardware. Their medians count failed runs too. NEMO is fast as
 well as strong: 32 of its 44 solves took 8 seconds or less.
 
-### Cost
+### API cost
 
 At OpenAI's [API prices](https://developers.openai.com/api/docs/pricing) for
 `gpt-6-luna` (checked 2026-11-16), the run cost $0.42.
@@ -135,7 +135,7 @@ A single `inverse_fold` call on a long target cannot be interrupted. All 7 of
 `g11-s62`'s held-out failures with an error are timeouts on targets of 108 to
 400 bases.
 
-## Limits
+## What could skew the result
 
 - The 8-second budget is wall-clock time, and up to three evaluations, each
   running 4 puzzles at once, ran at the same time. A borderline puzzle can
@@ -146,7 +146,7 @@ A single `inverse_fold` call on a long target cannot be interrupted. All 7 of
   from fetching at run time. `g11-s62` makes no network call.
 - One run, one seed.
 
-## Next
+## Experiments worth running next
 
 - **A longer per-puzzle limit** (`BUDGET_S` in `evaluate.py`), during the
   search as well as on the held-out puzzles, to see how far more time takes

@@ -26,7 +26,7 @@ One HELIX mutation by Claude Sonnet 5.5 rewrote a Franka Panda solver package on
 
 ## Watch the search live
 
-`helix ui` opens a live dashboard of a run in your browser: the best score generation by generation, each agent at work with its transcript streaming, the lineage of every proposal and the path from the seed to the best candidate, and every candidate's diff, weakest cases and evaluator feedback. The loop is drawn inside its isolation boundaries, so a sandbox setting you did not intend stands out. The dashboard only reads the run; for a run on another machine, forward one port over SSH. [Read the guide](guides/ui.md).
+`helix ui` shows a run in your browser, while it runs or after it ends. You can follow each agent's transcript as it works, see which proposals were kept and which were rejected, and open any candidate to read its diff and its score on each instance. It never writes to the run. [Read the guide](guides/ui.md).
 
 <div class="helix-ui" markdown>
 <video class="ui-light" src="assets/ui/helix-ui-tour-light.mp4" poster="assets/ui/helix-ui-light.png" aria-label="helix ui on a live eterna100 RNA design run" width="1440" height="900" autoplay loop muted playsinline></video>

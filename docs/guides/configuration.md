@@ -172,19 +172,20 @@ base_dir = ".helix/worktrees"
 # cleanup_dominated = false      # deprecated and ignored; still accepted so old configs load
 ```
 
-HELIX reserves its per-invocation prompts, summaries, batch files and backend
-artifacts at the candidate worktree root. It records ignore rules in the
-repository's shared Git `info/exclude`, so you can protect `.gitignore`.
-Candidate snapshots and cache keys exclude those paths even when your
-`.gitignore` allows them. Summary and merge diffs also omit these paths,
-including the contents of tracked artifacts inherited from older runs.
+HELIX writes its own files into each candidate worktree: the agent's prompt,
+change summaries, `helix_batch.json` and the backend's result files. It keeps
+them out of git with rules in the repository's `.git/info/exclude`, not in
+`.gitignore`, so you can list `.gitignore` in `protected_files`. These files
+are never part of a candidate: they are left out of its snapshot, its cache key
+and the diffs shown to agents, even where your `.gitignore` would let git track
+them.
 
-HELIX removes inherited tracked copies before the pre-agent snapshot can untrack
-them. This keeps stale prompts and batch files out of the agent workspace.
-An untracked prompt with different content uses the fallback path. When both
-paths collide, HELIX preserves both and reports `PromptArtifactCollisionError`.
-You can remove HELIX's old artifact rules from `.gitignore` and resume an
-affected run with your current configuration.
+If an older run committed copies of these files, HELIX removes them before the
+agent starts, so the agent never sees a stale prompt or batch file. If an
+untracked file of yours has the prompt file's name and different content, HELIX
+writes the prompt to a fallback path; if that name is taken too, the mutation
+fails with `PromptArtifactCollisionError` and both files are left alone. HELIX no longer needs its rules in your `.gitignore`:
+you can delete them and resume an affected run with your current configuration.
 
 ## Backend notes
 
