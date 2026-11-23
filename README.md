@@ -100,6 +100,7 @@ HELIX never touches your branch, HEAD or remote: every candidate lives in a deta
 | [`maniskill_pick_place`](https://github.com/KE7/helix/tree/main/examples/maniskill_pick_place) | A multi-file `solver/` package that drives a Franka Panda through push, pick and stack in ManiSkill 3 | 0.064 → 1.0 validation in one mutation ([write-up](https://ke7.github.io/helix/experiments/maniskill-pick-place.html)) | 90 held-out trials the agent never sees |
 | [`circle_packing`](https://github.com/KE7/helix/tree/main/examples/circle_packing) | optimize_anything's circle-packing seed code and refiner prompt: pack 26 circles in the unit square | [Write-up](https://ke7.github.io/helix/experiments/circle-packing.html) | GEPA's own fitness function |
 | [`web_researcher`](https://github.com/KE7/helix/tree/main/examples/web_researcher) | A question-answering agent for software questions whose answers change over time | Run it to produce results | Versions fetched live from PyPI and endoflife.date at scoring time |
+| [`eterna100`](https://github.com/KE7/helix/tree/main/examples/eterna100) | An RNA sequence designer: for a target secondary structure, a sequence that folds into it (Eterna100-V2) | 6 → 32–33 of 50 held-out puzzles in a 49-minute run with `gpt-6-luna`, at 8 s per puzzle; on par with SentRNA and LEARNA ([write-up](https://ke7.github.io/helix/experiments/eterna100.html)) | 50 held-out puzzles the agent never sees |
 
 ## How it works
 

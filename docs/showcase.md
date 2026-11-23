@@ -40,6 +40,19 @@ HELIX runs optimize_anything's circle-packing experiment: pack 26 circles in the
 
 [Write-up](experiments/circle-packing.md) · [Example](https://github.com/KE7/helix/tree/main/examples/circle_packing)
 
+### Eterna100 RNA design: 6 → 32–33 of 50 held-out puzzles in 49 minutes
+
+HELIX evolves an RNA sequence designer for the Eterna100-V2 benchmark. The task is inverse folding, which is [NP-hard](https://arxiv.org/abs/1710.11513): for a target secondary structure from the Eterna citizen-science game, return a sequence whose ViennaRNA 2 minimum-free-energy fold is exactly that structure. The seed pairs every stem G-C and does no search. The agent is Codex with `gpt-6-luna`, OpenAI's lowest-priced GPT-6 model.
+
+**Key results** (from the recorded run):
+
+- On 50 held-out puzzles never shown to the agents, the evolved designer solves 32–33 (three scorings) at 8 seconds per puzzle, against 6 for the seed.
+- That is on par with the published SentRNA (33) and LEARNA (34), with median times per puzzle of 73 minutes for SentRNA and 30 seconds for LEARNA. DesiRNA solves 45 and NEMO 44.
+- The agents built it on ViennaRNA's own `RNAinverse` (8 of 50 alone), adding restarts and simulated annealing.
+- The run took 49 minutes, and its API cost was $0.42.
+
+[Write-up](experiments/eterna100.md) · [Example](https://github.com/KE7/helix/tree/main/examples/eterna100)
+
 ### Web researcher
 
 A question-answering agent for software-engineering questions whose answers change over time, such as current package versions. The seed asks Claude Haiku directly, with no web access, and the evaluator scores answers against versions it fetches live from PyPI and endoflife.date.

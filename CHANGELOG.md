@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   login volume. `helix ui` uses it to show each agent's own live transcript.
 - A proposal rejected for changing protected evaluator files now records them:
   its `decision` record in `.helix/timing.jsonl` has a `paths` list.
+- `examples/eterna100`: HELIX evolves an RNA sequence designer on the
+  Eterna100-V2 benchmark. Each puzzle is a target secondary structure; a
+  design solves it when its ViennaRNA 2 minimum-free-energy fold matches the
+  target. 20 training, 30 validation and 50 held-out puzzles, stratified by how
+  many published algorithms solve each one; the agent is Codex.
 
 ### Packaging
 
