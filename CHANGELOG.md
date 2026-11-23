@@ -7,64 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.4.0] - 2026-11-23
 
-- `helix ui` opens a read-only live dashboard of a project in the browser: run
-  progress, the frontier, the lineage of every proposal (with a minimap for
-  long runs), the path from the seed to the best candidate step by step, a
-  table of all proposals with outcome filters, every candidate with its diff (against its
-  parent or the seed), task prompt, children and per-instance scores against
-  its parent, the current generation with the agent's live transcript (Codex
-  and Claude), run health with cost per generation and the share spent on
-  rejected proposals, and where the agent and evaluator run. Candidate pages
-  update when their proposal finishes. The dashboard never writes to the run.
-  Data requests use a bearer token, evaluator commands are redacted, and live
-  transcripts continue after oversized records. See the
-  [Live dashboard](https://ke7.github.io/helix/guides/ui.html) guide.
-- `.helix/timing.jsonl` now has a `usage` record for every agent charge:
-  tokens, `cost_usd`, candidate, source (`seed_generation`, `mutation`,
-  `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
-  per generation and per proposal is exact, rejected proposals included.
-  `helix timing` and the Perfetto export are unchanged.
+### Added
+- `helix ui` opens a read-only live dashboard of a run in the browser: the
+  loop and frontier, the lineage of every proposal, the path from the seed to
+  the best candidate, each candidate's diff, prompt and scores, the agent's
+  live transcript (Codex and Claude), and cost per generation. It never writes
+  to the run. See the [Live dashboard](https://ke7.github.io/helix/guides/ui.html) guide.
+- `.helix/timing.jsonl` has a `usage` record for every agent charge (tokens,
+  `cost_usd`, candidate, source, generation), rejected proposals included.
 - `.helix/timing.jsonl` has a `session` record with the session id of each
-  `claude` and `codex` agent call. HELIX picks Claude Code's (`--session-id`)
-  and reads Codex's from its first event, so `helix ui` shows each agent's own
-  live transcript even when parallel sandboxed agents share one login volume.
-- A proposal rejected for changing protected evaluator files now records them:
-  its `decision` record in `.helix/timing.jsonl` has a `paths` list.
-- `examples/eterna100`: HELIX evolves an RNA sequence designer on the
-  Eterna100-V2 benchmark. Each puzzle is a target secondary structure; a
-  design solves it when its ViennaRNA 2 minimum-free-energy fold matches the
-  target. 20 training, 30 validation and 50 held-out puzzles, stratified by how
-  many published algorithms solve each one; the agent is Codex.
+  `claude` and `codex` agent call, so `helix ui` shows each agent's own live
+  transcript even when parallel sandboxed agents share one login volume.
+- A proposal rejected for changing protected evaluator files lists them under
+  `paths` in its `decision` record in `.helix/timing.jsonl`.
+- `examples/eterna100` evolves an RNA sequence designer on the Eterna100-V2
+  benchmark, with Codex as the agent. In the recorded run it went from 6 to
+  32–33 of 50 held-out puzzles.
 
 ### Packaging
-
 - New dependencies `starlette` and `uvicorn`, for `helix ui`'s local server.
 
 ### Changed
-
-- `evolution.retain_rejected_worktrees = true` now keeps every rejected
-  candidate, not only validation-stage rejects: evaluator-tamper rejects,
-  children whose minibatch eval raised, minibatch- and train-gate rejects,
-  children dropped by proposal selection or as duplicates, and rejected
-  merges. Each kept one has its worktree, its `helix/<id>` ref and the agent's
-  transcript, and a record in `helix attempts`. A run that already set it
-  keeps more worktrees; `helix clean` removes them. Off (the default), nothing
-  changes.
+- `evolution.retain_rejected_worktrees = true` keeps every rejected candidate
+  (worktree, `helix/<id>` ref and transcript), not only validation-stage
+  rejects. A run that already set it keeps more worktrees; `helix clean`
+  removes them. The default (off) is unchanged.
 
 ### Fixed
-
-- HELIX leaves `.gitignore` untouched when excluding invocation artifacts, so
-  protecting it no longer triggers false tamper rejections. Candidate commits
-  and cache keys exclude reserved artifacts even with a `.gitignore` allowlist.
-  On resume, HELIX removes inherited tracked artifacts from the agent workspace
-  before snapshotting and omits their contents from summary and merge diffs.
-
-- `examples/web_researcher`: when `solve()` raises, the question's feedback now
-  says so under `error`. Before, a failed model call (a missing key, or one
-  with no credit) was recorded only as an empty answer, so a run could stall
-  at the questions only the model can answer with nothing pointing at the key.
+- A protected `.gitignore` no longer causes false tamper rejections: HELIX no
+  longer edits it, and still keeps its own artifacts out of candidate commits,
+  cache keys and diffs.
+- `examples/web_researcher` reports a `solve()` exception, such as a missing
+  API key, in the question's feedback instead of as an empty answer.
 
 ## [0.3.0] - 2026-11-09
 
