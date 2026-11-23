@@ -26,10 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mutation_failed`, `merge`, `merge_failed`) and generation, so agent cost
   per generation and per proposal is exact, rejected proposals included.
   `helix timing` and the Perfetto export are unchanged.
-- Agents are launched with a line that names their candidate ("Read
-  .agent_task_prompt.md … This is HELIX candidate g3-s12."), so a session file
-  can be tied to its candidate even when parallel sandboxed agents share one
-  login volume. `helix ui` uses it to show each agent's own live transcript.
+- `.helix/timing.jsonl` has a `session` record with the session id of each
+  `claude` and `codex` agent call. HELIX picks Claude Code's (`--session-id`)
+  and reads Codex's from its first event, so `helix ui` shows each agent's own
+  live transcript even when parallel sandboxed agents share one login volume.
 - A proposal rejected for changing protected evaluator files now records them:
   its `decision` record in `.helix/timing.jsonl` has a `paths` list.
 - `examples/eterna100`: HELIX evolves an RNA sequence designer on the

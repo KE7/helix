@@ -49,6 +49,13 @@ _VOLUME_FIND = {
     "codex": "find /home/node/.codex/sessions -type f -name 'rollout-*.jsonl'",
     "claude": "find /home/node/.claude/projects/-workspace -maxdepth 1 -type f -name '*.jsonl'",
 }
+#: The one session file of a known session id (``helix.timing.session_recorder``).
+_VOLUME_FIND_ID = {
+    "codex": "find /home/node/.codex/sessions -type f -name {}",
+    "claude": "find /home/node/.claude/projects/-workspace -maxdepth 1 -type f -name {}",
+}
+_VOLUME_NAME_OF_ID = {"codex": "rollout-*-{}.jsonl", "claude": "{}.jsonl"}
+_SESSION_ID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z-]{7,63}$")
 _VOLUME_PATH_RE = {
     "codex": re.compile(r"^/home/node/\.codex/sessions/\d{4}/\d{2}/\d{2}/rollout-[A-Za-z0-9._:-]+\.jsonl$"),
     "claude": re.compile(r"^/home/node/\.claude/projects/-workspace/[A-Za-z0-9._-]+\.jsonl$"),
@@ -164,9 +171,11 @@ class TranscriptReader:
         self, cid: str, cursor: int, span: dict[str, Any], records: list[dict[str, Any]]
     ) -> dict[str, Any]:
         heuristic = "session matched to this agent by start time"
+        session_id = _span_session(records, span)
         with self._lock:
             known = self._sessions.get(cid)
-            if known is not None and known[0] != span["span_id"]:
+            # A start-order guess gives way once the agent's session id is recorded.
+            if known is not None and (known[0] != span["span_id"] or (session_id is not None and not known[3])):
                 known = None
                 self._sessions.pop(cid, None)
             now = time.monotonic()
@@ -181,6 +190,9 @@ class TranscriptReader:
             return self._reply("none", cursor, note=str(exc))
         if known is not None:
             listing = f"printf '%s\\n' {shlex.quote(known[1])}"
+        elif session_id is not None:
+            name = _VOLUME_NAME_OF_ID[self._backend].format(session_id)
+            listing = f"{_VOLUME_FIND_ID[self._backend].format(shlex.quote(name))} 2>/dev/null"
         else:
             minutes = math.ceil(max(time.time() - float(span["wall_time"]), 0.0) / 60) + 1
             listing = f"{_VOLUME_FIND[self._backend]} -mmin -{minutes} 2>/dev/null"
@@ -203,6 +215,12 @@ class TranscriptReader:
         path: str | None
         if known is not None:
             path, exact = known[1], known[3]
+        elif session_id is not None:
+            path = next((p for p in files if _session_id(Path(p).name) == session_id), None)
+            exact = True
+        elif _records_sessions(records):
+            # This run records session ids; this agent's is not announced yet.
+            path, exact = None, False
         else:
             path, exact = _match_session(span, records, files, cid, time.time())
         if path is None or path not in files:
@@ -246,6 +264,21 @@ def _open_agent_span(records: list[dict[str, Any]], cid: str) -> dict[str, Any] 
     return max(spans, key=lambda rec: rec["wall_time"]) if spans else None
 
 
+def _span_session(records: list[dict[str, Any]], span: dict[str, Any]) -> str | None:
+    """The session id HELIX recorded for the agent call *span* (``helix.timing.session_recorder``)."""
+    for rec in records:
+        if rec.get("event") == "session" and rec.get("parent_span_id") == span.get("span_id"):
+            sid = rec.get("session_id")
+            if isinstance(sid, str) and _SESSION_ID_RE.match(sid):
+                return sid
+    return None
+
+
+def _records_sessions(records: list[dict[str, Any]]) -> bool:
+    """Whether the latest run records each agent call's session id."""
+    return any(rec.get("event") == "session" for rec in _latest_run(records))
+
+
 def _match_session(
     span: dict[str, Any],
     records: list[dict[str, Any]],
@@ -253,12 +286,16 @@ def _match_session(
     cid: str,
     now: float,
 ) -> tuple[str | None, bool]:
-    """The session file of the agent call *span* of *cid*, and whether the match is exact.
+    """The session file of the agent call *span* of *cid* in a run that records no session ids.
 
-    HELIX launches each agent with a line naming its candidate ("This is
-    HELIX candidate g3-s12", mutator.py ``_prompt_file_instruction``), the
-    first user message of its session file.  The earliest session carrying
-    *cid*'s marker that began at or after the span's start is exact.
+    Returns the file and whether the match is exact.  Runs since 0.4.0 record
+    each agent call's session id, and are matched by it instead.
+
+    Runs between 2026-11-16 and 0.4.0 launched each agent with a line naming
+    its candidate ("This is HELIX candidate g3-s12"), the first user message
+    of its session file; later runs no longer tell the agent its candidate.
+    The earliest session carrying *cid*'s marker that began at or after the
+    span's start is exact.
 
     Sessions from runs before that line carry no marker.  Parallel agents of
     one backend share one auth volume and every session records ``cwd``
@@ -437,7 +474,8 @@ def _volume_script(listing: str, cursor: int) -> str:
     The header carries the start offset, the path, the first ``timestamp``
     in the first five lines (codex ``session_meta``; claude's first timed entry,
     since current Claude Code opens with an untimed ``session-owner`` line), and
-    the candidate id the launch line names in the first 40 lines, if any.
+    the candidate id the launch line names in the first 40 lines, if any (runs
+    between 2026-11-16 and 0.4.0).
     Symlinks are skipped, so nothing outside the session folders is ever opened.
     """
     return (
@@ -456,7 +494,7 @@ def _volume_script(listing: str, cursor: int) -> str:
     )
 
 
-#: The candidate id in a session's launch line (mutator.py ``_prompt_file_instruction``).
+#: The candidate id in the launch line of runs between 2026-11-16 and 0.4.0.
 _MARKER_RE = re.compile(r"^g\d+-[sm]\d+$")
 
 

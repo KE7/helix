@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,6 +61,7 @@ from helix.timing import (
     HELIX_TIMING_LOG_ENV,
     detail,
     read_timed_log,
+    session_recorder,
     timed_log_name,
     timed_totals,
     traced,
@@ -654,25 +656,19 @@ def build_mutation_prompt(
 # ---------------------------------------------------------------------------
 
 
-#: A candidate worktree is named after its candidate (``.helix/worktrees/g3-s12``).
-_CANDIDATE_WORKTREE_NAME = re.compile(r"^g\d+-[sm]\d+$")
-
-
-def _prompt_file_instruction(prompt_artifact_name: str, candidate_id: str | None = None) -> str:
+def _prompt_file_instruction(prompt_artifact_name: str) -> str:
     """The one-line prompt a backend is launched with.
 
-    It names the candidate when there is one.  That line is the first user
-    message of the backend's session file, and sandboxed agents share one
-    login volume and one ``/workspace`` path, so it is the only thing on disk
-    that ties a live session to its candidate (``helix ui`` matches on it).
+    It is the same for every candidate and names nothing about the search:
+    no candidate, generation or HELIX.  A prompt that differed per candidate
+    would be seen by the model, and a comparison run would measure that nudge
+    along with whatever it compares.  ``helix ui`` ties a live session to its
+    candidate through the session id instead (:func:`helix.timing.session_recorder`).
     """
-    instruction = (
+    return (
         f"Read {prompt_artifact_name} in the current workspace and follow "
         "those instructions exactly."
     )
-    if candidate_id and _CANDIDATE_WORKTREE_NAME.match(candidate_id):
-        instruction += f" This is HELIX candidate {candidate_id}."
-    return instruction
 
 
 def _write_mutation_prompt_artifact(
@@ -749,6 +745,32 @@ def _write_mutation_prompt_artifact(
 # ---------------------------------------------------------------------------
 
 
+def _thread_started_reader(record: Callable[[str], None]) -> Callable[[str], None]:
+    """A stdout-line callback that records codex's thread id once it is announced.
+
+    ``codex exec --json`` opens with ``{"type": "thread.started", "thread_id": ...}``,
+    and its rollout file's name ends in that id (``BACKEND_TRANSCRIPT_SOURCES``).
+    """
+    seen = False
+
+    def on_line(line: str) -> None:
+        nonlocal seen
+        if seen or '"thread.started"' not in line:
+            return
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(event, dict) or event.get("type") != "thread.started":
+            return
+        thread_id = event.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            seen = True
+            record(thread_id)
+
+    return on_line
+
+
 def _add_backend_auth_env(env: dict[str, str], backend: str) -> None:
     """Pass official headless auth env vars without requiring TOML config."""
     for key in BACKEND_AUTH_ENV.get(backend, ()):
@@ -774,7 +796,7 @@ def _build_backend_args(
     worktree_path: str,
     config: AgentConfig,
     prompt_artifact_name: str,
-    candidate_id: str | None = None,
+    session_id: str | None = None,
 ) -> list[str]:
     backend = config.backend
     if backend == "agy":
@@ -798,7 +820,7 @@ def _build_backend_args(
         # ``--print <prompt>`` is the final argv pair; Go's flag parser accepts
         # the space-separated form, and the instruction text never starts
         # with ``-``.  ``test_agy_cli_args_include_required_flags`` pins this.
-        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name, candidate_id)])
+        args.extend(["--print", _prompt_file_instruction(prompt_artifact_name)])
         return args
 
     if backend == "claude":
@@ -819,10 +841,14 @@ def _build_backend_args(
             args.extend(["--effort", config.effort])
         if config.max_turns is not None:
             args.extend(["--max-turns", str(config.max_turns)])
+        if session_id:
+            # HELIX picks the session id so ``helix ui`` can find the session
+            # file (``<session_id>.jsonl``) while the agent runs.
+            args.extend(["--session-id", session_id])
         if not config.web_access:
             # The ``=`` form stops the variadic flag swallowing the prompt.
             args.append("--disallowedTools=WebSearch,WebFetch")
-        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "codex":
@@ -847,7 +873,7 @@ def _build_backend_args(
         if not config.web_access:
             # ``codex_apps`` searches the web even with ``web_search`` off.
             args.extend(["-c", 'web_search="disabled"', "-c", "features.apps=false"])
-        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "cursor":
@@ -865,7 +891,7 @@ def _build_backend_args(
         ]
         if config.model:
             args.extend(["--model", config.model])
-        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "opencode":
@@ -883,7 +909,7 @@ def _build_backend_args(
         # for the source of truth on which backends propagate the field.
         if config.effort:
             args.extend(["--variant", config.effort])
-        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     if backend == "pi":
@@ -895,7 +921,7 @@ def _build_backend_args(
             args.extend(["--model", config.model])
         if config.effort:
             args.extend(["--thinking", config.effort])
-        args.append(_prompt_file_instruction(prompt_artifact_name, candidate_id))
+        args.append(_prompt_file_instruction(prompt_artifact_name))
         return args
 
     raise ValueError(f"Unsupported backend: {backend}")
@@ -2186,12 +2212,18 @@ def invoke_claude_code(
         primary_name=prompt_artifact_name,
         fallback_name=prompt_artifact_fallback_name,
     )
+    # The session id names the agent's session file, so ``helix ui`` can show
+    # each candidate's live transcript although sandboxed agents share one
+    # login volume and one ``/workspace`` path.  claude takes the id HELIX
+    # picks; codex announces its own in its first output line, read as the
+    # output streams.  Neither reaches the model as anything but the random
+    # id every session already has.
+    record_session = session_recorder()
+    session_id = str(uuid.uuid4()) if backend == "claude" else None
+    if session_id:
+        record_session(session_id)
     args = _build_backend_args(
-        backend_worktree_path,
-        config,
-        prompt_artifact_name,
-        # Named after the host worktree: in the sandbox the agent sees /workspace.
-        candidate_id=Path(worktree_path).name,
+        backend_worktree_path, config, prompt_artifact_name, session_id=session_id
     )
     cmd_str = shlex.join(args)
     backend_env = _scrub_environment(
@@ -2227,6 +2259,9 @@ def invoke_claude_code(
                 sync_back=True,
                 image=sandbox_image,
                 agent_backend=backend,
+                on_stdout_line=(
+                    _thread_started_reader(record_session) if backend == "codex" else None
+                ),
             )
         except subprocess.TimeoutExpired as exc:
             # ``sandbox.timeout_seconds`` ran out.  The container's edits are

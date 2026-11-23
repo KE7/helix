@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
@@ -1039,24 +1039,107 @@ def _run_docker_process(
     cwd: str | None = None,
     input_text: str | None = None,
     timeout: float | None = None,
+    on_stdout_line: Callable[[str], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a Docker command, keeping env values out of its rendered argv."""
+    """Run a Docker command, keeping env values out of its rendered argv.
+
+    *on_stdout_line*, when given, sees each stdout line as it is written.
+    """
     try:
-        result = subprocess.run(
-            args,
-            check=check,
-            capture_output=capture_output,
-            text=True,
-            cwd=cwd,
-            input=input_text,
-            env=_docker_host_env(),
-            timeout=timeout,
-        )
+        if on_stdout_line is not None and input_text is None and capture_output:
+            result = _run_streaming(args, cwd=cwd, timeout=timeout, on_stdout_line=on_stdout_line)
+            if check and result.returncode:
+                raise subprocess.CalledProcessError(
+                    result.returncode, args, result.stdout, result.stderr
+                )
+        else:
+            result = subprocess.run(
+                args,
+                check=check,
+                capture_output=capture_output,
+                text=True,
+                cwd=cwd,
+                input=input_text,
+                env=_docker_host_env(),
+                timeout=timeout,
+            )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         _redact_subprocess_exception(exc, args)
         raise
     result.args = _redact_docker_argv(args)
     return result
+
+
+#: Seconds to collect what a killed process's pipes still hold.
+_DRAIN_AFTER_KILL = 5.0
+
+
+def _run_streaming(
+    args: list[str],
+    *,
+    cwd: str | None,
+    timeout: float | None,
+    on_stdout_line: Callable[[str], None],
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run(capture_output=True, text=True)`` that also hands each stdout line to a callback.
+
+    The timeout covers the process and the draining of its output, as in
+    ``subprocess.run``; when it runs out the process is killed and
+    ``TimeoutExpired`` carries the output so far.  Undecodable bytes are
+    replaced rather than raised, and a callback that raises is logged and
+    never stops the capture.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    proc = subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+        env=_docker_host_env(),
+    )
+    out: list[str] = []
+    err: list[str] = []
+
+    def pump_stdout() -> None:
+        assert proc.stdout is not None
+        failed = False
+        for line in proc.stdout:
+            out.append(line)
+            if failed:
+                continue
+            try:
+                on_stdout_line(line)
+            except Exception as exc:
+                failed = True
+                logger.warning("stdout line callback failed: %s: %s", type(exc).__name__, exc)
+
+    def pump_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            err.append(line)
+
+    def left() -> float | None:
+        return None if deadline is None else max(deadline - time.monotonic(), 0.0)
+
+    pumps = [threading.Thread(target=pump_stdout, daemon=True), threading.Thread(target=pump_stderr, daemon=True)]
+    for pump in pumps:
+        pump.start()
+    try:
+        proc.wait(timeout=left())
+        for pump in pumps:
+            pump.join(left())
+        if any(pump.is_alive() for pump in pumps):
+            raise subprocess.TimeoutExpired(args, timeout or 0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for pump in pumps:
+            pump.join(_DRAIN_AFTER_KILL)
+        raise subprocess.TimeoutExpired(args, timeout or 0, output="".join(out), stderr="".join(err)) from None
+    return subprocess.CompletedProcess(args, proc.returncode, "".join(out), "".join(err))
 
 
 def subprocess_output_text(output: str | bytes | None) -> str:
@@ -1369,8 +1452,12 @@ def run_sandboxed_commands(
     image: str | None = None,
     agent_backend: str | None = None,
     input_text: str | None = None,
+    on_stdout_line: Callable[[str], None] | None = None,
 ) -> list[subprocess.CompletedProcess[str]]:
-    """Run commands in one Docker sandbox workspace copy."""
+    """Run commands in one Docker sandbox workspace copy.
+
+    *on_stdout_line* sees each stdout line of every command as it is written.
+    """
     if not commands:
         raise ValueError("at least one sandbox command is required")
     if input_text is not None and len(commands) != 1:
@@ -1427,6 +1514,7 @@ def run_sandboxed_commands(
                             cwd=str(source),
                             input_text=input_text,
                             timeout=sandbox.timeout_seconds,
+                            on_stdout_line=on_stdout_line,
                         )
                     )
                 except subprocess.TimeoutExpired as exc:
@@ -1483,6 +1571,7 @@ def run_sandboxed_command(
     image: str | None = None,
     agent_backend: str | None = None,
     input_text: str | None = None,
+    on_stdout_line: Callable[[str], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one command in a Docker sandbox using a copy of *cwd* as workspace."""
     return run_sandboxed_commands(
@@ -1495,6 +1584,7 @@ def run_sandboxed_command(
         image=image,
         agent_backend=agent_backend,
         input_text=input_text,
+        on_stdout_line=on_stdout_line,
     )[0]
 
 

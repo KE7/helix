@@ -29,7 +29,8 @@ Spans are written whatever becomes of the candidate they worked on, the same
 way its tokens are charged whatever its fate.  :func:`decision` then records
 that fate once per candidate, so time can be split into what went to accepted
 and to rejected candidates.  :func:`usage` records each charge of agent tokens
-and cost, so a generation's agent cost is exact rather than estimated.
+and cost, so a generation's agent cost is exact rather than estimated, and
+:func:`session_recorder` the session id of each agent call.
 
 The ``helix.timed`` section is the other side: the API that code HELIX runs
 (the evaluator, scripts the agent runs) uses to report its own operations.
@@ -253,6 +254,38 @@ def usage(stats: UsageStats, *, candidate_id: str | None, source: str | None) ->
             "thread_id": threading.get_ident(),
         }
     )
+
+
+def session_recorder() -> Callable[[str], None]:
+    """A function that records the backend session id of the open ``agent`` span.
+
+    The id names the agent's session file: HELIX picks claude's
+    (``--session-id``) and reads codex's from its ``thread.started`` event as
+    the output streams.  ``helix ui`` uses it to show each candidate's live
+    transcript, since sandboxed agents share one login volume and one
+    ``/workspace`` path, and nothing the agent reads names its candidate.
+    The span context is captured here, so the returned function may be called
+    from the thread that reads the backend's output.
+    """
+    parent, generation, candidate = _context.get()
+
+    def record(session_id: str) -> None:
+        if _sink is None:
+            return
+        _write(
+            {
+                "event": "session",
+                "session_id": session_id,
+                "candidate": candidate,
+                "parent_span_id": parent,
+                "run_id": _run_id,
+                "generation": generation,
+                "wall_time": time.time(),
+                "thread_id": threading.get_ident(),
+            }
+        )
+
+    return record
 
 
 def traced(

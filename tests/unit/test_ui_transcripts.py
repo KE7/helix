@@ -464,7 +464,7 @@ def test_volume_script_finds_claude_start_after_an_untimed_first_line(tmp_path: 
 
 
 def test_volume_script_reads_the_candidate_from_the_launch_line(tmp_path: Path) -> None:
-    """HELIX names the candidate in the line it launches the agent with, the session's first user message."""
+    """Runs between 2026-11-16 and 0.4.0 named the candidate in the launch line; their sessions still match."""
     path = tmp_path / "s.jsonl"
     launch = {"type": "response_item", "payload": {"role": "user", "content": [
         {"type": "input_text", "text": "Read .agent_task_prompt.md in the current workspace and follow "
@@ -505,3 +505,82 @@ def test_no_start_order_guess_while_sessions_may_still_get_their_marker() -> Non
     span = records[2]
     assert tmod._match_session(span, records, files, "g1-s2", T0 + 8) == (None, False)
     assert tmod._match_session(span, records, files, "g1-s2", T0 + 6 + tmod._MARKER_WAIT + 1) == (s.format(6, 2), False)
+
+
+def _session(parent: str, session_id: str, cid: str) -> dict[str, Any]:
+    return {"event": "session", "session_id": session_id, "parent_span_id": parent, "run_id": "r1",
+            "candidate": cid, "wall_time": T0 + 2}
+
+
+@pytest.mark.parametrize(
+    ("backend", "path", "session_id"),
+    [
+        ("codex", "/home/node/.codex/sessions/2026/11/15/rollout-2026-11-15T00-00-05-019a7c3e-1111-7222-8333-944445555666.jsonl",
+         "019a7c3e-1111-7222-8333-944445555666"),
+        ("claude", "/home/node/.claude/projects/-workspace/0b5c3a0e-0000-4000-8000-000000000001.jsonl",
+         "0b5c3a0e-0000-4000-8000-000000000001"),
+    ],
+)
+def test_a_recorded_session_id_finds_its_file_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, path: str, session_id: str
+) -> None:
+    """Sandboxed agents share a volume and a cwd; the session id HELIX recorded picks the file."""
+    _worktree(tmp_path, "g1-s2")
+    rows = _codex_rows(T0 + 5) if backend == "codex" else _claude_rows(T0 + 5)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, _volume_block(path, 0, _iso(T0 + 5), _jsonl(rows)), b"")
+
+    monkeypatch.setattr(tmod.subprocess, "run", fake_run)
+    records = [_start("run", "run", T0 - 60), _start("agent", "a1", T0, "g1-s1"), _start("agent", "a2", T0 + 1, "g1-s2"),
+               _session("a2", session_id, "g1-s2")]
+    out = TranscriptReader(tmp_path, _config(backend, sandbox=True), FakeReader(records)).read("g1-s2")
+    name = f"rollout-*-{session_id}.jsonl" if backend == "codex" else f"{session_id}.jsonl"
+    assert f"-name {shlex.quote(name)}" in calls[0][-1]
+    assert out["session"] == session_id and out["note"] is None and out["events"]
+
+
+def test_no_start_order_guess_while_a_recorded_run_waits_for_the_session_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In a run that records session ids, an agent whose id is not announced yet shows nothing, not a sibling's session."""
+    _worktree(tmp_path, "g1-s2")
+    sibling = "/home/node/.codex/sessions/2026/11/15/rollout-2026-11-15T00-00-05-aaaaaaaa-0000-0000-0000-000000000001.jsonl"
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, 0, _volume_block(sibling, 0, _iso(T0 - 300), b""), b"")
+
+    monkeypatch.setattr(tmod.subprocess, "run", fake_run)
+    records = [_start("run", "run", T0 - 600), _start("agent", "a1", T0 - 400, "g1-s1"),
+               _session("a1", "aaaaaaaa-0000-0000-0000-000000000001", "g1-s1"), _start("agent", "a2", T0 - 400, "g1-s2")]
+    out = TranscriptReader(tmp_path, _config(sandbox=True), FakeReader(records)).read("g1-s2")
+    assert out["session"] is None and out["note"] == "no session file found yet"
+
+
+def test_a_start_order_guess_gives_way_to_the_recorded_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Before an agent's id is recorded the reader may guess by start order; the id, once recorded, wins."""
+    _worktree(tmp_path, "g1-s1")
+    s = "/home/node/.codex/sessions/2026/11/15/rollout-2026-11-15T00-00-0{}-aaaaaaaa-0000-0000-0000-00000000000{}.jsonl"
+    guess, mine = s.format(1, 1), s.format(2, 2)
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        listing = argv[-1].split(" | ", 1)[0]  # what the reader asked for: a find, or one cached path
+        blocks = [p for p in (guess, mine) if "-name 'rollout-*.jsonl'" in listing or p in listing
+                  or p.endswith(listing.split("rollout-*-")[-1].split("'")[0])]
+        out = b"".join(_volume_block(p, 0, _iso(T0 + 1), _jsonl(_codex_rows(T0 + 1))) for p in blocks)
+        return subprocess.CompletedProcess(argv, 0, out, b"")
+
+    monkeypatch.setattr(tmod.subprocess, "run", fake_run)
+    clock = [100.0]
+    monkeypatch.setattr(tmod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(tmod.time, "time", lambda: LATER)
+    records = [_start("run", "run", T0 - 60), _start("agent", "a1", T0, "g1-s1")]
+    reader = TranscriptReader(tmp_path, _config(sandbox=True), FakeReader(records))
+    first = reader.read("g1-s1")
+    assert first["session"] == "aaaaaaaa-0000-0000-0000-000000000001" and first["note"] == "session matched to this agent by start time"
+    records.append(_session("a1", "aaaaaaaa-0000-0000-0000-000000000002", "g1-s1"))
+    clock[0] += 5.0
+    second = reader.read("g1-s1")
+    assert second["session"] == "aaaaaaaa-0000-0000-0000-000000000002" and second["note"] is None
