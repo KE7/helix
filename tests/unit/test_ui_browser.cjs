@@ -17,6 +17,7 @@ class Element {
   setAttribute() {}
   addEventListener() {}
   replaceChildren() { this.children = []; }
+  querySelectorAll() { return []; }
   append(child) { this.children.push(child); }
   text() {
     return this.textContent + this.children.map((child) => child instanceof Element ? child.text() : child).join('');
@@ -33,7 +34,7 @@ function dashboard(fetch) {
   const context = {
     fetch, location, URLSearchParams, TextDecoder, Node: Element,
     window: { ReadableStream, TextDecoder },
-    document: { getElementById: () => candidate, createElement: () => new Element() },
+    document: { getElementById: () => candidate, createElement: () => new Element(), visibilityState: 'visible' },
     history: { replaceState: (_state, _title, url) => { assert.equal(url, '/'); location.hash = ''; } },
     sessionStorage: { setItem: (key, value) => storage.set(key, value), getItem: (key) => storage.get(key) },
     matchMedia: () => ({ matches: false }),
@@ -41,7 +42,7 @@ function dashboard(fetch) {
   };
   // Load the real script with a minimal DOM and replace auto-boot so tests can drive each update.
   vm.runInNewContext(app.replace('  boot();', `
-    globalThis.ui = { state: S, authorize: () => { token = loadToken(); }, connect, fromHash, get, index, renderView };
+    globalThis.ui = { state: S, authorize: () => { token = loadToken(); }, connect, fromHash, get, index, renderView, candidateKey, openTx, fetchTx };
   `), context);
   return { ...context.ui, location, candidate };
 }
@@ -135,4 +136,53 @@ test('the candidate view refetches an open proposal when its outcome changes', a
   assert.match(ui.candidate.text(), /0\.750/);
   assert.match(ui.candidate.text(), /\+updated code/);
   assert.doesNotMatch(ui.candidate.text(), /in progress/);
+});
+
+test('an open frontier candidate redraws when its rank or keys change', () => {
+  const ui = dashboard(async () => ({ ok: true, json: async () => ({}) }));
+  Object.assign(ui.state, { view: 'candidate', cand: cid, candVs: 'parent', run: { status: { state: 'running' } } });
+  Object.assign(ui.state, { byId: { [cid]: { id: cid, front: true, keys: 10, sole: 4 } }, rank: { [cid]: 1 }, front: [{ id: cid }] });
+  const before = ui.candidateKey();
+  Object.assign(ui.state, { byId: { [cid]: { id: cid, front: true, keys: 5, sole: 0 } }, rank: { [cid]: 2 }, front: [{ id: 'g3-s1' }, { id: cid }] });
+  assert.notEqual(ui.candidateKey(), before);
+});
+
+test('a transcript that moves on to a new session is read from its start', async () => {
+  const replies = [
+    { source: 'live', session: 'mutation', cursor: 900, events: [{ kind: 'message', text: 'mutating' }] },
+    { source: 'live', session: 'summary', cursor: 1000, events: [{ kind: 'message', text: 'tail of the summary' }] },
+    { source: 'live', session: 'summary', cursor: 300, events: [{ kind: 'message', text: 'summary from the start' }] },
+  ];
+  const cursors = [];
+  const ui = dashboard(async (url) => {
+    cursors.push(new URL(url, 'http://x').searchParams.get('cursor'));
+    const reply = replies.shift();
+    return { ok: true, json: async () => reply };
+  });
+  ui.authorize();
+  ui.openTx(cid);
+  const tx = ui.state.tx;
+  await new Promise(setImmediate);
+  await ui.fetchTx(tx);
+  await ui.fetchTx(tx);
+  assert.deepEqual(cursors, ['0', '900', '0']);
+  assert.equal(JSON.stringify(tx.events.map((e) => e.text)), '["summary from the start"]');
+  assert.equal(tx.cursor, 300);
+  assert.match(ui.candidate.text(), /summary from the start/);
+  assert.doesNotMatch(ui.candidate.text(), /mutating/);
+});
+
+test('redrawing the same candidate keeps the sections the reader opened', async () => {
+  const ui = dashboard(async () => ({ ok: true, json: async () => ({ id: cid, accepted: true, mean: 0.5, prompt: 'p', worktree_exists: true }) }));
+  ui.authorize();
+  Object.assign(ui.state, { view: 'candidate', cand: cid, candVs: 'parent', run: { status: { state: 'running' } } });
+  ui.renderView(true);
+  await ui.state.candRequest;
+  const before = [{ open: true }, { open: false }], after = [{ open: false }, { open: false }];
+  let calls = 0;
+  ui.candidate.querySelectorAll = () => (calls++ === 0 ? before : after);
+  ui.renderView(true);
+  await ui.state.candRequest;
+  assert.equal(calls, 2);
+  assert.deepEqual(after.map((e) => e.open), [true, false]);
 });

@@ -86,15 +86,20 @@ class TranscriptReader:
         cursor = max(int(cursor), 0)
         if not CANDIDATE_ID_RE.match(cid):
             return self._reply("none", cursor, note="unknown candidate")
-        if self._backend not in _BACKENDS:
-            return self._reply("none", cursor, note=f"{self._backend} transcripts are not shown")
         records = self._reader.timing_records()
-        span = _open_agent_span(records, cid)
-        if span is None:
-            return self._finished(cid, cursor, records)
-        if self._config.sandbox.enabled:
-            return self._live_sandboxed(cid, cursor, span, records)
-        return self._live_host(cid, cursor, span)
+        # The backend the agent ran with: `helix evolve --backend` can differ from helix.toml.
+        backend = _agent_backend(records, cid) or self._backend
+        if backend not in _BACKENDS:
+            reply = self._reply("none", cursor, note=f"{backend} transcripts are not shown")
+        else:
+            span = _open_agent_span(records, cid)
+            if span is None:
+                reply = self._finished(cid, cursor, records, backend)
+            elif self._config.sandbox.enabled:
+                reply = self._live_sandboxed(cid, cursor, span, records, backend)
+            else:
+                reply = self._live_host(cid, cursor, span, backend)
+        return {**reply, "backend": backend}
 
     def _reply(
         self,
@@ -119,7 +124,7 @@ class TranscriptReader:
 
     # -- finished ---------------------------------------------------------
 
-    def _finished(self, cid: str, cursor: int, records: list[dict[str, Any]]) -> dict[str, Any]:
+    def _finished(self, cid: str, cursor: int, records: list[dict[str, Any]], backend: str) -> dict[str, Any]:
         worktree = self._worktree(cid)
         if not worktree.is_dir():
             # A proposal waiting for its slot has no worktree yet; one whose
@@ -131,7 +136,7 @@ class TranscriptReader:
             )
             note = "worktree removed, and its transcript with it" if started else "agent not started yet"
             return self._reply("none", cursor, note=note)
-        path = _finished_transcript(worktree, self._config.sandbox.transcript_artifact_dir, self._backend)
+        path = _finished_transcript(worktree, self._config.sandbox.transcript_artifact_dir, backend)
         if path is None:
             return self._reply("none", cursor, note="no transcript recorded")
         try:
@@ -139,7 +144,7 @@ class TranscriptReader:
         except OSError:
             return self._reply("none", cursor, note="transcript unreadable")
         events, new_cursor = _consume(
-            self._backend, data, start, complete=start + len(data) - int(start > 0) >= size
+            backend, data, start, complete=start + len(data) - int(start > 0) >= size
         )
         return self._reply(
             "finished", new_cursor, session=_session_id(path.name), events=events, note=_tail_note(cursor, start)
@@ -147,10 +152,10 @@ class TranscriptReader:
 
     # -- live, unsandboxed ------------------------------------------------
 
-    def _live_host(self, cid: str, cursor: int, span: dict[str, Any]) -> dict[str, Any]:
+    def _live_host(self, cid: str, cursor: int, span: dict[str, Any], backend: str) -> dict[str, Any]:
         worktree = self._worktree(cid)
         start = float(span["wall_time"])
-        if self._backend == "codex":
+        if backend == "codex":
             path = _host_codex_session(Path.home(), worktree, start)
         else:
             path = _host_claude_session(Path.home(), worktree, start)
@@ -160,7 +165,7 @@ class TranscriptReader:
             data, offset, _ = _read_local(path, cursor)
         except OSError:
             return self._reply("live", cursor, note="session file unreadable")
-        events, new_cursor = _consume(self._backend, data, offset, complete=False)
+        events, new_cursor = _consume(backend, data, offset, complete=False)
         return self._reply(
             "live", new_cursor, session=_session_id(path.name), events=events, note=_tail_note(cursor, offset)
         )
@@ -168,7 +173,7 @@ class TranscriptReader:
     # -- live, sandboxed --------------------------------------------------
 
     def _live_sandboxed(
-        self, cid: str, cursor: int, span: dict[str, Any], records: list[dict[str, Any]]
+        self, cid: str, cursor: int, span: dict[str, Any], records: list[dict[str, Any]], backend: str
     ) -> dict[str, Any]:
         heuristic = "session matched to this agent by start time"
         session_id = _span_session(records, span)
@@ -184,18 +189,18 @@ class TranscriptReader:
                 return self._reply("live", cursor, session=known[2] if known else None, note=note)
             self._last_docker[cid] = now
         try:
-            image = resolve_sandbox_image(self._config.sandbox, self._backend)
-            volume = sandbox_auth_volume_name(self._backend, self._config.sandbox)
+            image = resolve_sandbox_image(self._config.sandbox, backend)
+            volume = sandbox_auth_volume_name(backend, self._config.sandbox)
         except ValueError as exc:
             return self._reply("none", cursor, note=str(exc))
         if known is not None:
             listing = f"printf '%s\\n' {shlex.quote(known[1])}"
         elif session_id is not None:
-            name = _VOLUME_NAME_OF_ID[self._backend].format(session_id)
-            listing = f"{_VOLUME_FIND_ID[self._backend].format(shlex.quote(name))} 2>/dev/null"
+            name = _VOLUME_NAME_OF_ID[backend].format(session_id)
+            listing = f"{_VOLUME_FIND_ID[backend].format(shlex.quote(name))} 2>/dev/null"
         else:
             minutes = math.ceil(max(time.time() - float(span["wall_time"]), 0.0) / 60) + 1
-            listing = f"{_VOLUME_FIND[self._backend]} -mmin -{minutes} 2>/dev/null"
+            listing = f"{_VOLUME_FIND[backend]} -mmin -{minutes} 2>/dev/null"
         try:
             result = subprocess.run(
                 docker_argv(image, volume, _volume_script(listing, cursor)),
@@ -210,7 +215,7 @@ class TranscriptReader:
         files = {
             path: (offset, stamp, marker, content)
             for path, offset, stamp, marker, content in _split_volume_output(result.stdout)
-            if _VOLUME_PATH_RE[self._backend].match(path)
+            if _VOLUME_PATH_RE[backend].match(path)
         }
         path: str | None
         if known is not None:
@@ -231,7 +236,7 @@ class TranscriptReader:
         with self._lock:
             self._sessions[cid] = (str(span["span_id"]), path, session, exact)
         offset, _, _, content = files[path]
-        events, new_cursor = _consume(self._backend, content, offset, complete=False)
+        events, new_cursor = _consume(backend, content, offset, complete=False)
         note = _tail_note(cursor, offset) or (None if exact else heuristic)
         return self._reply("live", new_cursor, session=session, events=events, note=note)
 
@@ -262,6 +267,22 @@ def _open_agent_span(records: list[dict[str, Any]], cid: str) -> dict[str, Any] 
         and isinstance(rec.get("wall_time"), (int, float))
     ]
     return max(spans, key=lambda rec: rec["wall_time"]) if spans else None
+
+
+def _agent_backend(records: list[dict[str, Any]], cid: str) -> str | None:
+    """The backend of *cid*'s latest agent call, else of the latest agent call recorded at all."""
+    own: str | None = None
+    latest: str | None = None
+    for rec in records:
+        if rec.get("event") != "start" or rec.get("span") != "agent":
+            continue
+        backend = (rec.get("attrs") or {}).get("backend")
+        if not isinstance(backend, str):
+            continue
+        if rec.get("candidate") == cid:
+            own = backend
+        latest = backend
+    return own or latest
 
 
 def _span_session(records: list[dict[str, Any]], span: dict[str, Any]) -> str | None:

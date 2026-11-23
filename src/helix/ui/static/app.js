@@ -750,7 +750,7 @@
   function stopTx() { if (S.tx && S.tx.timer) clearTimeout(S.tx.timer); S.tx = null; }
   function openTx(id) {
     stopTx();
-    S.tx = { id, cursor: 0, events: [], source: null, note: null, timer: null, t0: null, seen: 0, shown: null };
+    S.tx = { id, cursor: 0, events: [], source: null, session: null, note: null, timer: null, t0: null, seen: 0, shown: null };
     renderTx();
     fetchTx(S.tx);
   }
@@ -761,12 +761,14 @@
     try { d = await get(`/api/transcript/${encodeURIComponent(t.id)}?cursor=${t.cursor}`); } catch (e) { d = null; }
     if (S.tx !== t) return;
     if (d) {
-      if (t.source && d.source !== t.source && t.cursor) { t.events = []; t.cursor = 0; t.seen = 0; t.source = d.source; t.timer = setTimeout(() => fetchTx(t), 0); return; }
-      t.source = d.source; t.note = d.note || null; t.backend = d.backend || null;
+      // a new source, or a new session (the change-summary call after the mutation), restarts from its first byte
+      const moved = (t.source && d.source !== t.source) || (t.session && d.session && d.session !== t.session);
+      if (moved && t.cursor) { t.events = []; t.cursor = 0; t.seen = 0; t.source = d.source; t.session = d.session || null; t.timer = setTimeout(() => fetchTx(t), 0); return; }
+      t.source = d.source; if (d.session) t.session = d.session; t.note = d.note || null; t.backend = d.backend || null;
       for (const e of d.events || []) { t.events.push(e); t.seen++; }
       if (t.events.length > 600) t.events.splice(0, t.events.length - 600);
       if (num(d.cursor)) t.cursor = d.cursor;
-      const key = `${t.source}|${t.note}|${t.seen}`;
+      const key = `${t.source}|${t.session}|${t.note}|${t.seen}`;
       if (key !== t.shown) { t.shown = key; renderTx(); }
     }
     // "none" can change while the run goes on: a proposal selected before its agent starts
@@ -1131,7 +1133,9 @@
     const row = S.byId[S.cand];
     const lane = S.run?.now?.lanes?.find((l) => l.id === S.cand);
     const outcome = row ? (row.front ? 'frontier' : 'accepted') : lane && (lane.result?.status || 'running');
-    return ['candidate', S.cand, S.candVs, outcome, S.run?.status?.state].join('|');
+    // a frontier member's rank, keys and sole holdings move as later candidates join the frontier
+    const front = row && row.front ? [S.rank[S.cand], S.front.length, row.keys, row.sole] : [];
+    return ['candidate', S.cand, S.candVs, outcome, S.run?.status?.state, ...front].join('|');
   }
   function openCand(id, vs) {
     if (!ID_RE.test(id)) return;
@@ -1149,10 +1153,12 @@
     let d = null, err = null;
     try { d = await pending; } catch (e) { err = e; }
     if (S.cand !== id || S.candRequest !== pending) return;
+    // a redraw of the same candidate keeps the sections the reader opened
+    const opened = same ? [...V.querySelectorAll('details')].map((e) => e.open) : [];
     S.candData = d;
     if (!d) { fill(V, candCrumbs(id), h('div', { class: 'ch' }, h('h2', { text: id }), h('span', { text: err && err.status === 404 ? 'not found' : 'could not load' }))); return; }
     fill(V, candidateView(d));
-    if (same) V.scrollTop = top;
+    if (same) { V.querySelectorAll('details').forEach((e, i) => { if (opened[i]) e.open = true; }); V.scrollTop = top; }
   }
   function candCrumbs(id) {
     const via = { frontier: ['Frontier', 'frontier'], mutation: ['Mutation', 'mutation'], validation: ['Validation', 'validation'], lineage: ['Lineage', linRoute()], proposals: ['Proposals', propRoute()] }[S.from];

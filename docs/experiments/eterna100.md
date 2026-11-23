@@ -38,7 +38,9 @@ and does no search.
 The 100 puzzles are split 20 train, 30 validation and 50 held out, stratified
 by how many of the 15 published algorithm variants solve each one, so the
 three splits span the same difficulty. The agent sees the training puzzles and
-their feedback only.
+their feedback only. In the recorded run its workspace also held the example's
+README, which showed one validation target, p003, with a design; the seed
+designer already solves p003. The example now leaves the README out.
 
 ## Setup
 

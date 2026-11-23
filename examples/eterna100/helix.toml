@@ -50,7 +50,8 @@ Change designer.py and add new modules as needed.
 """
 
 [sandbox]
-# Mutation agents run in Docker workspace copies that leave out the evaluator
-# and the validation and test puzzles. Evaluation runs on the host.
+# Mutation agents run in Docker workspace copies that leave out the evaluator,
+# the validation and test puzzles, and README.md, which shows a validation
+# puzzle's design and the result of a past run. Evaluation runs on the host.
 enabled = true
-omit_from_agent = ["evaluate.py", "val", "test"]
+omit_from_agent = ["evaluate.py", "val", "test", "README.md"]
