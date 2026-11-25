@@ -144,7 +144,7 @@ agent sandbox. Everything that decides a score is the experiment's.
 |---|---|---|
 | Proposer | Codex `gpt-6-luna`, on the host | Claude Code `claude-haiku-4-5`, in the agent sandbox |
 | No web | `web_access = false` (Codex gets `web_search="disabled"`, `features.apps=false`), plus `--ignore-user-config` so no user plugins or MCP servers load | `web_access = false` and the gateway network |
-| Refiner | GEPA's `make_refiner` on `openai/gpt-5.1`, reached through Arena's OpenAI-compatible API (`api_base="https://api.arena.ai/v1"`) | the same, through OpenAI |
+| Refiner | GEPA's `make_refiner` on `openai/gpt-5.1` | the same |
 | Budget | 200 metric calls, with `stop_at_score` just above 2.635983362593453 | 200 metric calls |
 
 ### Result
