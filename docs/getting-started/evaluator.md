@@ -4,8 +4,8 @@ The evaluator is the one piece of code you write for HELIX. HELIX runs it in eac
 
 !!! note "The contract"
     - Print exactly **one** line that starts with `HELIX_RESULT=`, followed by a JSON list with one entry per example, in the order of `helix_batch.json`. Each entry is a score or a `[score, side_info]` pair.
-    - **Higher is better.** Scores must be finite numbers (no `NaN`, no booleans). They need not lie in [0, 1], but `perfect_score_threshold` and `stop_at_score`, if you set them, use the same scale (see [Configuration](../guides/configuration.md)).
-    - A non-zero exit code or a missing `HELIX_RESULT=` line marks the evaluation as failed; its stdout and stderr go to the next mutation as debug context.
+    - **Higher is better.** Scores must be finite numbers (no `NaN`); `true` and `false` count as 1 and 0. They need not lie in [0, 1], but `perfect_score_threshold` and `stop_at_score`, if you set them, use the same scale (see [Configuration](../guides/configuration.md)).
+    - Without a `HELIX_RESULT=` line there are no scores, and HELIX treats the evaluation as an error. A non-zero exit keeps the per-example scores it printed (the minibatch gate still uses them), and its stdout and stderr go to the next mutation as debug context.
     - HELIX writes the ids to evaluate into `helix_batch.json` in the working directory and sets `HELIX_SPLIT` to `train` or `val`. You own the dataset: map each id to an example the same way every time.
     - The evaluator runs with a scrubbed environment and no shell. List API keys and other variables it needs in `passthrough_env`.
 
@@ -92,4 +92,4 @@ For notes about the whole evaluation rather than one instance, call `from helix 
 `log("what happened", key=value)` in your evaluator. They appear as Evaluator Notes in the next task prompt.
 
 The agent never sees the raw `HELIX_RESULT=` line. HELIX saves your evaluator's stdout and stderr with each
-evaluation for debugging; the agent gets them when an evaluation fails (see the contract above).
+evaluation for debugging; the agent gets them when the evaluator exits non-zero (see the contract above), unless `evaluator.include_stdout` or `include_stderr` is off.

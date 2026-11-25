@@ -3,7 +3,7 @@
 
 ```
 .helix/
-├── config.toml          # Snapshot of helix.toml at run start
+├── config.toml          # The first run's objective and evaluator command
 ├── helix.log            # Run log: errors and warnings land here
 ├── evaluator_manifest.json # Protected evaluator file hashes
 ├── state.json           # Generation, frontier, budget

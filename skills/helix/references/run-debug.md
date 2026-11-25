@@ -89,7 +89,7 @@ helix ui            # live dashboard; over SSH: ssh -N -L 8790:127.0.0.1:8790 ho
 ### Where the time went
 
 Every run appends timing to `.helix/timing.jsonl`, and `helix timing` reads it.
-The README's "Timing Trace" section explains each table and the record format.
+The [timing guide](https://ke7.github.io/helix/guides/timing.html) explains each table and the record format.
 Use it to find what to fix:
 
 - Most work went to **rejected** candidates: the search has stalled.

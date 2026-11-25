@@ -9,20 +9,11 @@ Read-only. Press Ctrl+C to stop.
 ```
 
 It reads `helix.toml` and `.helix/`, plus the agents' session files for live transcripts, and never writes to any of
-them. Before the first run it shows the configured loop.
+them. Before the first run it shows the configured loop. Its flags are in the
+[CLI reference](../reference/cli.md#helix-ui-options).
 
 ![The helix ui dashboard during a run: header numbers, the helix progress chart, the loop with live numbers, run health, and the current generation's agents with a live transcript](../assets/ui/helix-ui-light.png#only-light)
 ![The helix ui dashboard during a run: header numbers, the helix progress chart, the loop with live numbers, run health, and the current generation's agents with a live transcript](../assets/ui/helix-ui-dark.png#only-dark)
-
-## Options
-
-```
---dir PATH        Project directory containing helix.toml (default: .)
---config PATH     Path to the config file (default: helix.toml)
---port INT        Port to listen on (default: 8790; the next 10 are tried when it is taken)
---host HOST       Interface to listen on (default: 127.0.0.1)
---no-browser      Print the address without opening a browser
-```
 
 ## Remote runs
 

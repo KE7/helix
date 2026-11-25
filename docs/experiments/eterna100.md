@@ -42,6 +42,11 @@ their feedback only. In the recorded run its workspace also held the example's
 README, which showed one validation target, p003, with a design; the seed
 designer already solves p003. The example now leaves the README out.
 
+The agent's sandbox had an open network. Its instructions forbid fetching
+published solutions, and the evaluator scores 0 for any candidate whose files
+hold a run of 40 or more `A`, `C`, `G` or `U` letters. Nothing stops a designer from
+fetching at run time, but `g11-s62` makes no network call.
+
 ## Setup
 
 | | |
@@ -58,9 +63,11 @@ top-level split folders. Neither changes a score in this run.
 
 ## Results
 
-The seed solves 6 of the 50 held-out puzzles. The best candidate, `g11-s62`,
+The seed solves 6 of the 50 held-out puzzles. The run's best candidate, `g11-s62`,
 solves 32 in two of three scorings and 33 in the third. They differ by one
-borderline puzzle, which the 8-second wall-clock budget makes load-dependent.
+borderline puzzle. The 8-second budget is wall-clock time, and up to three
+evaluations, each running up to 4 puzzles at once, ran at the same time, so a
+borderline puzzle can pass under light load and fail under heavy load.
 
 | | Train (20) | Validation (30) | Held out (50) |
 |---|---|---|---|
@@ -134,17 +141,6 @@ validation and did not replace `g11-s62`.
 A single `inverse_fold` call on a long target cannot be interrupted. All 7 of
 `g11-s62`'s held-out failures with an error are timeouts on targets of 108 to
 400 bases.
-
-## Limits
-
-- The 8-second budget is wall-clock time, and up to three evaluations, each
-  running 4 puzzles at once, ran at the same time. A borderline puzzle can
-  pass under light load and fail under heavy load.
-- The agent's sandbox had an open network. Its instructions forbid fetching
-  published solutions, and the evaluator scores 0 for any candidate file that
-  stores an RNA sequence of 40 or more letters, but nothing stops a designer
-  from fetching at run time. `g11-s62` makes no network call.
-- One run, one seed.
 
 ## Next experiments
 

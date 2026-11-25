@@ -67,8 +67,9 @@ the plumbing changed. For every candidate:
 
 Every executed program that beats the run's best becomes the next
 `current_best_solution`. The StateTracker's metric calls count executions of
-candidate or refined code. GEPA's `state_tracker_logs.json` records them with
-the code behind the best packing.
+candidate or refined code, so one evaluation can add two. GEPA's
+`state_tracker_logs.json` records them with the code behind the best packing,
+and the metric calls quoted on this page, for both runs, are these.
 
 The plumbing that differs: HELIX starts the evaluator once per request, so the
 StateTracker is saved to disk after every change. A candidate subprocess
@@ -90,9 +91,10 @@ reports its return value as JSON rather than a pickle. dspy is pinned to
 | Perfect-score skip | off (default) | no `perfect_score_threshold` |
 | Proposer | `reflection_lm="openai/gpt-5"`, round-robin over components | HELIX mutation agent: Claude Code on `claude-haiku-4-5`, 40 turns |
 
-HELIX's `max_evaluations` counts the same metric calls as GEPA's
-`max_metric_calls`; `max_generations = 1000` is only a guard, because every
-generation spends at least one evaluation.
+HELIX's `max_evaluations` counts evaluator calls, as GEPA's
+`max_metric_calls` does, not StateTracker metric calls.
+`max_generations = 1000` is only a guard, because every generation spends at
+least one evaluation.
 
 ### Environment
 
@@ -145,7 +147,7 @@ agent sandbox. Everything that decides a score is the experiment's.
 | Proposer | Codex `gpt-6-luna`, on the host | Claude Code `claude-haiku-4-5`, in the agent sandbox |
 | No web | `web_access = false` (Codex gets `web_search="disabled"`, `features.apps=false`), plus `--ignore-user-config` so no user plugins or MCP servers load | `web_access = false` and the gateway network |
 | Refiner | GEPA's `make_refiner` on `openai/gpt-5.1` | the same |
-| Budget | 200 metric calls, with `stop_at_score` just above 2.635983362593453 | 200 metric calls |
+| Budget | `max_evaluations = 200`, with `stop_at_score` just above 2.635983362593453 | `max_evaluations = 200` |
 
 ### Result
 
@@ -159,13 +161,13 @@ agent sandbox. Everything that decides a score is the experiment's.
 | 54 | 2.6359830847 (final best) |
 | 73 | stopped by hand |
 
-The run stopped at metric call 73 of 200, after 9.5 hours: the last 19 calls
+The run was stopped at metric call 73, after 9.5 hours: the last 19 calls
 had not improved the score, and nothing above it was left except the
 tolerance below. The jump past 2.63598 (generation 11) came from the
 mutation agent's own code; the gains after it, in the ninth and tenth
 decimal places, came from GPT-5.1's refinements of agent code. For comparison, optimize_anything's published run first
 reached 2.63598 at metric call 63 and its final best at 114. One run of each
-is not a statistical comparison, and the budget counts only metric calls, not
+is not a statistical comparison, and the evaluation budget does not count
 code the agent runs while it edits. Candidate code runs with network access,
 as in optimize_anything; the code behind the best packing makes no network
 calls.
