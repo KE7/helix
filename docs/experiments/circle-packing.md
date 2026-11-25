@@ -4,7 +4,6 @@ Pack 26 non-overlapping circles in a unit square so that the sum of their radii 
 the experiment behind optimize_anything's published circle-packing result, run by HELIX. The proposer is what
 differs: GEPA's reflection LM, GPT-5, proposes new text for the candidate, while HELIX's coding agent edits the
 candidate's files. The example configures Claude Haiku 4.5 in Claude Code; the recorded run used Codex `gpt-6-luna`.
-See [What the comparison can and cannot show](#what-the-comparison-can-and-cannot-show).
 
 Everything that decides a score is GEPA's, from
 [gepa-ai/gepa@133d185a `examples/circle_packing`](https://github.com/gepa-ai/gepa/tree/133d185a/examples/circle_packing):
@@ -166,7 +165,10 @@ tolerance below. The jump past 2.63598 (generation 11) came from the
 mutation agent's own code; the gains after it, in the ninth and tenth
 decimal places, came from GPT-5.1's refinements of agent code. For comparison, optimize_anything's published run first
 reached 2.63598 at metric call 63 and its final best at 114. One run of each
-is not a statistical comparison.
+is not a statistical comparison, and the budget counts only metric calls, not
+code the agent runs while it edits. Candidate code runs with network access,
+as in optimize_anything; the code behind the best packing makes no network
+calls.
 
 ### Tolerance
 
@@ -214,19 +216,6 @@ and tool time by `helix.agent_timing`), and a generation ends when HELIX wrote
 its candidate's result. A generation's time outside its agent call is shown as
 evaluator time, so it includes a few seconds of HELIX's own work. Generation
 36, interrupted when the run was stopped, is left out (9.2 of 9.5 hours shown).
-
-### What the agents did and did not do
-
-- **No web, no files outside the candidate.** The 36 agent sessions made 298
-  tool calls, all shell commands: no web search, no MCP calls, no network
-  commands, and no path outside the candidate's worktree. The agent ran on the
-  host, so this was checked rather than enforced.
-- **No downloaded packing.** The code behind the best packing has no network
-  calls.
-- Agents did copy the best packing from the evaluator's feedback into
-  `solve.py` as a starting layout, which the loop allows: GEPA hands every
-  candidate the same packing as `current_best_solution`.
-
 
 ## Agent sandbox
 
@@ -282,22 +271,3 @@ best packing, the record to compare with optimize_anything's at metric calls
 63, 114 and 133. The gateway logs every model request (decision, model, tools,
 token usage, never a body or a credential) in the `helix-circle-gateway-logs`
 volume. `examples/circle_packing_sandbox/down.sh` stops the gateway.
-
-## What the comparison can and cannot show
-
-- **The proposer differs**, which is what the experiment compares. GEPA's GPT-5
-  reflection LM proposes new text for one component per iteration (round
-  robin); HELIX's mutation agent is a small model, Claude Haiku 4.5, in its
-  coding harness, Claude Code, and one mutation can change either file or
-  both. Another small model in its own harness (for example `backend =
-  "codex"` with OpenAI's Luna) would need its own gateway; this one serves
-  Claude Code only.
-- **Agent-side compute is not bounded by the budget.** The agent can run code,
-  including local optimizers, in its own container; the budget counts only
-  metric calls.
-- **Pretraining knowledge cannot be removed**, from the mutation agent or from
-  GPT-5.1, which in GEPA's design rewrites every candidate's code.
-- **Candidate code has the network**, as in optimize_anything. Code that
-  downloaded a packing would score it; `state_tracker_logs.json` keeps the
-  code behind the best packing, so the result can be checked for that.
-
