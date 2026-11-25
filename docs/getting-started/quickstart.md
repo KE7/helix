@@ -26,7 +26,7 @@ This writes `helix.toml`, a `.helix/` state directory, and a `.gitignore` that i
 
 Then write the evaluator: see [Writing an evaluator](evaluator.md). Run it by hand once before `helix evolve`.
 
-## What HELIX copies
+## Worktree contents
 
 Each candidate is a git worktree of your repo at `HEAD`, plus your uncommitted and untracked changes. Three things
 trip up a first run:
@@ -37,7 +37,7 @@ trip up a first run:
   `passthrough_env`.
 - `[evaluator].command` runs without a shell, so pipes and `&&` don't work. Put them in a script.
 
-## Recommended: sandbox the agent
+## Sandbox (recommended)
 
 The simplest safe setup runs the mutation agent in a Docker copy of the candidate that leaves out your evaluator, while the evaluator itself runs on your machine:
 
@@ -94,7 +94,7 @@ mkdir -p ~/.claude/skills
 ln -sfn "$(pwd)/skills/helix" ~/.claude/skills/helix
 ```
 
-## Which files the agent can change
+## Whole-repo candidates
 
 The candidate is your whole working tree. There is no `target_file`: the agent may read, edit, create or delete any
 file in the project during a mutation. A minimal project looks like:
@@ -131,7 +131,7 @@ Then run the full search (10 generations by default, or `[evolution].max_generat
 helix evolve
 ```
 
-## Look at the results
+## Results
 
 ```bash
 # Show the Pareto frontier

@@ -18,7 +18,7 @@
 | `helix timing` | Show where the run's time went (work by kind and candidate fate, wall time per generation); `--perfetto FILE` exports a timeline |
 | `helix ui` | Open a read-only live dashboard of the project in the browser ([guide](../guides/ui.md)) |
 
-## `helix ui` Options
+## `helix ui` options
 
 ```
 --dir PATH        Project directory containing helix.toml (default: .)
@@ -31,7 +31,7 @@
 Open the printed address with its `#token=…` fragment to authorize the browser tab. API clients send the token in
 the `Authorization: Bearer` header.
 
-## `helix evolve` Options
+## `helix evolve` options
 
 ```
 --dir PATH          Project directory containing helix.toml (default: .)

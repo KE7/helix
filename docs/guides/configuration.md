@@ -2,7 +2,7 @@
 
 HELIX reads its settings from `helix.toml` in your project root. For a minimal one, see [Writing an evaluator](../getting-started/evaluator.md).
 
-## A full helix.toml
+## Full example
 
 Every key below is optional except `objective` and `[evaluator].command`. The values are examples, not necessarily the defaults.
 
@@ -167,7 +167,7 @@ base_dir = ".helix/worktrees"
 # cleanup_dominated = false      # deprecated and ignored; still accepted so old configs load
 ```
 
-## Files HELIX writes in each worktree
+## Worktree files
 
 HELIX writes its own files into each candidate worktree: the agent's prompt,
 change summaries, `helix_batch.json` and the backend's result files. It keeps
@@ -184,7 +184,7 @@ writes the prompt to a fallback path; if that name is taken too, HELIX stops
 with `PromptArtifactCollisionError` and leaves both files alone. HELIX no longer needs its rules in your `.gitignore`:
 you can delete them and resume an affected run with your current configuration.
 
-## opencode and pi
+## Backend notes
 
 **opencode** (`backend = "opencode"`), without the Docker sandbox:
 

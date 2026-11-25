@@ -14,7 +14,7 @@ them. Before the first run it shows the configured loop.
 ![The helix ui dashboard during a run: header numbers, the helix progress chart, the loop with live numbers, run health, and the current generation's agents with a live transcript](../assets/ui/helix-ui-light.png#only-light)
 ![The helix ui dashboard during a run: header numbers, the helix progress chart, the loop with live numbers, run health, and the current generation's agents with a live transcript](../assets/ui/helix-ui-dark.png#only-dark)
 
-## Command-line options
+## Options
 
 ```
 --dir PATH        Project directory containing helix.toml (default: .)
@@ -24,7 +24,7 @@ them. Before the first run it shows the configured loop.
 --no-browser      Print the address without opening a browser
 ```
 
-## Watching a run on another machine
+## Remote runs
 
 Start the dashboard where the run is, then forward the port it prints (8790 unless that was taken):
 
@@ -36,13 +36,13 @@ ssh -N -L 8790:127.0.0.1:8790 my-server
 Then open the printed address on your machine. Leave `--host` at `127.0.0.1`. Any other address lets anyone who can
 reach the port and has the token read your validation scores and evaluator feedback.
 
-## Following a run
+## Views
 
 The main page is the **Loop**. The **Views** menu at the top right opens the Frontier, Lineage, Path and Proposals,
 and clicking any candidate opens its page. Every view has its own URL, such as `#lineage/g12-s3` or
 `#candidate/g12-s3`, so you can link to it.
 
-### Score, time and spend
+### Run summary
 
 The header shows the best validation score, the seed's score, generations, evaluations, an estimate of the time left
 before the first limit is hit, and spend. The chart below plots the best score so far at each generation. With several
@@ -52,12 +52,12 @@ Run health shows generations since the last new best, the share of proposals tha
 phase, and failures (agent timeouts, agent errors, evaluator errors). Spend is broken down per generation, with the
 share spent on proposals that were rejected or failed. Codex reports tokens but no cost, so a Codex run shows tokens.
 
-### The agents at work
+### Current generation
 
 The current generation lists each proposal with its phase and elapsed time. Select one to follow its agent's
-transcript as it runs (see [Where transcripts come from](#where-transcripts-come-from)).
+transcript as it runs (see [Live transcripts](#live-transcripts)).
 
-### What the agent can see and change
+### Sandbox and protected files
 
 The Loop draws the Docker sandbox when the agent runs in one, and the evaluator on the host or in its sidecar. A card
 under mutation lists the files the agent may change, the protected files it must not change (a candidate that changes
@@ -65,7 +65,7 @@ one is rejected before it is scored), and how many files the sandbox hides from 
 read every file in its worktree. Settings that look like mistakes are marked in amber, such as web tools turned off
 while the agent's shell can still reach the network.
 
-## Tracing kept and rejected proposals
+## Frontier, Lineage, Path and Proposals
 
 - **Frontier**: the candidates kept as parents. Each holds the best score on at least one frontier key (by default, a
   validation instance), and none is dominated by the others, as in GEPA. A strip shows the best score among them on
@@ -97,7 +97,7 @@ a circle with their count.*
 
 <small>Screenshots from November 2026; `scripts/docs_screenshots.py` regenerates them from a running dashboard.</small>
 
-## How scores and costs are counted
+## Scores and costs
 
 - A score labelled `val` is a validation mean. One labelled `gate` comes from a gate: for a rejected proposal, the
   score it was rejected on; for a perfect-score skip, the parent's. When every score is 0 or 1, scores are shown as
@@ -117,7 +117,7 @@ Escape closes the open panel or returns to the Loop. In the Lineage, with a node
 Right to its best child, and Up and Down to its neighbours in the same generation. In Proposals, Up and Down move the
 selection and Enter opens it.
 
-## Where transcripts come from
+## Live transcripts
 
 Transcripts are shown for the `codex` and `claude` backends, whichever one the agent ran with. They come from the
 session file the CLI writes as it runs. While the agent runs, you see that file. When it finishes, you see the copy
@@ -136,7 +136,7 @@ by start time".
 With `evolution.sibling_history` on, the change-summary call's transcript replaces the mutation's while it runs. A
 single transcript record larger than 1 MiB is skipped.
 
-## Access and secrets
+## Security
 
 - The dashboard never writes to the project, `.helix/`, worktrees, git refs or Docker volumes. Like every `helix`
   command it loads the project's `.env`; it reads no other credential files, such as the agents' logins.
@@ -145,7 +145,7 @@ single transcript record larger than 1 MiB is skipped.
 - The page itself loads without the token, but all run data needs the token in the printed address. The page moves the
   token out of the URL into the tab's session storage and sends it as an `Authorization: Bearer` header.
 
-## Gaps in what the dashboard knows
+## Limits
 
 - A run killed with `SIGKILL` writes no end marker, so it looks like it is still running. The dashboard marks a run
   that has written nothing for a long time as "Running?".

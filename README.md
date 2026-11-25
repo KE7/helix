@@ -91,7 +91,7 @@ helix ui            # live dashboard in the browser
 helix best --export ./best
 ```
 
-HELIX never touches your branch, HEAD or remote: every candidate lives in a detached worktree under `.helix/worktrees/`. For a first run, turn on the [Docker sandbox](https://ke7.github.io/helix/getting-started/quickstart.html#recommended-sandbox-the-agent). The [docs](https://ke7.github.io/helix/) cover [writing an evaluator](https://ke7.github.io/helix/getting-started/evaluator.html), [configuration](https://ke7.github.io/helix/guides/configuration.html) and the [CLI](https://ke7.github.io/helix/reference/cli.html).
+HELIX never touches your branch, HEAD or remote: every candidate lives in a detached worktree under `.helix/worktrees/`. For a first run, turn on the [Docker sandbox](https://ke7.github.io/helix/getting-started/quickstart.html#sandbox-recommended). The [docs](https://ke7.github.io/helix/) cover [writing an evaluator](https://ke7.github.io/helix/getting-started/evaluator.html), [configuration](https://ke7.github.io/helix/guides/configuration.html) and the [CLI](https://ke7.github.io/helix/reference/cli.html).
 
 ## Examples
 

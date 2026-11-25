@@ -1,6 +1,6 @@
 # Datasets and evaluator integrity
 
-## Where instance ids come from
+## Dataset modes
 
 Your evaluator loads and scores the examples. HELIX hands it a list of instance ids in `helix_batch.json` and sets
 `HELIX_SPLIT` to `train` or `val`; your evaluator maps each id to an example. The ids come from one of three setups:
@@ -20,7 +20,7 @@ When more than one is set:
 - Validation ids come from `dataset.val_size` if set, otherwise from `seedless.val_path`, otherwise from
   `seedless.train_path` (validation then reuses the training ids).
 
-## Grouping instances for stratified minibatches
+## Grouped ids for stratified sampling
 
 `evolution.batch_sampler = "stratified"` draws each minibatch across groups of instances. An id's group is the text
 before the first `evolution.group_key_separator` (default `"__"`), so `"pushcube__0"` and `"pushcube__1"` are both in
@@ -32,7 +32,7 @@ point `seedless.train_path` (and `val_path`) at it; `seedless.enabled` can stay 
 `splits/train/pushcube__0.json` and so on. Numbered ids such as `"7"` have no separator, so each is a group of one and
 there are no groups to balance.
 
-## Checking a first part of validation before the rest
+## Staged validation
 
 With validation ids and `evolution.val_stage_size = N`, a proposal that passes the gate is first scored on the first
 `N` validation ids. Only if it passes that stage is it scored on the remaining ids, and HELIX combines the two into
@@ -45,7 +45,7 @@ whole.
 During the first stage HELIX sets `HELIX_EVALUATION_PHASE=val_stage`. Your evaluator can return scores only then and
 save feedback and other side effects for the full call.
 
-## Protecting evaluator files
+## Evaluator integrity
 
 List the files your score depends on in `evaluator.protected_files`, so a mutation or merge cannot raise its score by
 editing the benchmark:

@@ -27,7 +27,7 @@ Each candidate is the whole repository, not one file or one prompt, and each mut
 The agent can read the code, change several files, run your tests and its own scripts, and fix its mistakes before
 HELIX scores the result. That suits changes that need exploring a real codebase, not a one-line edit.
 
-## How HELIX differs from GEPA's optimize_anything
+## Differences from GEPA optimize_anything
 
 HELIX's search loop (minibatch-gated acceptance, instance-level Pareto parent selection, and merge) is ported from
 GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335.3813167); see
@@ -41,7 +41,7 @@ GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335
   evaluator sidecar (`[sandbox].evaluator = true` with `[evaluator.sidecar]`) runs evaluation on a private Docker
   network that agent containers cannot reach.
 
-## One generation, step by step
+## The search loop
 
 ![The HELIX search loop: pick a parent from the instance-level Pareto frontier, let a coding agent edit it over many turns in its own worktree, gate the child against its parent on a training minibatch, score it on the full validation set, and add it to the frontier. Both scoring steps use a protected evaluator.](../assets/helix-loop-light.svg#only-light)
 ![The HELIX search loop](../assets/helix-loop-dark.svg#only-dark)

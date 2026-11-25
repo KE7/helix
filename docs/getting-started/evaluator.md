@@ -9,7 +9,7 @@ The evaluator is the one piece of code you write for HELIX. HELIX runs it in eac
     - HELIX writes the ids to evaluate into `helix_batch.json` in the working directory and sets `HELIX_SPLIT` to `train` or `val`. You own the dataset: map each id to an example the same way every time.
     - The evaluator runs with a scrubbed environment and no shell. List API keys and other variables it needs in `passthrough_env`.
 
-## A single task
+## Single task
 
 With no `[dataset]` section, the candidate is scored on one task, and `helix_batch.json` holds a single id:
 
@@ -21,7 +21,7 @@ score, feedback = run_my_benchmark()  # your code; higher is better
 print("HELIX_RESULT=" + json.dumps([[score, {"feedback": feedback}]]))
 ```
 
-## A dataset with train and validation splits
+## Train and validation splits
 
 Set the split sizes, and HELIX samples ids from them: `"0"` to `"199"` for training here, as strings. To use named ids such as `"pushcube__0"` instead (which `evolution.batch_sampler = "stratified"` needs to group examples), point `[seedless].train_path` / `val_path` at directories of `*.json` files; the file stems become the ids (see [Datasets](../guides/datasets.md)). Either way, key your examples by id rather than by position:
 
@@ -46,7 +46,7 @@ for i in ids:
 print("HELIX_RESULT=" + json.dumps(results))
 ```
 
-## Test it by hand
+## Testing by hand
 
 Before `helix evolve`, run the command once from your project directory the way HELIX will:
 
@@ -56,7 +56,7 @@ HELIX_SPLIT=train uv run python evaluate.py | grep '^HELIX_RESULT='
 rm helix_batch.json
 ```
 
-## Use your project's environment
+## Project environment
 
 `[evaluator].command` runs without a shell, in a scrubbed environment. Point it at the interpreter that has your
 evaluator's dependencies, for example:
@@ -69,7 +69,7 @@ command = "uv run python evaluate.py"
 or a wrapper script such as `bash run_eval.sh`. A bare `python3 evaluate.py` works only if that interpreter already
 has everything your evaluator imports.
 
-## Write feedback the agent can act on
+## Feedback
 
 The next mutation reads `side_info`: HELIX puts it in the Diagnostics section of the agent's task prompt, after the
 scores. A score alone tells the agent only that a case failed. Say why:

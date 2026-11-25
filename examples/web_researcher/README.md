@@ -40,7 +40,7 @@ An exception or an empty answer scores 0 for that question, and the exception is
 `evaluate.py`, `train/` and `val/` are protected: a candidate that changes them is rejected. The sandbox also leaves
 them out of the agent's copy (`omit_from_agent`). The evaluator runs on your machine, in the candidate's worktree.
 
-## Running it
+## How to run
 
 The seed agent calls the Anthropic API, so set `ANTHROPIC_API_KEY`, with credit on it. `helix.toml` lists it in
 `passthrough_env`, so the evaluator receives it, and the `claude` mutation agent uses it too.

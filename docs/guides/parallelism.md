@@ -1,6 +1,6 @@
 # Parallelism and resume
 
-## Running several proposals per generation
+## Parallel proposals
 
 Two settings decide how many proposals a generation makes:
 
@@ -24,7 +24,7 @@ HELIX validates the chosen candidates one at a time. Raising `max_workers` makes
 validation. The [GEPA analysis of parallel proposals](https://gepa-ai.github.io/gepa/blog/2026/07/30/parallel-proposals/)
 assumes validation runs in parallel too, so its speedups are an upper bound for HELIX.
 
-## How far a run can go past `max_evaluations`
+## Evaluation budget
 
 HELIX checks `evolution.max_evaluations` before it starts a generation's proposals, and does not cancel work already
 started. A generation that starts just under the cap can finish over it, by at most the evaluations that generation
@@ -43,7 +43,7 @@ One evaluation is one uncached instance. A cached result costs nothing, and a si
 A merge that passes its check on a sample of validation instances is scored on the full validation set even if that
 goes past the cap, as in GEPA.
 
-## Resuming an interrupted run
+## Resume
 
 HELIX saves `.helix/state.json` as soon as a candidate joins the frontier, so an accepted candidate survives an
 interrupt even if its generation does not finish. `helix resume` keeps:
@@ -56,7 +56,7 @@ Every other proposal from the interrupted generation is removed, with its worktr
 the generation runs again. HELIX reseeds its random number generator on each invocation, so a resumed run can take a
 different path than an uninterrupted one would have.
 
-## Evaluating instances in parallel
+## Per-example parallelism
 
 HELIX runs your evaluator once per batch of instance ids. To score the instances of one batch in parallel, do it
 inside your evaluator. Starting a process per instance from HELIX would pay the startup cost every time.

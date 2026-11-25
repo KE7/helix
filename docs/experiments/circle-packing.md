@@ -250,7 +250,7 @@ that the web and `api.anthropic.com` are unreachable and that the gateway
 refuses a web-search tool. `up.sh --capture` makes the gateway record and
 refuse every request instead, for trying the setup without a login.
 
-## Running it yourself
+## Reproducing
 
 ```bash
 helix sandbox login claude
