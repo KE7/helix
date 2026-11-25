@@ -1,8 +1,8 @@
 # Configuration
 
-HELIX is configured via `helix.toml` in your project root. A minimal config is on [Writing an evaluator](../getting-started/evaluator.md).
+HELIX reads its settings from `helix.toml` in your project root. For a minimal one, see [Writing an evaluator](../getting-started/evaluator.md).
 
-## Full Example
+## Full example
 
 Every key below is optional except `objective` and `[evaluator].command`. The values are examples, not necessarily the defaults.
 
@@ -28,30 +28,25 @@ rng_seed = 0
 
 [evaluator]
 command = "uv run python evaluate.py"
-# The only supported parser is "helix_result".
-# "helix_result" takes a per-example list matching GEPA optimize_anything's
-# `tuple[float, SideInfo] | float` union — each entry is either a bare
-# score or a [score, side_info] pair, mixed allowed:
-#   HELIX_RESULT=[s_0, s_1, ...]                        # all bare
-#   HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ...]        # all rich
-#   HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]           # mixed
-# Positional to `helix_batch.json`. HELIX zips it into id-keyed
-# `instance_scores` and stores the side_info list for the reflection
-# prompt. `HELIX_RESULT` is a machine protocol; use `from helix import log`
-# for human-readable evaluator notes.
+# The evaluator prints one HELIX_RESULT= line: a JSON list with one entry
+# per id in helix_batch.json, in order. Each entry is a score or a
+# [score, side_info] pair, as in GEPA optimize_anything:
+#   HELIX_RESULT=[s_0, s_1, ...]
+#   HELIX_RESULT=[[s_0, si_0], [s_1, si_1], ...]
+#   HELIX_RESULT=[s_0, [s_1, si_1], s_2, ...]
+# The next mutation reads side_info. For notes about the whole run, use
+# `from helix import log` in the evaluator.
 include_stdout = true
 include_stderr = true
 extra_commands = []               # additional commands to run for context
 protected_files = ["evaluate.py"] # optional extra files HELIX must keep immutable
 
 [dataset]
-# Cardinality of the train / val splits.  HELIX samples the ids "0".."n-1"
-# from them and writes each batch to helix_batch.json (a JSON list[str]);
-# the evaluator (running in the worktree) filters its own dataset by those
-# ids.  For grouped ids such as "pushcube__0" (batch_sampler = "stratified"),
-# use [seedless].train_path / val_path instead; see the datasets guide.
-# Leave both unset, with no [seedless] paths, for GEPA O.A. Single-Task Search /
-# HELIX single-task-no-example mode (dataset=None, valset=None).
+# Split sizes. HELIX hands the evaluator ids "0".."n-1" in helix_batch.json;
+# the evaluator maps each id to an example. For named ids such as
+# "pushcube__0", which batch_sampler = "stratified" groups by, use
+# [seedless].train_path / val_path instead; see the datasets guide.
+# Leave both unset, with no [seedless] paths, to score a single task.
 # train_size = 200
 # val_size  = 200
 
@@ -172,26 +167,29 @@ base_dir = ".helix/worktrees"
 # cleanup_dominated = false      # deprecated and ignored; still accepted so old configs load
 ```
 
-HELIX reserves its per-invocation prompts, summaries, batch files and backend
-artifacts at the candidate worktree root. It records ignore rules in the
-repository's shared Git `info/exclude`, so you can protect `.gitignore`.
-Candidate snapshots and cache keys exclude those paths even when your
-`.gitignore` allows them. Summary and merge diffs also omit these paths,
-including the contents of tracked artifacts inherited from older runs.
+## Worktree files
 
-HELIX removes inherited tracked copies before the pre-agent snapshot can untrack
-them. This keeps stale prompts and batch files out of the agent workspace.
-An untracked prompt with different content uses the fallback path. When both
-paths collide, HELIX preserves both and reports `PromptArtifactCollisionError`.
-You can remove HELIX's old artifact rules from `.gitignore` and resume an
-affected run with your current configuration.
+HELIX writes its own files into each candidate worktree: the agent's prompt,
+change summaries, `helix_batch.json` and the backend's result files. It keeps
+them out of git with rules in the repository's `.git/info/exclude`, not in
+`.gitignore`, so you can list `.gitignore` in `protected_files`. These files
+are never part of a candidate: they are left out of its snapshot, its cache key
+and the diffs shown to agents, even where your `.gitignore` would let git track
+them.
+
+If an older run committed copies of these files, HELIX removes them before the
+agent starts, so the agent never sees a stale prompt or batch file. If an
+untracked file of yours has the prompt file's name and different content, HELIX
+writes the prompt to a fallback path; if that name is taken too, HELIX stops
+with `PromptArtifactCollisionError` and leaves both files alone. HELIX no longer needs its rules in your `.gitignore`:
+you can delete them and resume an affected run with your current configuration.
 
 ## Backend notes
 
 **opencode** (`backend = "opencode"`), without the Docker sandbox:
 
 - Each candidate runs opencode with its own data directory, `<worktree>/.helix_opencode_state/.local/share/opencode` (via `XDG_DATA_HOME`), so parallel proposals never share one `opencode.db`.
-- Your stored logins still apply: HELIX links your `auth.json` (`$XDG_DATA_HOME/opencode/auth.json`, by default `~/.local/share/opencode/auth.json`, where `opencode providers login` writes) into that directory. It is a link, so a token opencode refreshes is saved to your own file. API-key variables (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) work as before.
+- Your opencode login still works. HELIX links your `auth.json` into that directory: the file `opencode providers login` writes, `$XDG_DATA_HOME/opencode/auth.json` (by default `~/.local/share/opencode/auth.json`). Because it is a link, a token opencode refreshes is saved to your own file. API-key variables (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) work too.
 - HELIX never reads or copies your own `opencode.db`; the run's transcript comes from the candidate's database.
 
 **pi** (`backend = "pi"`):

@@ -62,7 +62,8 @@ cd "$work_dir"
 helix evolve
 ```
 
-`helix.toml` sets GEPA's budget of 200 metric calls, its cache, an objective
+`helix.toml` sets HELIX's cap of 200 evaluations (`max_evaluations = 200`, as GEPA's
+`max_metric_calls=200`), GEPA's cache, an objective
 frontier, a minibatch of 1 and no merge. The objective and the agent
 background are GEPA's text. The agent is Claude Haiku 4.5 in Claude Code, with
 its built-in web tools off (`web_access = false`). See

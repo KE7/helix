@@ -128,23 +128,9 @@ score = evaluate_candidate()
 print("HELIX_RESULT=" + json.dumps([[score, {"scores": {"objective": score}}]]))
 ```
 
-```toml
-[evaluator]
-command = "python /runner/evaluate_client.py"
-
-[evaluator.sidecar]
-image = "my-private-evaluator:latest"
-runner_image = "my-evaluator-runner:latest"
-command = "python -m benchmark_server"
-endpoint = "http://helix-evaluator:8080/evaluate"
-
-[sandbox]
-enabled = true
-evaluator = true  # the sidecar is used only with both flags set
-```
-
-Use `helix_result` anyway when you want side info in reflection prompts or
-future multi-axis scoring.
+Configure it as above, but leave `[dataset]` sizes and `[seedless]` paths
+unset. HELIX then writes `["0"]` to `helix_batch.json` and leaves
+`HELIX_INSTANCE_IDS` unset.
 
 ## Multi-Objective Migration
 

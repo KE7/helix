@@ -18,56 +18,53 @@
 
 ## Why HELIX?
 
-A coding agent on its own makes one attempt and stops when it thinks it is done. HELIX runs many attempts against your evaluator, keeps only children that measurably beat their parents, and keeps every candidate that is the best on some instance, so a fix for one case is not lost to a regression on another. You get a search with a scorer you control, and the result is plain code you can read.
+A coding agent on its own makes one attempt and stops when it thinks it is done. HELIX runs many attempts against
+your evaluator, keeps only children that measurably beat their parents, and keeps every candidate that is the best on
+some instance, so a fix for one case is not lost to a regression on another. You get a search with a scorer you
+control, and the result is plain code you can read.
 
-HELIX is built for improving **real, multi-file codebases**, where useful mutations require exploration, iteration, and tooling.
+Each candidate is the whole repository, not one file or one prompt, and each mutation is a full coding-agent session.
+The agent can read the code, change several files, run your tests and its own scripts, and fix its mistakes before
+HELIX scores the result. That suits changes that need exploring a real codebase, not a one-line edit.
 
-HELIX treats the **entire repository** as the evolving organism, rather than one file or one patch. Each mutation is an agentic coding session running inside an isolated git worktree, so a mutation can:
+## Differences from GEPA optimize_anything
 
-1. **Read across the codebase** to understand architecture and dependencies.
-2. **Edit multiple files coherently** in one mutation.
-3. **Use tools mid-mutation** like tests, linters, shell commands, and, where the backend provides it, web search.
-4. **Take multiple turns to diagnose and self-correct** before the mutation is scored.
-
-### Design
-
-HELIX's search loop (minibatch-gated acceptance, instance-level Pareto parent selection, and merge) is ported from GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335.3813167); see [Acknowledgments](https://github.com/KE7/helix#acknowledgments)). In HELIX:
+HELIX's search loop (minibatch-gated acceptance, instance-level Pareto parent selection, and merge) is ported from
+GEPA `optimize_anything` ([Agrawal et al., 2026](https://doi.org/10.1145/3786335.3813167); see
+[Acknowledgments](https://github.com/KE7/helix#acknowledgments)). In HELIX:
 
 - The candidate is the whole working tree. There is no `target_file`, and a mutation may create, edit, or delete files.
-- Each mutation is a multi-turn session of a coding-agent CLI (`agy`, `claude`, `codex`, `cursor`, `opencode`, or `pi`) that can read, edit, and run code in the candidate's worktree before HELIX scores it.
-- Each candidate lives in its own git worktree.
-- An optional Docker sandbox (`[sandbox].enabled = true`) runs mutation and merge agents in copied workspaces. An optional evaluator sidecar (`[sandbox].enabled = true` and `[sandbox].evaluator = true`, plus `[evaluator.sidecar]`) runs evaluation on a private Docker network that agent containers cannot reach.
+- Each mutation is a multi-turn session of a coding-agent CLI (`agy`, `claude`, `codex`, `cursor`, `opencode`, or
+  `pi`) that can read, edit, and run code in the candidate's worktree before HELIX scores it.
+- Each candidate lives in its own git worktree, so proposals run in parallel (`evolution.max_workers`).
+- An optional Docker sandbox (`[sandbox].enabled = true`) runs the agents in copies of the workspace. An optional
+  evaluator sidecar (`[sandbox].evaluator = true` with `[evaluator.sidecar]`) runs evaluation on a private Docker
+  network that agent containers cannot reach.
 
-Meta-Harness ([Lee et al., 2026](https://arxiv.org/abs/2603.28052)) is concurrent work that uses a coding-agent proposer to optimize single-file harness programs.
-
-## Key Features
-
-| | Feature | Description |
-|---|---|---|
-| 🧬 | **Whole-codebase evolution** | The candidate is your repository, not a single file, prompt, or patch |
-| 📂 | **Multi-file editing** | Mutate entire directory trees — edit `auth.py:42` and `routes.py:18` in one coherent session |
-| 🔁 | **Multi-turn mutations** | A single mutation can inspect, edit, test, revise, and continue before being evaluated |
-| 🔧 | **Tool access during mutation** | The configured backend can read, grep, run tests, inspect the codebase, and, where the backend provides it, use the web mid-mutation |
-| ✅ | **Self-verification** | A mutation can run tests and other commands to check its changes before HELIX scores it |
-| 📊 | **Pareto frontier** | Instance-level Pareto selection across test cases — no single metric bottleneck |
-| ⚡ | **Parallel evaluation** | Worktrees are isolated → parallel proposals via `ThreadPoolExecutor` (proposal concurrency bounded by `evolution.max_workers`) |
-| 🔀 | **Merge / crossover** | Combine two frontier candidates that excel on different instances |
-| 💾 | **State persistence & resume** | Crash-safe generation-granular resume with `helix resume` |
-| 🚦 | **Gated mutations** | Train-set gating rejects regressions before Pareto evaluation |
-| 📋 | **Run log** | `helix log` lists every candidate in order: parent, outcome, score change, files changed and what the agent changed |
-
-## How It Works
+## The search loop
 
 ![The HELIX search loop: pick a parent from the instance-level Pareto frontier, let a coding agent edit it over many turns in its own worktree, gate the child against its parent on a training minibatch, score it on the full validation set, and add it to the frontier. Both scoring steps use a protected evaluator.](../assets/helix-loop-light.svg#only-light)
 ![The HELIX search loop](../assets/helix-loop-dark.svg#only-dark)
 
-**The loop in detail:**
+Before the first generation, HELIX copies your repository into a worktree as the seed and scores it on the
+validation set. Then each generation runs these steps:
 
-1. **Seed** — Your starting code is copied into a git worktree and evaluated
-2. **Evaluate** — Run the evaluator command in the candidate worktree and parse its `HELIX_RESULT` line. With sandboxed evaluation (`[sandbox].enabled = true`, `[sandbox].evaluator = true`, and `[evaluator.sidecar]`), HELIX starts the private evaluator sidecar once per run and runs short-lived evaluator-runner containers that call it
-3. **Select** — Pick a parent from the Pareto frontier (weighted by instance wins)
-4. **Mutate** — Spawn the configured agent backend in the candidate's worktree. With `[sandbox].enabled = true`, the backend runs in an isolated Docker workspace, where it can edit candidate files and use its backend auth but does not join the evaluator network
-5. **Gate** — Re-evaluate on the train set. Reject if the mutation caused regressions
-6. **Pareto Update** — Evaluate on the val set and update the Pareto frontier
-7. **Merge** — Periodically combine two complementary frontier candidates via the configured backend. The agent starts in a copy of candidate A and gets the objective and each parent's diff against their common ancestor. The diffs leave out protected evaluator files and `[sandbox].omit_from_agent` paths, and the prompt carries no scores or validation ids. A merge that leaves the code identical to a parent is rejected without being evaluated (`helix attempts --reason merge_no_change`), and one that fails its validation-subsample gate is recorded the same way (`--reason merge_subsample`). A merge that passes its validation-subsample gate is always evaluated on the full validation set and joins the frontier, even when that crosses `max_evaluations`, as in GEPA
-8. **Cleanup** — Remove dominated worktrees; persist state; repeat
+1. **Select.** HELIX picks a parent from the Pareto frontier, by default favouring candidates that are the best on
+   more instances (`evolution.candidate_selection_strategy` offers other rules).
+2. **Mutate.** The agent edits a copy of the parent in its own worktree. Its task prompt holds your objective, the
+   parent's scores and the evaluator's feedback on a training minibatch. If the parent already reaches
+   `evolution.perfect_score_threshold` on every instance of the minibatch, HELIX skips the mutation, as GEPA does.
+3. **Gate.** HELIX scores the child on the same minibatch. A child that does not beat its parent there is rejected
+   (`evolution.acceptance_criterion = "improvement_or_equal"` also accepts ties).
+4. **Validate.** Children that pass, or the best of them under `evolution.proposal_selection`, are scored on the
+   validation set and saved. The frontier keeps those that are the best on at least one instance.
+
+With `evolution.merge_enabled` on, some generations try a merge in place of mutation: an agent combines two frontier
+candidates that do well on different instances. The merge agent starts from one parent and sees each parent's diff,
+without protected files, scores or validation ids. A merge identical to either parent, or one that fails a check on a
+sample of validation instances, is rejected. One that passes is scored on the full validation set even if that goes
+past `max_evaluations`, as in GEPA.
+
+HELIX saves its state after each accepted candidate, so `helix resume` continues an interrupted run. Rejected
+candidates' worktrees are removed (`evolution.retain_rejected_worktrees` keeps them), and `helix log` lists the
+accepted and rejected candidates with their parent, outcome, score and what the agent changed.
